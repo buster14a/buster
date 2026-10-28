@@ -20,8 +20,9 @@
 // recipe happens to produce the width). ffs of zero is defined to produce zero.
 //
 // Output columns and local columns must be mutually disjoint, writable to their capacities, and disjoint from the
-// buffer/call objects. Existing locals must be initialized. A successful append claims its new local range and entry
-// range; a failure changes no counts or bytes. No allocation, source checking, Tier 1 acceptance or source dispatch
+// buffer/call objects and optional scratch record. Existing locals must be initialized. A successful append claims its
+// new local range and entry range; a failure changes no counts or bytes, including scratch. No allocation, source
+// checking, Tier 1 acceptance or source dispatch
 // is implied by this module. cbuiltin_lower_parameter_class and cbuiltin_lower_type_class expose the slot contract.
 #ifndef BUSTER_C_BUILTIN_LOWER_INCLUDED
 #define BUSTER_C_BUILTIN_LOWER_INCLUDED
@@ -40,6 +41,23 @@ typedef enum CBuiltinLowerError
     CBUILTIN_LOWER_CAPACITY,
 } CBuiltinLowerError;
 
+typedef enum CBuiltinLowerLimit
+{
+    CBUILTIN_LOWER_LIMIT_NONE,
+    CBUILTIN_LOWER_LIMIT_RECIPE,
+    CBUILTIN_LOWER_LIMIT_ENTRIES,
+    CBUILTIN_LOWER_LIMIT_LOCALS,
+} CBuiltinLowerLimit;
+
+// Integer recipes use U64 values only. These slots are private to recipes and dead after each append's result has
+// reached the value stack. Operands and source locals must never use them. A failed append leaves the pool intact.
+typedef struct CBuiltinLowerScratch CBuiltinLowerScratch;
+struct CBuiltinLowerScratch
+{
+    uint32_t locals[BUSTER_CBUILTIN_LOWER_TEMPORARIES];
+    uint32_t count;
+};
+
 typedef struct CBuiltinLowerBuffer CBuiltinLowerBuffer;
 struct CBuiltinLowerBuffer
 {
@@ -52,6 +70,8 @@ struct CBuiltinLowerBuffer
     uint8_t* local_flags;
     uint32_t local_count;
     uint32_t local_capacity;
+    // Optional integer-recipe pool; other recipe families retain their existing allocation contract.
+    CBuiltinLowerScratch* scratch;
 };
 
 typedef struct CBuiltinLowerCall CBuiltinLowerCall;
@@ -73,8 +93,10 @@ struct CBuiltinLowerResult
     uint32_t first;
     uint32_t count;
     uint32_t result_class;
+    // Newly allocated locals only. Reused scratch is already initialized and need not be a contiguous range.
     uint32_t temporary_first;
     uint32_t temporary_count;
+    CBuiltinLowerLimit limit;
 };
 
 typedef struct CBuiltinLowerRecipe CBuiltinLowerRecipe;
@@ -86,6 +108,7 @@ struct CBuiltinLowerRecipe
     uint32_t count;
     uint32_t temporary_first;
     uint32_t temporary_count;
+    const CBuiltinLowerScratch* scratch;
     bool full;
 };
 
@@ -144,7 +167,9 @@ static void cbuiltin_lower_emit(CBuiltinLowerRecipe* recipe, uint32_t kind, uint
 
 static uint32_t cbuiltin_lower_temporary(CBuiltinLowerRecipe* recipe)
 {
-    const uint32_t result = recipe->temporary_first + recipe->temporary_count;
+    const uint32_t reused = recipe->scratch != NULL ? recipe->scratch->count : 0;
+    const uint32_t result = recipe->temporary_count < reused ? recipe->scratch->locals[recipe->temporary_count] :
+                            recipe->temporary_first + recipe->temporary_count - reused;
     recipe->temporary_count += 1;
     recipe->full |= recipe->temporary_count > BUSTER_CBUILTIN_LOWER_TEMPORARIES;
     return result;
@@ -725,9 +750,27 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
     CBuiltinLowerRecipe recipe = { 0 };
     const bool unary = call != 0 && call->id > CBUILTIN_NONE && call->id <= CBUILTIN_FFSLL;
     const bool overflow = call != 0 && call->id >= CBUILTIN_ADD_OVERFLOW && call->id <= CBUILTIN_MUL_OVERFLOW;
+    bool scratch_valid = buffer == NULL || buffer->scratch == NULL || buffer->scratch->count <= BUSTER_CBUILTIN_LOWER_TEMPORARIES;
+    if (buffer != NULL && buffer->scratch != NULL && scratch_valid && buffer->local_classes != NULL && buffer->local_flags != NULL)
+    {
+        for (uint32_t i = 0; i < buffer->scratch->count; i += 1)
+        {
+            const uint32_t local = buffer->scratch->locals[i];
+            scratch_valid &= local < buffer->local_count && local < buffer->local_capacity;
+            if (scratch_valid)
+            {
+                scratch_valid &= buffer->local_classes[local] == BUSTER_TYPED_CLASS_U64 && buffer->local_flags[local] == 0;
+                scratch_valid &= call == NULL || (local != call->a && (!overflow || (local != call->b && local != call->destination)));
+            }
+            for (uint32_t j = 0; j < i; j += 1)
+            {
+                scratch_valid &= local != buffer->scratch->locals[j];
+            }
+        }
+    }
     if (buffer == 0 || call == 0 || buffer->count > buffer->capacity || buffer->local_count > buffer->local_capacity ||
         buffer->capacity > BUSTER_TIER0_MAX_ENTRIES || buffer->local_capacity > BUSTER_TIER0_MAX_LOCALS || buffer->kinds == 0 ||
-        buffer->classes == 0 || buffer->values == 0 || buffer->local_classes == 0 || buffer->local_flags == 0)
+        buffer->classes == 0 || buffer->values == 0 || buffer->local_classes == 0 || buffer->local_flags == 0 || !scratch_valid)
     {
         result.error = CBUILTIN_LOWER_ARGUMENT;
     }
@@ -755,6 +798,7 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
     else
     {
         recipe.temporary_first = buffer->local_count;
+        recipe.scratch = buffer->scratch;
         result.result_class = unary ? cbuiltin_lower_unary(&recipe, call) : BUSTER_TYPED_CLASS_I32;
         if (overflow && (cbuiltin_lower_wide(call->a_type) || cbuiltin_lower_wide(call->b_type) || cbuiltin_lower_wide(call->result_type)))
         {
@@ -764,9 +808,13 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
         {
             cbuiltin_lower_overflow(&recipe, call);
         }
-        if (recipe.full || recipe.count > buffer->capacity - buffer->count || recipe.temporary_count > buffer->local_capacity - buffer->local_count)
+        const uint32_t reused = buffer->scratch != NULL ? buffer->scratch->count : 0;
+        const uint32_t added = recipe.temporary_count > reused ? recipe.temporary_count - reused : 0;
+        if (recipe.full || recipe.count > buffer->capacity - buffer->count || added > buffer->local_capacity - buffer->local_count)
         {
             result.error = CBUILTIN_LOWER_CAPACITY;
+            result.limit = recipe.full ? CBUILTIN_LOWER_LIMIT_RECIPE : recipe.count > buffer->capacity - buffer->count ?
+                           CBUILTIN_LOWER_LIMIT_ENTRIES : CBUILTIN_LOWER_LIMIT_LOCALS;
             result.result_class = 0;
         }
         else
@@ -774,7 +822,7 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
             result.first = buffer->count;
             result.count = recipe.count;
             result.temporary_first = buffer->local_count;
-            result.temporary_count = recipe.temporary_count;
+            result.temporary_count = added;
             if (BUSTER_VECTOR_PATH(vector))
             {
                 for (uint32_t i = 0; i < recipe.count; i += 64)
@@ -800,10 +848,18 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
                     buffer->values[buffer->count + i] = recipe.values[i];
                 }
             }
-            memset(buffer->local_classes + buffer->local_count, BUSTER_TYPED_CLASS_U64, recipe.temporary_count);
-            memset(buffer->local_flags + buffer->local_count, 0, recipe.temporary_count);
+            memset(buffer->local_classes + buffer->local_count, BUSTER_TYPED_CLASS_U64, added);
+            memset(buffer->local_flags + buffer->local_count, 0, added);
+            if (buffer->scratch != NULL)
+            {
+                for (uint32_t i = 0; i < added; i += 1)
+                {
+                    buffer->scratch->locals[reused + i] = buffer->local_count + i;
+                }
+                buffer->scratch->count += added;
+            }
             buffer->count += recipe.count;
-            buffer->local_count += recipe.temporary_count;
+            buffer->local_count += added;
         }
     }
     return result;

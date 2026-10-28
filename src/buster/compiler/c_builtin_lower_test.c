@@ -855,6 +855,119 @@ static void cbuiltin_lower_test_wide_refusals(CBuiltinLowerTestTally* tally)
     }
 }
 
+// Compare reused recipes with independent fresh-local recipes after translating only local identities. A user local
+// between the unary and product pools makes the scratch noncontiguous; every other field must remain exactly equal.
+static void cbuiltin_lower_test_scratch(CBuiltinLowerTestTally* tally)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        CBuiltinLowerScratch scratch = { 0 };
+        CBuiltinLowerTestStream pooled;
+        const CBuiltinLowerCall initial = { .id = CBUILTIN_POPCOUNT, .a = 0 };
+        cbuiltin_lower_test_stream(&pooled, &initial);
+        pooled.buffer.local_count = 3;
+        pooled.buffer.scratch = &scratch;
+        for (uint32_t round = 0; round < 4; round += 1)
+        {
+            for (uint32_t id = CBUILTIN_BSWAP16; id <= CBUILTIN_MUL_OVERFLOW; id += 1)
+            {
+                const bool overflow = id >= CBUILTIN_ADD_OVERFLOW;
+                const CBuiltinLowerCall call = {
+                    .id = (CBuiltinId)id,
+                    .a = 0,
+                    .b = 1,
+                    .destination = 2,
+                    .a_type = round & 1 ? BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED : 64,
+                    .b_type = round & 1 ? BUSTER_CBUILTIN_LOWER_WIDE : 64 | BUSTER_CBUILTIN_SIGNED,
+                    .result_type = round & 1 ? BUSTER_CBUILTIN_LOWER_WIDE : 32 | BUSTER_CBUILTIN_SIGNED,
+                };
+                CBuiltinLowerTestStream fresh;
+                cbuiltin_lower_test_stream(&fresh, &call);
+                fresh.buffer.local_count = 3;
+                fresh.local_classes[0] = (uint8_t)(overflow ? cbuiltin_lower_type_class(call.a_type) : cbuiltin_lower_parameter_class(call.id));
+                fresh.local_classes[1] = (uint8_t)cbuiltin_lower_type_class(call.b_type);
+                fresh.local_classes[2] = BUSTER_TYPED_CLASS_U64;
+                fresh.local_flags[0] = overflow && cbuiltin_lower_wide(call.a_type) ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+                fresh.local_flags[1] = overflow && cbuiltin_lower_wide(call.b_type) ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+                memcpy(pooled.local_classes, fresh.local_classes, 3);
+                memcpy(pooled.local_flags, fresh.local_flags, 3);
+                pooled.buffer.count = 0;
+                const uint32_t before = pooled.buffer.local_count;
+                const CBuiltinLowerResult expected = cbuiltin_lower_scalar(&fresh.buffer, &call);
+                const CBuiltinLowerResult result = path == 0 ? cbuiltin_lower_scalar(&pooled.buffer, &call) : cbuiltin_lower(&pooled.buffer, &call);
+                bool same = expected.error == CBUILTIN_LOWER_OK && result.error == CBUILTIN_LOWER_OK && result.count == expected.count &&
+                            result.result_class == expected.result_class && pooled.buffer.local_count == before + result.temporary_count;
+                for (uint32_t i = 0; same && i < result.count; i += 1)
+                {
+                    uint64_t value = fresh.values[i];
+                    if ((fresh.kinds[i] == BUSTER_TYPED_LOCAL || fresh.kinds[i] == BUSTER_TYPED_SET_LOCAL) && value >= 3)
+                    {
+                        value = scratch.locals[value - 3];
+                    }
+                    same = pooled.kinds[i] == fresh.kinds[i] && pooled.classes[i] == fresh.classes[i] && pooled.values[i] == value;
+                }
+                cbuiltin_lower_test_expect(tally, same, "pooled recipes equal independent fresh-local recipes", id, round * 2 + path);
+                if (round == 0 && id == CBUILTIN_BSWAP16)
+                {
+                    pooled.local_classes[pooled.buffer.local_count] = BUSTER_TYPED_CLASS_I32;
+                    pooled.local_flags[pooled.buffer.local_count] = 0;
+                    pooled.buffer.local_count += 1;
+                }
+            }
+        }
+        cbuiltin_lower_test_expect(tally, scratch.count == 16 && pooled.buffer.local_count == 20,
+                                   "all recipe families reuse at most sixteen U64 slots around a user local", 0, path);
+        const CBuiltinLowerCall call = {
+            .id = CBUILTIN_MUL_OVERFLOW,
+            .a = 0,
+            .b = 1,
+            .destination = 2,
+            .a_type = 64,
+            .b_type = 64,
+            .result_type = 64,
+        };
+        CBuiltinLowerTestStream partial;
+        cbuiltin_lower_test_stream(&partial, &call);
+        CBuiltinLowerScratch small = { .locals = { 3, 4, 5 }, .count = 3 };
+        partial.buffer.scratch = &small;
+        partial.buffer.local_count = 6;
+        partial.buffer.local_capacity = 18;
+        memset(partial.local_classes + 3, BUSTER_TYPED_CLASS_U64, 3);
+        const CBuiltinLowerTestStream partial_before = partial;
+        const CBuiltinLowerScratch small_before = small;
+        const CBuiltinLowerResult refused = path == 0 ? cbuiltin_lower_scalar(&partial.buffer, &call) : cbuiltin_lower(&partial.buffer, &call);
+        cbuiltin_lower_test_expect(tally, refused.error == CBUILTIN_LOWER_CAPACITY && refused.limit == CBUILTIN_LOWER_LIMIT_LOCALS &&
+                                         memcmp(&partial, &partial_before, sizeof(partial)) == 0 && memcmp(&small, &small_before, sizeof(small)) == 0,
+                                   "partially populated pool grows transactionally with one local missing", call.id, path);
+        pooled.local_classes[0] = BUSTER_TYPED_CLASS_U64;
+        pooled.local_classes[1] = BUSTER_TYPED_CLASS_U64;
+        pooled.local_flags[0] = 0;
+        pooled.local_flags[1] = 0;
+        pooled.buffer.count = 0;
+        pooled.buffer.local_capacity = pooled.buffer.local_count;
+        CBuiltinLowerResult result = cbuiltin_lower(&pooled.buffer, &call);
+        cbuiltin_lower_test_expect(tally, result.error == CBUILTIN_LOWER_OK && result.temporary_count == 0,
+                                   "full local storage still accepts an already populated scratch pool", call.id, path);
+        for (uint32_t failure = 0; failure < 6; failure += 1)
+        {
+            pooled.buffer.count = 0;
+            pooled.buffer.capacity = failure == 0 ? 1 : BUSTER_CBUILTIN_LOWER_TEST_ENTRIES;
+            CBuiltinLowerScratch changed = scratch;
+            changed.count = failure == 1 ? 0 : failure == 2 ? BUSTER_CBUILTIN_LOWER_TEMPORARIES + 1 : changed.count;
+            changed.locals[0] = failure == 3 ? pooled.buffer.local_count : failure == 4 ? 0 : failure == 5 ? changed.locals[1] : changed.locals[0];
+            pooled.buffer.scratch = &changed;
+            const CBuiltinLowerScratch pool_before = changed;
+            const CBuiltinLowerTestStream bytes_before = pooled;
+            result = path == 0 ? cbuiltin_lower_scalar(&pooled.buffer, &call) : cbuiltin_lower(&pooled.buffer, &call);
+            const CBuiltinLowerLimit limit = failure == 0 ? CBUILTIN_LOWER_LIMIT_ENTRIES : CBUILTIN_LOWER_LIMIT_LOCALS;
+            cbuiltin_lower_test_expect(tally, result.error == (failure < 2 ? CBUILTIN_LOWER_CAPACITY : CBUILTIN_LOWER_ARGUMENT) &&
+                                             (failure >= 2 || result.limit == limit) && memcmp(&pooled, &bytes_before, sizeof(pooled)) == 0 &&
+                                             memcmp(&changed, &pool_before, sizeof(changed)) == 0,
+                                       "pooled refusal preserves bytes, counts and pool and names its limit", call.id, failure * 2 + path);
+        }
+    }
+}
+
 static int run_builtin_lower_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -887,6 +1000,7 @@ static int run_builtin_lower_tests(int argc, char** argv)
         uint64_t state = seed != 0 ? seed : 1;
         cbuiltin_lower_test_guards(&tally);
         cbuiltin_lower_test_wide_refusals(&tally);
+        cbuiltin_lower_test_scratch(&tally);
         for (uint32_t id = CBUILTIN_BSWAP16; id <= CBUILTIN_FFSLL; id += 1)
         {
             const CBuiltinLowerCall call = { .id = (CBuiltinId)id, .a = 0 };

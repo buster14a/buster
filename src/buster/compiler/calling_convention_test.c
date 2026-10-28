@@ -3789,6 +3789,37 @@ static uint32_t abi_test_world_directed(AbiTestWorld* world, TypeId* directed)
     return count;
 }
 
+// The record a compiled clang world's directed signatures pass (#137): a union of 16 bytes whose high eightbyte is padding,
+// an int beside an empty struct aligned to 16, which clang passes as its low eightbyte alone, an i64, once the uncounted
+// nullptr_t before it leaves clang's count a general register that LLVM has used: in one 8-byte slot, the next argument's
+// after it (a stack copy of 16 bytes would run into that slot). Returns how many it made into `directed`.
+static uint32_t abi_test_world_directed_compiled(AbiTestWorld* world, TypeId* directed)
+{
+    TypeTable* table = &world->types.test.table;
+    uint32_t count = 0;
+    TypeMember none[1];
+    const TypeId empty = type_tag(table, BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
+    if (empty != 0 && type_complete_record(table, empty, none, 0, (TypeRecordAttributes){ 0 }))
+    {
+        type_test_world_completed(&world->types, empty);
+        const TypeId aligned = type_aligned(table, empty, 4);
+        TypeMember members[2] = {
+            type_test_member(type_test_new_name(&world->types), BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+            type_test_member(type_test_new_name(&world->types), aligned, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        const TypeId record = aligned != 0 ? type_tag(table, BUSTER_TYPE_KIND_UNION, type_test_new_name(&world->types)) : 0;
+        if (record != 0 && type_complete_record(table, record, members, 2, (TypeRecordAttributes){ 0 }))
+        {
+            type_test_world_completed(&world->types, record);
+            abi_test_world_add(world, record);
+            directed[count] = record;
+            count += 1;
+        }
+    }
+    table->last_error = TYPE_ERROR_NONE;
+    return count;
+}
+
 static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t count)
 {
     uint64_t random = seed;
@@ -5331,7 +5362,8 @@ static uint32_t abi_test_va_disagreement(const AbiTestCross* cross, uint32_t n, 
 // Signatures over `types`, their bytes, and their locations (abi_assign's): first one per `directed` record,
 // (nullptr_t, long x4, the record, long), where clang's count of general registers runs ahead of LLVM's (the uncounted
 // nullptr_t takes rdi) and the record finds two counted and one left (a split, or one i128 on the stack and the long
-// in r9); then random ones.
+// in r9), or in a compiled world (nullptr_t, long x5, the record, long), where the record finds one counted and none left
+// (abi_test_world_directed_compiled); then random ones.
 static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, uint32_t type_count, const TypeId* unnamed_types, uint32_t unnamed_count,
                                       const TypeId* directed, uint32_t directed_count, uint64_t* random, AbiTestFillItem* stack)
 {
@@ -5345,7 +5377,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         const bool directed_one = n < directed_count;
         const uint64_t shape = type_test_below(random, 16);
         const uint32_t random_named = (uint32_t)(shape < 10 ? type_test_below(random, 6) : shape < 15 ? 4 + type_test_below(random, 10) : 12 + type_test_below(random, 10));
-        const uint32_t named = directed_one ? 7 : random_named;
+        const uint32_t directed_at = cross->compiled ? 6 : 5;
+        const uint32_t named = directed_one ? directed_at + 2 : random_named;
         const uint32_t unnamed = !directed_one && unnamed_count != 0 && type_test_below(random, 4) == 0 ? (uint32_t)type_test_below(random, 7) : 0;
         const bool variadic = !directed_one && (unnamed != 0 || (unnamed_count != 0 && type_test_below(random, 16) == 0));
         signature->result = directed_one || type_test_below(random, 5) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
@@ -5361,7 +5394,7 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
             TypeId type = a < named ? types[type_test_below(random, type_count)] : unnamed_types[type_test_below(random, unnamed_count)];
-            type = directed_one ? (a == 0 ? BUSTER_TYPE_NULLPTR : a == 5 ? directed[n] : BUSTER_TYPE_LONG) : type;
+            type = directed_one ? (a == 0 ? BUSTER_TYPE_NULLPTR : a == directed_at ? directed[n] : BUSTER_TYPE_LONG) : type;
             for (uint32_t attempt = 0; cross->gcc && variadic && a < named && attempt < 64 && abi_test_gcc_variadic_differs(cross->abi, type); attempt += 1)
             {
                 type = types[type_test_below(random, type_count)];
@@ -5826,6 +5859,12 @@ static void abi_test_write_ours(AbiTestCross* cross, TypeTestText* text)
         type_test_format(text, ";\n%sbuster_callee_%u", result, n);
         abi_test_parameters(cross, text, n, true);
         type_test_format(text, "\n{\n");
+        // Each parameter's bytes written back from the data first, the last first: one kept in a stack slot shorter than its
+        // object would overwrite the slots after it, which the captures then show.
+        for (uint32_t a = signature->named; a != 0; a -= 1)
+        {
+            type_test_format(text, "    memcpy(&a%u, abi_args_%u + %u, sizeof(a%u));\n", a - 1, n, cross->offsets[signature->first + a - 1], a - 1);
+        }
         for (uint32_t a = 0; a < signature->named; a += 1)
         {
             type_test_format(text, "    memcpy(abi_capture_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
@@ -6458,9 +6497,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
         world.vectors = compiled && vector_bytes == 64;
         abi_test_world_build(&world, seed, 600);
         // GCC's worlds have neither nullptr_t nor packing, and compiled ones not the directed records, whose runs of
-        // bit-fields past 64 bits the producer refuses.
+        // bit-fields past 64 bits the producer refuses, but a directed record of their own.
         TypeId directed[BUSTER_ABI_TEST_DIRECTED];
-        const uint32_t directed_count = gcc || compiled ? 0 : abi_test_world_directed(&world, directed);
+        const uint32_t directed_count = gcc ? 0 : compiled ? abi_test_world_directed_compiled(&world, directed) : abi_test_world_directed(&world, directed);
         type_test_spell_world(&world.types);
         // GCC has no __fp16 on x86-64, nor a spelling of _Complex __float128, and it passes a _Complex __bf16 in two
         // SSE registers but counts one, as neither its va_arg nor clang reads it (nothing in its world is made of these).

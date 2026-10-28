@@ -20,6 +20,28 @@ static or inline function gets no code, and an object only such a function
 refers to no data. `--lower-all` lowers every definition that may be emitted,
 referenced or not, a test option for measuring what that saves.
 
+`#pragma GCC visibility push(default|hidden|protected|internal)` and `pop`
+retain a source-ordered state stack (#620). Declarations sample that state;
+the first applied visibility follows the linked entity through later
+declarations, and an explicit attribute on the same declaration takes priority
+over the pragma. Internal visibility maps to hidden on this x86-64 target, as
+Clang does. The object writer receives the ELF visibility on defined and
+undefined global symbols; local symbols keep default visibility. Malformed
+directives carry bounded syntax diagnostics, and an unmatched pop rejects the
+unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
+units allocate no visibility history or object column.
+
+Before C23, a direct call of an undeclared identifier creates the compatibility
+declaration `extern int name()` in that block's source scope (#623). Repeated
+calls in the same scope share it; later prototypes use the ordinary linked
+entity compatibility rules. Arguments use the default integer and floating
+promotions until a prototype is visible. C99 and later diagnose the first call
+with its identifier and `-Wimplicit-function-declaration`, as Clang does;
+`-Wno-error=implicit-function-declaration` demotes it, while
+`-Wno-implicit-function-declaration` suppresses it. Source diagnostic pragmas
+apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
+Parenthesized identifiers and non-call uses do not acquire an implicit type.
+
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
@@ -221,6 +243,87 @@ does, each rule checked against clang's answers on probes of it:
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
+- **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
+  `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
+  number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
+  read as clang's `PragmaClangSectionHandler` reads them, adjacent ordinary
+  strings joined, an empty name clearing its kind and a line of no settings
+  doing nothing, with a setting before an error in its line kept. Its three
+  errors are at clang's places with clang's messages: a kind that isn't one
+  (also for anything after a complete setting), a missing `=`, and a name that
+  isn't an ordinary string. Then the section type conflicts, as Sema's
+  `UnifySection` takes a unit's uses of section names in order
+  (`check_input_section_conflicts`, one pass after the walk over a unit's few
+  section events): the settings, each function declaration's own `section`
+  attribute and each definition of a variable with static storage, its
+  attribute inherited from earlier declarations (a tentative one's at the
+  unit's end, at its last tentative declaration, unless the unit defines it).
+  Each section name has its first use's flags, and a use that gives it others
+  is clang's conflict, at the use, with clang's message. Refused by name rather
+  than guessed: a line with a name, where clang reads it macro-expanded (the
+  first kind and every `=`), that was a macro's anywhere in the unit (the
+  retained line keeps its tokens as written), and an error at the line's end,
+  whose place the retained line doesn't keep. A setting applies to the
+  definitions after it that have no section attribute of their own: text to
+  the functions', the others by a static-storage variable's final section
+  kind. The deferred reader leaves a unit with a setting to source order, and
+  a lane refuses a body with a section attribute.
+- **Named sections in `-c` and the direct path** (#619's part 2): a
+  definition with a `section` attribute (the first within one declaration,
+  or the latest earlier declaration's as clang passes it on), and a function a text setting places
+  go in their sections (`CheckInputSections.placements`,
+  `check_program_sections`). `-c`'s object has one section of each name and
+  flags (`ObjectOptions.atom_sections`), of the kind LLVM gives a global with
+  an explicit section: a function's text (`ax`); a variable's data (`aw`),
+  read-only (`a`), read-only after relocation (`aw`) or thread-local data
+  (`awT`), by its class, or `.bss`'s and `.tbss`'s zero fill (`NOBITS`) by
+  its name's family. A zero-filled variable in another name's section is data,
+  zeros in a section with bytes, as LLVM puts no global with an explicit
+  section in BSS, and a function in another kind's section (`.data`) is a
+  section of that name of its own, `ax`, as clang makes it. The direct path's
+  executable merges each into its class's output section, as a linker's
+  script merges `.text.*` and `.data.*`. Refused by name: conservatively, any
+  emitted static-storage definition while any bss/data/rodata/relro setting
+  is active ("a definition under active '#pragma clang section' settings"),
+  until the emission selects a variable's final section kind, which clang
+  decides through the pragmas' attributes its tentative definitions pass on:
+  a bss-only or rodata-only setting still refuses `int x = 1`, although clang
+  leaves it in ordinary `.data`, while a text-only setting and cleared object
+  settings leave static objects alone; a definition's own or inherited
+  `section` attribute takes it out of the refusal, into its section. Also
+  refused by name: a name LLVM gives another kind than the definition's (an initialized variable in a `.bss`, which clang's code
+  generation refuses too, or one not thread-local in a `.tdata`); and a name
+  ELF gives another type (`.note*`, the init and fini arrays'). The entire
+  `.llvm.*` family is conservatively refused too, including ordinary
+  PROGBITS names such as `.llvm.custom`; `.llvm_custom` is outside this
+  reserved family. The diagnostic names the unsupported ELF type or reserved
+  family without claiming every reserved name has another ELF type.
+  An empty section attribute clears inherited placement and overrides an
+  active pragma setting while preserving the default section class, including
+  BSS/TBSS zero fill. Its reader event still participates in section conflicts.
+- **File-scope `asm`** (#619's part 2), which `main.c` makes
+  `.text.buster_checker` with: its statements' templates in source order, a
+  line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
+  atoms join the unit's link before its functions', as clang emits a module's
+  `asm` first (`check_program_emit_file_asm`), each in its section in `-c`'s
+  object. Refused by name: a template the assembler doesn't take, one that
+  defines or refers to a symbol (a label, an instruction's operand, CFI),
+  which the unit's symbols don't join yet, and a section of a class C's
+  definitions don't have or of another type than its class's (an init
+  array's, a note).
+- **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
+  `on` `main.c` puts around the checker unit's own tests (#681): one
+  identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
+  with its two errors at clang's places with clang's messages (any other
+  argument, and a token after it). An `off` makes the function definitions
+  after it `optnone` and `noinline` until an `on`, which changes nothing a
+  Tier 0 compile emits, so the reader only checks the line. Refused by name: an
+  argument or a token after it that was a macro's name in the unit (clang reads
+  both expanded), and a missing argument, an error at the line's end. The 9700X
+  job checks each translation unit `build.sh` compiles, `main.c` among them,
+  with `build.sh`'s flags (#619's part 3), so that a construct the build's
+  sources take up and the checker doesn't fails the job rather than waiting
+  for the next measurement of `main.c`.
 - **`no_builtin`**, on a function's definition only: on another declaration of
   a function it is an error, and on anything else it is ignored, as clang has
   it.
@@ -232,13 +335,16 @@ does, each rule checked against clang's answers on probes of it:
   before expressions have types, so whether an element initializes a whole
   struct, or starts brace elision, comes from the tree: the element's root's
   type, from an identifier's declaration, a compound literal's type, a `?:`'s
-  third operand, a parenthesized expression or a call of a function by its name,
-  and a subscript's, a member's and an indirection's of these (`x[1]`,
+  third operand, a parenthesized expression or a call of a function by its name
+  (of an intrinsic, by the prototype the reader keeps at the call's `)`), and a
+  subscript's, a member's and an indirection's of these (`x[1]`,
   `bind->runtime->libc.soname`, `*p`), each step applied to its base's type from
   the innermost out. It came from the last typed token in the element, and so a
   compound literal with a member's value, `(struct L){ .target = n }`, read as
   `n`'s type, and `{ x[1], x[2] }` of structs as a struct's first two members:
-  one element where clang has two.
+  one element where clang has two. An intrinsic's call, which no declaration
+  types, still read so: `{ __builtin_ia32_compressqi512_mask(a, w, m), a }` of
+  byte vectors as its mask's scalar, one element where clang has two.
 - **Compound literals in a static object's initializer**, in a function too:
   clang folds a block-scope compound literal's value, an automatic object's, as
   GNU C does, into a `static` array's element or a `static` struct, where its
@@ -352,6 +458,14 @@ is normally quiet, while the corresponding folded file-scope array bound warns.
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
+
+Preprocessor-completed `#pragma message`, `#pragma GCC warning`, `#pragma GCC
+error`, `#ident` and `#sccs` records are accepted without another semantic action
+or diagnostic (#662). The checker recognizes their bounded canonical shapes;
+unrelated or malformed records retain their own handler/refusal. A GCC error
+still rejects the unit during preprocessing. `#sccs` is canonicalized to `#ident`.
+The strings from `#ident` and `#sccs` are deliberately omitted from object
+`.comment` sections; they affect neither program behavior nor source acceptance.
 
 The action layer is broader than that adapter. It can check enum promotions,
 bit-field restrictions, compatible record assignment, nested const members,
@@ -1136,22 +1250,68 @@ What the lowering covers past scalars (#145's programs):
   with no baseline runtime speedup claimed for them. The record includes raw
   samples, identities, native/Clang scalar/vector checks and source-corpus
   receipts, including the successful pinned c-testsuite rerun.
+- **C11 atomics (#671).** The C11 builtin family and ordinary atomic lvalues
+  share the existing raw-bit native leaves for aligned representations through
+  eight bytes, with generic libatomic calls for other layouts. Reads, assignment,
+  compound updates and prefix/postfix increments preserve one evaluation of each
+  source operand. Atomic storage padding, static size/alignment and addressable
+  locals are distinct from their unwrapped C values. The
+  [builtin guide](c-builtins-integration.md#atomic-and-terminal-helper-calls)
+  records the runtime ABI and remaining value-representation limits.
+  Floating min/max under `FENV_ACCESS ON` calls the target's `fminf`, `fmin`,
+  `fmaxf` or `fmax` within the retry, as Clang's strict path does, retaining
+  native DAZ behavior and requiring `-lm` when linking. Address and RHS
+  evaluation remain outside that retry. This does not extend the existing
+  floating retry-exception conformance claim.
+  Atomic vector loads, stores, exchange and compare-exchange retain vector value
+  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  updates of atomic vectors are explicitly refused until their retry computation
+  has a vector lowering.
+
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
-  is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
-  where `abi_assign` puts them; a struct or union result lands in a frame object
+  is its address, its size in `argument_sizes` (but 8 for one passed as its low
+  eightbyte alone, below), and Tier 0 passes its bytes where `abi_assign` puts
+  them; a struct or union result lands in a frame object
   of the call site's own (`call_result_objects`), whose address is the call's
   value. That object is aligned to the result's canonical type at least, an
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is padding (NO_CLASS: a 16-byte union of an `int`
+  and an empty struct aligned to 16) passes as its low eightbyte alone
+  (`check_lower_passed_bytes`), an `i64` or a `double` in clang's code: in a
+  register, in an 8-byte stack slot, the next argument's after it (when clang's
+  count of registers has one left and LLVM's none), or in a slot of its size
+  once clang's has none, the rest of it padding. A call copies those 8 bytes,
+  and the parameter arrives in an object of 8, which the function's first
+  entries copy into one of its size, the C parameter's. (A caller's copy of 16
+  bytes overwrote the next argument's slot, and a parameter of 16 bytes kept in
+  its slot reached into it, or past the incoming arguments.) A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
   of a `long double`, in st0) returns its bytes' address too. Those larger than
   64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
   stack aligned to it at the call, which realigns the caller's frame.
+- **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
+  aggregate-returning body's control graph removes unreachable transfers
+  without renumbering labels. A reachable implicit return supplies an address
+  for a register result or preserves the hidden result pointer; the value is
+  unspecified. Tier 0's aggregate-end rule remains unchanged. Its validation
+  also checks emitted unreachable statement tails, which retain the existing
+  implicit-return safeguard. A second walk selects constant conditions for
+  `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
+  suppression. Return warnings currently cover aggregate bodies without
+  statement-expression regions, assembly, reachable call or semantic-query
+  expressions, or nonconstant enum selectors. Calls, queries and enum switches
+  retain conservative handling until their noreturn, context-sensitive constant
+  and exhaustive-enumerator facts are available to the control graph. Constant
+  switch dispatch follows converted side-effect-free source selector
+  values and signed case ranges only in the warning walk; the Tier 0 walk
+  retains every dispatch edge. Source/native tests cover register and hidden
+  results, branches, switch, loops, labels and defined paths through partial returns.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -1278,6 +1438,35 @@ What the lowering covers past scalars (#145's programs):
   width as a narrower one is, by a pair of 128-bit shifts (a constant too).
   The overflow builtins of one of 65 to 127 bits are refused by name (their
   recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
+- **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
+  X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
+  name, of its family's records with its rule's form, as clang -O0's code
+  computes it, its arguments at their prototype's types (an 8- or 16-bit
+  integer widened to the 32 bits a general register's field reads) and its
+  immediates constants. The families: compares into an opmask and selects under
+  one, KMOV, masked loads and stores, two-vector operations and permutes,
+  shifts, an element's extraction (of a 256-bit vector's high lane, after
+  extracting the lane) and insertion, the elements' top bits, BMI2's PDEP, PEXT
+  and BZHI, undefined vectors (zeros), the opmask operations (KAND, KADD,
+  KUNPCK, KOR, KXOR, KSHIFTL, and `ktestz`'s, whose row's result the caller
+  tests), compression and expansion (into a vector and into memory), masks of
+  the elements' top bits and vectors of a mask's, truncating conversions of a
+  low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
+  VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
+  VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
+  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
+  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
+  integers. A builtin the table doesn't name is refused by name ("this x86
+  builtin"), and so are one whose instructions the target hasn't, a gather's or
+  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
+  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
+  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
+  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  prototypes' types, the masks' and the vectors' from the call's argument, with
+  every result folded into the program's hash, by both paths against clang
+  -O0's code for znver5; they run where the host has the rows' features
+  (`x86_target_native`), and compile and link elsewhere. `test-checker
+  --program-vectors` runs them and the vector programs alone.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -1498,6 +1687,54 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+The source driver caps its published errors as Clang 23 does (#669): nineteen
+ordinary errors by default, followed, only if another error occurs, by the fatal
+`too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
+ordinary errors before that fatal diagnostic, and zero leaves them unlimited.
+Warnings do not consume the error budget; each accepted diagnostic keeps its
+macro notes, while the cutoff has neither a location nor notes. Suppressed
+warnings (`-w`) do not enter the counts. The final line gives the published
+warning and error totals with Clang's singular/plural spelling; clean units print
+no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
+does in Clang. Both output paths share the publication gate, including deferred
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
+graph's construction.
+
+The source driver collects preprocessing, parser and checker groups before
+publication (#698). Their order follows expansion-output boundaries and proven
+semantic completion points, independently of the diagnostic's located token.
+For example, an earlier missing name precedes a later `#error`; runtime shift
+warnings complete after their function's closing brace and its lookahead, so
+an EOF preprocessing diagnostic can precede that warning. Required constant
+evaluation retains its own expression-completion boundary in a sparse warning
+fact. Include stacks and macro/explicit notes are rendered with their primary
+after the final order is known. The shared gate then counts only published
+groups and applies the error budget once. Standalone preprocessing retains
+immediate publication.
+
+A nonfatal preprocessing error leaves the source stream available for
+diagnostics. A real preprocessing fatal leaves only its produced prefix;
+existing complete-declaration/statement recovery can diagnose safe original
+fragments there. Either outcome remains a rejected unit and cannot replace an
+object file, even if the final budget hides a later error. Diagnostic capture
+exhaustion also rejects the unit and publishes one fatal rather than accepting
+an incompletely diagnosed warning-only source. Failed history replays keep
+queued groups' backing alive or replace a silent failure safely.
+
+After the whole declaration/body resolver has completed, ordinary missing-name
+binding reports can retain independent later declarations (#699). Two bounded
+forest passes give each rejected top-level declaration its earlier safe graph
+prefix; independent declarations keep their full graphs. Missing operands
+acquire no invented value or type. Initializer, assembly and control scans use
+the same local completion cuts, including whole-switch completion barriers,
+and independent tentative-definition constraints still run at translation-unit
+end. Type-query/declarator failures, unsupported pragmas, resource failures and
+unfinished resolver states retain the conservative prefix. Repaired/deferred
+views with skipped bodies do not enable this new binding recovery. A successful
+deferred merge has the same complete unit as source order and uses the same cuts.
+All these views remain
+diagnostic-only and preserve the original source rejection.
+
 ### What the lowering costs (#531)
 
 On the 9700X, the lowering (`check_lower_prepare`, then the bodies'
@@ -1609,6 +1846,18 @@ The test command fails if the oracle cannot run. It covers:
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
   (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- `#pragma clang section` and `#pragma clang optimize` (#619;
+  `test-checker-driver`'s `check_test_driver_section_pragmas` and
+  `check_test_driver_optimize_pragmas`, on all four routes): each line's
+  settings and errors, and the section type conflicts in clang's order, against
+  clang's first error, place and message; the refusals by name pinned; and
+  `-c` of each unit clang takes, whose object must put every function, object
+  and thread-local in a section of the name, type, flags and alignment clang
+  -O0 -c's object puts it in, and have a file-scope `asm`'s sections as
+  clang's, with their bytes (`check_test_driver_same_sections`); its
+  executable by the direct path, which must exit with 0; and `-c`'s refusals by
+  name, the conservative active-object-setting refusal and its
+  no-active-object-setting controls among them.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on

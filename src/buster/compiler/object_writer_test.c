@@ -615,8 +615,24 @@ static bool object_test_same_symbol(const ObjectView* view, uint64_t index, cons
 // Checks unit `unit`'s object, as `view` read it, against the representation: everything is worked out again here
 // from the link alone (the orientation comment of object_writer.c says what the object holds, in what order), but the
 // DWARF's `debug_headers` sections after the sections of atoms, which object_test_debug_compare checks.
-static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, uint32_t unit, bool function_sections, uint64_t debug_headers,
-                                ObjectTestCounts* counts, Arena* arena)
+// Whether `descriptor` is no descriptor or `class`'s own section's, by the test's own formats: its atom goes in that
+// section, as without descriptors.
+static bool object_test_default_descriptor(const ObjectAtomSection* descriptor, uint8_t class)
+{
+    const ObjectTestSection* format = &object_test_sections[class];
+    return descriptor->name.length == 0 ||
+           (descriptor->name.length == strlen(format->name) && memcmp(descriptor->name.pointer, format->name, descriptor->name.length) == 0 &&
+            descriptor->type == format->type && descriptor->flags == format->flags && descriptor->entry_size == format->entry_size);
+}
+
+static bool object_test_same_descriptor(const ObjectAtomSection* a, const ObjectAtomSection* b)
+{
+    return a->name.length == b->name.length && memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0 && a->type == b->type && a->flags == b->flags &&
+           a->entry_size == b->entry_size;
+}
+
+static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, uint32_t unit, bool function_sections,
+                                const ObjectAtomSection* descriptors, uint64_t debug_headers, ObjectTestCounts* counts, Arena* arena)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
@@ -649,29 +665,63 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
         }
     }
 
-    // The sections of atoms in class order, each followed by its .rela section if its atoms have fixups.
+    // The sections of atoms in class order: each class's own (with function sections, a section per TEXT atom), then with
+    // descriptors one per other descriptor of the class, in the order of their first atoms, each followed by its .rela
+    // section if its atoms have fixups. The groups are found by comparing each atom's descriptor with every group's so
+    // far, where the writer hashes them.
+    uint32_t* atom_group = allocated && descriptors != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count) : 0;
+    const ObjectAtomSection** group_descriptor = allocated && descriptors != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, const ObjectAtomSection*, (uint64_t)atoms->count + 1) : 0;
+    const bool grouped = descriptors == 0 || (atom_group != 0 && group_descriptor != 0);
+    object_test_expect(tally, grouped, "room for the descriptors' groups", unit);
     uint64_t index = 1;
     uint64_t placed_count = 0;
-    for (uint8_t class = 1; allocated && class < BUSTER_LINK_CLASS_COUNT; class += 1)
+    for (uint8_t class = 1; allocated && grouped && class < BUSTER_LINK_CLASS_COUNT; class += 1)
     {
+        uint32_t groups = 1;
+        for (AtomId atom = 1; descriptors != 0 && atom < atoms->count; atom += 1)
+        {
+            if (atoms->unit[atom] == unit && atoms->class[atom] == class)
+            {
+                uint32_t group = 0;
+                if (!object_test_default_descriptor(&descriptors[atom], class))
+                {
+                    group = 1;
+                    while (group < groups && !object_test_same_descriptor(group_descriptor[group], &descriptors[atom]))
+                    {
+                        group += 1;
+                    }
+                    group_descriptor[group] = &descriptors[atom];
+                    groups += group == groups ? 1 : 0;
+                }
+                atom_group[atom] = group;
+            }
+        }
+        for (uint32_t group = 0; group < groups; group += 1)
+        {
+        const ObjectAtomSection* explicit = group != 0 ? group_descriptor[group] : 0;
         uint64_t first_placed = placed_count;
         uint64_t offset = 0;
         uint64_t alignment = 1;
         uint64_t fixup_count = 0;
-        // The unit's atoms of the class in id order, then a sentinel pass that closes the last section.
+        // The unit's atoms of the class and group in id order, then a sentinel pass that closes the last section.
         for (AtomId atom = 1; atom <= atoms->count; atom += 1)
         {
-            const bool in_class = atom < atoms->count && atoms->unit[atom] == unit && atoms->class[atom] == class;
-            const bool closes = placed_count > first_placed && (atom == atoms->count || (in_class && function_sections && class == BUSTER_LINK_CLASS_TEXT));
+            const bool in_class = atom < atoms->count && atoms->unit[atom] == unit && atoms->class[atom] == class && (descriptors == 0 || atom_group[atom] == group);
+            const bool apart = explicit == 0 && function_sections && class == BUSTER_LINK_CLASS_TEXT;
+            const bool closes = placed_count > first_placed && (atom == atoms->count || (in_class && apart));
             if (closes)
             {
                 // The section the atoms placed from first_placed on went to.
                 const Elf64_Shdr* header = index < view->section_count ? &view->sections[index] : 0;
                 const ObjectTestSection* format = &object_test_sections[class];
                 const char* name = header != 0 ? object_view_section_name(view, index) : 0;
-                const NameId section_atom_name = function_sections && class == BUSTER_LINK_CLASS_TEXT ? atom_name[placed[first_placed]] : 0;
+                const NameId section_atom_name = apart ? atom_name[placed[first_placed]] : 0;
                 char expected_name[BUSTER_OBJECT_TEST_PATH_BYTES];
-                if (section_atom_name != 0)
+                if (explicit != 0)
+                {
+                    snprintf(expected_name, sizeof(expected_name), "%.*s", (int)explicit->name.length, explicit->name.pointer);
+                }
+                else if (section_atom_name != 0)
                 {
                     snprintf(expected_name, sizeof(expected_name), ".text.%.*s", (int)link->names.length[section_atom_name], (const char*)link->names.bytes[section_atom_name]);
                 }
@@ -679,8 +729,11 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
                 {
                     snprintf(expected_name, sizeof(expected_name), "%s", format->name);
                 }
-                const bool same = header != 0 && name != 0 && strcmp(name, expected_name) == 0 && header->sh_type == format->type && header->sh_flags == format->flags &&
-                                  header->sh_entsize == format->entry_size && header->sh_addralign == alignment && header->sh_size == offset && header->sh_link == 0 &&
+                const uint32_t type = explicit != 0 ? explicit->type : format->type;
+                const uint64_t flags = explicit != 0 ? explicit->flags : format->flags;
+                const uint64_t entry_size = explicit != 0 ? explicit->entry_size : format->entry_size;
+                const bool same = header != 0 && name != 0 && strcmp(name, expected_name) == 0 && header->sh_type == type && header->sh_flags == flags &&
+                                  header->sh_entsize == entry_size && header->sh_addralign == alignment && header->sh_size == offset && header->sh_link == 0 &&
                                   header->sh_info == 0;
                 object_test_expect(tally, same, "a section of atoms: its name, type, flags, alignment and size", index);
                 // Its atoms' bytes, and int3 or zero before each.
@@ -730,6 +783,7 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
                 alignment = atom_alignment > alignment ? atom_alignment : alignment;
                 fixup_count += atoms->fixup_count[atom];
             }
+        }
         }
     }
 
@@ -861,12 +915,14 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
             const int64_t addend = link_fixup_addend(link, fixup);
             const bool local = (symbols->flags[target] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
             // GNU as and LLVM: a local target through its section's symbol, but for the GOT, TLS and size kinds and an
-            // IFUNC, and in a string pool for a PC-relative kind or an addend.
+            // IFUNC, and in a string pool (or a described mergeable section) for a PC-relative kind or an addend.
+            const bool described = descriptors != 0 && descriptors[target_atom].name.length != 0;
+            const bool pool = described ? (descriptors[target_atom].flags & SHF_MERGE) != 0 : atoms->class[target_atom] == BUSTER_LINK_CLASS_STRINGS;
             const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL ||
                               kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64 ||
                               kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 ||
                               (symbols->flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC ||
-                              (atoms->class[target_atom] == BUSTER_LINK_CLASS_STRINGS && (link_fixup_kinds[kind].pc_relative || addend != 0));
+                              (pool && (link_fixup_kinds[kind].pc_relative || addend != 0));
             const bool through_section = local && !kept;
             const uint64_t expected_symbol = through_section ? section_symbol[atom_section[target_atom]] : symbol_place[target];
             const int64_t expected_addend = through_section ? addend + (int64_t)(atom_offset[target_atom] + symbols->value[target]) : addend;
@@ -1822,7 +1878,7 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
         }
         debug = absent ? 0 : debug;
         const uint64_t debug_headers = debug == 0 ? 0 : 6 + (debug->function_count != 0 ? 2 : 0);
-        result = result && object_test_compare(tally, &view, link, unit, options.function_sections, debug_headers, counts, arena);
+        result = result && object_test_compare(tally, &view, link, unit, options.function_sections, options.atom_sections, debug_headers, counts, arena);
         result = result && (debug == 0 || object_test_debug_compare(tally, &view, link, debug));
         const char* file_name = result ? object_view_string(view.symbol_names, view.symbol_names_size, view.symbols[1].st_name) : 0;
         object_test_expect(tally, !result || (file_name != 0 && strcmp(file_name, source) == 0), "STT_FILE's name", unit);
@@ -1831,6 +1887,48 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
     }
     arena_pop_to(arena, length);
     return result;
+}
+
+// Descriptors for every atom of `link` (ObjectOptions.atom_sections, #619), on `arena`, or 0 without room: of each class
+// that C's named sections reach, every other atom in a named section of the class's kind (the second of three TEXT
+// atoms; the third with .text's own descriptor, which goes in .text), and the others without one, in their classes'
+// own sections.
+static ObjectAtomSection* object_test_named_descriptors(const Link* link, Arena* arena)
+{
+    ObjectAtomSection* table = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, link->atoms.count);
+    if (table != 0)
+    {
+        memset(table, 0, link->atoms.count * sizeof(ObjectAtomSection));
+        for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+        {
+            const uint8_t class = link->atoms.class[atom];
+            const bool odd = (atom & 1) != 0;
+            if (class == BUSTER_LINK_CLASS_TEXT && atom % 3 != 0)
+            {
+                table[atom] = (ObjectAtomSection){
+                    .name = atom % 3 == 1 ? BUSTER_S8(".text.buster_named") : BUSTER_S8(".text"),
+                    .type = SHT_PROGBITS,
+                    .flags = SHF_ALLOC | SHF_EXECINSTR,
+                };
+            }
+            else if (odd && (class == BUSTER_LINK_CLASS_DATA || class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS ||
+                             class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS))
+            {
+                const ObjectTestSection* format = &object_test_sections[class];
+                const String8 name = class == BUSTER_LINK_CLASS_DATA ? BUSTER_S8(".data.buster_named") :
+                                     class == BUSTER_LINK_CLASS_DATA_RELRO ? BUSTER_S8(".data.rel.ro.buster_named") :
+                                     class == BUSTER_LINK_CLASS_BSS ? BUSTER_S8(".bss.buster_named") :
+                                     class == BUSTER_LINK_CLASS_RODATA ? BUSTER_S8(".rodata.buster_named") :
+                                     class == BUSTER_LINK_CLASS_TDATA ? BUSTER_S8(".tdata.buster_named") : BUSTER_S8(".tbss.buster_named");
+                table[atom] = (ObjectAtomSection){
+                    .name = name,
+                    .type = format->type,
+                    .flags = format->flags,
+                };
+            }
+        }
+    }
+    return table;
 }
 
 // An atom of the link made by hand, with its bytes copied onto `arena` (none for zero-fill or no size).
@@ -2040,19 +2138,26 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         ObjectSymbols symbols;
         const bool prepared = generated && object_prepare(&units, &program.link, options[i].units, arena) && object_map_symbols(&symbols, &program.link, arena);
         object_test_expect(&tally, !generated || prepared, "object_prepare", i);
-        for (uint32_t sections = 0; prepared && sections < 2; sections += 1)
+        // Each object four ways: as is, with function sections, with named sections (object_test_named_descriptors), and
+        // with both.
+        const ObjectAtomSection* named = prepared ? object_test_named_descriptors(&program.link, arena) : 0;
+        object_test_expect(&tally, !prepared || named != 0, "room for the named sections' descriptors", i);
+        for (uint32_t sections = 0; named != 0 && sections < 4; sections += 1)
         {
             const ObjectOptions object_options = {
-                .function_sections = sections == 1,
+                .function_sections = (sections & 1) != 0,
+                .atom_sections = (sections & 2) != 0 ? named : 0,
+                .atom_section_count = (sections & 2) != 0 ? program.link.atoms.count : 0,
             };
             ObjectTestCounts counts = { 0 };
             for (uint32_t unit = 0; unit < units.count; unit += 1)
             {
                 object_test_unit(&tally, &program.link, &units, &symbols, unit, object_options, &counts, arena);
             }
-            printf("  %s%s: %u objects, %llu bytes, %llu sections, %llu symbols, %llu relocations (%llu through section symbols; %llu TPOFF32, %llu GOTTPOFF, "
+            printf("  %s%s%s: %u objects, %llu bytes, %llu sections, %llu symbols, %llu relocations (%llu through section symbols; %llu TPOFF32, %llu GOTTPOFF, "
                    "%llu GOTPCRELX, %llu REX_GOTPCRELX, %llu GOTPCREL, %llu PLT32, %llu PC32, %llu 64, %llu PC64, %llu 32, %llu 32S, %llu SIZE32, %llu SIZE64)\n",
-                   names[i], sections == 1 ? ", function sections" : "", units.count, (unsigned long long)counts.bytes, (unsigned long long)counts.sections,
+                   names[i], (sections & 1) != 0 ? ", function sections" : "", (sections & 2) != 0 ? ", named sections" : "", units.count,
+                   (unsigned long long)counts.bytes, (unsigned long long)counts.sections,
                    (unsigned long long)counts.symbols, (unsigned long long)counts.relocations, (unsigned long long)counts.section_symbol_relocations,
                    (unsigned long long)counts.by_type[R_X86_64_TPOFF32], (unsigned long long)counts.by_type[R_X86_64_GOTTPOFF],
                    (unsigned long long)counts.by_type[R_X86_64_GOTPCRELX], (unsigned long long)counts.by_type[R_X86_64_REX_GOTPCRELX],
@@ -2100,10 +2205,38 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
     object_test_expect(&tally, !made || !object_prepare(&units, &hand, 2, arena), "object_prepare with a unit missing", 0);
     const bool prepared = made && object_prepare(&units, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, arena) && object_map_symbols(&symbols, &hand, arena);
     object_test_expect(&tally, !made || (prepared && units.count == BUSTER_OBJECT_TEST_HAND_UNITS), "object_prepare on the link made by hand", 0);
-    for (uint32_t sections = 0; prepared && sections < 2; sections += 1)
+    const ObjectAtomSection* hand_named = prepared ? object_test_named_descriptors(&hand, arena) : 0;
+    // Invalid names must reject before the grouping hashes or compares them. A huge count has only one byte behind
+    // it, so checking the declared limit after a name read would cross the slice (the null cases also reach .text's
+    // default-descriptor comparison or the custom-name hash). Empty names remain the documented absent descriptor.
+    if (hand_named != 0)
+    {
+        static char embedded[] = { '.', 'x', 0, 'y' };
+        static const String8 invalid[] = {
+            { .pointer = NULL, .length = 5 },
+            { .pointer = NULL, .length = 7 },
+            { .pointer = "x", .length = UINT32_MAX },
+            { .pointer = embedded, .length = sizeof(embedded) },
+        };
+        ObjectAtomSection* bad = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, hand.atoms.count);
+        object_test_expect(&tally, bad != 0, "room for invalid section descriptor controls", 0);
+        for (uint32_t i = 0; bad != 0 && i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+        {
+            memset(bad, 0, (uint64_t)hand.atoms.count * sizeof(ObjectAtomSection));
+            bad[1] = (ObjectAtomSection){ .name = invalid[i], .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_EXECINSTR };
+            const ObjectOptions object_options = { .atom_sections = bad, .atom_section_count = hand.atoms.count };
+            const uint64_t before = arena->length;
+            const Object rejected = object_build(&hand, &units, &symbols, 0, object_options, BUSTER_S8("invalid.c"), arena);
+            object_test_expect(&tally, rejected.error == OBJECT_ERROR_RANGE && rejected.bytes == 0 && arena->length == before,
+                               "a malformed section descriptor rejects before grouping and leaves no output", i);
+        }
+    }
+    for (uint32_t sections = 0; hand_named != 0 && sections < 4; sections += 1)
     {
         const ObjectOptions object_options = {
-            .function_sections = sections == 1,
+            .function_sections = (sections & 1) != 0,
+            .atom_sections = (sections & 2) != 0 ? hand_named : 0,
+            .atom_section_count = (sections & 2) != 0 ? hand.atoms.count : 0,
         };
         ObjectTestCounts counts = { 0 };
         for (uint32_t unit = 0; unit < units.count; unit += 1)
@@ -3043,16 +3176,23 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         object_test_expect(&tally, generated, names[i], i);
         // wild 0.10 doesn't link SIZE32 and SIZE64, so it links only the programs without them.
         const uint32_t linkers = options[i].sizes ? BUSTER_OBJECT_TEST_ALL_LINKERS & ~BUSTER_OBJECT_TEST_WILD : BUSTER_OBJECT_TEST_ALL_LINKERS;
-        for (uint32_t sections = 0; generated && sections < 2; sections += 1)
+        // As is, with function sections, with named sections and with both (object_test_objects').
+        const uint64_t named_length = arena->length;
+        const ObjectAtomSection* named = generated ? object_test_named_descriptors(&program.link, arena) : 0;
+        object_test_expect(&tally, !generated || named != 0, "room for the named sections' descriptors", i);
+        for (uint32_t sections = 0; named != 0 && sections < 4; sections += 1)
         {
             const ObjectOptions object_options = {
-                .function_sections = sections == 1,
+                .function_sections = (sections & 1) != 0,
+                .atom_sections = (sections & 2) != 0 ? named : 0,
+                .atom_section_count = (sections & 2) != 0 ? program.link.atoms.count : 0,
             };
             char file[64];
-            snprintf(file, sizeof(file), "%s%s", directories[i], sections == 1 ? "-sections" : "");
+            snprintf(file, sizeof(file), "%s%s%s", directories[i], (sections & 2) != 0 ? "-named" : "", (sections & 1) != 0 ? "-sections" : "");
             object_test_cross_check_program(&tally, &program.link, options[i].units, object_test_program_expected(&program), options[i].libc,
                                             options[i].shared ? harness : 0, object_options, directory, file, linkers, keep, arena);
         }
+        arena_pop_to(arena, named_length);
         if (generated)
         {
             object_test_against_as(&tally, &program, directory, directories[i], keep, arena);
