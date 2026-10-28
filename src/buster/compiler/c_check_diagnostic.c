@@ -55,6 +55,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wreturn-type", NULL, "non-void function does not return a value" },
     { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
     { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
+    { "-Wdeprecated-non-prototype", NULL, "a function definition without a prototype is deprecated in all versions of C and is not supported in C23" },
+    { "-Wdeprecated-non-prototype", NULL, "passing arguments to a function without a prototype is deprecated in all versions of C and is not supported in C23" },
+    { NULL, NULL, "too few arguments in call" },
+    { NULL, NULL, "too many arguments in call" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -145,6 +149,20 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
     return severity;
 }
 
+// K&R diagnostics retain call-site spelling independently of the definition's compatibility signature.
+static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t known = graph->members != NULL ? graph->members[node] : 0;
+    const uint32_t callee = graph->operand0[node];
+    return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
+}
+
+static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    return check_graph_system_token(&input->graph, token) ? CHECK_WARNING_IGNORE : check_diagnostic_severity(input, token, warning);
+}
+
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
 {
     const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
@@ -193,6 +211,14 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         }
     }
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
+    for (uint32_t i = 0; policies && i < input->kr_definition_count; i += 1)
+    {
+        const uint32_t at = input->kr_definitions[i];
+        if (at < first && check_diagnostic_kr_severity(input, at, CHECK_WARNING_KR_DEFINITION) >= CHECK_WARNING_ERROR)
+        {
+            first = at;
+        }
+    }
     for (uint32_t i = 0; policies && i < input->packed_member_count; i += 1)
     {
         const CheckInputPackedMember* member = input->packed_members + i;
@@ -226,13 +252,16 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     }
     for (uint32_t node = 0; policies && stream != NULL && node < stream->count; node += 1)
     {
-        const uint32_t at = input->graph.tokens[node];
         uint32_t warnings = stream->warnings[node];
-        while (at < first && warnings != 0)
+        while (warnings != 0)
         {
             const uint32_t warning = warnings & (0u - warnings);
+            const bool kr = (warning & CHECK_WARNING_KR_CALLS) != 0;
+            const uint32_t at = kr ? check_diagnostic_kr_call_token(input, node) : input->graph.tokens[node];
             const bool ignored = stream->warning_ignored != NULL && (stream->warning_ignored[node] & warning) != 0;
-            if (check_diagnostic_severity_default(input, at, warning, ignored) >= CHECK_WARNING_ERROR)
+            const CheckWarningSeverity severity = kr ? check_diagnostic_kr_severity(input, at, warning) :
+                                                      check_diagnostic_severity_default(input, at, warning, ignored);
+            if (at < first && severity >= CHECK_WARNING_ERROR)
             {
                 first = at;
             }

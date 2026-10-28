@@ -1786,6 +1786,29 @@ static uint32_t check_constant_overload_head(const CheckConstantInput* input, ui
 static void check_constant_action(CheckConstantInput* input, const CheckAction* action, uint32_t callee, CheckActionResult* checked)
 {
     CheckInputReader* reader = input->reader;
+    CheckAction known;
+    if (action->op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
+    {
+        uint32_t use = callee;
+        for (uint32_t steps = 0; use >= input->first && use < input->end && steps < input->end - input->first; steps += 1)
+        {
+            const uint8_t role = reader->parser->tree.roles[use];
+            const uint8_t kind = reader->parser->tokens.kinds[use];
+            if (role != PARSE_ROLE_CLOSE_GROUP && !(role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_AMP))
+            {
+                break;
+            }
+            const uint32_t child = input->first_value[use - input->first];
+            use = child != BUSTER_CHECK_NONE && input->next_value[child - input->first] == BUSTER_CHECK_NONE ? child : BUSTER_CHECK_NONE;
+        }
+        const uint32_t declaration = use < reader->parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
+        if (declaration < reader->parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+        {
+            known = *action;
+            known.type = reader->declared_types[declaration];
+            action = &known;
+        }
+    }
     uint32_t head = action->op == CHECK_OP_CALL ? action->operands[0].overload_head : 0;
     head = action->op == CHECK_OP_CALL && head == 0 ? check_constant_overload_head(input, callee) : head;
     bool pending_arguments = false;
@@ -2055,7 +2078,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         else if (role == PARSE_ROLE_OPERAND && kind == PARSE_KIND_IDENTIFIER)
         {
             const uint32_t declaration = reader->output->declarations[token];
-            const TypeId type = reader->declared_types[token];
+            const TypeId type = check_input_expression_type(reader, token);
             valid = type != 0 && declaration < parser->tokens.count;
             if (valid)
             {
@@ -2720,7 +2743,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         else if (operand && kind == PARSE_KIND_IDENTIFIER)
         {
             const uint32_t declaration = reader->output->declarations[token];
-            const TypeId type = reader->declared_types[token];
+            const TypeId type = check_input_expression_type(reader, token);
             valid = type != 0 && declaration < parser->tokens.count;
             if (valid)
             {

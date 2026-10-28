@@ -218,6 +218,12 @@ typedef enum CheckDiagnostic
 #define CHECK_WARNING_DISTINCT_POINTER_COMPARE 0x2000u
 #define CHECK_WARNING_CONDITIONAL_POINTER_INTEGER 0x4000u
 #define CHECK_WARNING_CONDITIONAL_POINTER_TYPES 0x8000u
+// Cold source/call diagnostics live above the packed 16-bit arithmetic warning keys.
+#define CHECK_WARNING_KR_DEFINITION 0x200000u
+#define CHECK_WARNING_NON_PROTOTYPE_CALL 0x400000u
+#define CHECK_WARNING_KR_TOO_FEW 0x800000u
+#define CHECK_WARNING_KR_TOO_MANY 0x1000000u
+#define CHECK_WARNING_KR_CALLS (CHECK_WARNING_NON_PROTOTYPE_CALL | CHECK_WARNING_KR_TOO_FEW | CHECK_WARNING_KR_TOO_MANY)
 
 typedef struct CheckConversion CheckConversion;
 struct CheckConversion
@@ -2076,12 +2082,27 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         const uint8_t flags = table->types.flags[type_index(function)];
         const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        // A direct K&R designator has no prototype. The reader retains its known definition's promoted signature
+        // separately, as clang does: convert the known arguments, but diagnose a count mismatch as a warning.
+        // A real prototype (including a function pointer's) never takes this exception.
+        const bool kr = !prototype && type_kind(table, action->type) == BUSTER_TYPE_KIND_FUNCTION;
         uint32_t count = 0;
-        const TypeId* parameters = type_parameters(table, function, &count);
-        if (prototype && (action->argument_count < count || (!variadic && action->argument_count != count)))
+        const TypeId* parameters = type_parameters(table, kr ? action->type : function, &count);
+        if ((prototype || kr) && (action->argument_count < count || (!variadic && action->argument_count != count)))
         {
-            // As clang reports them: too few arguments at the call, too many at the first argument past the last parameter.
-            check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, action->argument_count > count ? count + 1 : 0);
+            if (kr)
+            {
+                result->warnings |= action->argument_count < count ? CHECK_WARNING_KR_TOO_FEW : CHECK_WARNING_KR_TOO_MANY;
+            }
+            else
+            {
+                // As clang reports them: too few at the call, too many at the first argument past the last parameter.
+                check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, action->argument_count > count ? count + 1 : 0);
+            }
+        }
+        else if (!prototype && !kr && action->argument_count != 0)
+        {
+            result->warnings |= CHECK_WARNING_NON_PROTOTYPE_CALL;
         }
         result->value.type = type_return(table, function);
         result->value.flags = BUSTER_CHECK_SIDE_EFFECT;
@@ -2108,7 +2129,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
             else
             {
                 CheckValue value = check_action_operand(table, &argument, &converted, 0);
-                const bool parameter = prototype && i < count;
+                const bool parameter = (prototype || kr) && i < count;
                 if (!parameter)
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);

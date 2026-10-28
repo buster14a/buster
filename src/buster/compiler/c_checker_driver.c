@@ -67,6 +67,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_KR_IMPLICIT_INT: result = "parameter was not declared; ISO C99 and later do not support implicit int"; break;
     }
     return result;
 }
@@ -287,6 +288,26 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, warning);
+    if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        if (warning == CHECK_WARNING_KR_TOO_FEW || warning == CHECK_WARNING_KR_TOO_MANY)
+        {
+            const uint32_t name = parser->tokens.names[token];
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s to '%.*s'",
+                               check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+        }
+        else
+        {
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(warning));
+        }
+    }
+}
+
 // The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
@@ -315,10 +336,12 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
-    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count + 1;
+    const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
+    const uint64_t call_offset64 = kr_offset64 + input->kr_definition_count;
+    const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const bool reports = report_room > 1;
-    const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
+    const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
@@ -356,6 +379,35 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 (repair == NULL || check_repair_warning_token(repair, token)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
+            }
+        }
+        for (uint32_t i = 0; show_warnings && i < input->kr_definition_count; i += 1)
+        {
+            const uint32_t token = input->kr_definitions[i];
+            if (token < count && check_diagnostic_kr_severity(input, token, CHECK_WARNING_KR_DEFINITION) != CHECK_WARNING_IGNORE &&
+                (repair == NULL || check_repair_warning_token(repair, token)))
+            {
+                report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
+            }
+        }
+        // The call diagnostics don't fit the arithmetic warnings' packed 16-bit keys. Gather only their nodes,
+        // through the existing warning mask scan, and sort them with the sparse source reports instead.
+        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
+        {
+            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
+                if (flags != 0)
+                {
+                    const uint32_t token = check_diagnostic_kr_call_token(input, node);
+                    if (token < count && check_diagnostic_kr_severity(input, token, flags) != CHECK_WARNING_IGNORE &&
+                        (repair == NULL || check_repair_warning_token(repair, token)))
+                    {
+                        report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)call_offset64 + node);
+                    }
+                }
             }
         }
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
@@ -526,7 +578,15 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
-                if (sequence >= offset)
+                if (sequence >= (uint32_t)call_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, stream->warnings[sequence - (uint32_t)call_offset64] & CHECK_WARNING_KR_CALLS);
+                }
+                else if (sequence >= (uint32_t)kr_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, CHECK_WARNING_KR_DEFINITION);
+                }
+                else if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
@@ -556,6 +616,13 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                         const uint32_t name = parser->tokens.names[token];
                         pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "use of undeclared identifier '%.*s'",
                                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    }
+                    else if (phase == 0 && input->reports[index].message == CHECK_INPUT_KR_IMPLICIT_INT && token < count)
+                    {
+                        const uint32_t name = parser->tokens.names[token];
+                        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source,
+                            "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
+                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }
                     else if (source != BUSTER_CHECK_NONE)
                     {

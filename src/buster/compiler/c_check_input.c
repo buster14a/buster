@@ -30,6 +30,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOOP_PARENTHESIS,
     CHECK_INPUT_NAKED_STATEMENT,
     CHECK_INPUT_NAKED_PARAMETER,
+    CHECK_INPUT_KR_IMPLICIT_INT,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -51,6 +52,7 @@ static const char* const check_input_messages[] =
     "unroll pragma's count unclosed",
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
+    "parameter was not declared; ISO C99 and later do not support implicit int",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -194,6 +196,10 @@ struct CheckInput
     TypeId* declared_types;
     uint8_t* declaration_kinds;
     uint8_t* function_flags;
+    // Named K&R parameters bound the extra entry conversions without inflating ordinary units' reservations.
+    uint32_t kr_parameter_count;
+    uint32_t* kr_definitions;
+    uint32_t kr_definition_count;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -482,6 +488,7 @@ struct CheckInputReader
     uint32_t specifier_query_depth;
     bool specifier_pending;
     uint32_t implicit_function_capacity;
+    uint32_t kr_definition_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
@@ -702,6 +709,51 @@ static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
         reader->output->resource = true;
     }
     return type;
+}
+
+// A K&R definition retains promoted parameter types for compatibility and the callee ABI, but its designator
+// has no prototype. Keep this distinction in both the expression graph and source-only type queries.
+static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t token)
+{
+    TypeId type = reader->declared_types[token];
+    const uint32_t declaration = reader->output->declarations[token];
+    if (reader->output->kr_parameter_count != 0 && declaration < reader->parser->tokens.count &&
+        (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+    {
+        const TypeId function = type_strip_aligned(reader->types, type);
+        type = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, function), NULL, 0, 0,
+                                                               type_function_abi_kind(reader->types, function)));
+    }
+    return type;
+}
+
+// Retain only K&R definitions' source points; ordinary translation units allocate no diagnostic column.
+static void check_input_kr_definition(CheckInputReader* reader, uint32_t token)
+{
+    CheckInput* input = reader->output;
+    if (input->kr_definition_count == reader->kr_definition_capacity)
+    {
+        const uint32_t capacity = reader->kr_definition_capacity == 0 ? 8 :
+                                  reader->kr_definition_capacity <= UINT32_MAX / 2 ? reader->kr_definition_capacity * 2 : 0;
+        uint32_t* definitions = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+        if (definitions != NULL)
+        {
+            if (input->kr_definition_count != 0)
+            {
+                memcpy(definitions, input->kr_definitions, (uint64_t)input->kr_definition_count * sizeof(uint32_t));
+            }
+            input->kr_definitions = definitions;
+            reader->kr_definition_capacity = capacity;
+        }
+        else
+        {
+            input->resource = true;
+        }
+    }
+    if (!input->resource)
+    {
+        input->kr_definitions[input->kr_definition_count++] = token;
+    }
 }
 
 // Scans of a token column for the reader's passes that act on few tokens (#529): each gives the tokens from `first`
@@ -2984,8 +3036,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
 // identifier list (`names`, chained by parameter_next), as C17 6.9.1p6 constrains it and clang reports it: specifiers
 // without a storage class but register, a function specifier or typedef; declarators that each name a listed name not
 // declared yet, without an initializer. Each listed name gets its declared type, adjusted as a parameter's (an array's
-// and a function's to a pointer); one left undeclared is an error at its name in the list, as clang refuses its implicit
-// int. A struct, union or enum defined in the list and a variably modified type are refused by name. The list's tokens are
+// and a function's to a pointer); one left undeclared is int in C89, or an error at its name from C99 on. A struct, union or enum defined in the list and a variably modified type are refused by name. The list's tokens are
 // the definition's: the walk passes over them.
 static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names, uint32_t first, uint32_t body)
 {
@@ -3067,8 +3118,16 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
     {
         if (reader->declared_types[parameter] == 0)
         {
-            check_input_report(reader, parameter, CHECK_INPUT_DECLARATION);
-            valid = false;
+            if (parser->language.standard < 1999)
+            {
+                // C90 6.7.1: an undeclared identifier-list parameter has type int, silently in clang's C89 modes.
+                reader->declared_types[parameter] = BUSTER_TYPE_INT;
+            }
+            else
+            {
+                check_input_report(reader, parameter, CHECK_INPUT_KR_IMPLICIT_INT);
+                valid = false;
+            }
         }
     }
     for (uint32_t token = first; token < body; token += 1)
@@ -3251,6 +3310,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     body += 1;
                 }
+                if (body < count)
+                {
+                    check_input_kr_definition(reader, name);
+                }
                 valid = body < count && check_input_kr_declarations(reader, parameters, i, body);
                 uint32_t parameter_count = 0;
                 for (uint32_t parameter = parameters; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
@@ -3273,6 +3336,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 valid = valid && type != 0;
                 i = valid ? body : i;
                 kr_definition = valid;
+                reader->output->kr_parameter_count += valid ? parameter_count : 0;
             }
         }
         if (valid && attributes != 0)
@@ -4655,7 +4719,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    const TypeId type = reader->declared_types[token];
+                    const TypeId type = check_input_expression_type(reader, token);
                     const uint32_t declaration = reader->output->declarations[token];
                     const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
                     *check_graph_leaf_of(graph, node) = (CheckValue)
@@ -5025,6 +5089,24 @@ static void check_input_expressions(CheckInputReader* reader)
             if (node != BUSTER_CHECK_NONE)
             {
                 graph->types[node] = reader->query_types[token];
+                if (op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
+                {
+                    // Parentheses don't create graph nodes. Address-of preserves a direct declaration, but
+                    // dereference, a cast or a conditional is a call through its expression's type instead.
+                    uint32_t callee = a;
+                    if (callee < node && graph->ops[callee] == CHECK_OP_ADDRESS)
+                    {
+                        callee = graph->operand0[callee];
+                    }
+                    const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+                    const uint32_t declaration = use < parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
+                    if (declaration < parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
+                    {
+                        // CALL's type is the known promoted signature, member its designator's source token plus one.
+                        graph->types[node] = reader->declared_types[declaration];
+                        graph->members[node] = use + 1;
+                    }
+                }
                 if (reader->builtins[token] != 0)
                 {
                     graph->members[node] = reader->builtins[token];

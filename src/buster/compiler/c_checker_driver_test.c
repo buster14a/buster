@@ -2911,6 +2911,38 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "K&R definition emits its deprecated-non-prototype warning",
+            .source = "int f(a)float a;{return (int)a;}\n",
+            .warnings = 1,
+        },
+        {
+            .name = "K&R arity warnings do not block object emission",
+            .source = "int f(a)int a;{return a;}int g(void){return f()+f(1,2); }\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R deprecation suppression leaves the independent arity warning",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}int g(void){return (&f)(1,2); }\n",
+            .warnings = 1,
+        },
+        {
+            .name = "promoted K&R definition warning blocks object emission",
+            .source = "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "K&R indirect call warning follows source-ordered diagnostic policy",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint g(void){return (*f)(1,2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "quiet K&R warnings still emit an object",
+            .source = "int f(a)int a;{return a;}int g(void){return f(1,2);}\n",
+            .quiet = true,
+        },
+        {
             "valid functions and relocatable static storage",
             "static int value=7; int *pointer=&value; int f(int x){return x+value;}\n",
             false,

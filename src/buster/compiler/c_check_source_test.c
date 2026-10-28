@@ -1142,6 +1142,70 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
+            .name = "K&R missing declarations default to int in C89",
+            .source = "int f(a,b)int a;{return a+b;} int g(void){return f(3,4);}",
+            .standard = 1989,
+        },
+        {
+            .name = "K&R all implicit parameters in C89",
+            .source = "int f(a,b){return a+b;} int g(void){return f(3,4);}",
+            .standard = 1989,
+        },
+        {
+            .name = "K&R undeclared parameter is an error in C99",
+            .source = "int f(a,b)int a;{return a+b;}",
+            .rejected = true,
+            .standard = 1999,
+        },
+        {
+            .name = "K&R undeclared parameter is an error in C17",
+            .source = "int f(a,b)int a;{return a+b;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R identifier lists are rejected in C23",
+            .source = "int f(a)int a;{return a;}",
+            .rejected = true,
+            .standard = 2023,
+        },
+        {
+            .name = "K&R direct and addressed calls warn about arity without rejecting",
+            .source = "int f(a)int a;{return a;}int g(void){return f()+f(1,2)+(&f)(1,2);}",
+        },
+        {
+            .name = "K&R indirect designators retain no prototype",
+            .source = "int f(a)int a;{return a;}int g(void){return (*f)(1,2)+(1?f:f)(1,2);}",
+        },
+        {
+            .name = "K&R direct arguments retain known assignment constraints",
+            .source = "int f(a)int a;{return a;}int g(void){return f((int*)0);}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R prior prototype does not turn its definition into a prototype",
+            .source = "int f(int);int f(a)char a;{return a;}int g(void){return f(1,2);}",
+        },
+        {
+            .name = "K&R later prototype restores hard arity checking",
+            .source = "int f(a)int a;{return a;}int f(int);int g(void){return f(1,2);}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R initializer does not erase a function pointer prototype",
+            .source = "int f(a)int a;{return a;}int g(void){int (*p)(int)=f;return p(1,2);}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R typeof observes the no-prototype expression type",
+            .source = "int f(a)int a;{return a;}__typeof__(f)*p=f;int g(void){return p(1,2);}"
+                      "_Static_assert(__builtin_types_compatible_p(__typeof__(f),int(void)),\"no prototype\");",
+        },
+        {
+            .name = "K&R calls in type queries keep known argument constraints",
+            .source = "int f(a)int a;{return a;}unsigned long g(void){return sizeof(f((int*)0));}",
+            .rejected = true,
+        },
+        {
             "K&R parameter rejects a leading _Noreturn keyword",
             "int f(a) _Noreturn int a; { return a; }\n",
             true,
@@ -1676,6 +1740,14 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     }
     const char* arguments[] = { "-std=gnu17" };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    {
+        if (fixtures[i].standard != 0)
+        {
+            const char* dialect[] = { fixtures[i].standard == 1989 ? "-std=gnu89" : fixtures[i].standard == 1999 ? "-std=gnu99" : "-std=gnu23" };
+            ready = parse_test_clang(clang, dialect, BUSTER_ARRAY_LENGTH(dialect), pointers + i, 1, outcomes + i);
+        }
+    }
     check_test_expect(test, ready, "extended source clang oracle could not run");
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {
