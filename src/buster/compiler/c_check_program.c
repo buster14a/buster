@@ -1325,7 +1325,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack)
 {
     const CheckProgram* program = writer->program;
     const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
@@ -1337,19 +1337,19 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // The task records are no longer live. Their storage also bounds the warning-only expression walk;
-        // capacity is 8 * token_count + 16, hence these byte offsets keep the u32 worklist aligned.
-        _Static_assert(sizeof(CheckControlTask) >= 6, "control tasks hold two byte marks and one u32 worklist");
-        uint8_t* node_seen = (uint8_t*)writer->tasks + writer->capacity;
-        uint32_t* node_stack = (uint32_t*)((uint8_t*)writer->tasks + (uint64_t)writer->capacity * 2);
+        // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
+        // into their already initialized node marks, then restore every touched word before references consume it.
+        // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
+        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16,
+        // so the u32 suffix is aligned and graph->count <= capacity bounds it within the existing allocation.
+        const uint32_t warning_mark = UINT32_C(1) << 31;
+        _Static_assert(sizeof(CheckControlTask) >= 5, "control tasks hold byte marks and a u32 visited list");
+        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + writer->capacity);
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             bool warning_safe = graph->count <= writer->capacity;
             memset(seen, 0, body->count);
-            if (pass != 0 && warning_safe)
-            {
-                memset(node_seen, 0, graph->count);
-            }
+            uint32_t touched_count = 0;
             uint32_t head = 0;
             uint32_t tail = 1;
             queue[0] = 0;
@@ -1431,11 +1431,12 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 }
                 // Calls may be declared noreturn. Until that contract is carried by controls, avoid diagnosing a
                 // conservative fall-off after an expression containing a call or a terminal builtin.
-                if (pass != 0 && warning_safe && entry->node < graph->count && node_seen[entry->node] == 0)
+                if (pass != 0 && warning_safe && entry->node < graph->count && (node_marks[entry->node] & warning_mark) == 0)
                 {
                     uint32_t depth = 1;
                     node_stack[0] = entry->node;
-                    node_seen[entry->node] = 1;
+                    node_marks[entry->node] |= warning_mark;
+                    touched[touched_count++] = entry->node;
                     while (depth != 0 && warning_safe)
                     {
                         const uint32_t node = node_stack[--depth];
@@ -1460,9 +1461,10 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
                             {
                                 const uint32_t operand = operands[o];
-                                if (operand < graph->count && node_seen[operand] == 0)
+                                if (operand < graph->count && (node_marks[operand] & warning_mark) == 0)
                                 {
-                                    node_seen[operand] = 1;
+                                    node_marks[operand] |= warning_mark;
+                                    touched[touched_count++] = operand;
                                     node_stack[depth++] = operand;
                                 }
                             }
@@ -1479,6 +1481,10 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         queue[tail++] = target;
                     }
                 }
+            }
+            for (uint32_t t = 0; t < touched_count; t += 1)
+            {
+                node_marks[touched[t]] &= ~warning_mark;
             }
             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
             if (pass == 0)
@@ -2301,7 +2307,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body);
+        check_program_return_flow(&writer, body, nodes, stack);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
