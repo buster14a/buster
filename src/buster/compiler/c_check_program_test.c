@@ -3516,8 +3516,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
                                        "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+    // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
-                                "file-assembly-machine-boundary", true, false, 0, 0);
+                                "file-assembly-lowers-no-code", true, true, 0, 0);
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
