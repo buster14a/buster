@@ -522,10 +522,14 @@ static void asm_lex_vector(AsmParser* parser)
 
 static void asm_lex(AsmParser* parser)
 {
+    parser->instruction_capacity = 1;
 #if !BUSTER_HOST_VECTOR
     asm_lex_scalar(parser);
+    for (uint32_t at = 0; at < parser->token_count; at += 1)
+    {
+        parser->instruction_capacity += parser->tokens[at].kind == '\n';
+    }
 #else
-    parser->instruction_capacity = 1;
     if (BUSTER_VECTOR_PATH(parser->options.vectorized))
     {
         asm_lex_vector(parser);

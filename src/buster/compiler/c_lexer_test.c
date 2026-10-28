@@ -208,8 +208,15 @@ static CheckCounts print_counts(const char* check, uint64_t total, const char* i
     CheckCounts sum = {0};
     for (uint32_t mode = 0; mode < BUSTER_TEST_NUMBER_MODES; mode += 1)
     {
-        printf("%s%s: %lu of %lu %s differ, %lu need the scalar lexer for a part\n", check, number_mode_names[mode], (unsigned long)counts[mode].different,
-               (unsigned long)total, items, (unsigned long)counts[mode].fell_back);
+        printf("%s%s: %lu of %lu %s differ", check, number_mode_names[mode], (unsigned long)counts[mode].different, (unsigned long)total, items);
+        if (BUSTER_HOST_VECTOR)
+        {
+            printf(", %lu need the scalar lexer for a part\n", (unsigned long)counts[mode].fell_back);
+        }
+        else
+        {
+            printf("; vector lexer execution unavailable in this build\n");
+        }
         sum.different += counts[mode].different;
         sum.fell_back += counts[mode].fell_back;
     }
@@ -1032,8 +1039,9 @@ static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint
                     snprintf(name, sizeof(name), "raw strings (misalignment %lu, case %lu, start %lu)", (unsigned long)misalignment, (unsigned long)c,
                              (unsigned long)start);
                     const Comparison comparison = compare(source, vectorized, scalar, flags, failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
-                    const bool unexpected = comparison == COMPARISON_DIFFERENT || (raw && comparison != COMPARISON_FELL_BACK) ||
-                                            (!raw && !may_fall_back && comparison != COMPARISON_SAME);
+                    const bool unexpected = comparison == COMPARISON_DIFFERENT ||
+                                            (BUSTER_HOST_VECTOR && ((raw && comparison != COMPARISON_FELL_BACK) ||
+                                                                    (!raw && !may_fall_back && comparison != COMPARISON_SAME)));
                     if (unexpected && comparison != COMPARISON_DIFFERENT && failed < BUSTER_TEST_REPORTED_INPUTS)
                     {
                         printf("%s %s the scalar lexer\n", name, raw ? "doesn't take" : "takes");
@@ -1044,12 +1052,30 @@ static bool check_raw_strings(TokenArrays* vectorized, TokenArrays* scalar, uint
             }
         }
     }
-    printf("raw strings: %lu of %lu cases fail\n", (unsigned long)failed, (unsigned long)checked);
+    printf("raw strings: %lu of %lu cases fail%s\n", (unsigned long)failed, (unsigned long)checked,
+           BUSTER_HOST_VECTOR ? "" : " (vector fallback checks unavailable)");
     return failed == 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // run_c_lexer_tests
+
+// A BOM belongs to the file start, not to a token. A later line still uses offsets in the original file.
+static bool check_line_bom(TokenArrays* tokens, uint32_t flags)
+{
+    static const uint8_t source[] = "\xef\xbb\xbf" "abc\nxyz";
+    const uint64_t length = sizeof(source) - 1;
+    int64_t count = c_tokenize_lines(source, length, 0, tokens->kinds, tokens->starts, tokens->ends, flags);
+    bool valid = count == 2 && (tokens->kinds[0] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER &&
+                 tokens->starts[0] == 3 && tokens->ends[0] == 6 &&
+                 (tokens->kinds[1] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER && tokens->starts[1] == 7 && tokens->ends[1] == 10;
+    count = c_tokenize_lines(source, length, 7, tokens->kinds, tokens->starts, tokens->ends, flags);
+    valid &= count == 1 && (tokens->kinds[0] & ~BUSTER_C_TOKEN_START_OF_LINE) == C_TOKEN_RAW_IDENTIFIER && tokens->starts[0] == 7 && tokens->ends[0] == 10;
+    count = c_tokenize_lines(source, 3, 0, tokens->kinds, tokens->starts, tokens->ends, flags);
+    valid &= count == 0;
+    printf("line BOM offsets: %s\n", valid ? "correct" : "WRONG");
+    return valid;
+}
 
 // Parses a decimal number of up to 64 bits into `value`. Returns false if `text` isn't one.
 static bool parse_u64(const char* text, uint64_t* value)
@@ -1129,9 +1155,10 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         const bool comments = check_comments(&vectorized, &scalar, flags);
         const bool raw_strings = check_raw_strings(&vectorized, &scalar, flags) && check_raw_errors();
         const bool separators = check_separators(&vectorized, &scalar, flags) && check_separator_fixtures(&vectorized, &scalar, flags);
+        const bool line_bom = check_line_bom(&vectorized, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
-        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators
+        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments && raw_strings && separators && line_bom
                      ? 0
                      : 1;
     }

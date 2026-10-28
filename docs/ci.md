@@ -11,7 +11,13 @@ The baseline build runs on x86-64 without AVX-512. Native builds select the
 existing scalar twins when the compiler's host target lacks the full SIMD
 feature set. Intrinsic-only shared helpers have scalar definitions for that
 build. Generated-code ISA and ABI remain controlled by the existing target
-options. Benchmark commands require a vector host build.
+options. Benchmark commands require a vector host build. Both hosted variants
+may report `scalar`: `native` targets the runner's CPU, which does not guarantee
+the full vector feature set. Each run logs its CPU, target features and selected
+path. Baseline memory boundary tests also run with undefined-behavior checks.
+The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
+and compile a C fixture and assemble a multi-instruction fixture, then links and
+executes their results on that same emulated CPU.
 
 The hosted tests fetch the frozen corpus from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).
@@ -27,7 +33,9 @@ matrix. A failure, cancellation or skipped suite prevents the physical job from
 being queued, including scheduled and manual runs whose change selector is
 skipped. The benchmark job checks out the same `github.sha`, builds with
 `BUSTER_HOST_ARCH=znver5`, verifies the Ryzen 7 9700X identity and retains the
-existing host lock, CPU placements and benchmark selection.
+existing host lock, CPU placements and benchmark selection. It stages the current
+official stable Clang 23.1.4 release in the runner's private cache, verifying the
+archive SHA-256 and preserving its licenses. It does not modify system packages.
 
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires successful hosted tests and

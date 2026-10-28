@@ -192,6 +192,20 @@ jobs:
           clang --version
           llvm-config --version
 
+      - name: Compile and run baseline code on an emulated x86-64 CPU
+        if: matrix.host_arch == 'x86-64'
+        run: |
+          smoke="$RUNNER_TEMP/baseline-smoke"
+          mkdir "$smoke"
+          printf '\357\273\277#define A 7\nint buster_add(int x){return x+A;}\n' > "$smoke/input.c"
+          printf '.text\n.globl buster_asm\nbuster_asm:\nmov $7, %%eax\nadd $3, %%eax\nret\n' > "$smoke/input.s"
+          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler -E -P -o "$smoke/input.i" "$smoke/input.c"
+          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler -c -march=x86-64 -o "$smoke/input.o" "$smoke/input.c"
+          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler assemble -march=x86-64 -o "$smoke/asm.o" "$smoke/input.s"
+          printf 'int buster_add(int); int buster_asm(void); int main(void){return buster_add(5)!=12 || buster_asm()!=10;}\n' > "$smoke/main.c"
+          clang -march=x86-64 "$smoke/main.c" "$smoke/input.o" "$smoke/asm.o" -o "$smoke/program"
+          timeout 60s qemu-x86_64 -cpu qemu64 "$smoke/program"
+
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers
         # (tools/performance, docs/performance, web/perf), this pin or these steps: about 11 s of building and checking that
@@ -652,19 +666,21 @@ jobs:
       BUSTER_HOST_ARCH: znver5
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
-      - name: Verify benchmark host and bootstrap compiler
+      - name: Verify benchmark host
         run: |
           test "$(uname -s)" = Linux
           test "$(uname -m)" = x86_64
           grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
           grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
-          clang --version
 
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Stage official Clang 23.1.4 in the private runner cache
+        run: bash tools/ci/setup-benchpress.sh
 
       - name: Build the Zen 5 benchmark executable
         run: |

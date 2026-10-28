@@ -1220,9 +1220,9 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's predefines give as clang's
-do for the same options (`c_predefines.c`).
+The compiler's host path follows the target feature macros, which the
+preprocessor's predefines give as clang's do for the same options
+(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
 
 ## Sharing the 9700X
 

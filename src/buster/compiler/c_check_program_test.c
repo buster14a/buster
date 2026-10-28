@@ -685,6 +685,16 @@ static bool check_test_program_oracle(const Link* link, const char* source, char
     return valid;
 }
 
+// DAZ is optional even with SSE2; FXSAVE's mask says whether MXCSR bit 6 may be written.
+static bool check_test_program_daz(void)
+{
+    uint8_t state[512] __attribute__((aligned(16)));
+    uint32_t mask;
+    __asm__ volatile("fxsave %0" : "=m"(state));
+    memcpy(&mask, state + 28, sizeof(mask));
+    return (mask & 64u) != 0;
+}
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -699,7 +709,9 @@ static const char check_test_program_harness[] =
     "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
     "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
     "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
-    "int change_daz(int n){unsigned old=_mm_getcsr();_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
+    "int change_daz(int n){struct {unsigned char b[512];} __attribute__((aligned(16))) s;"
+    "__asm__ volatile(\"fxsave %0\":\"=m\"(s));unsigned mask;__builtin_memcpy(&mask,s.b+28,4);"
+    "unsigned old=_mm_getcsr();if(mask&64u)_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
     "double fp_special(int n){const unsigned long b[]={0,0x8000000000000000UL,0x7ff0000000000000UL,0xfff0000000000000UL,"
     "0x7ff8000000000001UL,0x7ff0000000000001UL,1,0x8000000000000001UL,0x3ff8000000000000UL};"
     "union{unsigned long bits;double value;}x={b[(unsigned)n%9]};return x.value;}\n"
@@ -2266,6 +2278,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
         "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
         "fenv-implicit-narrowing-conversion", clang);
+    if (!check_test_program_daz())
+    {
+        printf("  fenv classification: DAZ toggle skipped (MXCSR does not support it)\n");
+    }
     check_test_program_source(test,
         "#pragma STDC FENV_ACCESS ON\n"
         "int clear_fp(void);int fp_state(void);int change_daz(int);double fp_special(int);int tested(int n){"

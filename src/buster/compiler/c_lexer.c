@@ -3755,7 +3755,8 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t leng
     int64_t result = C_TOKENIZER_ERROR_FILE_TOO_BIG;
     if (length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
-        result = begin >= length ? 0 : (int64_t)c_tokenize_scalar_range(source, length, begin, true, UINT64_MAX, kinds, starts, ends, 0, flags, &resume);
+        const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
+        result = begin >= length ? 0 : (int64_t)c_tokenize_scalar_range(source, length, mark ? 3 : begin, true, UINT64_MAX, kinds, starts, ends, 0, flags, &resume);
     }
     return result;
 #else

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 # Install test-only dependencies on a disposable GitHub-hosted Ubuntu 26.04 VM.
 set -euo pipefail
 test "$(uname -s)" = Linux
@@ -12,7 +14,7 @@ printf '%s\n' 'deb [signed-by=/usr/share/keyrings/buster-llvm.asc] https://apt.l
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends clang-23 llvm-23-dev llvm-23-tools \
     libclang-23-dev libclang-cpp23-dev libclang-rt-23-dev lld-23 \
-    gcc g++ binutils libc6-dev gdb mold tcc zstd linux-perf
+    gcc g++ binutils libc6-dev gdb mold tcc zstd linux-perf qemu-user
 # LLVM's release branch receives current patch updates. Use the same toolchain
 # for the build, C/C++ oracles, pragma adapter, object and DWARF consumers.
 toolbin="$RUNNER_TEMP/buster-test-tools"
