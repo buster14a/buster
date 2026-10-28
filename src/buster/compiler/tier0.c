@@ -322,7 +322,9 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
-#define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
+// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
+#define BUSTER_TIER0_MAX_DEPTH 240
+#define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
 // The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
@@ -2994,13 +2996,16 @@ struct Tier0Entries
     uint8_t* key_classes;
     uint8_t* variants;
     uint8_t* absorbed;
+    // Modulo-byte deltas: a wide CALL can pop more than a signed byte represents.
     int8_t* integer_effects;
     int8_t* floating_effects;
     uint8_t* depths;
     uint8_t* floating_depths;
     uint16_t* templates;
-    uint16_t* lengths;
+    uint32_t* lengths;
     uint32_t* positions;
+    // Full measured count before narrowing positions; output allocation refuses an unrepresentable total.
+    uint64_t record_count;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and a
@@ -3021,8 +3026,6 @@ struct Tier0Entries
 #define BUSTER_TIER0_DEEP_SPILL_FLOATING 0x10
 #define BUSTER_TIER0_DEEP_FILL_INTEGER 0x20
 #define BUSTER_TIER0_DEEP_FILL_FLOATING 0x40
-// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
-#define BUSTER_TIER0_MAX_DEPTH 240
 
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
 {
@@ -3579,25 +3582,93 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
     }
 }
 
-// The locals by references, most first and by index among equals: an insertion sort, since a function's locals are few.
-// The vector path's twin, tier0_assign_registers_vector, ranks the locals instead.
-static void tier0_order_locals(uint32_t locals, const uint32_t* references, uint32_t* order)
+// At most 16 general or 16 floating registers can be homes. Only each kind's first 16 eligible locals in the stable
+// reference order can take one, whatever the clobbers. Keep those prefixes instead of sorting every local (#664).
+#define BUSTER_TIER0_HOME_CANDIDATES 16u
+_Static_assert(BUSTER_TIER0_CALLER_SAVED_DEPTHS + BUSTER_TIER0_CALLEE_SAVED <= BUSTER_TIER0_HOME_CANDIDATES, "the bounded prefix covers every general home");
+
+static uint32_t tier0_register_locals(const Tier0Function* function, const Tier0Home* homes, const uint32_t* references, uint32_t* order)
 {
-    for (uint32_t l = 0; l < locals; l += 1)
+    uint32_t count = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
     {
-        order[l] = l;
-    }
-    for (uint32_t a = 1; a < locals; a += 1)
-    {
-        const uint32_t local = order[a];
-        uint32_t b = a;
-        while (b > 0 && references[order[b - 1]] < references[local])
+        uint32_t counts[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
+        uint32_t indices[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
+        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+        for (uint32_t local = 0; local < function->local_count; local += 1)
         {
-            order[b] = order[b - 1];
-            b -= 1;
+            const uint32_t reference = references[local];
+            const bool eligible = !homes[local].is_register && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 &&
+                                  tier0_class_floating(function->local_classes[local]) == (kind != 0);
+            if (eligible && reference > counts[BUSTER_TIER0_HOME_CANDIDATES - 1])
+            {
+                uint32_t at = BUSTER_TIER0_HOME_CANDIDATES - 1;
+                #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+                while (at > 0 && reference > counts[at - 1])
+                {
+                    counts[at] = counts[at - 1];
+                    indices[at] = indices[at - 1];
+                    at -= 1;
+                }
+                counts[at] = reference;
+                indices[at] = local;
+            }
         }
-        order[b] = local;
+        for (uint32_t at = 0; at < BUSTER_TIER0_HOME_CANDIDATES && counts[at] != 0; at += 1)
+        {
+            order[count] = indices[at];
+            count += 1;
+        }
     }
+    return count;
+}
+
+// The same bounded prefixes, with 16-local eligibility and threshold masks and register-resident insertion. Locals
+// arrive by index, so a new key precedes only strictly smaller counts: equal keys retain their original index order.
+// Every insertion moves at most 16 lanes, independent of the function's local count. Loads honor the logical tails.
+static uint32_t tier0_register_locals_vector(const Tier0Function* function, const Tier0Home* homes, const uint32_t* references, uint32_t* order)
+{
+    const __m512i previous = _mm512_set_epi32(14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0);
+    const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    uint32_t count = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        __m512i best = _mm512_setzero_si512();
+        __m512i indices = _mm512_setzero_si512();
+        for (uint32_t first = 0; first < function->local_count; first += 16)
+        {
+            const __mmask16 lanes = (__mmask16)tier0_lanes(first, function->local_count);
+            const __m512i counts = _mm512_maskz_loadu_epi32(lanes, references + first);
+            const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, homes + first);
+            const __m512i high = (lanes >> 8) != 0 ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), homes + first + 8) : _mm512_setzero_si512();
+            const __mmask16 in_register = _mm512_kunpackb(_mm512_test_epi64_mask(high, is_register), _mm512_test_epi64_mask(low, is_register));
+            const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
+            const __m128i classes = _mm_maskz_loadu_epi8(lanes, function->local_classes + first);
+            const __mmask16 address = _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+            const __mmask16 floating = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F32)) | _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F64));
+            const __m512i least = _mm512_permutexvar_epi32(_mm512_set1_epi32(BUSTER_TIER0_HOME_CANDIDATES - 1), best);
+            uint32_t candidates = lanes & ~in_register & ~address & (kind != 0 ? floating : ~floating) & _mm512_cmpgt_epu32_mask(counts, least);
+            while (candidates != 0)
+            {
+                const uint32_t local = first + (uint32_t)__builtin_ctz(candidates);
+                candidates &= candidates - 1;
+                const __m512i key = _mm512_set1_epi32((int32_t)references[local]);
+                const __mmask16 after = _mm512_cmpgt_epu32_mask(key, best);
+                if (after != 0)
+                {
+                    const __mmask16 at = (__mmask16)(1u << (uint32_t)__builtin_ctz(after));
+                    best = _mm512_mask_permutexvar_epi32(best, after, previous, best);
+                    best = _mm512_mask_mov_epi32(best, at, key);
+                    indices = _mm512_mask_permutexvar_epi32(indices, after, previous, indices);
+                    indices = _mm512_mask_set1_epi32(indices, at, (int32_t)local);
+                }
+            }
+        }
+        const __mmask16 kept = _mm512_test_epi32_mask(best, best);
+        _mm512_mask_compressstoreu_epi32(order + count, kept, indices);
+        count += (uint32_t)__builtin_popcount(kept);
+    }
+    return count;
 }
 
 // The greedy loop of tier0_assign_homes for the vector path, for up to 64 locals, without the order: the loop gives the
@@ -3761,7 +3832,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
 // a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
-// `order` (local_count) is scratch for the locals by them (tier0_order_locals).
+// `order` (2 * BUSTER_TIER0_HOME_CANDIDATES) is scratch for the bounded eligible prefixes by kind.
 static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
 {
     (void)vector;
@@ -3809,18 +3880,19 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The rest by references, most first (`order`, tier0_order_locals'); for the vector path and up to 64 locals, by their
+    // The eligible prefixes by references, most first (`order`); for the vector path and up to 64 locals, by their
     // ranks (tier0_assign_registers_vector).
     const bool ranked = BUSTER_VECTOR_PATH(vector) && locals <= 64;
+    uint32_t candidates = 0;
     if (ranked)
     {
         frame->saved |= tier0_assign_registers_vector(function, homes, references, taken);
     }
     else
     {
-        tier0_order_locals(locals, references, order);
+        candidates = vector ? tier0_register_locals_vector(function, homes, references, order) : tier0_register_locals(function, homes, references, order);
     }
-    for (uint32_t k = 0; k < locals && !ranked; k += 1)
+    for (uint32_t k = 0; k < candidates; k += 1)
     {
         const uint32_t local = order[k];
         const bool address_taken = (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
@@ -6424,8 +6496,8 @@ static Tier0DeepEntry tier0_deep_entry(const Tier0Function* function, const Tier
     Tier0DeepEntry deep;
     deep.before[0] = entries->deep_depths[i];
     deep.before[1] = entries->deep_floating_depths[i];
-    deep.exit[0] = (uint32_t)((int32_t)deep.before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u);
-    deep.exit[1] = (uint32_t)((int32_t)deep.before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u);
+    deep.exit[0] = (uint8_t)((int32_t)deep.before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0));
+    deep.exit[1] = (uint8_t)((int32_t)deep.before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0));
     deep.window[0] = entries->depths[i];
     deep.window[1] = entries->floating_depths[i];
     deep.result[0] = leaves == 1;
@@ -6537,7 +6609,8 @@ static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
 // argument read from its slot, a stack one through rax into its place in the outgoing area, then each register one
 // straight into its register; an indirect call's callee into r11; then the call as tier0_emit_call makes it, its result
 // stored into its slot, and the stacks its flags fill loaded back. Nothing below the arguments is saved around it: it is
-// in the slots. Its arguments are values: tier0_select_deep leaves a call with aggregate arguments to TIER0_ERROR_DEPTH.
+// in the slots. Aggregate copies run before any ABI register is populated, so their scratch registers are free;
+// register parts then load from the saved addresses, without the ordinary path's parallel-move conflicts.
 static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                  Tier0Writer* writer)
 {
@@ -6562,15 +6635,52 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     {
         uint32_t integer = 0;
         uint32_t floating = 0;
+        uint32_t temporary = 0;
         for (uint32_t a = 0; a < count; a += 1)
         {
             const uint32_t class = function->argument_classes[first + a];
+            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
             const AbiLocation location = function->argument_locations[first + a];
             const bool is_floating = tier0_class_floating(class);
             const uint32_t slot = is_floating ? tier0_deep_slot(frame, 1, floating_below + floating) : tier0_deep_slot(frame, 0, below + (indirect ? 1 : 0) + integer);
             integer += is_floating ? 0 : 1;
             floating += is_floating ? 1 : 0;
-            if (pass == 0 && location.kind == BUSTER_ABI_LOCATION_STACK)
+            if (size != 0)
+            {
+                const bool whole = tier0_aggregate_whole(location);
+                Tier0Part parts[2];
+                const uint32_t part_count = whole ? 0 : tier0_location_parts(location, size, parts);
+                if (pass == 0 && whole)
+                {
+                    tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
+                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, 0, size,
+                               X86_REGISTER_R10, 0);
+                }
+                else if (!whole && part_count != 0)
+                {
+                    tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
+                    for (uint32_t k = 0; k < part_count; k += 1)
+                    {
+                        const Tier0Part part = parts[k];
+                        if (pass == 0 && part.reg == BUSTER_TIER0_PART_STACK)
+                        {
+                            tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, part.offset, part.bytes,
+                                       X86_REGISTER_R10, 0);
+                        }
+                        else if (pass == 0 && part.load == BUSTER_TIER0_PART_TEMPORARY)
+                        {
+                            tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporary), X86_REGISTER_RAX, part.offset, part.bytes,
+                                       X86_REGISTER_R10, 0);
+                        }
+                        else if (pass != 0 && part.reg != BUSTER_TIER0_PART_STACK)
+                        {
+                            tier0_load_part(writer, part, X86_REGISTER_RAX, temporary);
+                        }
+                        temporary += part.reg != BUSTER_TIER0_PART_STACK && part.load == BUSTER_TIER0_PART_TEMPORARY ? 1 : 0;
+                    }
+                }
+            }
+            else if (pass == 0 && location.kind == BUSTER_ABI_LOCATION_STACK)
             {
                 tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
                 tier0_extend(writer, class, X86_REGISTER_RAX);
@@ -7499,8 +7609,7 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 // it from here on: tier0_emit_deep), stores its result into its slot, and loads the registers back if its exit is within
 // the table. A call deep on either stack takes its arguments from their slots (tier0_emit_deep_call). Every deep entry is
 // deferred, in both paths, and counted in *deep_count. Returns TIER0_OK, or TIER0_ERROR_DEPTH where deep values don't
-// reach: a function with long double values (whose slots its depths index), a call with aggregate arguments at depths
-// whose copies' scratch registers are past the tables, or a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth
+// reach: a function with memory-class values (whose slots its depths index), or a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth
 // columns' bytes would wrap past.
 static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
 {
@@ -7529,8 +7638,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             const uint8_t kind = function->kinds[i];
             const uint32_t stack = tier0_stack(function->classes[i]);
             const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
-            const uint32_t exit[2] = { (uint32_t)((int32_t)before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u),
-                                       (uint32_t)((int32_t)before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u) };
+            const uint32_t exit[2] = { (uint8_t)((int32_t)before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0)),
+                                       (uint8_t)((int32_t)before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0)) };
             if (kind == BUSTER_TYPED_CALL)
             {
                 const uint32_t call = (uint32_t)function->values[i];
@@ -7539,8 +7648,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 {
                     aggregates |= function->argument_sizes[function->call_first[call] + a] != 0;
                 }
-                const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1];
-                error = aggregates && (before[0] >= limits[0] || before[1] >= limits[1]) ? TIER0_ERROR_DEPTH : TIER0_OK;
+                const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1] ||
+                                  (aggregates && (before[0] >= limits[0] || before[1] >= limits[1]));
                 for (uint32_t s = 0; s < 2 && deep; s += 1)
                 {
                     flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0);
@@ -7662,7 +7771,7 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(c
             counts.references += info->fixup != 0xff ? 1 : 0;
             counts.choices += info->choice != 0xff ? 1 : 0;
         }
-        entries->lengths[i] = (uint16_t)length;
+        entries->lengths[i] = length;
     }
     return counts;
 }
@@ -7698,9 +7807,23 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
         {
             const uint32_t class = function->argument_classes[first + a];
-            const uint32_t kind = function->argument_locations[first + a].kind;
+            const AbiLocation location = function->argument_locations[first + a];
+            const uint32_t kind = location.kind;
+            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
             const uint32_t extension = tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
-            count += kind == BUSTER_ABI_LOCATION_STACK ? 2 + extension : kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 + extension : 0;
+            if (size != 0)
+            {
+                uint8_t own = 0;
+                uint32_t own_set = 0;
+                count += tier0_aggregate_records(location, size, &own, &own_set);
+                // Whole stack arguments need the address once; register/split arguments in both passes.
+                Tier0Part parts[2];
+                count += tier0_aggregate_whole(location) ? 1 : tier0_location_parts(location, size, parts) != 0 ? 2 : 0;
+            }
+            else
+            {
+                count += kind == BUSTER_ABI_LOCATION_STACK ? 2 + extension : kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 + extension : 0;
+            }
         }
         const bool indirect = function->call_targets[call] == 0;
         const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -7757,31 +7880,38 @@ static void tier0_sort_branches(uint32_t* branches, uint32_t* targets, uint32_t 
 // Each entry's first record, after the prologue (the entry past the last is the epilogue's first record).
 static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue)
 {
-    uint32_t position = prologue;
+    uint64_t position = prologue;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
-        entries->positions[i] = position;
+        entries->positions[i] = (uint32_t)position;
         position += entries->lengths[i];
     }
-    entries->positions[function->count] = position;
+    entries->record_count = position;
+    entries->positions[function->count] = (uint32_t)position;
 }
 
 // The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store;
 // and the entries' first records (`entries` of them and the epilogue's) when asked for (`positions` not null).
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
 {
-    code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
-    code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
-    code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
-    code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
-    // The entries' positions are final once measured: emission writes each entry's records from its position.
-    code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
-    code->count = records;
-    code->entry_count = positions != 0 ? entries : 0;
-    const bool room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
-    if (room && positions != 0)
+    // Both position passes accumulate in 64 bits. Refuse before allocation or publication when the record IDs,
+    // including the vector emitter's padding, would wrap; narrowed scratch positions are never consumed then.
+    bool room = records <= UINT32_MAX - BUSTER_TIER0_TEMPLATE_RECORDS;
+    if (room)
     {
-        memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+        code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records + BUSTER_TIER0_TEMPLATE_RECORDS);
+        code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+        code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+        code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+        // The entries' positions are final once measured: emission writes each entry's records from its position.
+        code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
+        code->count = (uint32_t)records;
+        code->entry_count = positions != 0 ? entries : 0;
+        room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
+        if (room && positions != 0)
+        {
+            memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+        }
     }
     return room;
 }
@@ -7932,7 +8062,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
     entries->floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
     entries->templates = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
-    entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
+    entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
     entries->deep = 0;
@@ -8021,8 +8151,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     const uint32_t locals = function->local_count;
     Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Home, locals + 1);
     uint32_t* references = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    if (error == TIER0_OK && (homes == 0 || references == 0 || order == 0))
+    uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
+    if (error == TIER0_OK && (homes == 0 || references == 0))
     {
         error = TIER0_ERROR_MEMORY;
     }
@@ -8068,7 +8198,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts, function->entry_records ? entries->positions : 0,
+        if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
                                         function->count))
         {
             error = TIER0_ERROR_MEMORY;
@@ -10100,7 +10230,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
         previous = current;
     }
-    positions[count] = (uint32_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
+    entries->record_count = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
+    positions[count] = (uint32_t)entries->record_count;
     return counts;
 }
 
@@ -11091,7 +11222,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     }
     for (uint32_t c = 0; valid && !few_calls && c < call_count; c += 1)
     {
-        // At most 65 operands: tier0_validate_tables refuses more than 64 arguments.
+        // Counts fit in a byte, including an indirect callee. More than 64 operands defer to the scalar validator.
         call_words[c] = function->call_argument_counts[c] + (function->call_targets[c] == 0 ? 1 : 0);
     }
     // The values' bounds, by BUSTER_TIER0_BOUND_* (an empty range where there is nothing to name: [1, 0]), built in

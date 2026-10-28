@@ -473,6 +473,7 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize off
 #include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
+#include "buster/compiler/c_check_constraints_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
@@ -675,7 +676,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "-E") == 0)
     {
-        result = run_preprocessor_command(argc - 1, argv + 1);
+        result = run_preprocessor_command_mode(argc - 1, argv + 1, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
@@ -959,7 +960,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
-        result = run_check_command(argc - 2, argv + 2, false);
+        result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
@@ -1378,8 +1379,15 @@ static int main_command(int argc, char** argv, bool* found)
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
 int main(int argc, char** argv)
 {
-    bool found = false;
-    int result = main_unit_x86(argc, argv, &found);
+    const int guardian = worker_budget_guardian_command(argc, argv);
+    // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
+    // dispatch, including -E and parse commands that need no worker lease themselves.
+    bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
+    int result = guardian >= 0 ? guardian : 0;
+    if (!found)
+    {
+        result = main_unit_x86(argc, argv, &found);
+    }
     if (!found)
     {
         result = main_unit_frontend(argc, argv, &found);
@@ -1460,7 +1468,7 @@ int main_unit_types(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
-    return run_check_command(count, arguments, true);
+    return run_check_command_mode(count, arguments, true, false);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)

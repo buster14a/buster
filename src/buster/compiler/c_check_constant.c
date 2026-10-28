@@ -32,7 +32,7 @@ static bool check_input_integer_ice(const CheckInputReader* reader, const CheckV
 
 static bool check_input_integer_attribute(const CheckInputReader* reader, const CheckValue* value)
 {
-    return check_input_integer_ice(reader, value) && (value->flags & BUSTER_CHECK_GNU_DIVISION) == 0;
+    return check_input_integer_ice(reader, value) && (value->flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0;
 }
 
 static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t warnings)
@@ -1538,8 +1538,8 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const TypeId type = check_constant_type(input, association, colon);
                 const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
-                valid = type != 0 && type_is_complete(reader->types, type) && kind != BUSTER_TYPE_KIND_FUNCTION &&
-                        kind != BUSTER_TYPE_KIND_VOID && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
+                // An incomplete type, void's too, as the expression's reader takes it (check_input_selection_type).
+                valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
                 bool matches = false;
                 valid = valid && check_generic_association(reader, &seen, type, &matches);
                 if (valid)
@@ -1897,10 +1897,6 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     {
         check_input_warning_add(input->reader, action->node, checked.warnings);
     }
-    if (checked.diagnostic == CHECK_DIAG_NONE && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_INITIALIZE))
-    {
-        check_query_speculative_conversion(input->reader->types, action->operands, action->node, &checked.value);
-    }
     *value = checked.value;
     return checked.diagnostic == CHECK_DIAG_NONE;
 }
@@ -1909,7 +1905,7 @@ static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t 
 {
     const uint8_t warnings = input->reader->output->constant_warnings[closing];
     const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
-    input->reader->output->constant_warnings[closing] = warnings;
+    check_input_constant_warning_set(input->reader->output, closing, warnings);
     check_input_warning_changed(input->reader, closing, warnings);
     return valid;
 }

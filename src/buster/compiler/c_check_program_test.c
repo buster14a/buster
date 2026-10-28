@@ -1015,6 +1015,16 @@ struct CheckTestDataPrepared
     CheckDataInputStatus status;
 };
 
+static uint32_t check_test_initializer_index_dense(const CheckInitializers* initializers, uint32_t token)
+{
+    uint32_t index = 0;
+    for (uint32_t i = 0; i < initializers->count; i += 1)
+    {
+        index = initializers->declaration_tokens[i] == token ? i + 1 : index;
+    }
+    return index;
+}
+
 static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const CheckInput* input, const CheckStream* stream,
                                           const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
 {
@@ -1024,7 +1034,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
     const uint32_t count = input->token_count;
     bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
                  stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
-                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && (initializers->count == 0 || (initializers->plans != 0 && initializers->declaration_tokens != 0));
     result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
     result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1078,7 +1088,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (token != BUSTER_CHECK_NONE)
         {
             object_capacity += 1;
-            const uint32_t plan_index = initializers->declaration_plans[token];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
             reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
@@ -1110,7 +1120,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (selected != BUSTER_CHECK_NONE)
         {
             const uint32_t latest = result->latest_declarations[object];
-            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, selected);
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
@@ -1327,9 +1337,35 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
+        memset(defined, 0xa5, (uint64_t)program->object_count + 1);
         check_program_object_access(program, access, defined, path == 0);
-        same = memcmp(defined, expected, (uint64_t)program->object_count + 1) == 0;
+        for (uint32_t s = 0; same && s < program->symbol_count; s += 1)
+        {
+            const uint32_t object = program->symbol_objects[s];
+            same = defined[object] == expected[object];
+        }
     }
+    uint8_t* needs[2] = { 0 };
+    CheckProgram reduced[2] = { *program, *program };
+    bool rooms[2] = { false, false };
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        needs[path] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+        reduced[path].object_declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+        reduced[path].object_naked = NULL;
+        same = needs[path] != NULL && reduced[path].object_declarations != NULL;
+        if (same)
+        {
+            memset(needs[path], 0, (uint64_t)count + 1);
+            memset(reduced[path].object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true) :
+                                     check_program_static_prepared(reduced + path, data, needs[path], output);
+        }
+    }
+    same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
+           memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
+           (reduced[0].object_naked == NULL) == (reduced[1].object_naked == NULL) &&
+           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return same;
@@ -1377,6 +1413,7 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
+            .prepared_data = &data,
             .identifiers = &identifiers,
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
@@ -2042,11 +2079,140 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 }
 
 #include "c_check_program_batch_test.c"
+#include "c_check_literal_table_test.c"
+
+static void check_test_program_many_arguments(CheckTest* test, const char* clang)
+{
+    static const uint32_t counts[] = { 65, 127, 130, 238, 239 };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "large call source has a bounded output stream");
+        if (text != NULL)
+        {
+            fprintf(text, "long many(");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%slong a%u", a != 0 ? "," : "", a);
+            }
+            fprintf(text, "){return ");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%sa%u*%u", a != 0 ? "+" : "", a, a + 1);
+            }
+            fprintf(text, ";}int tested(int n){");
+            if (counts[c] <= 238)
+            {
+                // Keep the direct result in a local: holding it on the value stack would exhaust the indirect limit.
+                fprintf(text, "__typeof__(many)*volatile p=many;long direct=many(");
+            }
+            else
+            {
+                fprintf(text, "return (int)(many(");
+            }
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                if (counts[c] <= 127)
+                {
+                    fprintf(text, "%s(long)n+%u", a != 0 ? "," : "", a);
+                }
+                else
+                {
+                    fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                }
+            }
+            if (counts[c] <= 238)
+            {
+                fprintf(text, ");long indirect=p(");
+                for (uint32_t a = 0; a < counts[c]; a += 1)
+                {
+                    if (counts[c] <= 127)
+                    {
+                        fprintf(text, "%s(long)n-%u", a != 0 ? "," : "", a);
+                    }
+                    else
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                }
+                fprintf(text, ");");
+                if (counts[c] >= 130)
+                {
+                    // A wide call must refill the live prefix, even when its compact negative stack effect wraps.
+                    fprintf(text, "long held=(long)n-many(");
+                    for (uint32_t a = 0; a < counts[c]; a += 1)
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                    fprintf(text, ");return (int)((direct+indirect+held)%%1000003);}");
+                }
+                else
+                {
+                    fprintf(text, "return (int)((direct+indirect)%%1000003);}");
+                }
+            }
+            else
+            {
+                fprintf(text, ")%%1000003);}");
+            }
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "large call source completes without truncation");
+            if (written)
+            {
+                char name[80];
+                snprintf(name, sizeof(name), "calls-of-%u-arguments", counts[c]);
+                check_test_program_source(test, source, name, clang);
+            }
+        }
+        free(source);
+    }
+    char* variadic = NULL;
+    size_t variadic_length = 0;
+    FILE* text = open_memstream(&variadic, &variadic_length);
+    check_test_expect(test, text != NULL, "127-argument variadic source has output storage");
+    if (text != NULL)
+    {
+        fputs("struct P{float a,b,c,d;};long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;"
+              "for(int i=0;i<count;i++){r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);"
+              "struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}__builtin_va_end(ap);return r;}"
+              "int tested(int n){struct P p={n,n+1,n+2,n+3};return (int)(var(42", text);
+        for (uint32_t a = 0; a < 42; a += 1)
+        {
+            fprintf(text, ",(long)n+%u,(double)n*0.25+%u,p", a, a);
+        }
+        fputs(")%1000003);}", text);
+        const bool written = fclose(text) == 0;
+        check_test_expect(test, written, "127-argument variadic source completes without truncation");
+        if (written)
+        {
+            check_test_program_source(test, variadic, "variadic-127-mixed-aggregate-arguments", clang);
+        }
+    }
+    free(variadic);
+    check_test_program_source(test,
+        "struct P{float a,b,c,d;};struct Q{long a;double b;};struct B{long a,b,c,d;};"
+        "long mixed(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,"
+        "struct P x,struct Q y,struct B z,double r,double s){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+(long)(x.a+x.b+x.c+x.d+y.b+r+s)+y.a+z.a+z.b+z.c+z.d;}"
+        "struct B hidden(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,struct P x)"
+        "{struct B r={a+b+c+d,e+f+g+h,i+j+k+l,m+o+p+q+(long)x.d};return r;}"
+        "long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;for(int i=0;i<count;i++){"
+        "r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}"
+        "__builtin_va_end(ap);return r;}"
+        "int tested(int n){struct P p={n,n+1,n+2,n+3};struct Q q={n,n+0.5};struct B b={n,n+1,n+2,n+3};"
+        "struct B r=hidden(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p);"
+        "return (int)(mixed(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p,q,b,2.5,3.5)+r.a+r.b+r.c+r.d+"
+        "var(7,(long)n,1.0,p,2L,3.0,p,4L,5.0,p,6L,7.0,p,8L,9.0,p,10L,11.0,p,12L,13.0,p));}",
+        "deep-aggregate-mixed-and-variadic-calls", clang);
+}
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
+    check_test_program_many_arguments(test, clang);
     check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
         "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
@@ -2511,6 +2677,67 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
         "fpclassify-known-category-effects", clang);
+    // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the
+    // identifier list's, a struct and a register parameter, a call through the prototype of their promoted types, which
+    // converts its arguments as clang's does, and an empty list's definition after its declaration.
+    check_test_program_source(test,
+        "struct P{int x,y;};int add(a,b)int a;long b;{return a+(int)b;}char at(p,n)const char*p;int n;{return p[n];}"
+        "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
+        "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
+        "kr-definitions", clang);
+    // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
+    // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
+    // order, and mingw's fmaxl, which the libc corpus's comparison found.
+    check_test_program_source(test,
+        "double fp_special(int);float fp_specialf(int);int clear_fp(void);int fp_state(void);int seen;"
+        "double mark(int k,double v){seen=seen*10+k;return v;}"
+        "int bits(double x,double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsf(float x,float y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsl(long double x,long double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "long double fmaxl_like(long double x,long double y){return (__builtin_isgreaterequal(x,y)||__builtin_isnan(y))?x:y;}"
+        "int tested(int n){double x=fp_special(n),y=fp_special(n*7+3);float a=fp_specialf(n),b=fp_specialf(n*5+1);"
+        "long double l=x,m=(long double)b;clear_fp();unsigned k=(unsigned)bits(x,y);k=k*32+(unsigned)fp_state();clear_fp();"
+        "k=k*64+(unsigned)bitsf(a,b);k=k*32+(unsigned)fp_state();clear_fp();k=k*64+(unsigned)bitsl(l,m);k=k*32+(unsigned)fp_state();"
+        "seen=0;k=k*2+(unsigned)__builtin_islessgreater(mark(1,x),mark(2,(double)n));k=k*100+(unsigned)seen;"
+        "k=k*8+(unsigned)(__builtin_isunordered(n,b)+__builtin_isgreater(n,2.5f)*2+__builtin_isless(a,y)*4);"
+        "long double r=fmaxl_like(l,m);unsigned long u;unsigned short e;__builtin_memcpy(&u,&r,8);__builtin_memcpy(&e,(char*)&r+8,2);"
+        "k=k*31+(unsigned)u+(unsigned)(u>>32);k=k*7+e;return (int)k;}",
+        "floating-comparison-builtins", clang);
+    // The native common format's DAZ policy applies to the ordered comparisons as well as EQ and NE. An x87
+    // promotion would keep these subnormals nonzero while clang's ucomiss/ucomisd compare them as zero under DAZ.
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "double fp_special(int);float fp_specialf(int);int change_daz(int);int clear_fp(void);int fp_state(void);"
+        "int bits(double x,double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsf(float x,float y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int tested(int n){int old=change_daz(n);double x=fp_special(6+(((unsigned)n>>1)&1u));float y=fp_specialf(6+(((unsigned)n>>1)&1u));"
+        "clear_fp();unsigned k=(unsigned)bits(x,0.0);k=k*32+(unsigned)fp_state();clear_fp();"
+        "k=k*64+(unsigned)bitsf(y,0.0f);k=k*32+(unsigned)fp_state();change_daz(old);return (int)k;}",
+        "floating-comparison-native-daz", clang);
+    // Both arguments must finish before a compare raises FE_INVALID. Converting the first signaling NaN to x87
+    // would quiet it before the second argument clears the flags. Both quiet self-tests must run even when the
+    // first argument is a quiet NaN and the second signals.
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "double fp_special(int);float fp_specialf(int);int clear_fp(void);int fp_state(void);int seen;"
+        "double second(double x){seen++;clear_fp();return x;}float secondf(float x){seen++;clear_fp();return x;}"
+        "int tested(int n){double s=fp_special(5),q=fp_special(4);float fs=fp_specialf(5),fq=fp_specialf(4);"
+        "seen=0;clear_fp();unsigned k=(unsigned)__builtin_isgreater(s,second(0.0));k|=(unsigned)(fp_state()!=1)<<1;"
+        "k|=(unsigned)__builtin_isgreaterequal(s,second(0.0))<<2;k|=(unsigned)(fp_state()!=1)<<3;"
+        "k|=(unsigned)__builtin_isless(s,second(0.0))<<4;k|=(unsigned)(fp_state()!=1)<<5;"
+        "k|=(unsigned)__builtin_islessequal(s,second(0.0))<<6;k|=(unsigned)(fp_state()!=1)<<7;"
+        "k|=(unsigned)__builtin_isgreater(fs,secondf(0.0f))<<8;k|=(unsigned)(fp_state()!=1)<<9;"
+        "k|=(unsigned)__builtin_isgreaterequal(fs,secondf(0.0f))<<10;k|=(unsigned)(fp_state()!=1)<<11;"
+        "k|=(unsigned)__builtin_isless(fs,secondf(0.0f))<<12;k|=(unsigned)(fp_state()!=1)<<13;"
+        "k|=(unsigned)__builtin_islessequal(fs,secondf(0.0f))<<14;k|=(unsigned)(fp_state()!=1)<<15;"
+        "k|=(unsigned)__builtin_isgreater(q,second(s))<<16;k|=(unsigned)(fp_state()!=1)<<17;"
+        "k|=(unsigned)__builtin_isless(fq,secondf(fs))<<18;k|=(unsigned)(fp_state()!=1)<<19;return (int)(k|((unsigned)seen<<20));}",
+        "floating-comparison-argument-exception-order", clang);
     check_test_program_source(test,
         "int calls;double make(int n){calls++;return n<0?-__builtin_inf():n==0?-0.0:(double)(-n)-0.25;}int tested(int n){calls=0;"
         "double d=__builtin_fabs(make(n));float f=__builtin_fabsf((float)n-7.5f);return __builtin_isinf_sign(make(n))*1000+"
@@ -3116,6 +3343,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
     // C; __float128 is its spelling).
     check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    // A K&R definition (#154's decision: as clang): its callers pass its parameters' promoted types, which a parameter of a
+    // type the promotions change would convert from on entry, not lowered yet.
+    check_test_program_boundary_reason(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true,
+                                       false, 1, 0, "K&R parameters the default argument promotions change");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,

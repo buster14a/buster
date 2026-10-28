@@ -81,6 +81,15 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      unit is source order's: a tag first named in a file-scope prototype
      (`void g(struct S *p);`) is of the prototype's scope, a level deeper than
      the file scope the history holds (#438);
+   - each of those names gets the rest of the per-name state the top level's
+     walk changes as it goes, as it was at the opening
+     (`check_deferred_name_state`): its linked declaration and type, the last
+     of the top level's updates before the opening (`check_deferred_linked`
+     logs them by position, and `check_deferred_bodies` indexes the log by
+     name). An upper-bound binary search selects the last equal-position update
+     at or before the opening, so many later redeclarations do not make each
+     body scan the name's suffix again. It also gets its intrinsic's cache entry, a hit not yet decoded where the
+     top level decoded it after the opening, as source order's is there;
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
      transparency after it withdrawn (`type_tag_withdraw`). The withdrawals
@@ -99,9 +108,12 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    activations are the top level's, and only scopes end after the closing).
    Its result is kept from the lane's copies: its type changes (from the
    lane's one record, which each body takes back, packed), its binding events,
-   its appended entries, the completion positions of the tags it made, the top
-   level's VLAs it changed (its parameters') and the predefined types it made.
-   Then the lane takes its names' heads and its view back.
+   its appended entries (its intrinsic declarations and calls among them), the
+   completion positions and transparency of the tags it made, those of the
+   top level's tags it completed (its definition's parameter-list tags, #436),
+   the top level's VLAs it changed (its parameters') and the predefined types
+   it made. Then the lane takes its names' heads, its view and the top level's
+   tags it changed back (`type_tag_restore`).
 5. **The merge** (`check_deferred_merge`), in source order, on the caller's
    thread:
    - `type_replay` makes the top level's changes and each body's again in the
@@ -115,8 +127,18 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    - every column the walk wrote with a `TypeId` or a table id is mapped
      through its owner's part: a body's tokens and its parameters' through the
      body's, the rest through the top level's. The tags' completion positions,
-     linked types, predefined types (the earliest maker's by position),
-     `__func__` strings and intrinsic declarations follow.
+     linked types, predefined types (the earliest maker's by position) and
+     `__func__` strings follow;
+   - the intrinsic declarations go in the order source order decodes them,
+     each catalogue entry once, at its first maker's place: for each body, the
+     top level's made before its cut, then the body's own, and last the top
+     level's after the last cut. A body that uses an entry the top level
+     decoded before its opening finds that declaration in its cache and makes
+     none; one whose entry the top level decoded only after its opening
+     decodes it itself, as source order's walk does there, and every later
+     declaration of the entry, the top level's or another body's, is its own
+     in the merge. The calls go at their cuts, each with its declaration's
+     place, and each token's call id is mapped to its call's place.
 
 Each body's walk writes the shared per-token columns only at its own tokens
 and its parameters', which no other walk writes; everything else it writes is
@@ -161,16 +183,49 @@ source order, said with the reason:
 
 - the top level reports an error, or its walk stops;
 - the unit has overloadable functions, whose sets later declarations join;
-- a body declares something with linkage (`extern`, a function at block
-  scope): the file-scope entity's type, which later declarations see;
-- a body makes a union transparent, which applies to what follows it;
-- a body uses an intrinsic, whose tables the merge doesn't take yet;
-- a body completes a tag the top level made: its definition's parameter-list
-  tag, which the body declares again (#436), whose completion everything after
-  the body sees in source order and the merge doesn't carry yet;
+- a body's declaration with linkage (`extern`, a function at block scope)
+  that changes what later declarations see (below): its entity's first
+  declaration, one that changes the entity's type, or one unlike the linked
+  declaration it replaces;
+- a body makes a union of the top level's transparent, which applies to what
+  follows it: a file-scope union a block's typedef makes so, or a definition's
+  parameter-list union its body defines so;
 - a body's walk reports an error (a later phase's error is merged like any
   other: the phases run on the merged state);
 - a table runs out of room.
+
+A body's declaration with linkage is the file-scope entity's, and source
+order's walk keeps it for the declarations after it: the name's linked
+declaration (`linked_declarations`) and type (`linked_types`, the composite of
+every declaration so far). A lane starts from the top level's at its opening,
+and takes a declaration that leaves them as they would be without it: of an
+entity declared before the opening, whose composite with the entity's type is
+that type (no array size or prototype the entity lacked), and that replaces the
+linked declaration only by one later declarations inherit the same from (its
+kind, linkage and thread-local storage it must share, or the walk reports it,
+and the rest it inherited, but whether it is naked, which is its own).
+
+An intrinsic's tables are its declarations, decoded once per catalogue entry
+in the order the walk first uses each, and its calls; the merge orders both as
+source order's walk makes them (above). A lane has room for the top level's
+declarations and as many again, since a body decodes each entry once at most,
+an entry the top level decoded after the body's opening among them.
+
+A body that completes its definition's parameter-list tag, which it declares
+again (#436), completes a tag the top level made. Nothing after the body can
+name it: its scope ends with the body, and distinct tags are never compatible
+(C17's rule, which the checker keeps: C23's tag compatibility, #133, would let
+code after the body compare it with another tag of its name). So the merged
+table, which `type_replay` completes at the body's definition, and the tag's
+completion position are all that show it, and the merge takes the position
+from the body's result. A lane gives the tag back to the top level's state,
+incomplete, before its next body.
+
+A unit with overloadable functions stays source order's. A lane would need each
+set's index as the top level had it at the body's opening (each name's
+candidates by signature, and whether the name is overloadable yet), and its
+own candidates and calls laid out at its cut, as the intrinsics' are. None of
+the corpora below has one: C code meets them mostly in clang's `<tgmath.h>`.
 
 The fallback checks the unit from nothing, with the caller's table taken back
 to how it came: a merge that fails after its replay has filled it.
@@ -183,7 +238,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 80 fixtures, 65 of the
+- `./build/compiler test-checker-deferred [--keep]`: 101 fixtures, 86 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -267,16 +322,27 @@ passes every checker test.
   body; tags completed, redeclared and shadowed around bodies, and completed
   between bodies where the walk itself needs them complete or not (a local
   object, local records, an enum, a typedef); block-scope declarations with
-  linkage; strings and `__func__`, string initializers' indices, statement
+  linkage, which merge where they leave the entity's linked state as it was
+  at the opening (after its definition and before it, a prototype before the
+  function's definition, an array without the size the top level gives it
+  later, a naked prototype's attribute it inherits) and go to source order
+  where they don't (its first declaration, a size or parameters it lacked, the
+  naked attribute it adds, a conflict); intrinsics in a body, in two,
+  before the top level's use of them (with types the top level makes between
+  them) and after it, and of vector types, which merge;
+  strings and `__func__`, string initializers' indices, statement
   expressions, VLAs, varargs, a predefined type first made in a body, asm
   statements, cached constants and `_Generic`, compound literals and statics;
-  recursion and forward calls, labels; unions made transparent in a body and
-  at file scope between bodies; naked functions' bodies, among others' and
+  recursion and forward calls, labels; unions made transparent in a body
+  (a file-scope one, which goes to source order, and the body's own, which
+  merges) and at file scope between bodies; naked functions' bodies, among
+  others' and
   with what a naked body refuses; loop hints, and those clang refuses;
   tags first named in a prototype's parameter, a sizeof in an array's bound
   and a definition's parameter, and one declared before its prototype; a
-  definition's parameter-list tag used in its body, which merges, and
-  completed there, which goes to source order; C23's enums with a fixed
+  definition's parameter-list tag used in its body, and completed there (a
+  struct, a union and an enum, after a use, and in each of two bodies), which
+  merge; C23's enums with a fixed
   underlying type in bodies beside plain enums, structs and unions, read with
   `-std=gnu23`: a fixed one before a plain one and after it, eight bodies of
   them, and a file-scope one shadowed in a body;
@@ -299,7 +365,20 @@ passes every checker test.
 The 9700X job runs `test-checker-deferred`, c-testsuite's programs with
 `--deferred 8`, and the frozen SQLite source's check with `--deferred 8`.
 
-On the laptop (Zen 4), with `--deferred 8` unless said, each against clang:
+On the 9700X, with #697's item 4 (the bodies above merged) and `--deferred 8`,
+each against clang 23.1.1: c-testsuite on the system's headers, as the 9700X
+job checks it, and the frozen corpora on their own headers
+(`--no-default-config --target=x86_64-linux-gnu -march=znver5 -nostdinc`):
+
+| Corpus | Units merged | Left to source order | Bodies read apart | Differences |
+| --- | --- | --- | --- | --- |
+| c-testsuite's 220 programs | 220 | 0 | 449 | 0 |
+| the frozen `sqlite3.c` (`-std=gnu17`, with `--symbols`) | 1 | 0 | 2,608 | 0 |
+| the frozen musl's `src` (1,524 files, its build's options) | 1,486 | 38: 37 errors in a body, 1 that doesn't parse | 21,918 | 0 |
+| the frozen Zig 0.14.1 `lib/libc` (2,315 files, 968 that don't preprocess alone, `-std=gnu17`) | 1,022 | 325: 256 that don't parse, 43 errors in a body, 26 at the top level | 3,178 | 0 |
+
+Before it, on the laptop (Zen 4), with `--deferred 8` unless said, each
+against clang:
 
 | Corpus | Units merged | Left to source order | Bodies read apart | Differences |
 | --- | --- | --- | --- | --- |
@@ -675,9 +754,10 @@ is retained.
 
 The top level, the merge and the phases after it are sequential, so the lanes
 shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading. Bodies that do what the merge doesn't take
-(above) send their unit to source order. Intrinsic declarations, block-scope
-declarations with linkage and transparency made in a body are the next to
-merge.
+(above) send their unit to source order: on the corpora above, only bodies
+that report errors do since #697's item 4. Overloadable functions and a union
+of the top level's made transparent in a body are what the merge doesn't take
+yet.
 
 A lane's cost decides how many lanes pay, and a process's first reading pays
 most of it in its lanes' first touches of their copies' pages: on the laptop,

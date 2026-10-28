@@ -44,6 +44,8 @@
 //   and the last of them by --lanes 8, each one lane's; and each failing program by --lanes 8, with lanes and in such a
 //   child, by each path: the exit status and diagnostics of --lanes 1.
 
+#include "worker_budget_test.c"
+
 typedef struct CheckLanesTestTally CheckLanesTestTally;
 struct CheckLanesTestTally
 {
@@ -410,6 +412,68 @@ static bool check_lanes_test_same(const CheckLanesTestEmission* a, const CheckLa
     return same && (a->size == 0 || memcmp(a->object, b->object, a->size) == 0);
 }
 
+#include "c_check_backend_startup_test.c"
+// The real emission consumes external slots and returns them before its normal, failed-start or resource retry
+// completes. Its independent object/failure oracle is the ordinary one-lane emission above; the pipe contents are
+// the ownership oracle, including the exact exceptional bytes and no implicit calling-thread token.
+static void check_lanes_test_budget(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp,
+                                     const InternTable* identifiers, bool scalar, bool rows, bool unwind, const CheckLanesTestEmission* one)
+{
+    const uint8_t tokens[] = { 0, 73, 255 };
+    uint32_t unusable[BUSTER_CHECK_EMIT_MAX_LANES];
+    for (uint32_t lane = 0; lane < BUSTER_CHECK_EMIT_MAX_LANES; lane += 1)
+    {
+        unusable[lane] = BUSTER_LANE_CPU_MASK_WORDS * 64;
+    }
+    for (uint32_t retry = 0; retry < 3; retry += 1)
+    {
+        int fds[2] = { -1, -1 };
+        const bool ready = pipe(fds) == 0 && write(fds[1], tokens, sizeof(tokens)) == sizeof(tokens);
+        check_lanes_test_expect(tally, ready, "external ownership fixture has its three exact tokens", NULL);
+        if (ready)
+        {
+            char flags[128];
+            snprintf(flags, sizeof(flags), "--jobserver-auth=%d,%d", fds[0], fds[1]);
+            WorkerBudget budget;
+            worker_budget_initialize(&budget, flags, 8);
+            CheckProgramLanes lanes = {
+                .lanes = 8,
+                .every_lane = true,
+                .cpus = retry == 1 ? unusable : NULL,
+                .budget = &budget,
+                .squeeze_body = retry == 2 ? 1 : 0,
+                .squeeze_arenas = retry == 2 ? BUSTER_CHECK_EMIT_SQUEEZE_BYTES : 0,
+            };
+            CheckLanesTestEmission many = check_lanes_test_emit(unit, parser, pp, identifiers, &lanes, scalar, rows, unwind);
+            const uint32_t bodies = unit->selected.program.body_count;
+            const uint32_t expected = bodies != 0 && bodies < 4 ? bodies : bodies != 0 ? 4 : 1;
+            check_lanes_test_expect(tally, check_lanes_test_same(one, &many),
+                                    "external ownership and every retry preserve the one-lane object or failure", NULL);
+            check_lanes_test_expect(tally, many.active == expected && !budget.return_failed &&
+                                    worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
+                                    "emission returns every exact slot on ordinary, failed-start and resource paths", NULL);
+            if (retry == 1 && expected > 1)
+            {
+                check_lanes_test_expect(tally, many.again == CHECK_PROGRAM_AGAIN_START, "external ownership is released before failed-start retry", NULL);
+            }
+            if (retry == 2 && expected > 1 && one->emitted)
+            {
+                check_lanes_test_expect(tally, many.again != CHECK_PROGRAM_AGAIN_NONE, "external ownership is released before resource retry", NULL);
+            }
+            free(many.object);
+            worker_budget_close(&budget);
+        }
+        if (fds[0] >= 0)
+        {
+            close(fds[0]);
+        }
+        if (fds[1] >= 0)
+        {
+            close(fds[1]);
+        }
+    }
+}
+
 // `unit` emitted on one lane, then on 2, 3 and 8 lanes, every lane forced, on 8 with lanes 0, 1 and 7 each slow in
 // turn, and on 8 that can't be pinned, with and without -g's rows and unwind tables: each emission the one lane's, the
 // unpinned one run again on one lane, the others not. Returns how many emissions it compared, and `emitted` whether the
@@ -434,6 +498,7 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
         const bool unwind = shape == 1;
         CheckLanesTestEmission one = check_lanes_test_emit(unit, parser, pp, identifiers, NULL, scalar, rows, unwind);
         *emitted |= one.emitted;
+        check_lanes_test_budget(tally, unit, parser, pp, identifiers, scalar, rows, unwind, &one);
         for (uint32_t run = 0; run <= BUSTER_ARRAY_LENGTH(counts) + BUSTER_ARRAY_LENGTH(slow); run += 1)
         {
             const bool slowed = run >= BUSTER_ARRAY_LENGTH(counts) && run < BUSTER_ARRAY_LENGTH(counts) + BUSTER_ARRAY_LENGTH(slow);
@@ -1264,11 +1329,29 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
         char* arguments[] = { (char*)executable, (char*)"--lanes", (char*)refused[r], (char*)"-c", (char*)"-o", object, source, NULL };
         snprintf(detail, sizeof(detail), "--lanes \"%s\"", refused[r]);
         check_lanes_test_expect(tally, check_lanes_test_run(arguments, errors) == 1, "the driver refuses a lane count it can't take", detail);
+        char* budget_arguments[] = { (char*)executable, (char*)"--worker-budget", (char*)refused[r], (char*)"-c", (char*)"-o", object, source, NULL };
+        check_lanes_test_expect(tally, check_lanes_test_run(budget_arguments, errors) == 1, "the driver refuses an invalid total worker budget", detail);
     }
     char* missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--lanes", NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(missing, errors) == 1, "the driver refuses --lanes without its value", 0);
     char* joined[] = { (char*)executable, (char*)"--lanes=8", (char*)"-c", (char*)"-o", object, source, NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(joined, errors) == 0, "the driver takes --lanes=8", 0);
+    char* capped[] = { (char*)executable, (char*)"--lanes=8", (char*)"--worker-budget=1", (char*)"-c", (char*)"-o", object, source, NULL };
+    check_lanes_test_expect(tally, check_lanes_test_run(capped, errors) == 0, "the driver takes an explicit calling-thread-only worker budget", NULL);
+    char* budget_missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--worker-budget", NULL };
+    check_lanes_test_expect(tally, check_lanes_test_run(budget_missing, errors) == 1, "the driver refuses --worker-budget without its value", NULL);
+    static const char* const dry_routes[] = { "-c", "-E", "parse" };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(dry_routes); r += 1)
+    {
+        unlink(object);
+        char* dry[] = { "env", "MAKEFLAGS=n", (char*)executable, (char*)dry_routes[r], "-o", object,
+                        "/buster-nonexistent-dry-run-source.c", NULL };
+        const int status = check_lanes_test_run(dry, errors);
+        struct stat output_stat;
+        struct stat error_stat;
+        check_lanes_test_expect(tally, status == 0 && stat(object, &output_stat) != 0 && stat(errors, &error_stat) == 0 && error_stat.st_size == 0,
+                                "make dry runs do no source work, output or diagnostics in C, -E and parse routes", dry_routes[r]);
+    }
 }
 
 // The driver on each failing program `failure_N.c` in `directory` (see the file's comment), by each path: by --lanes 8,
@@ -1370,6 +1453,8 @@ static int run_check_lanes_tests(int argc, char** argv)
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)
     {
+        check_lanes_test_backend_startup(&tally, directory);
+        check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
         check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
         check_lanes_test_programs(&tally, directory, programs);

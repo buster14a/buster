@@ -501,6 +501,125 @@ static void check_builtin_float_test_constraints(CheckBuiltinFloatTest* test, Ty
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.folded, "completed selector enum becomes usable after its source cutoff");
 }
 
+// A value of `type`, as a constant of that type holds it.
+static long double check_builtin_float_test_round(TypeId type, long double value)
+{
+    return type == BUSTER_TYPE_FLOAT ? (long double)(float)value : type == BUSTER_TYPE_DOUBLE ? (long double)(double)value : value;
+}
+
+// isgreater ... isunordered: their argument rules, their conversions to the common real floating type, and their folding
+// against IEEE's rule stated apart (a NaN on either side makes all but isunordered false), for every pair of formats.
+static void check_builtin_float_test_comparisons(CheckBuiltinFloatTest* test, TypeTable* table)
+{
+    const CBuiltinId ids[] = { CBUILTIN_ISGREATER, CBUILTIN_ISGREATEREQUAL, CBUILTIN_ISLESS, CBUILTIN_ISLESSEQUAL, CBUILTIN_ISLESSGREATER, CBUILTIN_ISUNORDERED };
+    const long double values[] = { -__builtin_infl(), -1.5L, -0.0L, 0.0L, 0x1p-149L, 1.0L, 16777217.0L, 1e300L, __builtin_infl(), __builtin_nanl("") };
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    for (uint32_t id = 0; id < BUSTER_ARRAY_LENGTH(ids); id += 1)
+    {
+        for (uint32_t pair = 0; pair < BUSTER_ARRAY_LENGTH(formats) * BUSTER_ARRAY_LENGTH(formats); pair += 1)
+        {
+            const TypeId left = formats[pair / BUSTER_ARRAY_LENGTH(formats)];
+            const TypeId right = formats[pair % BUSTER_ARRAY_LENGTH(formats)];
+            const TypeId common = left == BUSTER_TYPE_LONG_DOUBLE || right == BUSTER_TYPE_LONG_DOUBLE ? BUSTER_TYPE_LONG_DOUBLE :
+                                  left == BUSTER_TYPE_DOUBLE || right == BUSTER_TYPE_DOUBLE ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(values) * BUSTER_ARRAY_LENGTH(values); v += 1)
+            {
+                const long double x = check_builtin_float_test_round(left, values[v / BUSTER_ARRAY_LENGTH(values)]);
+                const long double y = check_builtin_float_test_round(right, values[v % BUSTER_ARRAY_LENGTH(values)]);
+                const CheckValue arguments[2] = { check_test_float(left, x), check_test_float(right, y) };
+                const CheckBuiltinFloatAction action = { .id = ids[id], .arguments = arguments, .argument_count = 2 };
+                CheckBuiltinFloatResult result;
+                check_builtin_float_one(table, &action, &result);
+                const bool unordered = x != x || y != y;
+                const bool expected = ids[id] == CBUILTIN_ISGREATER ? !unordered && x > y : ids[id] == CBUILTIN_ISGREATEREQUAL ? !unordered && x >= y :
+                                      ids[id] == CBUILTIN_ISLESS ? !unordered && x < y : ids[id] == CBUILTIN_ISLESSEQUAL ? !unordered && x <= y :
+                                      ids[id] == CBUILTIN_ISLESSGREATER ? !unordered && (x < y || y < x) : unordered;
+                check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
+                                                result.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.action.value.integer == expected &&
+                                                (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.folded && result.runtime_builtin == CBUILTIN_NONE &&
+                                                result.floating_type == common && result.argument_conversions[0].type == common &&
+                                                result.argument_conversions[1].type == common,
+                                                "a comparison of two constants folds to IEEE's unordered rule in their common format");
+            }
+        }
+    }
+    // The usual arithmetic conversions first: an int converts to float, rounded (16777217 is 16777216.0f).
+    const CheckValue mixed[2] = { check_test_integer(BUSTER_TYPE_INT, 16777217), check_test_float(BUSTER_TYPE_FLOAT, 16777216.0L) };
+    const CBuiltinId mixed_ids[] = { CBUILTIN_ISGREATER, CBUILTIN_ISGREATEREQUAL, CBUILTIN_ISLESSGREATER };
+    const bool mixed_answers[] = { false, true, false };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(mixed_ids); i += 1)
+    {
+        const CheckBuiltinFloatAction action = { .id = mixed_ids[i], .arguments = mixed, .argument_count = 2 };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.floating_type == BUSTER_TYPE_FLOAT &&
+                                        result.action.value.integer == mixed_answers[i] && result.argument_conversions[0].type == BUSTER_TYPE_FLOAT &&
+                                        (result.argument_conversions[0].flags & BUSTER_CHECK_CONVERT_ARITHMETIC) != 0,
+                                        "an integer argument converts to the other's floating type before the comparison");
+    }
+    // clang's rule: the conversions must give a real floating type, or "ordered compare requires two args of floating
+    // point type", at the first argument.
+    CheckValue invalid[2] = { check_test_integer(BUSTER_TYPE_INT, 1), check_test_integer(BUSTER_TYPE_CHAR, 2) };
+    const TypeId pointer = type_pointer(table, BUSTER_TYPE_DOUBLE);
+    const TypeId complex = type_complex(table, BUSTER_TYPE_DOUBLE);
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        if (i == 1)
+        {
+            invalid[0] = (CheckValue){ .type = pointer, .category = CHECK_RVALUE };
+            invalid[1] = check_test_float(BUSTER_TYPE_DOUBLE, 1);
+        }
+        else if (i == 2)
+        {
+            invalid[0] = check_test_float(BUSTER_TYPE_DOUBLE, 1);
+            invalid[0].type = complex;
+        }
+        else if (i == 3)
+        {
+            invalid[0] = check_test_float(BUSTER_TYPE_DOUBLE, 1);
+            invalid[1] = (CheckValue){ .type = pointer, .category = CHECK_RVALUE };
+        }
+        const CheckBuiltinFloatAction action = { .id = CBUILTIN_ISLESS, .arguments = invalid, .argument_count = 2 };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE && result.action.diagnostic_operand == 0 &&
+                                        !result.folded && result.action.value.constant_kind == CHECK_CONSTANT_NONE,
+                                        "two integers, a pointer or a complex argument is refused at the first argument");
+    }
+    const CheckValue pair[3] = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_DOUBLE, 2), check_test_float(BUSTER_TYPE_DOUBLE, 3) };
+    for (uint32_t count = 0; count <= 3; count += 1)
+    {
+        const CheckBuiltinFloatAction action = { .id = CBUILTIN_ISUNORDERED, .arguments = pair, .argument_count = count };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, (result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT) == (count != 2), "a comparison takes two arguments");
+    }
+    // An argument with an effect, or one that isn't constant, leaves the comparison to run: not folded, no ICE.
+    CheckValue effects[2] = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_FLOAT, 2) };
+    effects[1].flags |= BUSTER_CHECK_SIDE_EFFECT;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (i == 1)
+        {
+            effects[1] = (CheckValue){ .type = BUSTER_TYPE_FLOAT, .category = CHECK_RVALUE };
+        }
+        const CheckBuiltinFloatAction action = { .id = CBUILTIN_ISLESSGREATER, .arguments = effects, .argument_count = 2 };
+        CheckBuiltinFloatResult result;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.runtime_builtin == CBUILTIN_ISLESSGREATER &&
+                                        (result.action.value.flags & BUSTER_CHECK_ICE) == 0 && result.evaluated_operands == 3 &&
+                                        ((result.action.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0) == (i == 0) && result.floating_type == BUSTER_TYPE_DOUBLE,
+                                        "a comparison with an effect or a value not constant runs, both arguments evaluated");
+    }
+    const CheckValue wide[2] = { check_test_float(BUSTER_TYPE_FLOAT128, 1), check_test_float(BUSTER_TYPE_DOUBLE, 2) };
+    const CheckBuiltinFloatAction quad = { .id = CBUILTIN_ISGREATER, .arguments = wide, .argument_count = 2 };
+    CheckBuiltinFloatResult result;
+    check_builtin_float_one(table, &quad, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded && result.floating_type == BUSTER_TYPE_FLOAT128 &&
+                                    (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_FORMAT) != 0,
+                                    "a comparison in an unsupported format stays typed and unfolded");
+}
+
 static void check_builtin_float_test_batches(CheckBuiltinFloatTest* test, TypeTable* table)
 {
     CheckValue values[6] = {
@@ -692,9 +811,20 @@ static void check_builtin_float_test_oracle(CheckBuiltinFloatTest* test, const c
         "#pragma clang diagnostic error \"-Wabsolute-value\"\nenum E : unsigned __int128 { A }; double f(enum E x) { return __builtin_fabs(x); }\n",
         "double f(void*p) { return __builtin_fabs(p); }\n",
         "int f(int x) { return __builtin_isinf_sign(x); }\n",
+        "_Static_assert(__builtin_isgreater(2.0,1.0) && !__builtin_isgreater(__builtin_nan(\"\"),1.0) && __builtin_isunordered(__builtin_nan(\"\"),1.0f) &&"
+        " __builtin_islessgreater(1.0f,2.0L) && !__builtin_islessgreater(1.0,1) && __builtin_isgreaterequal(16777216.0f,16777217) &&"
+        " !__builtin_isgreater(16777216.0f,16777217) && __builtin_islessequal(-0.0,0.0) && !__builtin_isless(-0.0,0.0),\"comparisons\");\n"
+        "int a[__builtin_isless(1,2.0)]; int x=__builtin_isunordered(1.0L,2);\n",
+        "int f(int a, int b) { return __builtin_isless(a, b); }\n",
+        "int f(double a) { return __builtin_isless(a); }\n",
+        "int f(double a) { return __builtin_isless(a, a, a); }\n",
+        "int f(double *p, double a) { return __builtin_isgreater(p, a); }\n",
+        "int f(_Complex double z, double a) { return __builtin_isunordered(z, a); }\n",
+        "int f(_Bool b, char c) { return __builtin_islessequal(b, c); }\n",
     };
     const bool rejected[] = { false, false, false, true, true, true, true, false, false, true, true, false, false,
-                             false, false, true, true, false, false, false, true, true, false, false, true, true, true };
+                             false, false, true, true, false, false, false, true, true, false, false, true, true, true,
+                             false, true, true, true, true, true, true };
     _Static_assert(BUSTER_ARRAY_LENGTH(sources) == BUSTER_ARRAY_LENGTH(rejected), "every floating oracle source has an expected result");
     char directory[] = "/tmp/buster-check-builtin-float-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
@@ -748,6 +878,7 @@ static int run_check_builtin_float_tests(int argc, char** argv)
             check_builtin_float_test_classification(&test, &types.table);
             check_builtin_float_test_absolute(&test, &types.table);
             check_builtin_float_test_constraints(&test, &types.table);
+            check_builtin_float_test_comparisons(&test, &types.table);
             check_builtin_float_test_batches(&test, &types.table);
             check_builtin_float_test_pages(&test, &types.table);
         }

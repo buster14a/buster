@@ -6,7 +6,7 @@
 // its initializer. Structural preparation emits no future binding events; the source pass executes each bound
 // job at its actual opener. The token scan skips expression groups and uses no recursive descent.
 
-static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment)
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
@@ -102,6 +102,13 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
     return valid;
 }
 
+static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+{
+    const bool compact = check_input_literal_table_prepare(reader, assignment);
+    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
+    return valid;
+}
+
 static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token)
 {
     const uint32_t close = (uint32_t)reader->designator_indices[token];
@@ -173,6 +180,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             if (reader->linkage[declaration] != 0)
             {
                 reader->linked_types[name] = type;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
             }
         }
     }

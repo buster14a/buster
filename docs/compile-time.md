@@ -201,6 +201,51 @@ Three allocations touched far more memory than they used.
 [#572](https://github.com/buster14a/buster/issues/572) then took 121 MB more off
 the checker ("The checker's columns", below). The objects are the same bytes.
 
+The remaining parser scratch work in [#628](https://github.com/buster14a/buster/issues/628)
+separates the production vector workspace from the kernel benchmark's nine
+traversal arrays (36 bytes per token). The C driver requests `tree_only`; other
+clients build final traversal columns after popping the vector workspace.
+Those unused arrays had created a hole before live K4 slots and fallback
+scratch. The obsolete candidate stack, another six bytes per token, had no
+consumer either. The benchmark explicitly reserves its traversal arrays;
+production retains the borrowed arena's mark and initializes every value it
+reads, including on dirty pages and arena copies. This reduces the scratch
+span; its RSS and system-time effect requires separate whole-process
+measurement and is not implied by the virtual byte count.
+
+The reader's zero-default `asm_ids` output column is also omitted when the
+parser's roles prove there is no assembly statement group. Declaration linkage
+labels contain `asm` keywords but need no IDs: the pinned SQLite input has 45
+such keywords and no statement groups. Its 716,157 tokens otherwise require
+2,864,632 bytes of IDs. The scalar reader keeps a dense zero column as an oracle;
+real assembly statements keep the original allocation, capacity and diagnostics.
+Every reader uses a zero-default accessor or a guarded vector load, and deferred
+ID remapping preserves an absent column. No arena freshness or high-water mark
+is assumed.
+
+The [frozen main416 qualification record](https://github.com/buster14a/buster-performance/blob/32b96dd2a12c12c7aaf25be3639a31b7fc87cdd9/docs/measurements/unclaimed-perf-2026-10-28/issue-628/ASM-COLUMN-RESULTS.md)
+measured about 8 MiB lower native peak RSS for the parser and empty-ID changes
+together on the pinned SQLite input. Wall and system-time improvements were
+not established; the record's compiler, source, controls and remaining scope
+are explicit.
+
+The reader fills thirteen mandatory retained uint32 output columns whose
+empty value is `UINT32_MAX` with bounded all-one byte fills,
+including each column's sentinel. Requested scalar parsing keeps the original
+interleaved initialization loop as an independent oracle, and the six
+reader-internal NONE stores keep their existing ownership and initialization.
+Optional zero-default columns retain their existing NULL guards. Dirty and
+borrowed output storage is always explicitly cleared; no fresh-page or arena
+high-water assumption is made. The column layout and allocated byte count do
+not change.
+
+The [frozen native record](https://github.com/buster14a/buster-performance/blob/dfc33ffce07a0d04cdcbe9d435bd6ebb1fd7af8d/docs/measurements/retained-none-fill-2026-10-28/README.md)
+measures 6.7 to 7.0 percent higher whole-process throughput for its 800k-byte
+table in both role orders, with 6.18 percent fewer retired user instructions.
+Peak RSS is unchanged and system time does not improve. The small SQLite
+timing observation remains a cost screen without code-placement qualification;
+the broader #628 memory/system-time goal remains open.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:
@@ -522,6 +567,35 @@ traversal; they are not a measured sum of those independent improvements.
 
 ## The passes after checking (#592)
 
+#641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
+`declaration_tokens`; `check_initializers_plan_index` returns an index plus one by a bounded lower bound, with zero
+for an absent token, including the empty unit. The plans and their tokens are immutable after successful planning.
+The source adapter, VLA/compound-literal lowering and x86 diagnostic consumers all use that lookup.
+
+The warning producers maintain counts while they write or clear warnings: declaration-time constant rows,
+the final expression-warning rows, and ignored asm labels. The diagnostic collector omits an empty column and
+sizes its ordering arrays from those counts. Prepared flags distinguish completed producer metadata from a
+hand-built input or stream, which retains the full scan. Mutating a completed warning column requires updating
+its count through the producer helper or clearing that column's prepared flag; the metadata is part of the
+immutable source snapshot. Randomized dense-oracle tests exercise both cases, including suppression and
+speculative constant-call restoration.
+
+Where static-data preparation already ran, the program consumes its declaration keys instead of selecting
+the same tokens again. Syntax-only users retain the original selection. The emission initializes `defined`
+only at symbol objects, its only readable domain, and scans static-storage declarations instead of initialized
+automatic locals. Attribute collection selects nonnull pointers before testing declaration identity; its
+retained-object bytes are initialized only at the collected objects. Parameters remain in this collection,
+so their alias/retain refusal is preserved. The current warning-range index updates the count in its existing
+scalar or masked blocks, including deferred merges and speculative restoration, without a new final pass.
+
+[Frozen 9700X qualification](https://github.com/buster14a/buster-performance/blob/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-641/target/README.md)
+retains only this first slice: its 2,852 SQLite objects and 1,760 small-corpus pairs matched the base bytes.
+The post-check construction/handoff/consumer sum fell from 32.320 to 31.489 ms, with about 2.1 MiB less RSS,
+but whole-compile changes stayed within the A/A dispersion. A second compact selection-metadata slice was
+rejected after ablation. Selection maps and attributed-declaration lists remain future #641 work. These
+measurements apply to the frozen revisions in that report; this refreshed main-321 stack claims correctness
+and representation savings, with no new whole-compile speedup attribution.
+
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
 `--time-stages` runs of each build, pinned to CPU 2, the order rotating by
 round: `main` at `8ab9a208` and #592's head (`d4be6a47`), both built as the
@@ -622,13 +696,36 @@ isn't measured here: its input is a different unit (speedtest1's with
 `sqlite3.c`), and its link is work `-c` doesn't do. Its stages would show in
 the `executable` row.
 
+## Small-unit setup and exit (#652)
+
+Main's terminal C and `check` commands, and its `-E` command, let process exit
+tear down their mappings. Output files are closed before the command returns;
+stdout is flushed by libc on ordinary process exit. The reusable
+`run_check_command` and `run_preprocessor_command` routes still release all
+owned mappings before returning, including error paths, so tests and other
+callers can compile another unit. The driver suite runs each reusable route
+twice and checks that it retains no additional mappings.
+
+On the terminal routes the `release` stage includes no explicit arena teardown.
+Whole-process measurements still include the kernel's teardown at exit; the
+old release stage's time must not be reported as an equal whole-process saving.
+The tables above retain their recorded source revisions and cleanup policy.
+
+The ordinary arena's 64 KiB base-page prefix is retained. The
+[frozen 9700X evidence](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-652/target)
+compares cleanup-only `24e9c1f8` with `bc1b4861`: isolated A/A, A/B and reversed
+B/A controls show about 13–14% lower empty syntax-check latency, 12% lower
+preprocessing latency and 6.4–6.7% lower tiny object latency. SQLite is a
+neutral control. Those timings apply to the recorded revisions, not a later
+integration; its exact-head correctness and CI validation remain separate.
+
 ## How it is measured
 
 **The stage clock.** `--time-stages` (`c_check_clock.c`) makes the C driver
 report, on standard error after the command, a row per stage.
 - **Laps.** A lap charges the TSC ticks since the previous lap to the stage it
   names. So the stages never overlap, and they add up to the clock's span, from
-  the driver's first instruction to its last release. The TSC's rate is
+  the driver's first instruction to its final stage mark. The TSC's rate is
   measured against `CLOCK_MONOTONIC` over the same span.
 - **Marks.** The coarse laps read `getrusage` too, for each stage's system time,
   minor faults and growth of the peak RSS. The per-function passes (lowering,
@@ -713,3 +810,20 @@ reference showed no slowdown:
 
 On the small file, the backend's tables (`backend-setup`) take more than half
 of the compile.
+
+### Avoiding backend startup when no function is emitted (#590)
+
+For an empty or data-only translation unit, and one whose static functions are
+all dropped by selection, `backend-setup` now contains only the stage-clock
+boundary. Encoder, operand-semantics, Tier 0 and unwind table initialization is
+conditional on a selected body. Data/symbol emission and normal diagnostics
+still execute, and object bytes are unchanged. The first selected function in
+a reusable caller initializes the tables as before. This removes table work
+independently of whether the process's pages use huge pages or base pages;
+small files with a selected function still pay the existing setup cost.
+
+The [frozen qualification record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-590/target)
+compares `bc1b4861` with `8b815992`, including the host's default page policy,
+an exec-inherited per-process THP-disable control and body-bearing units.
+That control did not change the host to `madvise`. These timings predate the
+later encoder changes; validation of the current source is recorded separately.

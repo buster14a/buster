@@ -57,13 +57,27 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
 {
     const Parser* parser = reader->parser;
     bool valid = true;
-    for (uint32_t ancestor = target; valid && ancestor < parser->tokens.count; ancestor = parser->tree.parents[ancestor])
+    // Most units have no GNU statement expression. Otherwise only regions below the source and target's common
+    // ancestor can be entered: a region above it holds both. The reader's postorder intervals recognize that ancestor
+    // without another token column or a walk from the source. Keep the full parent walk on the scalar path as oracle.
+    const bool scalar = parser->options.scalar;
+    const uint32_t source_position = !scalar && reader->output->region_count != 0 && source < parser->tokens.count ? reader->postorder_positions[source] : BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = target; valid && ancestor < parser->tokens.count && (scalar || reader->output->region_count != 0); ancestor = parser->tree.parents[ancestor])
     {
         const uint32_t selected = reader->output->expression_regions[ancestor];
         if (selected != 0)
         {
             const CheckInputRegion* region = &reader->output->regions[selected - 1];
             valid = source > region->opening && source < region->closing;
+        }
+        if (!scalar)
+        {
+            const uint32_t position = reader->postorder_positions[ancestor];
+            const uint32_t size = reader->subtree_sizes[position];
+            if (source_position <= position && position - source_position < size)
+            {
+                break;
+            }
         }
     }
     return valid;
@@ -158,7 +172,7 @@ static void check_input_indirect_gotos(CheckInputReader* reader)
                         high = region->closing < high ? region->closing : high;
                     }
                 }
-                first = first == BUSTER_CHECK_NONE && check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 ? token : first;
+                first = first == BUSTER_CHECK_NONE && check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 ? token : first;
             }
             if (first != BUSTER_CHECK_NONE && !addressed)
             {
@@ -166,7 +180,7 @@ static void check_input_indirect_gotos(CheckInputReader* reader)
             }
             for (uint32_t token = first; addressed && token < closing; token += 1)
             {
-                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token <= low || token >= high))
+                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token <= low || token >= high))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
@@ -312,7 +326,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     labels[slot] = token + 1;
                 }
             }
-            else if ((kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
+            else if ((kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
                 reader->output->declaration_bodies[token] = body;
             }
@@ -357,7 +371,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 continue;
             }
             const uint8_t kind = parser->tokens.kinds[token];
-            const bool jump = kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0;
+            const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0;
             const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
             if (jump && check_input_indirect_goto(parser, token))
             {

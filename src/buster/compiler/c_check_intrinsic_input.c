@@ -295,8 +295,6 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
         {
             info = output->intrinsic_declarations[cached - 1].info;
         }
-        // #113's deferred reader merges no intrinsic declarations yet: a body that uses one is read in source order.
-        check_input_lane_refuse(reader, reader->lane && info != 0, "a body uses an intrinsic");
         if (info != 0)
         {
             status = CHECK_INPUT_INTRINSIC_FAILED;

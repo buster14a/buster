@@ -936,8 +936,10 @@ designs and the compilers already built this way.
   measurements.
 - `src/buster/compiler/c_check_actions.c` supplies the reader-independent
   expression rules and constant folding for #133. `c_checker.c` checks an
-  explicit postorder operand graph either in source order or in stable
-  dependency levels, with scalar barriers for actions that intern types.
+  explicit postorder operand graph either a node at a time or in batches of
+  consecutive nodes that read none of each other (or, with
+  `CheckOptions.level_order`, in stable dependency levels), with scalar
+  barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
@@ -952,9 +954,14 @@ designs and the compilers already built this way.
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
-  source bodies.
-  `test-checker [--seed N] [--clang PATH] [--program-initializers] [--program-vectors]` compares fresh scalar/vector
-  tables, protected tails and original source fixtures against Clang.
+  source bodies by the scalar schedule, the vector path's postorder batches and its level order
+  (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
+  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
+  `test-checker [--seed N] [--clang PATH] [--program-initializers] [--program-vectors]` compares fresh scalar/vector tables,
+  protected tails and original source fixtures against Clang, and checks the constraint catalogue
+  (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
+  a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
+  file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector and x86 builtin programs alone (`c_check_program_vector_test.c`,
@@ -1248,11 +1255,15 @@ preprocessor's predefines give as clang's do for the same options
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Non-AVX-512
-CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
-hosted variants pass on the same triggering revision. Failed, cancelled or
-skipped tests cannot start the benchmark job. The existing required check name
-is retained by a hosted aggregation job that fails when either stage fails.
+Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
+builds on CPUs without the complete vector feature set use the scalar fallback.
+After both hosted variants pass on the same triggering revision, Benchpress
+requires the complete vector feature set and runs native correctness before
+benchmarks, reusing one build and the existing shared lock. All three builds run
+the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+skipped hosted tests cannot queue the hardware job; failed native tests cannot
+start benchmarks. The existing required check name is retained by a hosted
+aggregation job that fails when either stage fails.
 See [the CI guide](docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
@@ -1656,8 +1667,8 @@ drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
-The 9700X job's test step ("Run the tests within the host budget") runs every
-test through it, with `--timeout 180`, before the benchmarks, which run one at
+The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
+test through it, with `--timeout 600`, before the benchmarks, which run one at
 a time and pinned. Its commands share CPUs 0 to 7 (`taskset`), one per core,
 and the runner holds them to those 8 CPUs together (#522). Tests such as
 test-lanes and test-files start lanes of their own and the call-graph check
@@ -1705,7 +1716,7 @@ to about one per CPU (#468's review). To run the list as the job does (on the
 9700X, under its lock, as one run):
 
 ```sh
-sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | taskset -c 0-7 ./build/compiler parallel --timeout 180
+taskset -c 0-7 ./build/compiler parallel --jobs 8 --timeout 600 < tools/ci/correctness.tests
 ```
 
 `./build/compiler test-parallel` (about 7 s) checks it, each report exactly
@@ -4904,7 +4915,7 @@ and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
 
-`./build/compiler test-checker-deferred [--keep]` checks 65 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
@@ -4925,6 +4936,9 @@ its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+Empty, duplicate-position and nonzero-start linked histories are checked against
+a forward oracle with their ends at a protected page; the last update at the
+opening must be selected.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
@@ -5182,8 +5196,8 @@ mutants of the units it found no difference in (#133's last "Done when" item,
 It prints each kind's sites, mutants, clang's rejections and differences, and
 exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
 and semantic mutations") has the four corpora's configurations, the campaigns'
-counts and the two base differences left (two of #148's builtins in the libc
-corpus; Lua's labels as values agree since #133 took them). The 9700X job's test step checks 8
+counts and the base differences the comparisons found, all fixed (the libc corpus's last two, `fmaxl.c` and
+`fminl.c`, by #148's floating comparison builtins; Lua's labels as values since #133 took them). The 9700X job's test step checks 8
 mutants of the frozen SQLite source and 96 of the oracle's four musl sources
 with seed 133; a run that differs fails it, and `--keep` with `--minimize`
 reproduces it locally.
@@ -5597,8 +5611,13 @@ checks
 that each stop's backtrace goes through the program's functions to `_start`,
 two of them above `_start` at least once (the unwinder used an FDE), each frame
 at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
-and that perf's samples with DWARF call graphs name the program's functions,
-reach `_start` and give lines of `streamed.c`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
+and that at least four separate perf samples with DWARF call graphs name the program's functions,
+reach its actual `_start` and give lines of `streamed.c`. The larger cross-check fixture repeats the entry's
+callee/fold block 128 times in the generated typed stream and C, keeping the same function set and normal DWARF/unwind generation
+long enough for sampling. Other generator callers keep the ordinary single pass; zero and one repetitions produce
+identical streams and C. There is no sampling retry. Collection failures print exit statuses, data size and bounded
+stderr/profile text; negative controls reject one sample, duplicate frames and wrapper names.
+The files go in a directory under `$TMPDIR` (or `/tmp`), removed
 unless `--keep` or a failure. The 9700X job's test step runs it with
 `--cross-check`.
 

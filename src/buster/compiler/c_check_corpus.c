@@ -1335,7 +1335,7 @@ static bool check_corpus_initializers_equal(const CheckInitializers* x, const Ch
     }
     for (uint32_t token = 0; equal && token < x->token_count; token += 1)
     {
-        equal = x->declaration_plans[token] == y->declaration_plans[token];
+        equal = check_initializers_plan_index(x, token) == check_initializers_plan_index(y, token);
     }
     for (uint32_t plan = 0; equal && plan < x->count; plan += 1)
     {
@@ -1679,7 +1679,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
                 left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
                 left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
-                left->expression_regions[token] == right->expression_regions[token] && left->asm_ids[token] == right->asm_ids[token] &&
+                left->expression_regions[token] == right->expression_regions[token] && check_input_asm_id(left, token) == check_input_asm_id(right, token) &&
                 left->constant_warnings[token] == right->constant_warnings[token] &&
                 left->constant_warning_ignored[token] == right->constant_warning_ignored[token];
     }
@@ -1916,7 +1916,7 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  x->body_declarations[token] != y->body_declarations[token] ? "body_declarations" : x->parameters[token] != y->parameters[token] ? "parameters" :
                  x->parameter_next[token] != y->parameter_next[token] ? "parameter_next" : x->control_owners[token] != y->control_owners[token] ? "control_owners" :
                  x->label_targets[token] != y->label_targets[token] ? "label_targets" : x->case_ranges[token] != y->case_ranges[token] ? "case_ranges" :
-                 x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : x->asm_ids[token] != y->asm_ids[token] ? "asm_ids" :
+                 x->expression_regions[token] != y->expression_regions[token] ? "expression_regions" : check_input_asm_id(x, token) != check_input_asm_id(y, token) ? "asm_ids" :
                  x->constant_warnings[token] != y->constant_warnings[token] ? "constant_warnings" :
                  x->constant_warning_ignored[token] != y->constant_warning_ignored[token] ? "constant_warning_ignored" : 0;
         index = token;
