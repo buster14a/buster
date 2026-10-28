@@ -1396,11 +1396,7 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
 
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_resolve_moves_scalar(input, arena, result);
-#else
     const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
-    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, true);
+    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, BUSTER_HOST_VECTOR);
     return error;
-#endif
 }
