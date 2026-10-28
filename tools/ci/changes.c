@@ -338,17 +338,19 @@ static const ChangesModule changes_modules[] = {
         .name = "checker_binding_modes",
         .sources = "c_check_binding[a-z_]*|c_bindings[a-z_]*|c_parser_binding_trace|c_parser_bindings[a-z_]*",
     },
-    // #395's -g: what the source rows add to the emission (benchmark-check-debug's emit pass), each path alone and
-    // after scalar work, where the emission with them changes: the rows' passes, the emission and the lowering, which
-    // copy the entries' tokens out, debug.c's unit and Tier 0, which writes each entry's first record.
+    // #395's -g, each path alone and after scalar work, where the rows' producers or their passes change: what the
+    // source rows add to the emission (benchmark-check-debug's emit pass), and the unit built from the rows it makes
+    // (the build pass: their lines, the rows kept and the sections). The emission and the lowering copy the entries'
+    // tokens out, and Tier 0 writes each entry's first record, so a change to them changes the build pass's input.
     {
         .name = "check_debug",
         .sources = "c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0",
     },
-    // The rows' own passes (the raw rows, their lines, the rows kept and the unit) in the same states:
-    // c_check_debug.c's code and debug.c's. Every pass's samples took 22 s, most of it 200 ms of scalar work before
-    // each of 21 samples of each pass, where the emit pass's alone take about 5; in a day, 30 of the 39 pull requests'
-    // runs that paid them changed neither file, only the emission, the lowering or Tier 0.
+    // Every pass in the same states (the synthetic raw rows, their lines and the rows kept, besides the two above),
+    // where the rows' own passes change: c_check_debug.c's code and debug.c's. Every pass's samples took 22 s, most of
+    // it 200 ms of scalar work before each of 21 samples of each pass, where the emit and build passes' take about 10;
+    // in a day, 30 of the 39 pull requests' runs that paid them changed neither file, only the emission, the lowering
+    // or Tier 0.
     {
         .name = "check_debug_rows",
         .sources = "c_check_debug[a-z_]*|debug",
@@ -1586,7 +1588,7 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "files",
     },
     {
-        .name = "Tier 0 writes the entries' first records: the emission's -g samples, not the rows' passes'",
+        .name = "Tier 0 writes the entries' first records: the emit and build passes' -g samples, not every pass's",
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
         .outputs_false = "check_debug_rows checker",

@@ -1251,8 +1251,9 @@ there at a time, so everything takes one lock:
   checker's. Samples of different code split by what changes each: #336's
   time the default handoff (`direct`) where its inputs change, and the
   comparison of every mode only where the handoffs themselves do
-  (`checker_binding_modes`); #395's time the `emit` pass where the emission
-  changes, and the rows' own passes only where those do (`check_debug_rows`).
+  (`checker_binding_modes`); #395's time the passes the rows' producers reach
+  (`emit` and `build`) where the emission, the lowering or Tier 0 change, and
+  every pass only where the rows' own passes do (`check_debug_rows`).
   The daily and dispatched runs time them all. A step gated so also runs on
   the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's

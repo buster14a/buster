@@ -1142,21 +1142,29 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-check-debug
 
       - name: Benchmark the C driver's source rows in isolation and after scalar work
-        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c):
-        # what the rows add to the emission (the emit pass), each path alone and after scalar work. Where the rows' own
-        # passes change (`check_debug_rows`: c_check_debug*.c and debug.c), and on the daily and dispatched runs, every
-        # pass, whose 200 ms of scalar work before each of their samples is most of the step's 22 s.
+        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c), each
+        # path alone and after scalar work, in processes of their own: the passes the rows' producers reach, what the
+        # rows add to the emission (the emit pass) and the unit built from the rows it makes (the build pass: their
+        # lines, the rows kept and the sections), whose inputs a change to the emission, the lowering or Tier 0 changes.
+        # Where the rows' own passes change (`check_debug_rows`: c_check_debug*.c and debug.c), and on the daily and
+        # dispatched runs, every pass at once, whose 200 ms of scalar work before each sample is most of the step's 22 s.
         if: needs.changes.outputs.check_debug != 'false'
         env:
           ROWS: ${{ needs.changes.outputs.check_debug_rows != 'false' }}
         run: |
-          passes=(--only emit)
+          passes=(emit build)
           if [ "$ROWS" = true ]; then
-            passes=()
+            passes=(every)
           fi
-          taskset -c 2 ./build/compiler benchmark-check-debug "${passes[@]}" --path scalar
-          taskset -c 2 ./build/compiler benchmark-check-debug "${passes[@]}" --path vector
-          taskset -c 2 ./build/compiler benchmark-check-debug "${passes[@]}" --path vector --after-scalar 200
+          for pass in "${passes[@]}"; do
+            only=(--only "$pass")
+            if [ "$pass" = every ]; then
+              only=()
+            fi
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path scalar
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector --after-scalar 200
+          done
 
       - name: Benchmark the deferred bodies' reader on frozen SQLite
         # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart,
