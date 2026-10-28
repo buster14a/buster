@@ -4935,7 +4935,7 @@ on the calling thread before the lanes start, until `check_deferred_release`.
 `./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 86
 fixtures of the issue's cases through the scalar path, the vector path and the
 deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
-resolution, and on 1 and 8 with the identifiers' ids in another order (#153):
+resolution, and on 8 with the identifiers' ids in another order (#153):
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
 and by the lanes' rule, its reader copied only by lanes that take a part, in

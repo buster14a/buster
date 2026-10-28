@@ -121,12 +121,12 @@ they do not stand in for an unimplemented C literal-pooling frontend.
   `--id-order` (the Nth test's from 153 on) and must write the vector path's
   executable, or its diagnostics, byte for byte.
 - `test-checker-deferred`: #113's deferred reader, which reads function bodies
-  on lanes. Every fixture runs again with the IDs in another order, on 1 and 8
-  lanes through each binding resolution: the scalar path, the vector path and
-  the deferred reader must still give the same results, column by column, and
-  the reader must merge each fixture as before. `test-checker-corpus
-  --id-order N` checks a corpus so, which the workflow does for c-testsuite's
-  programs with `--deferred 8`.
+  on lanes. Every fixture runs again with the IDs in another order, on 8 lanes
+  through each binding resolution: the scalar path, the vector path and the
+  deferred reader must still give the same results, column by column, and the
+  reader must merge each fixture as before. `test-checker-corpus --id-order N`
+  checks a corpus so, which the workflow does for c-testsuite's programs with
+  `--deferred 8`.
 
 The C driver's `--id-order N` (`check_driver_id_order`) is the test option for
 a whole compile: it preprocesses the unit once, printing nothing, into a table
@@ -200,7 +200,7 @@ independent dependencies each add their own integration check:
   `--id-order`; `test-c-testsuite` compiles each program's scalar build so.
 - #113's deferred reader, which checks function bodies on lanes:
   `test-checker-deferred` compares its results with source order's reader at
-  1, 2, 3 and 8 lanes, and at 1 and 8 with the IDs in another order.
+  1, 2, 3 and 8 lanes, and at 8 with the IDs in another order.
 - link-foreign (#86, #594), which resolves, converts and writes on lanes:
   `test-foreign` and `test-foreign-corpus` compare its outputs at 1, 2, 3 and
   8 lanes. It adds the global names to its link in its name IDs' order, which

@@ -210,7 +210,7 @@ rm "$flags_file" "$sources_file"
 ./build/compiler test-lexer --no-digraphs
 == Test deferred function bodies against source order
 # #113's fixtures, each through the deferred reader on 1, 2, 3 and 8 lanes with every binding resolution, and
-# on 1 and 8 with the identifiers' ids in another order (#153's --id-order, 153 by default).
+# on 8 with the identifiers' ids in another order (#153's --id-order, 153 by default).
 ./build/compiler test-checker-deferred
 == Test the scalar and AVX-512 assembly frontends
 ./build/compiler test-assembler --cross-check

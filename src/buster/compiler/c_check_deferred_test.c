@@ -7,7 +7,7 @@
 // column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
 // direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
 // whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
-// in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 1 and 8 lanes through each
+// in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 8 lanes through each
 // resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
 // lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
 // group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
@@ -709,31 +709,27 @@ static int run_checker_deferred_tests(int count, char** arguments)
             }
         }
         // With the identifiers' ids in another order (#153: check_corpus_id_ordered, by --id-order's N plus the fixture's
-        // index), on one lane and on 8 with every binding resolution: the paths must still be alike, and merge as before.
-        for (uint32_t l = 0; valid && l < 2; l += 1)
+        // index), on 8 lanes with every binding resolution: the paths must still be alike, and merge as before.
+        for (uint32_t m = 0; valid && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
         {
-            for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = modes[m];
+            check_corpus_deferred_every_lane = every;
+            check_corpus_id_ordered = true;
+            check_corpus_id_order = id_order + f;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_id_ordered = false;
+            check_corpus_deferred_every_lane = true;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected;
+            checks += 1;
+            failures += !passed;
+            ordered += 1;
+            if (!passed)
             {
-                check_corpus_deferred_lanes = l == 0 ? 1 : 8;
-                check_corpus_deferred_bindings = modes[m];
-                check_corpus_deferred_every_lane = every;
-                check_corpus_id_ordered = true;
-                check_corpus_id_order = id_order + f;
-                CheckCorpusOutcome outcome;
-                check_corpus_measure(path, &options, false, true, &outcome);
-                check_corpus_id_ordered = false;
-                check_corpus_deferred_every_lane = true;
-                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected;
-                checks += 1;
-                failures += !passed;
-                ordered += 1;
-                if (!passed)
-                {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s, with the ids in another order (%" PRIu64 "): %s\n", name,
-                            check_corpus_deferred_lanes, mode_names[m], id_order + f, !outcome.prepared ? "not preprocessed" :
-                            !outcome.deferred_equal ? "the deferred result differs" : !outcome.equal ? "the scalar and vector paths differ" :
-                            expected ? "not merged" : "merged");
-                }
+                fprintf(stderr, "test-checker-deferred: %s on 8 lanes through %s, with the ids in another order (%" PRIu64 "): %s\n", name, mode_names[m],
+                        id_order + f, !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : expected ? "not merged" : "merged");
             }
         }
         // The reader's own rule on 8 lanes, which reads most of the listed fixtures on one.

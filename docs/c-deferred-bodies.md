@@ -250,8 +250,8 @@ passes every checker test.
   fixture runs again with its identifiers' IDs in another order
   ([#153](https://github.com/buster14a/buster/issues/153): the driver's
   `--id-order` table, `check_driver_id_order`, from `--id-order N` on, 153 by
-  default), on 1 and 8 lanes through each resolution: the three paths must
-  still be alike, and the reader must merge it as before. A
+  default), on 8 lanes through each resolution: the three paths must still
+  be alike, and the reader must merge it as before. A
   merged unit's bodies must run on the rule's lanes (`CheckDeferred.active`),
   in as many parts as a group of them cuts (`CheckDeferred.parts`), its reader
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
