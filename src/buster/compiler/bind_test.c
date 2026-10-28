@@ -4797,13 +4797,16 @@ static const BindTestStaticSource bind_test_shared_sources[] = {
 };
 
 // Links `object` by cc -shared with the linker `fuse`, into `library`, with `why` if it isn't 0: cc's status.
+// Binding's modeled runtime requires libc even without a strong reference to it (dynamic_inputs). Override a
+// distribution driver's default --as-needed so lld sees the same runtime and versions for weak references too.
 static int bind_test_shared_link(const char* fuse, const char* why, const char* object, const char* library, const char* out, const char* err)
 {
-    char* arguments[8];
+    char* arguments[9];
     uint32_t count = 0;
     arguments[count++] = "cc";
     arguments[count++] = (char*)fuse;
     arguments[count++] = "-shared";
+    arguments[count++] = "-Wl,--no-as-needed";
     arguments[count] = (char*)why;
     count += why != 0 ? 1 : 0;
     arguments[count++] = "-o";
