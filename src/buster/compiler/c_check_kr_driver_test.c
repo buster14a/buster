@@ -58,10 +58,6 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
             char* arguments[16] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", mode == 0 ? "-fsyntax-only" : "-c",
                                     source, "-o", objects[0], "-isystem", (char*)directory };
             uint32_t count = 9;
-            if (lazy)
-            {
-                arguments[count++] = "-flazy-system-headers";
-            }
             if (cases[c].first != NULL)
             {
                 arguments[count++] = (char*)cases[c].first;
@@ -75,6 +71,10 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
                               check_test_implicit_count(expected, ": warning:") == cases[c].warnings &&
                               check_test_implicit_count(expected, ": error:") == cases[c].errors,
                               "Clang establishes the independent K&R policy status and exact counts");
+            if (lazy)
+            {
+                arguments[count++] = "-flazy-system-headers";
+            }
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 char* actual = NULL;
