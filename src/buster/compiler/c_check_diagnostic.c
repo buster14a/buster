@@ -10,6 +10,9 @@
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 #define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
 #define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
+#define CHECK_WARNING_RETURN_TYPE 0x40000u
+#define CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION 0x80000u
+#define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
 
 #include "c_check_packed_diagnostic.c"
 
@@ -49,6 +52,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wpointer-type-mismatch", NULL, "pointer type mismatch" },
     { "-Waddress-of-packed-member", NULL, "taking address of packed member may result in an unaligned pointer value" },
     { "-Wargument-outside-range", NULL, "argument value is outside the valid range" },
+    { "-Wreturn-type", NULL, "non-void function does not return a value" },
+    { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
+    { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)

@@ -170,6 +170,38 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+static void check_driver_visibility_reports(Preprocessor* pp, const CheckInput* input, bool quiet)
+{
+    const CheckInputVisibilityPragmas* history = input->visibility_pragmas;
+    for (uint32_t i = 0; history != NULL && !pp->fatal && i < history->count; i += 1)
+    {
+        const CheckInputVisibilityPragma* record = history->records + i;
+        const uint32_t flag = record->warning == 2 ? CHECK_WARNING_IGNORED_ATTRIBUTES : CHECK_WARNING_VISIBILITY_PRAGMA;
+        const CheckWarningSeverity severity = record->error ? CHECK_WARNING_ERROR : check_diagnostic_severity(input, record->token, flag);
+        if ((record->error || record->warning != 0) && severity != CHECK_WARNING_IGNORE && (!quiet || severity >= CHECK_WARNING_ERROR))
+        {
+            const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            if (record->warning == 2)
+            {
+                pp_diagnose_output(pp, pp_severity, record->diagnostic_source, "unknown visibility '%.*s' [-Wignored-attributes]",
+                                   (int)record->name.length, record->name.pointer);
+            }
+            else
+            {
+                if (record->diagnostic_location != 0)
+                {
+                    pp_diagnose(pp, pp_severity, record->diagnostic_location, "%s", record->message);
+                }
+                else
+                {
+                    pp_diagnose_output(pp, pp_severity, record->diagnostic_source, "%s", record->message);
+                }
+            }
+        }
+    }
+}
+
 static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                       const TypeTable* types, bool quiet)
 {
@@ -1369,6 +1401,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                                                              repairing ? repair.original_end : checking->tokens.count,
                                                              lazy_system_headers && !prefix_only ? lazy.deferred_tokens : 0);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
+                check_driver_visibility_reports(&pp, &input, quiet);
                 if (input.resource)
                 {
                     fprintf(stderr, "fatal error: checker input capacity exhausted\n");

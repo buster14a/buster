@@ -17,6 +17,12 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
+associated declaration/ELF integration (#620) are original project material
+under the default terms. Clang is an external behavior and object-format oracle;
+cJSON is an external compile qualification input. No upstream implementation or
+fixtures are incorporated.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

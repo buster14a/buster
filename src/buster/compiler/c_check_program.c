@@ -1824,7 +1824,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint32_t count = input->token_count;
     const uint32_t node_count = input->graph.count;
     bool valid = output != scratch && count == parser->tokens.count && count < (UINT32_MAX - 16) / 8 &&
-                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0;
+                 stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0 &&
+                 !input->visibility_error;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
             (options.initializer_reference_count == 0 || options.initializer_references != 0);

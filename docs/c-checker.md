@@ -20,6 +20,17 @@ static or inline function gets no code, and an object only such a function
 refers to no data. `--lower-all` lowers every definition that may be emitted,
 referenced or not, a test option for measuring what that saves.
 
+`#pragma GCC visibility push(default|hidden|protected|internal)` and `pop`
+retain a source-ordered state stack (#620). Declarations sample that state;
+the first applied visibility follows the linked entity through later
+declarations, and an explicit attribute on the same declaration takes priority
+over the pragma. Internal visibility maps to hidden on this x86-64 target, as
+Clang does. The object writer receives the ELF visibility on defined and
+undefined global symbols; local symbols keep default visibility. Malformed
+directives carry bounded syntax diagnostics, and an unmatched pop rejects the
+unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
+units allocate no visibility history or object column.
+
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE

@@ -94,6 +94,7 @@ typedef struct CheckInputDiagnosticPragmas CheckInputDiagnosticPragmas;
 typedef struct CheckInputNonnullPragmas CheckInputNonnullPragmas;
 typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
+typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -150,6 +151,9 @@ struct CheckInput
     CheckInputDiagnosticPragmas* diagnostic_pragmas;
     CheckInputNonnullPragmas* nonnull_pragmas;
     CheckInputPackPragmas* pack_pragmas;
+    CheckInputVisibilityPragmas* visibility_pragmas;
+    uint8_t* object_visibility;
+    bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
     CheckInputLoopDiagnostic* loop_diagnostic;
     CheckInputNakedDiagnostic* naked_diagnostic;
@@ -1469,6 +1473,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_function_name_input.c"
 #include "c_check_pragma_input.c"
 #include "c_check_pack_input.c"
+#include "c_check_visibility_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 
@@ -3258,6 +3263,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             reader->linked_declarations[name] = token + 1;
         }
         reader->linked_types[name] = composite;
+    }
+    if (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL))
+    {
+        check_input_visibility_declare(reader, token, point);
     }
     check_input_overload_declare(reader, token, point, old, overload);
     if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, reader->scope_count) == 0)
@@ -5627,6 +5636,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 bool prepared = check_input_diagnostic_pragmas(&reader, handled);
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
+                prepared = prepared && check_input_visibility_pragmas(&reader, handled);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 input->resource |= !prepared;
