@@ -1331,8 +1331,8 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
-static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
+static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native, uint32_t local_limit)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1436,6 +1436,8 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
         }
         for (uint32_t b = 0; lowered && b < program.body_count; b += 1)
         {
+            check_test_expect(test, local_limit == 0 || (lower[0].functions[b].local_count <= local_limit && lower[1].functions[b].local_count <= local_limit),
+                              "builtin scratch locals stay bounded across repeated recipes");
             check_test_expect(test, check_test_program_function(lower[0].functions + b, lower[1].functions + b),
                               "complete typed function and ABI locations agree across unit batches");
         }
@@ -1488,6 +1490,18 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, run_native, 0);
+}
+
+static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                            int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true, local_limit);
 }
 
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
@@ -2024,8 +2038,82 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 
 #include "c_check_program_batch_test.c"
 
+static void check_test_program_builtin_scratch(CheckTest* test, const char* clang)
+{
+    for (uint32_t limit = CBUILTIN_LOWER_LIMIT_RECIPE; limit <= CBUILTIN_LOWER_LIMIT_LOCALS; limit += 1)
+    {
+        CheckProgramLowered output = { 0 };
+        CheckLowerWriter writer = { .output = &output, .token = 17 };
+        const CBuiltinLowerBuffer buffer = { .capacity = BUSTER_TIER0_MAX_ENTRIES, .local_capacity = BUSTER_TIER0_MAX_LOCALS };
+        const CBuiltinLowerResult result = { .error = CBUILTIN_LOWER_CAPACITY, .limit = (CBuiltinLowerLimit)limit };
+        const char* expected = limit == CBUILTIN_LOWER_LIMIT_RECIPE ? "builtin recipe limit" : limit == CBUILTIN_LOWER_LIMIT_ENTRIES ?
+                               "Tier 0 per-function entry limit" : "Tier 0 per-function local limit";
+        check_lower_builtin_finish(&writer, &buffer, result, BUSTER_TYPE_INT);
+        check_lower_resource(&writer, "a later failure");
+        check_test_expect(test, output.status == CHECK_PROGRAM_RESOURCE && output.token == 17 && output.reason != NULL && strcmp(output.reason, expected) == 0,
+                          "builtin resource failures name the actual first limit");
+    }
+    static const char* unary[] = {
+        "__builtin_bswap16((unsigned short)x)",
+        "__builtin_bswap32(x)",
+        "__builtin_bswap64(z)",
+        "__builtin_clz(x)",
+        "__builtin_clzl(z)",
+        "__builtin_clzll(z)",
+        "__builtin_ctz(x)",
+        "__builtin_ctzl(z)",
+        "__builtin_ctzll(z)",
+        "__builtin_popcount(x)",
+        "__builtin_popcountl(z)",
+        "__builtin_popcountll(z)",
+        "__builtin_parity(x)",
+        "__builtin_parityl(z)",
+        "__builtin_parityll(z)",
+        "__builtin_ffs((int)x)",
+        "__builtin_ffsl((long)z)",
+        "__builtin_ffsll((long long)z)",
+    };
+    char source[32768];
+    uint32_t used = (uint32_t)snprintf(source, sizeof(source),
+        "int other(int n){unsigned long a;return __builtin_add_overflow((unsigned long)n,3UL,&a)+(int)(a%%97);}"
+        "int tested(int n){unsigned x=(unsigned)n|1;unsigned long z=((unsigned long)x<<33)|x;unsigned y=0;");
+    for (uint32_t repeat = 0; repeat < 8; repeat += 1)
+    {
+        for (uint32_t id = 0; id < BUSTER_ARRAY_LENGTH(unary); id += 1)
+        {
+            used += (uint32_t)snprintf(source + used, sizeof(source) - used, "y+=(unsigned)(%s)%%97;", unary[id]);
+        }
+        static const char* operation[] = { "add", "sub", "mul" };
+        for (uint32_t id = 0; id < BUSTER_ARRAY_LENGTH(operation); id += 1)
+        {
+            used += (uint32_t)snprintf(source + used, sizeof(source) - used,
+                "{signed char r;unsigned __int128 w;"
+                "y+=__builtin_%s_overflow((long)n,z,&r);y+=(unsigned char)r;"
+                "y+=__builtin_%s_overflow((__int128)n*((__int128)1<<64),(unsigned __int128)z,&w);y+=(unsigned)(w%%101);}", operation[id], operation[id]);
+        }
+    }
+    snprintf(source + used, sizeof(source) - used, "return (int)(y%%1000000007)+other(n);}");
+    check_test_program_source_bounds(test, source, "repeated-integer-recipes-reuse-locals", clang, false, -1, 0, 160);
+    check_test_program_source_bounds(test,
+        "int tested(int n){unsigned long a=0,b=0,c=0;unsigned long x=(unsigned long)(unsigned)n*0x100000001UL;"
+        "int r=__builtin_add_overflow(x,x+17,(__builtin_mul_overflow(x,x,&b),&a));"
+        "int s=__builtin_sub_overflow(x,__builtin_add_overflow(x,19UL,&c),&b);"
+        "unsigned t=__builtin_popcount((unsigned)n)+__builtin_clz((unsigned)n|1)+__builtin_parityll(x);"
+        "return (int)((a%97)+(b%101)+(c%103))+r*1000+s*2000+(int)t;}",
+        "nested-operand-destination-and-sibling-result-lifetimes", clang, false, -1, 0, 80);
+    check_test_program_source_bounds(test,
+        "int tested(int n){__int128 a=0,c=0;unsigned __int128 b=0;"
+        "__int128 x=(__int128)n*0x1000000000000000UL;unsigned __int128 y=(unsigned __int128)(unsigned)n<<96;"
+        "int r=__builtin_mul_overflow(x,(__builtin_sub_overflow(y,(unsigned __int128)17,&b),x+1),"
+        "(__builtin_add_overflow(x,x,&c),&a));"
+        "int s=__builtin_add_overflow(y,(__builtin_mul_overflow(x,x,&c),(unsigned __int128)c),&b);"
+        "return (int)((unsigned __int128)a%97+b%101+(unsigned __int128)c%103)+r*1000+s*2000;}",
+        "nested-wide-operand-objects-and-signedness", clang, false, -1, 0, 96);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_builtin_scratch(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_source(test,
