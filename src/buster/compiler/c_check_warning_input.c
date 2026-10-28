@@ -11,6 +11,14 @@
 #define BUSTER_CHECK_WARNING_BLOCK 64u
 #define BUSTER_CHECK_WARNING_STACK 32u
 
+// Count nonzero rows while the existing range/index producers change them. The prepared snapshot's collector can
+// skip an empty column without another final scan; speculative restoration uses the same mutation primitive.
+static void check_input_constant_warning_set(CheckInput* input, uint32_t token, uint8_t warnings)
+{
+    input->constant_warning_count = input->constant_warning_count - (input->constant_warnings[token] != 0) + (warnings != 0);
+    input->constant_warnings[token] = warnings;
+}
+
 static void check_input_warning_changed(CheckInputReader* reader, uint32_t token, uint32_t warnings)
 {
     if (reader->warning_index_ready && (uint8_t)warnings != 0)
@@ -24,8 +32,11 @@ static void check_input_warning_changed(CheckInputReader* reader, uint32_t token
 
 static void check_input_warning_add(CheckInputReader* reader, uint32_t token, uint32_t warnings)
 {
-    reader->output->constant_warnings[token] |= (uint8_t)warnings;
-    check_input_warning_changed(reader, token, warnings);
+    if ((uint8_t)warnings != 0)
+    {
+        check_input_constant_warning_set(reader->output, token, reader->output->constant_warnings[token] | (uint8_t)warnings);
+        check_input_warning_changed(reader, token, warnings);
+    }
 }
 
 static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t block, uint32_t first, uint32_t end,
@@ -51,7 +62,7 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
                 {
                     if (warnings != 0)
                     {
-                        warnings[token] &= (uint8_t)~clear;
+                        check_input_constant_warning_set(reader->output, token, warnings[token] & (uint8_t)~clear);
                     }
                     if (ignored != 0)
                     {
@@ -83,7 +94,10 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
         if (warnings != 0)
         {
             __m512i bytes = _mm512_maskz_loadu_epi8(present, warnings + begin);
+            const __mmask64 before = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
             bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_and_si512(bytes, keep));
+            const __mmask64 after = selected & _mm512_cmpneq_epi8_mask(bytes, zero);
+            reader->output->constant_warning_count -= (uint32_t)_mm_popcnt_u64(before) - (uint32_t)_mm_popcnt_u64(after);
             _mm512_mask_storeu_epi8(warnings + begin, selected, bytes);
             pending = _mm512_or_si512(pending, bytes);
         }
@@ -140,7 +154,7 @@ static void check_input_warning_range(CheckInputReader* reader, uint32_t first, 
                 {
                     if (reader->output->constant_warnings != 0)
                     {
-                        reader->output->constant_warnings[token] &= (uint8_t)~clear;
+                        check_input_constant_warning_set(reader->output, token, reader->output->constant_warnings[token] & (uint8_t)~clear);
                         if (reader->output->constant_warning_ignored != 0)
                         {
                             reader->output->constant_warning_ignored[token] &= (uint8_t)~clear;
