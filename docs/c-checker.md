@@ -1138,14 +1138,25 @@ What the lowering covers past scalars (#145's programs):
   receipts, including the successful pinned c-testsuite rerun.
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
-  is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
-  where `abi_assign` puts them; a struct or union result lands in a frame object
+  is its address, its size in `argument_sizes` (but 8 for one passed as its low
+  eightbyte alone, below), and Tier 0 passes its bytes where `abi_assign` puts
+  them; a struct or union result lands in a frame object
   of the call site's own (`call_result_objects`), whose address is the call's
   value. That object is aligned to the result's canonical type at least, an
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is padding (NO_CLASS: a 16-byte union of an `int`
+  and an empty struct aligned to 16) passes as its low eightbyte alone
+  (`check_lower_passed_bytes`), an `i64` or a `double` in clang's code: in a
+  register, in an 8-byte stack slot, the next argument's after it (when clang's
+  count of registers has one left and LLVM's none), or in a slot of its size
+  once clang's has none, the rest of it padding. A call copies those 8 bytes,
+  and the parameter arrives in an object of 8, which the function's first
+  entries copy into one of its size, the C parameter's. (A caller's copy of 16
+  bytes overwrote the next argument's slot, and a parameter of 16 bytes kept in
+  its slot reached into it, or past the incoming arguments.) A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
