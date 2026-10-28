@@ -145,13 +145,36 @@ static uint32_t check_driver_publication_position(const Parser* parser, const Pr
 // Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
 // brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
 // sparse warning; no clean unit acquires a token-wide completion column.
-static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair, uint32_t token, uint32_t warning)
+static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
+                                              const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning)
 {
     const uint32_t runtime = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
                              CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW;
     uint32_t boundary = token;
+    bool completed = false;
+    uint32_t low = 0;
+    uint32_t high = completion_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = (completions[middle] >> 32) < token;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    // The stable token sort preserves append order, so the final matching rewrite supplies its completion. Each
+    // token has at most eight legacy warning bits: all such lookups inspect at most eight times the sparse facts.
+    for (uint32_t i = low; i < completion_count && (completions[i] >> 32) == token; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + (uint32_t)completions[i];
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id < 8 && event->payload.data == warning)
+        {
+            boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? parser->tokens.count + 1u :
+                       event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u);
+            completed = true;
+        }
+    }
     const uint32_t constant = input->constant_warnings != NULL && token < input->token_count ? input->constant_warnings[token] : 0;
-    if ((warning & runtime) != 0 && (constant & warning) == 0)
+    if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
     {
         const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
         if (node < input->graph.count && input->graph.source_positions != NULL)
@@ -273,15 +296,24 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
     const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
     const uint64_t warning_room = show_warnings ? 2 * (uint64_t)scanned + nodes + excess_count + 1 : 0;
+    const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
     uint64_t* warning_sorting = warning_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
-    const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL);
+    uint64_t* completion_keys = completion_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, completion_count) : NULL;
+    uint64_t* completion_sorting = completion_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, completion_count) : NULL;
+    const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL) &&
+                       (completion_count == 0 || (completion_sorting != NULL && input->warning_events.events != NULL));
     if (ready)
     {
+        for (uint32_t i = 0; i < completion_count; i += 1)
+        {
+            completion_keys[i] = (uint64_t)input->warning_events.events[i].token << 32 | i;
+        }
+        const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
         uint32_t report_total = 0;
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
@@ -429,7 +461,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, token, warning_flag);
+                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag);
                     pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;

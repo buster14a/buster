@@ -28,6 +28,28 @@ static void check_input_warning_add(CheckInputReader* reader, uint32_t token, ui
     check_input_warning_changed(reader, token, warnings);
 }
 
+// Existing low-byte warning flags remain the policy/suppression truth. Sparse MESSAGE facts retain only the
+// producer's proven completion boundary; a later clear/rewrite can leave an old immutable fact, so the renderer
+// selects the latest matching fact only for a warning whose final dense bit is still present.
+static void check_input_warning_add_at(CheckInputReader* reader, uint32_t token, uint32_t warnings, uint32_t completion)
+{
+    check_input_warning_add(reader, token, warnings);
+    for (uint32_t flags = warnings & 0xffu; flags != 0 && reader->warning_events.arena != NULL && !reader->output->resource; flags &= flags - 1)
+    {
+        const uint32_t flag = flags & (0u - flags);
+        const CheckWarningEvent event = {
+            .id = (uint32_t)__builtin_ctz(flag),
+            .kind = CHECK_WARNING_EVENT_MESSAGE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion,
+            .payload = { .data = flag },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+}
+
 static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t block, uint32_t first, uint32_t end,
                                           uint8_t clear, uint8_t suppress)
 {
