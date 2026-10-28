@@ -859,6 +859,58 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
     check_test_types_close(&types);
 }
 
+static void check_test_binding_recovery_limits(CheckTest* test)
+{
+    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    uint32_t parents[] = { 3, 3, 3, BUSTER_PARSE_ROOT, 7, 7, 7, BUSTER_PARSE_ROOT, 11, 11, 11, BUSTER_PARSE_ROOT };
+    uint32_t postorder[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+    uint8_t kinds[BUSTER_ARRAY_LENGTH(parents)];
+    uint8_t roles[BUSTER_ARRAY_LENGTH(parents)];
+    memset(kinds, PARSE_KIND_IDENTIFIER, sizeof(kinds));
+    memset(roles, PARSE_ROLE_OPERAND, sizeof(roles));
+    Parser parser = {
+        .tokens = { .kinds = kinds, .count = BUSTER_ARRAY_LENGTH(parents) },
+        .tree = { .parents = parents, .roles = roles },
+    };
+    const uint64_t capacity = storage.capacity;
+    check_test_expect(test, storage.base != NULL, "diagnostic declaration-cut test storage");
+    for (uint32_t scenario = 0; storage.base != NULL && scenario < 8; scenario += 1)
+    {
+        arena_pop_to(&storage, 0);
+        storage.capacity = scenario == 6 ? 0 : capacity;
+        CheckInputReport reports[] = {
+            { .token = 1, .message = CHECK_INPUT_UNDECLARED },
+            { .token = 9, .message = CHECK_INPUT_UNDECLARED },
+        };
+        reports[1].message = scenario == 3 ? CHECK_INPUT_DECLARATION : CHECK_INPUT_UNDECLARED;
+        reports[1].pragma = scenario == 4 ? 1 : 0;
+        roles[9] = scenario == 5 ? PARSE_ROLE_MEMBER : PARSE_ROLE_OPERAND;
+        CheckInput input = { .token_count = parser.tokens.count, .reports = reports, .report_count = scenario == 1 ? 0 : 2 };
+        input.deferred_tokens = scenario == 7 ? roles : NULL;
+        CheckInputReader reader = { .output = &input, .parser = &parser, .arena = &storage, .postorder = postorder };
+        check_input_diagnostic_recover(&reader, scenario != 2);
+        if (scenario == 0)
+        {
+            bool exact = input.diagnostic_limits != NULL && input.diagnostic_report_count == 2 && !input.resource;
+            for (uint32_t token = 0; exact && token < parser.tokens.count; token += 1)
+            {
+                const uint32_t expected = token < 4 ? 1 : token < 8 ? parser.tokens.count : 9;
+                exact = input.diagnostic_limits[token] == expected;
+            }
+            check_test_expect(test, exact, "failed declarations retain safe prefixes and independent declaration cuts stay complete");
+        }
+        else
+        {
+            check_test_expect(test, input.diagnostic_limits == NULL && input.diagnostic_report_count == 0 && storage.length == 0 &&
+                                   input.resource == (scenario == 6), "clean, incomplete and unsafe reader states never publish recovery cuts");
+        }
+        check_test_expect(test, reports[0].token == 1 && reports[0].message == CHECK_INPUT_UNDECLARED && input.graph.count == 0,
+                          "declaration-cut recovery neither changes original reports nor fabricates expression values");
+    }
+    storage.capacity = capacity;
+    arena_release(&storage);
+}
+
 static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
 {
     check_test_binding_source(test, "", "x", 0, 0, true, false);
@@ -1068,6 +1120,7 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
     check_test_binding_guards(test);
     check_test_binding_column_failures(test);
     check_test_binding_compatibility_capacity(test);
+    check_test_binding_recovery_limits(test);
 }
 
 #endif

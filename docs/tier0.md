@@ -54,8 +54,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
-- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on the functions `-c` compiles
+- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
   of C files, `sqlite3.c`'s among them ("Measurements", below).
+  The source benchmark admits the reachable functions through typed emission.
+  Static-data publication and object-section placement, including assembled
+  file-scope atoms' section descriptors, are outside its validation scope.
+  For example, a valid function stream under a named `.note.*` section can be
+  measured even when whole-object publication explicitly refuses that section.
+  The driver and corpus object checks establish whole-object eligibility.
 
 - **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
