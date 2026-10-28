@@ -67,9 +67,13 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
                 arguments[count++] = (char*)cases[c].second;
             }
             const int oracle = check_test_driver_spawn(arguments, &expected);
+            const bool deprecated = expected != NULL && strstr(expected, "without a prototype") != NULL;
+            const bool arity_warning = expected != NULL && strstr(expected, "too many arguments") != NULL;
+            const bool return_warning = expected != NULL && strstr(expected, "non-void function") != NULL;
             check_test_expect(test, oracle == (cases[c].errors != 0) && expected != NULL &&
                               check_test_implicit_count(expected, ": warning:") == cases[c].warnings &&
-                              check_test_implicit_count(expected, ": error:") == cases[c].errors,
+                              check_test_implicit_count(expected, ": error:") == cases[c].errors &&
+                              (cases[c].warnings + cases[c].errors == 0 || deprecated || arity_warning),
                               "Clang establishes the independent K&R policy status and exact counts");
             if (lazy)
             {
@@ -89,7 +93,10 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
                          scalar == 0 ? "scalar" : "vector", mode == 0 ? "syntax" : "object");
                 check_test_expect(test, oracle >= 0 && status == oracle && actual != NULL &&
                                   check_test_implicit_count(actual, ": warning:") == cases[c].warnings &&
-                                  check_test_implicit_count(actual, ": error:") == cases[c].errors, description);
+                                  check_test_implicit_count(actual, ": error:") == cases[c].errors &&
+                                  (strstr(actual, "without a prototype") != NULL) == deprecated &&
+                                  (strstr(actual, "too many arguments") != NULL) == arity_warning &&
+                                  (strstr(actual, "non-void function") != NULL) == return_warning, description);
                 check_test_expect(test, mode == 0 || (access(objects[scalar], F_OK) == 0) == (status == 0),
                                   "K&R warning promotion blocks object publication and permitted warnings retain emission");
                 free(actual);
