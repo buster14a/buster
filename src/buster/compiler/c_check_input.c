@@ -2946,6 +2946,12 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
         CheckInputAttributes* common = reader->specifier_attributes;
         valid = valid && base != 0 && !reader->specifier_pending && !is_typedef && !is_inline && !reader->specifier_thread_local &&
                 (storage == 0 || storage == C_NAME_REGISTER);
+        const uint32_t noreturn = valid ? check_input_noreturn_keyword(common) : BUSTER_CHECK_NONE;
+        if (noreturn != BUSTER_CHECK_NONE)
+        {
+            check_input_report(reader, noreturn, CHECK_INPUT_DECLARATION);
+            valid = false;
+        }
         if (!valid && reader->output->report_count == 0)
         {
             check_input_report(reader, start, CHECK_INPUT_DECLARATION);

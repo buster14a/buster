@@ -995,6 +995,24 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
+            "K&R parameter rejects a leading _Noreturn keyword",
+            "int f(a) _Noreturn int a; { return a; }\n",
+            true,
+            false
+        },
+        {
+            "K&R parameter rejects an interleaved _Noreturn keyword",
+            "int f(a) int _Noreturn a; { return a; }\n",
+            true,
+            false
+        },
+        {
+            "K&R parameter retains register and ignored noreturn attributes",
+            "int f(a) register int a __attribute__((noreturn)); { return a; }\n",
+            false,
+            false
+        },
+        {
             "callback static initializer",
             "int f(int x) { return x; } int (*p)(int) = f;\n",
             false,
