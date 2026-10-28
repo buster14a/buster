@@ -21,9 +21,24 @@ static const char check_driver_const_bitfield[] = "const unsigned k=3;\nstruct S
 static const char check_driver_const_case[] = "const int k=3;\nint f(int n){switch(n){case k:return 1;default:return 0;}}\n";
 static const char check_driver_const_assert[] = "const int k=3;\n_Static_assert(k,\"k\");\n";
 static const char check_driver_const_static[] = "const int k=3;\nint g=k;\n";
+static const char check_driver_const_return[] = "struct S{int x;};\nstruct S f(void)\n{\nconst int k=3;\nenum{E=k};\n}\n";
 
 static const CheckDriverConstFixture check_driver_const_fixtures[] =
 {
+    {
+        .name = "a promoted GNU object fold preserves same-body aggregate return analysis",
+        .source = check_driver_const_return,
+        .options = { "-Wreturn-type", "-Werror=gnu-folding-constant" },
+        .oracle_status = 1,
+        .oracle_message = "[-Wreturn-type]",
+    },
+    {
+        .name = "one promoted GNU fold keeps its aggregate return warning at error limit one",
+        .source = check_driver_const_return,
+        .options = { "-Wreturn-type", "-Werror=gnu-folding-constant", "-ferror-limit=1" },
+        .oracle_status = 1,
+        .oracle_message = "[-Wreturn-type]",
+    },
     {
         .name = "default file array fold",
         .source = check_driver_const_array,
