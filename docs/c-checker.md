@@ -1268,8 +1268,16 @@ What the lowering covers past scalars (#145's programs):
   (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
   `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
   conversion's or constant's type for one. The overflow builtins store into a
-  `_BitInt` destination its value extended so. `_BitInt(65)` to `_BitInt(128)`
-  are refused by name.
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts (a constant too).
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame

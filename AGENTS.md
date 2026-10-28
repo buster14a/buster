@@ -5286,8 +5286,8 @@ and a callee per signature as `X86Instruction` records through `x86_encode`,
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
-this compiler on our side: a world of what its C passes (integers and
-`_BitInt`s to 64 bits, `__int128` and `unsigned __int128`, enums, pointers,
+this compiler on our side: a world of what its C passes (integers to 64 bits,
+`_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
 at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the

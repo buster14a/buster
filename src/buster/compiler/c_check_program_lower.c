@@ -536,11 +536,11 @@ static uint8_t check_lower_type_class(const TypeTable* types, TypeId type)
     else if (check_action_integer_type(types, base, &bits, &sign))
     {
         // An enum's values are its underlying type's. Of the 128-bit integers, __int128 and unsigned __int128 (Tier 0's I128
-        // and U128, which also live in memory: check_lower_memory_class); a _BitInt(128) stays refused. A _BitInt(N) of
-        // fewer than 64 bits whose N is no class's width takes the narrowest class that holds it, its values extended from
-        // N bits in it (check_lower_bit_int_shift).
+        // and U128, which also live in memory: check_lower_memory_class), and _BitInt(65) to _BitInt(128). A _BitInt(N)
+        // whose N is no class's width takes the narrowest class that holds it, its values extended from N bits in it
+        // (check_lower_bit_int_shift).
         const TypeId integer = kind == BUSTER_TYPE_KIND_ENUM ? types->types.base[type_index(base)] : base;
-        const bool wide = bits == 128 && type_kind(types, integer) == BUSTER_TYPE_KIND_INTEGER;
+        const bool wide = (bits == 128 && type_kind(types, integer) == BUSTER_TYPE_KIND_INTEGER) || (kind == BUSTER_TYPE_KIND_BIT_INT && bits > 64);
         result = bits == 1 ? BUSTER_TYPED_CLASS_U8 : bits == 8 ? BUSTER_TYPED_CLASS_I8 : bits == 16 ? BUSTER_TYPED_CLASS_I16 :
                  bits == 32 ? BUSTER_TYPED_CLASS_I32 : bits == 64 ? BUSTER_TYPED_CLASS_I64 : wide ? BUSTER_TYPED_CLASS_I128 : UINT8_MAX;
         if (result == UINT8_MAX && bits < 64 && kind == BUSTER_TYPE_KIND_BIT_INT)
@@ -820,9 +820,9 @@ static bool check_lower_wide(const CheckLowerWriter* writer, TypeId type)
     return check_lower_wide_class(check_lower_class(writer, type));
 }
 
-// A _BitInt(N) narrower than its class (check_lower_class: unsigned _BitInt(1) and every N below 64 but 8, 16 and 32):
-// the count that a left shift and a right shift by it extend its low N bits through the class with, signed or not by
-// the class, as clang stores such a value; 0 for every other type. Its values stay so extended, as the class's
+// A _BitInt(N) narrower than its class (check_lower_type_class: unsigned _BitInt(1), every N below 64 but 8, 16 and 32,
+// and every N from 65 to 127, of the 128-bit classes): the count that a left shift and a right shift by it extend its low
+// N bits through the class with, signed or not by the class, as clang stores such a value; 0 for every other type. Its values stay so extended, as the class's
 // operations, compares and conversions read them: what may leave other bits (a sum, a difference, a product, a left
 // shift, a negation, a complement, a value from memory or a call, a conversion to it) is extended again after it.
 static uint32_t check_lower_bit_int_shift(const TypeTable* types, TypeId type)
@@ -831,9 +831,9 @@ static uint32_t check_lower_bit_int_shift(const TypeTable* types, TypeId type)
     uint32_t bits = 0;
     bool sign = false;
     uint32_t shift = 0;
-    if (type_kind(types, base) == BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, base, &bits, &sign) && bits < 64)
+    if (type_kind(types, base) == BUSTER_TYPE_KIND_BIT_INT && check_action_integer_type(types, base, &bits, &sign))
     {
-        const uint32_t width = bits <= 8 ? 8 : bits <= 16 ? 16 : bits <= 32 ? 32 : 64;
+        const uint32_t width = bits <= 8 ? 8 : bits <= 16 ? 16 : bits <= 32 ? 32 : bits <= 64 ? 64 : 128;
         shift = width - bits;
     }
     return shift;
@@ -2646,7 +2646,11 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
         }
         if (check_lower_wide_class(class))
         {
-            check_lower_wide_constant(writer, class, value->integer);
+            // A _BitInt narrower than 128 bits extends from its own width (check_lower_bit_int_shift), as a narrow one does.
+            const uint32_t shift = writer->bit_ints ? check_lower_bit_int_shift(writer->program->types, value->type) : 0;
+            const unsigned __int128 shifted = value->integer << shift;
+            const unsigned __int128 extended = class == BUSTER_TYPED_CLASS_I128 ? (unsigned __int128)((__int128)shifted >> shift) : shifted >> shift;
+            check_lower_wide_constant(writer, class, extended);
         }
         else
         {
@@ -3497,6 +3501,15 @@ static uint32_t check_lower_builtin_type(const TypeTable* types, TypeId type)
     return result;
 }
 
+// Whether an overflow builtin's operand or destination is a _BitInt of 65 to 127 bits, which its recipes don't take: they
+// take a 128-bit one whole (BUSTER_CBUILTIN_LOWER_WIDE) and narrower ones of up to 64 bits.
+static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
+{
+    uint32_t width = 0;
+    bool sign = false;
+    return check_action_integer_type(types, type, &width, &sign) && width > 64 && width < 128;
+}
+
 static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -3517,6 +3530,11 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
         else if (stream->effects[selected].unsupported != 0 || stream->effects[selected].evaluated_operands != 7)
         {
             check_lower_unsupported(writer, "this overflow builtin");
+        }
+        else if (check_lower_builtin_between(program->types, conversions->operands[0].type) ||
+                 check_lower_builtin_between(program->types, conversions->operands[1].type) || check_lower_builtin_between(program->types, conversions->store.type))
+        {
+            check_lower_unsupported(writer, "overflow builtins of _BitInt of 65 to 127 bits");
         }
         else
         {
