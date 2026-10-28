@@ -1279,6 +1279,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         const bool emitted = !valid || (units != NULL ? check_units_merge(&code.link, units, unit_count, &binding, &output, &bytes, scratch) :
                                                         check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
                                                                                  &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+        if (units != NULL)
+        {
+            check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
+        }
         if (!emitted)
         {
             valid = false;

@@ -50,7 +50,8 @@ typedef enum CheckStage
     // and symbols, and an executable's bind_begin.
     CHECK_STAGE_EMIT_SETUP,
     // On several lanes (#151), the lanes' run: every function's lowering, Tier 0 code, sizing, encoding, rows and frame
-    // at once, which the stages from `lower` to `unwind` take on one lane.
+    // at once, which the stages from `lower` to `unwind` take on one lane. With several source files (#152), the units'
+    // run, every unit compiled on the lanes.
     CHECK_STAGE_LANES,
     // On one lane, branch_sizing_validate and size_branches of every function (with --verify, x86_validate).
     CHECK_STAGE_BRANCH_SIZING,
@@ -59,7 +60,8 @@ typedef enum CheckStage
     // On one lane, every function's frame for its unwind table; and the tables written.
     CHECK_STAGE_UNWIND,
     // Every function's atom, symbol, labels and fixups added to the link, the helpers' code, the switches' jump
-    // tables, and on one lane each function's labels' offsets.
+    // tables, and on one lane each function's labels' offsets. With several source files, the units' links merged
+    // (check_units_merge, its bind_begin among it).
     CHECK_STAGE_CODE_ATOMS,
     // -g: on one lane each function's source rows; and the DWARF (check_debug_build).
     CHECK_STAGE_DEBUG,
