@@ -301,6 +301,13 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
             destinations[i] = i;
             sources[i] = iteration % 2 == 0 ? (i + 1) % count : tier1_allocation_test_random(&seed) % 32;
         }
+        for (uint32_t i = count; i > 1; i -= 1)
+        {
+            const uint32_t other = tier1_allocation_test_random(&seed) % i;
+            const uint32_t swap = destinations[i - 1];
+            destinations[i - 1] = destinations[other];
+            destinations[other] = swap;
+        }
         const Tier1ParallelMoves input = {
             .sources = sources,
             .destinations = destinations,
@@ -309,6 +316,9 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
         };
         Tier1ResolvedMoves output = { 0 };
         bool valid = tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
+        Tier1ResolvedMoves oracle = { 0 };
+        valid = valid && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
+        valid = valid && oracle.count == output.count && memcmp(oracle.sources, output.sources, output.count * 4) == 0 && memcmp(oracle.destinations, output.destinations, output.count * 4) == 0;
         for (uint32_t i = 0; valid && i < output.count; i += 1)
         {
             valid = output.sources[i] < 33 && output.destinations[i] < 33;
@@ -894,6 +904,8 @@ static void tier1_allocation_test_native(Tier1AllocationTestTally* tally, Arena*
     }
 }
 
+#include "buster/compiler/tier1_moves_test.c"
+
 static int run_tier1_allocate_tests(int argc, char** argv)
 {
     uint64_t seed = 140;
@@ -928,6 +940,7 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_generated(&tally, &arena, seed, count);
         tier1_allocation_test_failures(&tally, &arena);
         tier1_allocation_test_moves(&tally, &arena, seed);
+        tier1_allocation_test_move_scaling(&tally);
         tier1_allocation_test_required(&tally, &arena);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);
