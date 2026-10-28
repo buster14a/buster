@@ -1375,7 +1375,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                 // reports share source order with declaration reports, but this fragment can never be emitted.
                 if (input_valid || input.diagnostic_graph)
                 {
-                    const CheckOptions check_options = { .scalar = scalar };
+                    const CheckOptions check_options = { .scalar = scalar, .verify = verify };
                     CheckStream stream;
                     ready = check_graph_run(&types, &input.graph, &output_arena, &scratch, &check_options, &stream);
                     ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, &scratch);

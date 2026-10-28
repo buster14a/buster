@@ -24,7 +24,9 @@ The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
 (`executable_write`). A binding that finds the snapshot damaged discards it and
-links once more from a fresh import. `--verify` also checks every function's
+links once more from a fresh import. `--verify` checks the reader's expression
+graph and its retained scheduling/allocation facts against the independent
+graph validator, and also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
 ([the c-testsuite guide](c-testsuite.md)), with `-c` too. Without it, the
 emission checks only each function's branch columns, which branch sizing reads
@@ -468,7 +470,37 @@ of the previous nonempty slice. This gives every argument-conversion record a
 single owner. The source adapter produces exactly that layout. Arguments are
 already checked expressions, not syntax that the call action must reparse.
 `check_graph_run` validates topology, arity, slice bounds, operation values and
-context bits before reading child results. Empty graphs need no node columns;
+context bits before reading child results for graphs supplied by other
+producers. The source reader publishes immutable graph facts (#674): one
+purity byte per node, maximum call width, overflow-effect and builtin counts,
+and argument/sideband consumption totals. `check_input_add` completes the
+preceding node after its caller filled the leaf, requested type and call data,
+before a later node can consume its purity. The reader flushes its final node
+and publishes the sideband totals before returning, including diagnostic-only
+prefixes. This costs constant work per node while its columns are still hot;
+it avoids a later pass over those columns. Both reader paths use the same
+protocol. Required dependency order makes each node's purity depend only on
+its operator, requested type and at most three existing purity bytes.
+
+Only this reader publishes `recorded_ready`; `check_graph_initialize` and
+other graph producers leave it false. `check_graph_add` invalidates a published
+summary, so a subsequent run falls back to validation. A caller that directly
+changes a published graph must clear `recorded_ready` first. All columns and
+sideband lists remain immutable while a summary is published. The retained
+purity column has exactly `capacity` readable bytes and lives with the graph;
+only `count` initialized bytes are copied to the scheduler's mutable marks.
+Allocation failure follows the reader's ordinary resource failure path.
+
+`CheckOptions.verify`, selected by the C driver's `--verify`, validates these
+graphs too and checks every counter and purity byte against the reader's
+facts. Mismatches return `CHECK_STATUS_INVALID_GRAPH` and roll back output;
+a purity mismatch names its first node. Generated graphs and fixtures retain
+the ordinary scalar/vector validators as independent oracles. `test-checker`
+checks both recorded schedules with and without verification on its generated
+graphs, compares both validators with each source fixture's recorded facts,
+and mutates every counter and purity byte to check rejection and rollback.
+
+Empty graphs need no node columns;
 an empty action batch may use null input and output pointers.
 
 Counted auxiliary records retain builtin calls, overload candidates/selections
@@ -574,8 +606,9 @@ the action gives: the leaf with its type as operand 0's conversion, or for an
 invalid type, that type's diagnostic and a zero value. It writes the records in
 node order: the barrier's leaves in the walk, a region's in its level pass,
 which then schedules only the rest. A separate pass of leaves wrote each
-output cache line twice. The vector path also validates the graph 16 nodes at a
-time (`check_graph_validate_vector`): the operators' classes come from one
+output cache line twice. When validation is required (an external producer or
+`--verify`), the vector path validates the graph 16 nodes at a time
+(`check_graph_validate_vector`): the operators' classes come from one
 `vpermi2b` table built from the scalar rules, and each argument slice's offset
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar

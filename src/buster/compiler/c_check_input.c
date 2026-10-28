@@ -3491,6 +3491,9 @@ static uint32_t check_input_expression_end(const CheckInputReader* reader, uint3
 
 static uint32_t check_input_add(CheckInputReader* reader, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c)
 {
+    // The previous node's caller has now filled its action data and witnesses. Finish it before a new node
+    // can consume its purity, while its columns are still hot. Late reader passes only add diagnostic context.
+    check_graph_record_nodes(&reader->output->graph);
     const uint32_t node = check_graph_add(&reader->output->graph, op, token, a, b, c);
     if (node == BUSTER_CHECK_NONE)
     {
@@ -4831,6 +4834,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.parameters = input->parameters;
     reader.parameter_next = input->parameter_next;
     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
+    input->graph.recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+    valid &= input->graph.recorded_pure != NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
     input->graph.warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : 0;
     valid &= input->graph.warning_suppressed != 0;
@@ -5251,6 +5256,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_packed_members(&reader);
                 }
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
+                if (!input->resource)
+                {
+                    check_graph_record_finish(&input->graph);
+                }
             }
         }
         valid = !input->resource && input->report_count == 0 && reader.bindings.valid;
