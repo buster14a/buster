@@ -1338,6 +1338,18 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
     check_lanes_test_expect(tally, check_lanes_test_run(capped, errors) == 0, "the driver takes an explicit calling-thread-only worker budget", NULL);
     char* budget_missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--worker-budget", NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(budget_missing, errors) == 1, "the driver refuses --worker-budget without its value", NULL);
+    static const char* const dry_routes[] = { "-c", "-E", "parse" };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(dry_routes); r += 1)
+    {
+        unlink(object);
+        char* dry[] = { "env", "MAKEFLAGS=n", (char*)executable, (char*)dry_routes[r], "-o", object,
+                        "/buster-nonexistent-dry-run-source.c", NULL };
+        const int status = check_lanes_test_run(dry, errors);
+        struct stat output_stat;
+        struct stat error_stat;
+        check_lanes_test_expect(tally, status == 0 && stat(object, &output_stat) != 0 && stat(errors, &error_stat) == 0 && error_stat.st_size == 0,
+                                "make dry runs do no source work, output or diagnostics in C, -E and parse routes", dry_routes[r]);
+    }
 }
 
 // The driver on each failing program `failure_N.c` in `directory` (see the file's comment), by each path: by --lanes 8,
