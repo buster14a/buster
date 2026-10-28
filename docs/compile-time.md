@@ -229,6 +229,17 @@ together on the pinned SQLite input. Wall and system-time improvements were
 not established; the record's compiler, source, controls and remaining scope
 are explicit.
 
+A separate #628 initialization experiment fills thirteen retained uint32 output
+columns whose empty value is `UINT32_MAX` with bounded all-one byte fills,
+including each column's sentinel. Requested scalar parsing keeps the original
+interleaved initialization loop as an independent oracle, and the six
+reader-internal NONE stores keep their existing ownership and initialization.
+Optional zero-default columns retain their existing NULL guards. Dirty and
+borrowed output storage is always explicitly cleared; no fresh-page or arena
+high-water assumption is made. The column layout and allocated byte count do
+not change. Instruction and whole-process measurements determine whether this
+experiment is worth retaining.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:
