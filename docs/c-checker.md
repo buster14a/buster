@@ -1245,6 +1245,27 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **`_BitInt(N)` of up to 64 bits (#148).** It takes the narrowest class of 8,
+  16, 32 or 64 bits that holds it (`check_lower_type_class`), its values extended
+  from N bits in it, as clang stores them (`check_lower_bit_int_shift`). What
+  may leave other bits is extended again after it by a pair of shifts
+  (`check_lower_bit_int_extend`): a sum, a difference, a product, a left shift,
+  a negation, a complement, an update, a conversion to it, and a value from
+  memory or a call (an update's old value too), whose bits past N the convention
+  leaves unspecified and clang's loads ignore. Tier 0 computes, compares and
+  shifts in I32, U32, I64 and U64 alone, so an operation of class I8, U8, I16 or
+  U16 (a `_BitInt`'s alone, as C promotes the other narrow types) converts its
+  operands to I32 or U32, by their signedness, and its result back
+  (`check_lower_computed`), and so does a switch on one, its cases too. A
+  constant extends from N bits. An expression of a `_BitInt` goes first to
+  `check_lower_bit_int_node`, out of line, by its value's kind, which the
+  expansion reads for every expression anyway, and the batch's templates
+  (`c_check_program_batch.c`) take none, by its type's fact
+  (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
+  `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
+  conversion's or constant's type for one. The overflow builtins store into a
+  `_BitInt` destination its value extended so. `_BitInt(65)` to `_BitInt(128)`
+  are refused by name.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -1441,7 +1462,7 @@ What the lowering covers past scalars (#145's programs):
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
+`_BitInt`s past 64 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
