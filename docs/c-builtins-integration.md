@@ -91,6 +91,25 @@ invalid or unsupported input and insufficient entry/local capacity leave all
 caller bytes and counts unchanged. Publication uses masked tails, with a
 scalar copy twin. No allocations or retained scratch storage are required.
 
+Integer callers may supply an optional `CBuiltinLowerScratch`. It owns up to
+20 private U64 local identities, disjoint from every argument and source local;
+the append reuses them and grows the pool transactionally when a larger recipe
+first needs more. Its result's temporary range describes only new locals.
+An overflow recipe and its product use one cursor, so their simultaneously live
+scratch values have separate identities. Recipe results reach the typed value
+stack before the next recipe can overwrite scratch. Miscellaneous, floating
+and varargs recipes keep their existing allocation contract.
+
+Source lowering keeps this recipe pool per function. Argument slots are cached
+separately by active integer-builtin nesting depth, argument position and value
+class. Each outer argument therefore survives nested calls in later arguments
+or in the destination expression; signed and unsigned 128-bit arguments retain
+their own 16-byte frame objects. Both pools start fresh for every body, including
+bodies lowered by different lanes. Repeated independent calls add typed entries
+and source locals, but no new builtin scratch once the applicable slots exist.
+Capacity refusals from integer recipes name the recipe bound, the per-function
+entry or local limit, or the lowering storage that actually ran out (#665).
+
 The recipes use the existing target-independent `BUSTER_TYPED_*` operations.
 Byte swaps and counts use fixed shifts, masks and arithmetic. Full overflow
 products use four 32-by-32 products and exact two-limb correction. With a

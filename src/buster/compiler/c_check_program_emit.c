@@ -1168,8 +1168,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
                     const bool unpublished = kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                              kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
-                                             kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_COMMON ||
-                                             (kind == CHECK_ATTRIBUTE_VISIBILITY && !check_input_attribute_equal(attribute->text, "default"));
+                                             kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_COMMON;
                     if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
                     {
                         // The typed source contract retains these obligations. Until symbol aliases and startup
@@ -1400,6 +1399,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
             flags = kind | (program->input->linkage[declaration] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
+            if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
+            {
+                flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+            }
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
                  (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
