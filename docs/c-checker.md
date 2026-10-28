@@ -1471,7 +1471,7 @@ warning-bearing selections in several bodies. The scaling campaign's original
 C generator and work-count instrumentation live in buster-performance under
 `docs/measurements/nested-selections-603-2026-10-27`.
 
-The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/a3b6790bf081b1d6958a57c7f9073a80f0be15cd/docs/measurements/nested-selections-603-2026-10-27)
+The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/6ab3a0e96500957ce30a05f974806eb153f482ac/docs/measurements/nested-selections-603-2026-10-27)
 compares main `92c025e7` with the implementation at `1014c296`. At depth
 2048, the eight default-driver cases improve from 8.42–30.57 ms to
 2.04–3.91 ms (4.1–8.4 times faster). Runtime discarded generics' root and

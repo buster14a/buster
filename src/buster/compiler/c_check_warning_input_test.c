@@ -97,6 +97,47 @@ static void check_test_warning_ranges(CheckTest* test)
             {
                 mismatches += memcmp(columns[column], expected[column], count) != 0;
             }
+            if (count >= BUSTER_CHECK_WARNING_BLOCK)
+            {
+                const uint32_t token = count / 2;
+                // Build an exact summary while this token is independent, then make it ordinary. Invalidating
+                // the index must restore work that the old summary deliberately excluded.
+                columns[3][token] |= BUSTER_CHECK_CONSTANT_BOUND_CONTEXT;
+                columns[0][token] = expected[0][token] = 0xff;
+                columns[1][token] = expected[1][token] = 0xff;
+                reader.warning_index_ready = false;
+                for (uint32_t phase = 0; phase < 3; phase += 1)
+                {
+                    if (phase == 1)
+                    {
+                        columns[3][token] &= (uint8_t)~BUSTER_CHECK_CONSTANT_BOUND_CONTEXT;
+                        reader.warning_index_ready = false;
+                    }
+                    else if (phase == 2)
+                    {
+                        // A worker join can replace columns after the parent finished a previous clear. It
+                        // invalidates summaries; a later warning must still reach the immediate-byte oracle.
+                        columns[0][token] = expected[0][token] = 0x5a;
+                        columns[1][token] = expected[1][token] = 0xa5;
+                        columns[2][token] = expected[2][token] = 0;
+                        reader.warning_index_ready = false;
+                    }
+                    check_input_warning_range(&reader, 0, count, 0xff, 0xff);
+                    for (uint32_t at = 0; at < count; at += 1)
+                    {
+                        if ((columns[3][at] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) == 0)
+                        {
+                            expected[0][at] = 0;
+                            expected[1][at] = 0;
+                            expected[2][at] = 0xff;
+                        }
+                    }
+                    for (uint32_t column = 0; column < 3; column += 1)
+                    {
+                        mismatches += memcmp(columns[column], expected[column], count) != 0;
+                    }
+                }
+            }
         }
     }
     check_test_expect(test, mismatches == 0, "scalar/vector ordered warning ranges match independent guarded byte oracle");
