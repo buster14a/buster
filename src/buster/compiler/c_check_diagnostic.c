@@ -318,7 +318,7 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     {
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
-        valid = valid && check_input_visibility_pragmas(&reader, handled);
+        valid = valid && check_input_visibility_pragmas(&reader, handled, false);
         if (valid && result->visibility_pragmas != NULL)
         {
             CheckInputVisibilityPragmas* history = result->visibility_pragmas;

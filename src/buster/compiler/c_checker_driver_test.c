@@ -3146,6 +3146,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             .source = "int value=\n#pragma GCC visibility push(bad)\n;\n",
             .rejected = true,
         },
+        {
+            .name = "legal visibility directive survives an erased malformed body",
+            .source = "int f(void){\n#pragma GCC visibility push(hidden)\nreturn 1+;\n}\n",
+            .rejected = true,
+        },
     };
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;

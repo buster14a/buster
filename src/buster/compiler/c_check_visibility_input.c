@@ -112,7 +112,7 @@ static void check_input_visibility_placement(CheckInputReader* reader, CheckInpu
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    while (*cursor < record->token)
+    while (links != NULL && *cursor < record->token)
     {
         const uint32_t token = *cursor;
         const uint8_t role = parser->tree.roles[token];
@@ -129,7 +129,24 @@ static void check_input_visibility_placement(CheckInputReader* reader, CheckInpu
         }
         *cursor += 1;
     }
-    if (record->warning != 1 && record->token != 0)
+    if (record->warning != 1 && record->token != 0 && links == NULL)
+    {
+        // Recovery can erase the whole failing declaration's tree, and allocation failure can leave no tree.
+        // Only these token kinds prove an interrupted expression without relying on that unavailable forest.
+        const uint8_t before = parser->tokens.kinds[record->token - 1];
+        if (before == PARSE_KIND_EQUAL || before == PARSE_KIND_RETURN)
+        {
+            record->message = "expected expression";
+            record->diagnostic_source = record->source + 3;
+            record->diagnostic_location = 0;
+            record->warning = 0;
+            record->error = true;
+            record->push = false;
+            record->pop = false;
+            reader->output->visibility_error = true;
+        }
+    }
+    else if (record->warning != 1 && record->token != 0)
     {
         const uint32_t before = record->token - 1;
         const uint8_t role = parser->tree.roles[before];
@@ -158,7 +175,7 @@ static void check_input_visibility_placement(CheckInputReader* reader, CheckInpu
     }
 }
 
-static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* handled)
+static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* handled, bool complete_tree)
 {
     const uint64_t mark = reader->arena->length;
     const uint64_t temporary = reader->scratch->length;
@@ -176,8 +193,8 @@ static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* ha
         CheckInputVisibilityPragmas* history = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputVisibilityPragmas, 1);
         CheckInputVisibilityPragma* records = history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputVisibilityPragma, capacity) : NULL;
         uint8_t* stack = records != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, capacity) : NULL;
-        uint32_t* links = stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)reader->parser->tokens.count + 1) : NULL;
-        valid = links != NULL;
+        uint32_t* links = stack != NULL && complete_tree ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)reader->parser->tokens.count + 1) : NULL;
+        valid = stack != NULL && (!complete_tree || links != NULL);
         if (valid)
         {
             *history = (CheckInputVisibilityPragmas){ .records = records };

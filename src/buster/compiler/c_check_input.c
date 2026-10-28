@@ -5642,7 +5642,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 bool prepared = check_input_diagnostic_pragmas(&reader, handled);
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
-                prepared = prepared && check_input_visibility_pragmas(&reader, handled);
+                prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 input->resource |= !prepared;
