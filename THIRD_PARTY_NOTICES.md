@@ -41,6 +41,28 @@ in `c_check_program.c`, `c_check_program_test.c` and
 an external behavior oracle. The dr_wav header used for compile qualification
 remains an external input; no upstream implementation or fixtures are imported.
 
+The system-header warning policy, retained pragma completion and `_Pragma`
+diagnostic-source changes (#666/#662), including their original fixtures in
+`c_preprocessor_system_warning_test.c` and `c_check_pragma_test.c`, use the
+project default terms. LLVM/Clang 23.1.4 diagnostic metadata and engine sources
+provide behavior facts, and Clang runs externally as an oracle. Miniz 3.0.2 is an
+external compile/runtime corpus with its original license retained outside the
+source tree; no implementation or corpus fixtures are copied into this project.
+
+The diagnostic publication gate, command-line limit parsing and summary changes
+in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
+`c_checker_driver_limit_test.c` (#669), are original project material under the
+default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
+and Clang runs externally as an independent oracle. No external implementation
+or fixture is copied.
+
+The deep aggregate-call setup, argument bound and extended generated/guarded
+native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
+`tier0_validate_test.c` and `c_check_program_test.c` (#668/#663) are original
+project material under the default terms. Clang is an external ABI oracle;
+the Nuklear header used for compile qualification is an external input and is
+not imported into this repository.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream
@@ -147,7 +169,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/foreign_copy_test.c`, `src/buster/compiler/foreign_bounds_test.c` | Original copy-relocation, __start_/__stop_ and IFUNC-refusal tests: their C and assembly fixtures and their library are original; Default. GCC, GNU as and lld run externally (lld as the oracle under --cross-check); the policies follow GNU ld's and lld's documented behavior and observed output, not copied code. |
 | `src/buster/compiler/foreign_corpus_test.c` | Original differential corpus test of link-foreign against lld and mold, its C and C++ fixture programs and its comparison rules; Default. gcc, clang, ar, lld and mold run externally. SQLite (public domain), Lua (MIT) and this repository's sources are external validation inputs, compiled and run at test time from paths the caller gives, not incorporated. |
 | `src/buster/compiler/foreign_link_lanes.c` | Original foreign conversion on lanes, its views of the link and the lanes' check of the link (`link_check_lanes`, in `link.c`); Default. The project's existing lane, Link and conversion interfaces are reused; no other linker's implementation is incorporated. |
-| `src/buster/compiler/streaming.c`, `src/buster/compiler/streaming_test.c`, `src/buster/compiler/streaming_benchmark.c` | Original streaming-output experiment: its data-first static executable writer, schedules, writer lane, DWARF units made as functions compile, generated-program glue, tests and benchmark; Default. Existing Tier 0, generator, branch sizing, encoder, unwind, debug, chunk-hash and executable writer code is reused. ELF, DWARF call-frame and DWARF 5 unit encodings are format facts. readelf, llvm-dwarfdump, gdb and perf run externally as consumers under --cross-check, not vendored. |
+| `src/buster/compiler/streaming.c`, `src/buster/compiler/streaming_test.c`, `src/buster/compiler/streaming_benchmark.c`, `src/buster/compiler/streaming_benchmark_test.c` | Original streaming-output experiment: its data-first static executable writer, schedules, writer lane, DWARF units made as functions compile, generated-program glue, tests and benchmark; Default. Existing Tier 0, generator, branch sizing, encoder, unwind, debug, chunk-hash and executable writer code is reused. ELF, DWARF call-frame and DWARF 5 unit encodings are format facts. readelf, llvm-dwarfdump, gdb and perf run externally as consumers under --cross-check, not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
 | `.githooks/commit-msg`, `.githooks/enable-sign-off.sh`, `.codex/hooks.json` | Original hooks that add the maintainer's sign-off where his opt-in is set, and Codex's configuration that runs one; Default. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |

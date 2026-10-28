@@ -279,7 +279,10 @@ static void check_input_visibility_declare(CheckInputReader* reader, uint32_t to
         }
     }
     const uint32_t object = reader->objects[token];
-    if (reader->linkage[token] == 2 && object != 0 && object <= reader->parser->tokens.count && visibility != 0)
+    const bool publish = reader->linkage[token] == 2 && object != 0 && object <= reader->parser->tokens.count && visibility != 0;
+    // Linked declarations may otherwise merge in a lane, but symbol visibility is source-ordered shared state.
+    check_input_lane_refuse(reader, reader->lane && publish, "a body's linked declaration needs source-order visibility");
+    if (!reader->lane && publish)
     {
         if (reader->output->object_visibility == NULL)
         {

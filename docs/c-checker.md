@@ -375,6 +375,14 @@ Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
 
+Preprocessor-completed `#pragma message`, `#pragma GCC warning`, `#pragma GCC
+error`, `#ident` and `#sccs` records are accepted without another semantic action
+or diagnostic (#662). The checker recognizes their bounded canonical shapes;
+unrelated or malformed records retain their own handler/refusal. A GCC error
+still rejects the unit during preprocessing. `#sccs` is canonicalized to `#ident`.
+The strings from `#ident` and `#sccs` are deliberately omitted from object
+`.comment` sections; they affect neither program behavior nor source acceptance.
+
 The action layer is broader than that adapter. It can check enum promotions,
 bit-field restrictions, compatible record assignment, nested const members,
 pointer qualification, function calls and their parameter conversions.
@@ -1171,6 +1179,11 @@ What the lowering covers past scalars (#145's programs):
   native DAZ behavior and requiring `-lm` when linking. Address and RHS
   evaluation remain outside that retry. This does not extend the existing
   floating retry-exception conformance claim.
+  Atomic vector loads, stores, exchange and compare-exchange retain vector value
+  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  updates of atomic vectors are explicitly refused until their retry computation
+  has a vector lowering.
+
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
@@ -1261,6 +1274,42 @@ What the lowering covers past scalars (#145's programs):
   is refused by name. The overflow builtins take 128-bit operands and
   destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
   in a frame object of its own.
+- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 16, 32
+  or 64 bytes (the intrinsics' `__m128` to `__m512i`, elements other than
+  `bool`) are Tier 0's VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
+  memory class: their locals, parameters and temporaries are frame objects of
+  their bytes (`check_lower_temporary_of`), their globals are read and written
+  through their addresses, and each `LOAD`, `STORE` and `SET` of one has its
+  bytes as its value, which the class doesn't carry. A function with one says so
+  (`Tier0Function.vectors`), from the classes its entries have, which one
+  bitmask gathers with long double's and the 128-bit integers'. Their entries
+  are AVX-512 forms: the target needs AVX-512F and AVX-512VL, which the lowering
+  takes from the preprocessor's target (`CheckProgramOptions.target_features`,
+  from `-march` and the `-m` flags), and without them a vector's first entry is
+  refused by name. The convention passes a vector in a register as wide as the
+  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
+  passes and returns one as the 128-bit integers are passed, through a frame
+  object of its bytes. An operator is an X86 entry of its row
+  (`c_check_program_vectors.c`): an instruction per operator and element type
+  where AVX-512 has one (`+ - * / & | ^ << >>`, the compares through an opmask
+  and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
+  AVX-512DQ where the row needs them; a scalar operand converts to the element's
+  type and is splat into every element, a shift's count at the shifted vector's
+  type. `op=` loads, computes and stores back. An element is read and written at
+  its place in the vector's bytes, an rvalue's after it is set into a temporary
+  (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
+  same bytes changes no bits. Integer division and remainder, and 8-bit
+  multiplication and shifts, which clang computes an element at a time, are
+  refused by name, and so are a cast between a vector and an integer, vectors of
+  other sizes and of `bool`, logical vector operators and vector conditions.
+  Element access through a volatile vector lvalue is also refused: Clang uses
+  a whole-vector volatile load, and a read/insert/store for an element write,
+  which a scalar access at the element's address cannot preserve. Whole-vector
+  volatile values and extraction from an already captured rvalue remain supported.
+  A vector local or parameter aligned past 16 bytes,
+  as the intrinsics' types are, is a frame object of its alignment, for which
+  Tier 0 realigns the function's frame
+  ([the Tier 0 guide](tier0.md#realigned-frames-136)).
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -1480,6 +1529,25 @@ closed, in Clang's constraint order. Earlier complete initializer/asm/control
 errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
+
+The source driver caps its published errors as Clang 23 does (#669): nineteen
+ordinary errors by default, followed, only if another error occurs, by the fatal
+`too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
+ordinary errors before that fatal diagnostic, and zero leaves them unlimited.
+Warnings do not consume the error budget; each accepted diagnostic keeps its
+macro notes, while the cutoff has neither a location nor notes. Suppressed
+warnings (`-w`) do not enter the counts. The final line gives the published
+warning and error totals with Clang's singular/plural spelling; clean units print
+no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
+does in Clang. Both output paths share the publication gate, including deferred
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
+graph's construction.
+
+Collection still has two pre-existing recovery boundaries: a preprocessing
+error prevents semantic collection of earlier source (#698), and an undeclared
+identifier can leave later independent expression warnings outside the safe
+graph prefix (#699). The publication limit does not supply those missing
+diagnostics or establish a combined source-order merge across stages.
 
 ### What the lowering costs (#531)
 

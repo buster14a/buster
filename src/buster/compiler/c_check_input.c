@@ -423,6 +423,9 @@ typedef struct CheckInputReader CheckInputReader;
 typedef struct CheckDeferred CheckDeferred;
 static void check_deferred_cut(CheckInputReader* reader, uint32_t opening);
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader);
+// The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
+// body's opening.
+static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
 struct CheckInputSpecifierJob
@@ -492,6 +495,7 @@ struct CheckInputReader
     uint8_t* linkage;
     uint32_t* objects;
     uint8_t* ignored;
+    // Assignment modes 1 (scalar) and 2 (list); 3 marks a complete compact #embed list item.
     uint8_t* initializers;
     uint8_t* static_initializers;
     uint32_t* initializer_declarations;
@@ -635,6 +639,8 @@ struct CheckInputReader
     uint32_t predefined_positions[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     CheckDeferred* deferred;
     const char* lane_reason;
+    // A lane's first tag of its own: the top level's are below it.
+    uint32_t lane_tags;
     bool lane;
     bool lane_unsupported;
 };
@@ -1115,6 +1121,10 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 reader->tag_completions[tag] = BUSTER_CHECK_NONE;
                 // A deferred body's tag takes an index that an earlier body on its lane may have had (c_check_deferred.c).
                 reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_NONE;
+                if (reader->transparent_unions != 0)
+                {
+                    reader->transparent_unions[tag] = 0;
+                }
                 if (fixed)
                 {
                     // Complete here: at the `{` or the `;` after the base.
@@ -1495,6 +1505,12 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
     const uint32_t source = reader->parser->tokens.sources[token];
     PPTokens* output = &reader->pp->output;
     const uint8_t kind = output->kinds[source];
+    // A compact resource has no single-token spelling. A speculative literal-table proof must fall back to the
+    // resource initializer path before interpreting its embed index as a spelling-end location.
+    if (kind == BUSTER_PP_KIND_EMBED)
+    {
+        return false;
+    }
     const uint64_t capacity = kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)output->values[source] - output->locations[source] + 1;
     uint8_t* buffer = arena_push(reader->scratch, capacity, 1);
     if (buffer != 0)
@@ -1591,7 +1607,17 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
     uint32_t length = 0;
     *result = (CheckLiteral){ 0 };
     const uint32_t name = reader->parser->tokens.names[token];
-    if (name == C_NAME_TRUE || name == C_NAME_FALSE)
+    uint32_t embed_length = 0;
+    const uint8_t* embed = parse_embed_bytes(reader->parser, token, &embed_length);
+    if (embed != NULL)
+    {
+        // A multi-element resource is accepted only as a complete list item, marked by initializer preparation.
+        // Treating it as one value in a call or expression would silently change the preprocessing token sequence.
+        result->type = BUSTER_TYPE_INT;
+        result->integer = embed[0];
+        result->valid = embed_length == 1 || reader->initializers[token] == 3;
+    }
+    else if (name == C_NAME_TRUE || name == C_NAME_FALSE)
     {
         result->type = BUSTER_TYPE_BOOL;
         result->integer = name == C_NAME_TRUE;
@@ -1730,11 +1756,13 @@ static void check_input_transparent_union(CheckInputReader* reader, TypeId type,
         {
             const TypeTransparentUnionResult marked = type_mark_transparent_union(reader->types, type);
             attribute->ignored = marked.status != TYPE_TRANSPARENT_UNION_APPLIED;
-            // A block's typedef may make a file-scope union transparent for what follows: source order's.
-            check_input_lane_refuse(reader, reader->lane && !attribute->ignored, "a body makes a union transparent");
+            const uint32_t tag = !attribute->ignored ? reader->types->types.index[type_index(type_strip_aligned(reader->types, type))] : 0;
+            // A block's typedef may make a file-scope union transparent for what follows: source order's, as is a
+            // definition's parameter-list union its body defines so (#436). A union the body made is its own, which
+            // nothing after the body can name, and the merge takes.
+            check_input_lane_refuse(reader, reader->lane && !attribute->ignored && tag < reader->lane_tags, "a body makes a union of the top level's transparent");
             if (!attribute->ignored)
             {
-                const uint32_t tag = reader->types->types.index[type_index(type_strip_aligned(reader->types, type))];
                 reader->output->resource |= reader->transparent_unions == 0;
                 if (reader->transparent_unions != 0 && reader->transparent_unions[tag] == 0)
                 {
@@ -3521,8 +3549,6 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    // A body's declaration with linkage is the file-scope entity's, which later declarations see: source order's.
-    check_input_lane_refuse(reader, reader->lane && reader->linkage[token] != 0, "a body declares something with linkage");
     if (!overload && reader->linkage[token] != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
@@ -3565,9 +3591,26 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             reader->linked_declarations[name] = token + 1;
         }
+        // A body's declaration with linkage is the file-scope entity's, which later declarations see. A lane, whose
+        // linked state is source order's at its body's opening (c_check_deferred.c), takes one that leaves nothing
+        // different after it: of an entity declared before the opening, whose type it doesn't change, and which replaces
+        // the entity's linked declaration only by one later declarations inherit the same from (its kind, linkage and
+        // thread-local storage it must share, and the rest it inherited, but whether it is naked).
+        if (reader->lane)
+        {
+            const bool replaced = linked != 0 && reader->linked_declarations[name] != linked;
+            const uint32_t flags = replaced ? reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
+            check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
+            check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
+            check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
+        }
         reader->linked_types[name] = composite;
+        if (reader->deferred != 0)
+        {
+            check_deferred_linked(reader, name, token);
+        }
     }
-    if (!reader->lane && (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL)))
+    if (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL))
     {
         check_input_visibility_declare(reader, token, point);
     }
@@ -4934,6 +4977,12 @@ static void check_input_expressions(CheckInputReader* reader)
                 op = CHECK_OP_COUNT;
                 supported = node != BUSTER_CHECK_NONE;
             }
+            else
+            {
+                // Resolving the operand's type may fold its arithmetic and record source warnings. The sizeof
+                // action checks that type but does not evaluate those operations; independent bounds stay live.
+                check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
+            }
         }
         if (op != CHECK_OP_COUNT && supported)
         {
@@ -6088,6 +6137,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         pack += 1;
                     }
                     const uint32_t position = parser->tokens.pragma_positions[pragma];
+                    if (handled[pragma] == 0 && check_input_completed_pragma(&reader, pragma))
+                    {
+                        handled[pragma] = 1;
+                    }
                     if ((handled[pragma] == 0 || handled[pragma] >= 3) &&
                         (input->deferred_tokens == 0 || deferred != 0 || input->deferred_tokens[position] == 0))
                     {

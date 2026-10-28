@@ -1688,6 +1688,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
                             .scalar = scalar,
+                            .target_features = options.target.features,
                         };
                         if (result == 0 && !check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch))
                         {
@@ -1779,6 +1780,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+        pp_diagnostic_summary(&pp);
         if (release)
         {
             parse_release(&parser);

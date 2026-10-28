@@ -4614,7 +4614,9 @@ static bool pp_test_named_ucn_scaling(const char* directory)
     }
     free(source);
     char standard[] = "-std=gnu17";
-    char* arguments[] = { standard, path, 0 };
+    // This checks every rejected UCN, independently of the command-line diagnostic publication budget.
+    char limit[] = "-ferror-limit=0";
+    char* arguments[] = { standard, limit, path, 0 };
     for (uint32_t k = 0; result && k < 2; k += 1)
     {
         Arena arena = arena_reserve(1ull << 20);
@@ -4622,7 +4624,7 @@ static bool pp_test_named_ucn_scaling(const char* directory)
         const char* input;
         const char* output;
         bool markers;
-        result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        result = pp_parse_options(3, arguments, &options, &arena, &input, &output, &markers);
         options.scalar = k == 1;
         options.quiet = true;
         static InternTable table;
@@ -7400,6 +7402,7 @@ static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
 #include "c_preprocessor_print_test.c"
+#include "c_preprocessor_system_warning_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
@@ -7697,6 +7700,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_print_offsets();
         passed_all &= pp_test_print_batches(directory);
+        passed_all &= pp_test_system_warnings(directory, with_clang);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
