@@ -2485,10 +2485,13 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         {
             // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made.
             const TypeId argument = stream->argument_conversions[first + a].type;
+            const TypeId passed_type = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC
+                                           ? parameter_types[a]
+                                           : argument;
             const bool aggregate = check_lower_aggregate(writer, argument);
             const bool wide = check_lower_wide(writer, argument);
-            abi->arguments[abi->argument_count++] = argument;
-            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, argument) : wide ? 16 : 0;
+            abi->arguments[abi->argument_count++] = passed_type;
+            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, passed_type) : wide ? 16 : 0;
             writer->aggregates |= aggregate || wide;
             writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, argument);
         }
@@ -2504,14 +2507,32 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const TypeId argument = stream->argument_conversions[first + a].type;
-            if (check_lower_wide(writer, argument))
+            const bool atomic = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC;
+            if (atomic && check_lower_aggregate(writer, argument))
             {
-                const uint8_t class = check_lower_class(writer, argument);
-                const uint32_t local = check_lower_temporary(writer, class);
+                // The atomic parameter keeps its own ABI classification and storage padding, while its initializer
+                // supplies only the underlying value's bytes. Capture those bytes into a padded argument object.
+                const TypeId passed_type = parameter_types[a];
+                const uint64_t bytes = type_size(types, passed_type);
+                const uint32_t local = check_lower_object(writer, bytes, type_alignment_log2(types, passed_type));
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
-                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, type_conversion_operand(types, passed_type)),
+                                                         .volatile_copy = check_lower_copy_node_volatile(writer, graph->argument_nodes[first + a], argument) });
+                check_lower_operand(writer, node, a + 3, false, argument);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = (TypeId)bytes, .value = local });
             }
-            check_lower_operand(writer, node, a + 3, false, argument);
+            else
+            {
+                if (check_lower_wide(writer, argument))
+                {
+                    const uint8_t class = check_lower_class(writer, argument);
+                    const uint32_t local = check_lower_temporary(writer, class);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                check_lower_operand(writer, node, a + 3, false, argument);
+            }
         }
         if (!direct)
         {
@@ -4918,6 +4939,7 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
 {
     const TypeTable* types = writer->program->types;
     const uint64_t size = type_size(types, writer->result);
+    const uint64_t value_size = type_size(types, type_conversion_operand(types, writer->result));
     const AbiReturn returned = writer->abi_table->results[type_index(writer->result)];
     if (writer->hidden != BUSTER_CHECK_NONE)
     {
@@ -4927,7 +4949,20 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false,
                                                      .volatile_copy = check_lower_copy_node_volatile(writer, node, writer->result) });
-            check_lower_expression(writer, node, false, 0);
+            if (size > value_size)
+            {
+                const uint32_t local = check_lower_object(writer, size, type_alignment_log2(types, writer->result));
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = value_size,
+                                                         .volatile_copy = check_lower_copy_node_volatile(writer, node, writer->result) });
+                check_lower_expression(writer, node, false, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = (TypeId)size, .value = local });
+            }
+            else
+            {
+                check_lower_expression(writer, node, false, 0);
+            }
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         }
     }

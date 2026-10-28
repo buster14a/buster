@@ -285,6 +285,10 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
             {
                 check_lower_conversion(writer, plan->operand_type, computed);
             }
+            if ((operation == BUSTER_TYPED_SHL || operation == BUSTER_TYPED_SHR) && check_lower_wide(writer, plan->operand_type))
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
         }
         if (pointer)
         {

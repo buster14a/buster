@@ -834,7 +834,8 @@ static bool check_action_assignable_mode(const TypeTable* table, TypeId destinat
         accepted = accepted && !(strict && (warning != 0 || extension));
         result->warnings |= accepted ? warning : 0;
     }
-    else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
+    else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR ||
+              target_kind == BUSTER_TYPE_KIND_ATOMIC) && target_kind == input_kind)
     {
         accepted = check_action_compatible_at(table, target, input, action, result);
     }
@@ -1787,7 +1788,8 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     }
     if (type_is_valid(table, target))
     {
-        target = type_conversion_operand(table, target);
+        target = check_action_kind(table, source.type) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(type_strip_aligned(table, target))
+                                                                               : type_conversion_operand(table, target);
         const bool void_return = action->op == CHECK_OP_CONVERT && check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID &&
                                  (check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID || (action->extensions & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0);
         if (!void_return && !check_action_assignable(table, target, &source, action, result))
@@ -2103,7 +2105,11 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
                 }
-                TypeId destination = parameter ? type_conversion_operand(table, parameters[i]) : type_default_argument_promote(table, value.type);
+                TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                if (check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC)
+                {
+                    destination = type_conversion_operand(table, destination);
+                }
                 bool assignable = check_action_assignable(table, destination, &value, action, &converted);
                 bool transparent = false;
                 if (!assignable && parameter && converted.diagnostic == CHECK_DIAG_NONE)

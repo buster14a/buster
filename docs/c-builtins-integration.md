@@ -424,6 +424,15 @@ pointer strides, prefix/postfix results, complex arithmetic and 128-bit division
 reuse the ordinary lowering's type and runtime contracts. Atomic locals remain
 addressable, and static-data emission retains the atomic storage size/alignment
 separately from its unwrapped value type.
+Atomic parameters retain their declared ABI classification while argument values
+are captured in padded objects. Atomic aggregate returns similarly copy only the
+underlying value's bytes into zeroed atomic storage. Compatible atomic rvalues
+retain their identity for initialization, assignment and calls.
+
+Floating updates follow Clang's current compare-exchange loop behavior. Clang
+23.1.1's `CGExprScalar.cpp` explicitly leaves saving/restoring floating exceptions
+across retries as a FIXME; this implementation likewise does not claim full C
+floating-environment conformance for failed retries.
 
 `c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,
 sync fence and atomic thread/signal-fence slice. It retains actual object and
