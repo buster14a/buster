@@ -406,7 +406,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves` | `count` `CheckValue` records when value leaves are present. Only `VALUE` reads its leaf record. |
+| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -512,7 +512,8 @@ time (`check_graph_validate_vector`): the operators' classes come from one
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record. `test-checker` compares the two
+reads: two cache lines of each 96-byte record, which since #572 lie one after
+another, as only `VALUE` nodes have one. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 

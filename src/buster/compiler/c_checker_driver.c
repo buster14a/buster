@@ -1363,10 +1363,11 @@ static int run_check_command(int count, char** arguments, bool executable)
             if (ready)
             {
                 CheckInput input;
-                const bool input_valid = repairing ? check_input_fragment(&input, checking, checking_pp, &types, &arena, &scratch, repair.original_end) :
-                                         prefix_only ? check_input_prefix(&input, checking, checking_pp, &types, &arena, &scratch) :
-                                         lazy_system_headers ? check_input_selected(&input, checking, checking_pp, &types, &arena, &scratch, lazy.deferred_tokens) :
-                                                       check_input(&input, checking, checking_pp, &types, &arena, &scratch);
+                // A repaired fragment (check_input_fragment), a prefix (check_input_prefix), a unit with its system headers'
+                // bodies deferred (check_input_selected) or the whole unit (check_input).
+                const bool input_valid = check_input_compile(&input, checking, checking_pp, &types, &arena, &scratch, !prefix_only,
+                                                             repairing ? repair.original_end : checking->tokens.count,
+                                                             lazy_system_headers && !prefix_only ? lazy.deferred_tokens : 0);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
                 if (input.resource)
                 {

@@ -7,7 +7,7 @@
 
 static bool check_test_graph_cleared(const CheckGraph* graph)
 {
-    return graph->ops == 0 && graph->tokens == 0 && graph->operand0 == 0 && graph->operand1 == 0 && graph->operand2 == 0 && graph->leaves == 0 && graph->types == 0 && graph->members == 0 && graph->contexts == 0 && graph->count == 0 && graph->capacity == 0 && graph->argument_offsets == 0 && graph->argument_counts == 0 && graph->argument_nodes == 0 && graph->argument_count == 0 && graph->argument_capacity == 0;
+    return graph->ops == 0 && graph->tokens == 0 && graph->operand0 == 0 && graph->operand1 == 0 && graph->operand2 == 0 && graph->leaves == 0 && graph->leaf_slots == 0 && graph->leaf_count == 0 && graph->types == 0 && graph->members == 0 && graph->contexts == 0 && graph->count == 0 && graph->capacity == 0 && graph->argument_offsets == 0 && graph->argument_counts == 0 && graph->argument_nodes == 0 && graph->argument_count == 0 && graph->argument_capacity == 0;
 }
 
 static bool check_test_graph_failed_stream(const CheckStream* stream)
@@ -137,6 +137,7 @@ static void check_test_graph_argument_guards(CheckTest* test, TypeTable* table, 
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
         graph.count = 0;
+        graph.leaf_count = 0;
         graph.argument_count = count;
         graph.argument_capacity = count;
         graph.argument_nodes = (uint32_t*)(mapping + page - count * sizeof(uint32_t));
@@ -458,6 +459,7 @@ static void check_test_graph_validation_world(CheckTest* test, CheckGraph* graph
         BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT128),
     };
     graph->count = 0;
+    graph->leaf_count = 0;
     graph->argument_count = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
@@ -639,15 +641,17 @@ static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t 
                 graph->argument_nodes[graph->argument_offsets[node] + graph->argument_counts[node] - 1] = node;
             }
         } break;
-        case 11: graph->leaves[node].overload_head = 1 + check_test_random(test) % 3; break;
+        case 11: check_graph_leaf_of(graph, node)->overload_head = 1 + check_test_random(test) % 3; break;
         case 12: graph->source_positions[node] = BUSTER_CHECK_NONE; break;
         case 13: graph->types[node] = graph->types[node] == 0 ? BUSTER_TYPE_INT : 0; break;
         case 14: graph->argument_offsets[node] = graph->argument_count + 1 + check_test_random(test) % 3; break;
+        // A VALUE node's leaf other than the next one, or a leaf for another node.
+        case 15: graph->leaf_slots[node] = graph->ops[node] == CHECK_OP_VALUE ? graph->leaf_slots[node] + 1 + check_test_random(test) % 2 : 0; break;
         default: graph->operand0[node] = graph->operand0[node] == BUSTER_CHECK_NONE ? node : BUSTER_CHECK_NONE; break;
     }
 }
 
-#define BUSTER_CHECK_TEST_GRAPH_RULES 16u
+#define BUSTER_CHECK_TEST_GRAPH_RULES 17u
 
 // #530: check_graph_validate_vector against check_graph_validate, its exact twin, on random graphs of every count to 70
 // and of 4,099 nodes, with and without the exact path's sideband nodes, the optional byte columns and tag history: each
@@ -718,7 +722,8 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                 const uint32_t last_argument = graph.argument_count != 0 ? graph.argument_nodes[graph.argument_count - 1] : 0;
                 const uint32_t slot = graph.argument_counts[node] != 0 && graph.ops[node] != CHECK_OP_VARARGS ? graph.argument_offsets[node] + graph.argument_counts[node] - 1 : 0;
                 const uint32_t saved_argument = graph.argument_count != 0 ? graph.argument_nodes[slot] : 0;
-                const uint32_t saved_head = graph.leaves[node].overload_head;
+                const uint32_t saved_slot = graph.leaf_slots[node];
+                const uint32_t saved_head = graph.ops[node] == CHECK_OP_VALUE ? check_graph_leaf_of(&graph, node)->overload_head : 0;
                 check_test_graph_break(test, &graph, node, rule);
                 check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its exact twin on a broken rule");
                 graph.ops[node] = (CheckOp)saved_ops;
@@ -738,7 +743,11 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                     graph.argument_nodes[slot] = saved_argument;
                     graph.argument_nodes[graph.argument_count - 1] = last_argument;
                 }
-                graph.leaves[node].overload_head = saved_head;
+                graph.leaf_slots[node] = saved_slot;
+                if (graph.ops[node] == CHECK_OP_VALUE)
+                {
+                    check_graph_leaf_of(&graph, node)->overload_head = saved_head;
+                }
             }
         }
         // Without an optional column the blocks read, the vector path is the exact one throughout.
@@ -782,8 +791,8 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
     {
         check_test_graph_validation_world(test, &graph, count, pointer, false, false);
         CheckGraph guarded = graph;
-        void* mappings[11] = { 0 };
-        uint64_t lengths[11] = { 0 };
+        void* mappings[12] = { 0 };
+        uint64_t lengths[12] = { 0 };
         guarded.ops = check_test_graph_validation_page(graph.ops, (uint64_t)count * sizeof(CheckOp), page, &mappings[0], &lengths[0]);
         guarded.operand0 = check_test_graph_validation_page(graph.operand0, (uint64_t)count * sizeof(uint32_t), page, &mappings[1], &lengths[1]);
         guarded.operand1 = check_test_graph_validation_page(graph.operand1, (uint64_t)count * sizeof(uint32_t), page, &mappings[2], &lengths[2]);
@@ -793,7 +802,8 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
         guarded.argument_counts = check_test_graph_validation_page(graph.argument_counts, (uint64_t)count * sizeof(uint32_t), page, &mappings[6], &lengths[6]);
         guarded.members = check_test_graph_validation_page(graph.members, (uint64_t)count * sizeof(uint32_t), page, &mappings[7], &lengths[7]);
         guarded.contexts = check_test_graph_validation_page(graph.contexts, count, page, &mappings[8], &lengths[8]);
-        guarded.leaves = check_test_graph_validation_page(graph.leaves, (uint64_t)count * sizeof(CheckValue), page, &mappings[9], &lengths[9]);
+        guarded.leaves = check_test_graph_validation_page(graph.leaves, (uint64_t)graph.leaf_count * sizeof(CheckValue), page, &mappings[9], &lengths[9]);
+        guarded.leaf_slots = check_test_graph_validation_page(graph.leaf_slots, (uint64_t)count * sizeof(uint32_t), page, &mappings[11], &lengths[11]);
         guarded.argument_nodes = check_test_graph_validation_page(graph.argument_nodes, (uint64_t)graph.argument_count * sizeof(uint32_t), page, &mappings[10], &lengths[10]);
         bool placed = true;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(mappings); i += 1)

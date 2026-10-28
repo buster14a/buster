@@ -35,7 +35,7 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
         const CBuiltinId builtin = (CBuiltinId)graph->members[node];
         bool effects = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_ASSIGN || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_VARARGS ||
                        op == CHECK_OP_BUILTIN_ATOMIC || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-        effects |= op == CHECK_OP_VALUE && (graph->leaves[node].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        effects |= op == CHECK_OP_VALUE && (check_graph_leaf_of(graph, node)->flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_STATEMENT_VALUE && (graph->members[node] & BUSTER_CHECK_SIDE_EFFECT) != 0;
         effects |= op == CHECK_OP_BUILTIN_MISC && (builtin == CBUILTIN_UNREACHABLE || builtin == CBUILTIN_TRAP ||
                    builtin == CBUILTIN_PREFETCH || builtin == CBUILTIN_MEMCPY || builtin == CBUILTIN_MEMSET ||

@@ -67,7 +67,9 @@ static void check_test_x86_diagnostic_storage(CheckTest* test)
         CheckOp op = CHECK_OP_VALUE;
         uint32_t none = BUSTER_CHECK_NONE;
         CheckValue leaf = { 0 };
-        CheckInput input = { .graph = { .count = 1, .ops = &op, .leaves = &leaf, .operand0 = &none, .operand1 = &none, .operand2 = &none } };
+        uint32_t slot = 0;
+        CheckInput input = { .graph = { .count = 1, .ops = &op, .leaves = &leaf, .leaf_slots = &slot, .leaf_count = 1, .operand0 = &none, .operand1 = &none,
+                                        .operand2 = &none } };
         CheckBuiltinX86Effect effect = { .range_event_count = 1 };
         CheckStream stream = { .x86 = &effect, .x86_count = 1 };
         CheckControl control = { .kind = CHECK_CONTROL_RETURN, .node = 0 };
