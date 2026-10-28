@@ -1248,7 +1248,13 @@ there at a time, so everything takes one lock:
   which no `*_test.c` matches: tests don't change what the samples measure).
   Keep the pattern to what the samples measure: a module's own decision
   campaign (#336's binding handoff) has a module of its own, not the whole
-  checker's. A step gated so also runs on the pull request that changes it.
+  checker's. Samples of different code split by what changes each: #336's
+  time the default handoff (`direct`) where its inputs change, and the
+  comparison of every mode only where the handoffs themselves do
+  (`checker_binding_modes`); #395's time the `emit` pass where the emission
+  changes, and the rows' own passes only where those do (`check_debug_rows`).
+  The daily and dispatched runs time them all. A step gated so also runs on
+  the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
   foreign phases, `clang -E`'s times beside the preprocessor's benchmark
   (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
