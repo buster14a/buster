@@ -1482,6 +1482,19 @@ pass the independent byte oracle; the available whole driver and the reader's
 initialization/traversal/selection path are measured together with their own
 costs, rather than claiming an isolated block-update rate.
 
+With the shared traversal from #640, complete-root queries consume
+`CheckInputReader.subtree_sizes` by postorder position. The reader borrows the
+parser's optional size column when available; tree-only, prefix and repair
+inputs derive one reader-owned column alongside their existing traversal.
+This actual consumer requires four retained bytes per token plus a sentinel.
+The first-child start column is temporary and released immediately after
+derivation. The default vector path publishes sizes in the same traversal
+pass; scalar/prefix/repair views derive them from their already retained
+postorder, positions, subtree ends and first children. The parent-scan root
+oracle explicitly requests the parser's optional size column. Warning tests
+also cover independent-to-ordinary context transitions and late writes after
+worker-column replacement against the immediate-byte oracle.
+
 Frozen SQLite has a small measured cost in this paired build: syntax checking
 +0.16% and object compilation +0.36%, with about 0.1 MiB more peak RSS and
 byte-identical objects. The record separates the deep Clang enum oracle's

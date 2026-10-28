@@ -5124,6 +5124,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 sizes[reader.postorder_positions[token]] = reader.ends[token] - starts[token] + 1;
             }
         }
+        if (sizes != 0)
+        {
+            sizes[count] = 0;
+        }
         arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
         // expression commas from call/declaration separators; reverse postorder passes that fact down once.
