@@ -24,6 +24,8 @@
 // Cycles and instructions come from the hardware counters (zero when unavailable). The paths must make the same links.
 // The exit status is 1 if the arguments are invalid, a program can't be made or bound, or the paths disagree.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -630,3 +632,12 @@ int run_bind_benchmark(int argc, char** argv)
     }
     return result ? 0 : 1;
 }
+
+#else
+int run_bind_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

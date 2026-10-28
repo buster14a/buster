@@ -2107,10 +2107,11 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             check_test_expect(test, input[p].visit_misses == 0, resource_message);
             if (p == 1 && adapted && !rejected[0] && input[0].token_count >= 16)
             {
-                // The vector path's walks skip tokens (#529): fewer visits than the scalar path's, which visit them all.
-                snprintf(resource_message, sizeof(resource_message), "%s: the vector path's walks visit %u and %u of %u tokens, the scalar path's %u and %u",
+                // The selected walks skip tokens (#529), independently of the host's classification kernels.
+                snprintf(resource_message, sizeof(resource_message), "%s: the selected walks visit %u and %u of %u tokens, the scalar path's %u and %u",
                          fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
-                check_test_expect(test, input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits, resource_message);
+                const bool visits = input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits;
+                check_test_expect(test, visits, resource_message);
             }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;

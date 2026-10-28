@@ -10,6 +10,8 @@
 // the corresponding scalar phase. Run separate processes on the locked 9700X, pinned to CPU 2. CPU cycles are read
 // from perf_event_open where permitted, otherwise explicitly unavailable. All timing/counter helpers are original.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -372,3 +374,12 @@ int run_tier1_frame_benchmark(int argc, char** argv)
     }
     return passed ? 0 : 1;
 }
+
+#else
+int run_tier1_frame_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

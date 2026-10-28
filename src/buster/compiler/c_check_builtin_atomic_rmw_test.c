@@ -616,11 +616,16 @@ static bool check_builtin_atomic_rmw_test_process(char* const* arguments, int* e
     return result;
 }
 
+#define BUSTER_ATOMIC_RMW_TEST_STRINGIFY_(value) #value
+#define BUSTER_ATOMIC_RMW_TEST_STRINGIFY(value) BUSTER_ATOMIC_RMW_TEST_STRINGIFY_(value)
+
 static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test, const char* clang)
 {
     static const char version_source[] =
-        "#if !defined(__clang__) || __clang_major__ != 23 || __clang_minor__ != 1 || __clang_patchlevel__ != 1\n"
-        "#error requires Clang 23.1.1\n"
+        "#if !defined(__clang__) || __clang_major__ != " BUSTER_ATOMIC_RMW_TEST_STRINGIFY(__clang_major__)
+        " || __clang_minor__ != " BUSTER_ATOMIC_RMW_TEST_STRINGIFY(__clang_minor__)
+        " || __clang_patchlevel__ != " BUSTER_ATOMIC_RMW_TEST_STRINGIFY(__clang_patchlevel__) "\n"
+        "#error external oracle must match the build Clang version\n"
         "#endif\n";
     static const struct
     {
@@ -695,7 +700,7 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         int exit_code = -1;
         qualified = parse_test_write(path, version_source, sizeof(version_source) - 1) &&
             check_builtin_atomic_rmw_test_process(arguments, &exit_code, diagnostics) && exit_code == 0;
-        check_builtin_atomic_rmw_test_expect(test, qualified, "external oracle requires exact primary Clang 23.1.1", 0);
+        check_builtin_atomic_rmw_test_expect(test, qualified, "external oracle matches the build Clang version", 0);
         if (!qualified && test->failures < 24)
         {
             fprintf(stderr, "test-check-builtins-atomic-rmw: Clang version gate: %s\n", diagnostics);
@@ -755,6 +760,9 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         rmdir(directory);
     }
 }
+
+#undef BUSTER_ATOMIC_RMW_TEST_STRINGIFY
+#undef BUSTER_ATOMIC_RMW_TEST_STRINGIFY_
 
 static int run_check_builtin_atomic_rmw_tests(int argc, char** argv)
 {

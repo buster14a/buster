@@ -405,10 +405,12 @@ static uint8_t check_overload_conversion(const TypeTable* table, const CheckValu
 // compensate for introducing that extension on an argument; incomparable bad-pointer sets stay incomparable.
 static uint32_t check_overload_rank_order(const uint8_t* left, const uint8_t* right, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     uint32_t bad_order = 0;
     uint32_t rank_order = 0;
     uint32_t i = 0;
-    if (!scalar)
+    if (!BUSTER_SCALAR_PATH(scalar))
     {
         const __m512i bad = _mm512_set1_epi8(CHECK_OVERLOAD_BAD_POINTER);
         while (i < count)
@@ -438,7 +440,7 @@ static uint32_t check_overload_rank_order(const uint8_t* left, const uint8_t* ri
 
 static uint32_t check_overload_better(const TypeTable* table, const CheckOverloadRequest* request, const CheckValue* arguments, const uint8_t* left, const uint8_t* right, uint32_t li, uint32_t ri, bool* full)
 {
-    uint32_t order = check_overload_rank_order(left, right, request->argument_count, request->scalar);
+    uint32_t order = check_overload_rank_order(left, right, request->argument_count, BUSTER_SCALAR_PATH(request->scalar));
     if ((order & 4u) == 0)
     {
         uint32_t lc = 0;
@@ -634,6 +636,8 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
 // qualifications need an adjusted argument view; their original lvalue/volatile/effect conversion is retained.
 static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected, uint64_t* scratch_peak)
 {
+    (void)scalar;
+
     const CheckOverloadRequest request = {
         .candidates = candidates,
         .count = count,
@@ -648,7 +652,7 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
             .extensions = action->extensions,
             .scratch_peak = scratch_peak,
         },
-        .scalar = scalar,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
     };
     CheckOverloadResult selected = head != UINT32_MAX ? check_overload_select(table, &request, scratch) : check_overload_result(CHECK_OVERLOAD_OK);
     if (head == UINT32_MAX)
