@@ -514,10 +514,16 @@ adjusted as a parameter's, under C17 6.9.1p6's constraints:
 A struct, union or enum defined in the list, and a variably modified
 parameter there, are still refused by name. An identifier list outside a
 definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+Inline deferred type specifiers such as `_Atomic(T)` in the declaration list
+remain outside this reader; the equivalent `_Atomic T` qualifier form and
+previously declared typedefs are accepted.
 
 The definition retains a prototype of its parameters' default argument
 promotions for compatibility checking and ABI lowering, as clang types it
 (`float f(a) float a; { ... }` has that internal signature `float (double)`).
+As in clang, `_Atomic` parameters retain their declared ABI types instead:
+`_Atomic float` is not promoted to double, and an atomic aggregate keeps its
+storage padding. Known calls retain these ABI types as well as their value conversions.
 At expression uses its designator instead has a no-prototype type. Known
 direct calls, including an addressed function, retain the definition's
 argument conversions, but a wrong argument count is a warning rather than
@@ -1268,6 +1274,24 @@ What the lowering covers past scalars (#145's programs):
   with no baseline runtime speedup claimed for them. The record includes raw
   samples, identities, native/Clang scalar/vector checks and source-corpus
   receipts, including the successful pinned c-testsuite rerun.
+- **C11 atomics (#671).** The C11 builtin family and ordinary atomic lvalues
+  share the existing raw-bit native leaves for aligned representations through
+  eight bytes, with generic libatomic calls for other layouts. Reads, assignment,
+  compound updates and prefix/postfix increments preserve one evaluation of each
+  source operand. Atomic storage padding, static size/alignment and addressable
+  locals are distinct from their unwrapped C values. The
+  [builtin guide](c-builtins-integration.md#atomic-and-terminal-helper-calls)
+  records the runtime ABI and remaining value-representation limits.
+  Floating min/max under `FENV_ACCESS ON` calls the target's `fminf`, `fmin`,
+  `fmaxf` or `fmax` within the retry, as Clang's strict path does, retaining
+  native DAZ behavior and requiring `-lm` when linking. Address and RHS
+  evaluation remain outside that retry. This does not extend the existing
+  floating retry-exception conformance claim.
+  Atomic vector loads, stores, exchange and compare-exchange retain vector value
+  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  updates of atomic vectors are explicitly refused until their retry computation
+  has a vector lowering.
+
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes

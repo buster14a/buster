@@ -526,15 +526,17 @@ static bool check_init_push(CheckInitWalker* walker, const CheckInitSelection* s
             walker->capacity = capacity;
         }
     }
-    const bool valid = walker->depth < walker->capacity;
+    const bool atomic_braces = braced && type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC;
+    const bool valid = walker->depth < walker->capacity && !atomic_braces;
     if (!valid)
     {
-        check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+        check_init_fail(walker, atomic_braces ? CHECK_INIT_INVALID : CHECK_INIT_RESOURCE, token);
     }
     else
     {
         walker->frames[walker->depth] = (CheckInitFrame){
-            .type = selected->type,
+            .type = type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC ?
+                    type_conversion_operand(walker->types, selected->type) : selected->type,
             .offset = selected->offset,
             .width = selected->width,
             .braced = braced,
@@ -995,13 +997,28 @@ static bool check_init_character(TypeId type)
 static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
                                     uint32_t node, TypeId* root_type, uint64_t* source_offset)
 {
+    const TypeId destination = selected->type;
+    CheckInitSelection value_selection = *selected;
+    if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        value_selection.type = type_conversion_operand(walker->types, selected->type);
+        selected = &value_selection;
+    }
     uint32_t opener = BUSTER_CHECK_NONE;
     const uint8_t kind = type_kind(walker->types, type_strip_aligned(walker->types, selected->type));
     const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || check_vector_type(walker->types, selected->type);
     if (!walker->infer && node < walker->stream->count && check_vector_type(walker->types, selected->type))
     {
+        const CheckAction action = {
+            .op = CHECK_OP_INITIALIZE,
+            .operands = { walker->stream->values[node] },
+            .type = destination,
+            .node = node,
+            .extensions = check_init_extensions(walker, begin),
+        };
         CheckActionResult checked = { 0 };
-        if (!check_vector_assignable(walker->types, selected->type, walker->stream->values + node, &checked))
+        check_action_scalar(walker->types, &action, &checked);
+        if (checked.diagnostic != CHECK_DIAG_NONE)
         {
             check_init_fail(walker, checked.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, begin);
         }
@@ -1533,7 +1550,7 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
 static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
-    const TypeId type = type_unqualified(type_strip_aligned(walker->types, selected->type));
+    const TypeId type = type_conversion_operand(walker->types, selected->type);
     const uint8_t kind = type_kind(walker->types, type);
     bool whole = !check_init_aggregate(walker->types, type);
     if (!whole && string != 0 && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
@@ -1554,7 +1571,15 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
         }
         if (type_is_valid(walker->types, source))
         {
-            const TypeAnswer compatible = type_compatible(walker->types, type, type_unqualified(type_strip_aligned(walker->types, source)));
+            if (walker->stream != NULL && node < walker->stream->count && walker->stream->values[node].category == CHECK_LVALUE &&
+                type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                source = type_conversion_operand(walker->types, source);
+            }
+            const TypeId target = type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC
+                                      ? type_unqualified(type_strip_aligned(walker->types, selected->type))
+                                      : type;
+            const TypeAnswer compatible = type_compatible(walker->types, target, type_unqualified(type_strip_aligned(walker->types, source)));
             whole = compatible == TYPE_ANSWER_YES;
             if (compatible == TYPE_ANSWER_FULL)
             {
@@ -1574,7 +1599,8 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
                 source = walker->expression_types[token] != 0 ? walker->expression_types[token] : source;
             }
         }
-        whole = check_vector_type(walker->types, source) || (kind == BUSTER_TYPE_KIND_EXT_VECTOR && (walker->infer || check_vector_real(walker->types, source)));
+        whole = check_vector_type(walker->types, type_conversion_operand(walker->types, source)) ||
+                (kind == BUSTER_TYPE_KIND_EXT_VECTOR && (walker->infer || check_vector_real(walker->types, source)));
     }
     if (!whole && walker->infer && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) &&
         walker->parser->tokens.kinds[begin] == PARSE_KIND_STRING)
@@ -1586,7 +1612,7 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
 
 #include "c_check_initializer_vector.c"
 
-static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node)
+static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSelection* selected, TypeId destination, uint32_t token, uint32_t node)
 {
     const TypeId target = type_unqualified(type_strip_aligned(walker->types, selected->type));
     TypeId splat_type = target;
@@ -1654,7 +1680,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         const CheckAction action = {
             .op = CHECK_OP_INITIALIZE,
             .operands = { walker->stream->values[node] },
-            .type = target,
+            .type = destination,
             .node = node,
         };
         CheckActionResult converted;
@@ -1726,6 +1752,13 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    const TypeId destination = selected->type;
+    CheckInitSelection value_selection = *selected;
+    if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        value_selection.type = type_conversion_operand(walker->types, selected->type);
+        selected = &value_selection;
+    }
     const CheckInitConstants* previous_constants = walker->constants;
     CheckInitConstants constants = { 0 };
     if (!walker->infer && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
@@ -1793,13 +1826,13 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         }
         else if (check_vector_type(walker->types, type))
         {
-            check_init_vector_value(walker, selected, token, node);
+            check_init_vector_value(walker, selected, destination, token, node);
         }
         else
         {
             CheckAction action = {
                 .op = CHECK_OP_INITIALIZE,
-                .type = selected->type,
+                .type = destination,
                 .node = node,
                 .extensions = check_init_extensions(walker, token),
             };
@@ -2140,6 +2173,12 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
     valid = valid && (graph == NULL || (graph->count == stream->count && (graph->count == 0 ||
             (graph->ops != NULL && graph->tokens != NULL && graph->operand0 != NULL && graph->operand1 != NULL && graph->operand2 != NULL))));
     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
+    if (valid && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE)
+    {
+        valid = false;
+        result->status = CHECK_INIT_INVALID;
+        result->failed_token = begin;
+    }
     if (valid && (stream->status != CHECK_STATUS_OK || (!diagnostic_only && stream->report_count != 0)))
     {
         valid = false;

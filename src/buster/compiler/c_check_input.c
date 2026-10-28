@@ -1429,7 +1429,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 reader->ignored[token] |= job == 0 || job->keyword != i || token <= i + 1 || token == close;
             }
-            if (selected != 0 && kind == PARSE_KIND_TYPEOF)
+            if (selected != 0 && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC))
             {
                 valid &= check_input_vla_query(reader, i + 2, close, selected);
             }
@@ -3072,6 +3072,14 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
     return result;
 }
 
+// The ABI type of a K&R parameter. Unlike an argument expression's unary conversion, clang's parameter
+// promotion preserves _Atomic: even _Atomic float arrives as float, and an atomic aggregate retains its padding.
+static TypeId check_input_kr_parameter_type(const TypeTable* types, TypeId declared)
+{
+    const TypeId type = type_unqualified(declared);
+    return type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC ? type : type_default_argument_promote(types, type);
+}
+
 // A K&R definition's declaration list, its tokens [first, body) before its body's brace, which declares the names of its
 // identifier list (`names`, chained by parameter_next), as C17 6.9.1p6 constrains it and clang reports it: specifiers
 // without a storage class but register, a function specifier or typedef; declarators that each name a listed name not
@@ -3367,7 +3375,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 uint32_t k = 0;
                 for (uint32_t parameter = parameters; valid && parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
                 {
-                    promoted[k++] = type_default_argument_promote(reader->types, type_unqualified(reader->declared_types[parameter]));
+                    promoted[k++] = check_input_kr_parameter_type(reader->types, reader->declared_types[parameter]);
                 }
                 const TypeId function_type = type_strip_aligned(reader->types, type);
                 type = valid ? check_input_type_result(reader, type_function(reader->types, type_return(reader->types, function_type), promoted, k,

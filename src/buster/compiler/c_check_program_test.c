@@ -733,6 +733,21 @@ static const char check_test_program_harness[] =
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
     "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
     "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
+    "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
+    "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
+    "_Atomic(ExternalAtomic4) external_atomic4(_Atomic(ExternalAtomic4) x){ExternalAtomic4 v=x;return v+3;}"
+    "int external_apply_atomic4(_Atomic(ExternalAtomic4)(*f)(_Atomic(ExternalAtomic4)),int n){ExternalAtomic4 v={0};"
+    "for(int i=0;i<4;i++)v[i]=n+i;_Atomic(ExternalAtomic4) out=f(v);ExternalAtomic4 r=out;int h=0;for(int i=0;i<4;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic8 __attribute__((vector_size(32)));"
+    "_Atomic(ExternalAtomic8) external_atomic8(_Atomic(ExternalAtomic8) x){ExternalAtomic8 v=x;return v+3;}"
+    "int external_apply_atomic8(_Atomic(ExternalAtomic8)(*f)(_Atomic(ExternalAtomic8)),int n){ExternalAtomic8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=n+i;_Atomic(ExternalAtomic8) out=f(v);ExternalAtomic8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic16 __attribute__((vector_size(64)));"
+    "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
+    "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
+    "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
@@ -940,6 +955,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         oracle,
         object,
         "-lm",
+        "-latomic",
         "-o",
         executable,
         0,
@@ -2388,6 +2404,14 @@ static void check_test_program_builtin_scratch(CheckTest* test, const char* clan
         "int s=__builtin_add_overflow(y,(__builtin_mul_overflow(x,x,&c),(unsigned __int128)c),&b);"
         "return (int)((unsigned __int128)a%97+b%101+(unsigned __int128)c%103)+r*1000+s*2000;}",
         "nested-wide-operand-objects-and-signedness", clang, false, -1, 0, 96);
+    check_test_program_source(test,
+        "int tested(int n){_Atomic unsigned long cell=(unsigned long)(unsigned)n+1;"
+        "unsigned shift=__builtin_ctzll(__c11_atomic_load(&cell,5)|8UL);"
+        "unsigned long value=__builtin_bswap64(__c11_atomic_load(&cell,5)+1);"
+        "cell+=__builtin_popcountll(value);"
+        "unsigned long old=__c11_atomic_fetch_xor(&cell,__builtin_bswap64(value),5);"
+        "return (int)((old^__c11_atomic_load(&cell,5))&0x7fffff00UL)+(int)shift;}",
+        "atomic-captures-and-integer-recipe-scratch", clang);
 }
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
@@ -2919,6 +2943,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}"
         "int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}",
         "kr-unused-promoted-parameter-capacity", clang);
+    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+    check_test_program_source(test,
+        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+        "kr-atomic-and-promoted-parameters", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
