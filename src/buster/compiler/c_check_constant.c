@@ -1788,7 +1788,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     CheckInputReader* reader = input->reader;
     CheckAction known;
     uint32_t source = callee;
-    if (action->op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
+    if (action->op == CHECK_OP_CALL && (reader->output->kr_parameter_count != 0 || reader->output->implicit_function_count != 0))
     {
         uint32_t use = callee;
         for (uint32_t steps = 0; use >= input->first && use < input->end && steps < input->end - input->first; steps += 1)
@@ -1810,12 +1810,13 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             use = value != use ? value : BUSTER_CHECK_NONE;
         }
         const uint32_t declaration = use < reader->parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
+        // The source identity also keeps grouped/addressed implicit declarations under their own warning policy.
+        source = declaration < reader->parser->tokens.count ? use : source;
         if (declaration < reader->parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
         {
             known = *action;
             known.type = reader->declared_types[declaration];
             action = &known;
-            source = use;
         }
     }
     uint32_t head = action->op == CHECK_OP_CALL ? action->operands[0].overload_head : 0;

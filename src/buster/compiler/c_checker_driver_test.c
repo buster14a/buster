@@ -3416,6 +3416,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             .warnings = 1,
         },
         {
+            .name = "source-only implicit calls do not add non-prototype warnings",
+            .source = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\n"
+                      "int g(void){int i=missing(1);return i+sizeof((&missing)(2))+sizeof((missing)(3));}\n",
+        },
+        {
             .name = "K&R source-only call obeys warning promotion",
             .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
                       "int f(a)int a;{return a;}\n#pragma clang diagnostic error \"-Weverything\"\n"
