@@ -380,7 +380,9 @@ typedef enum ParseBenchmarkTimed
     PARSE_TIMED_VECTOR_K5,
     PARSE_TIMED_VECTOR_K6,
     PARSE_TIMED_VECTOR_FALLBACK,
-    PARSE_TIMED_POSTORDER_SORTED,
+    PARSE_TIMED_TREE,
+    PARSE_TIMED_TREE_SIZES,
+    PARSE_TIMED_TREE_LINKS,
     PARSE_TIMED_POSTORDER,
     PARSE_TIMED_COUNT,
 } ParseBenchmarkTimed;
@@ -415,7 +417,9 @@ static const char* const parse_benchmark_timed_names[PARSE_TIMED_COUNT] =
     "vector-k5",
     "vector-k6",
     "vector-fallback",
-    "postorder-sorted",
+    "tree",
+    "tree-sizes",
+    "tree-links",
     "postorder",
 };
 
@@ -443,7 +447,9 @@ static const ParseBenchmarkTimed parse_benchmark_stage_order[] =
     PARSE_TIMED_VECTOR_K5,
     PARSE_TIMED_VECTOR_K6,
     PARSE_TIMED_VECTOR_FALLBACK,
-    PARSE_TIMED_POSTORDER_SORTED,
+    PARSE_TIMED_TREE,
+    PARSE_TIMED_TREE_SIZES,
+    PARSE_TIMED_TREE_LINKS,
     PARSE_TIMED_POSTORDER,
 };
 
@@ -646,9 +652,18 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
             parse_fallback(k, &input, everything);
             break;
         }
-        case PARSE_TIMED_POSTORDER_SORTED:
-            parse_postorder_sorted(k->parents, count, buffers->last_children, buffers->subtree_ends, buffers->cursors, buffers->postorder, buffers->first_children,
-                                   buffers->subtree_starts, buffers->sizes);
+        // The tree's columns as the parser derives them, then with the subtree sizes, then the twin from that postorder, as
+        // the checker's reader derived them before the parser published them.
+        case PARSE_TIMED_TREE:
+            parse_tree_columns(k->parents, count, buffers->last_children, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends,
+                               buffers->first_children, buffers->next_siblings, 0, 0);
+            break;
+        case PARSE_TIMED_TREE_SIZES:
+            parse_tree_columns(k->parents, count, buffers->last_children, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends,
+                               buffers->first_children, buffers->next_siblings, buffers->subtree_starts, buffers->sizes);
+            break;
+        case PARSE_TIMED_TREE_LINKS:
+            parse_tree_links(k->parents, buffers->postorder, count, buffers->positions, buffers->subtree_ends, buffers->first_children, buffers->next_siblings);
             break;
         case PARSE_TIMED_POSTORDER: parse_postorder(k->parents, count, buffers->last_children, buffers->postorder); break;
         default: break;

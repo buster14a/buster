@@ -78,7 +78,9 @@ jobs:
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
+      checker_binding_modes: ${{ steps.files.outputs.checker_binding_modes }}
       check_debug: ${{ steps.files.outputs.check_debug }}
+      check_debug_rows: ${{ steps.files.outputs.check_debug_rows }}
       files: ${{ steps.files.outputs.files }}
       compile_time: ${{ steps.files.outputs.compile_time }}
       performance: ${{ steps.files.outputs.performance }}
@@ -1180,12 +1182,29 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-check-debug
 
       - name: Benchmark the C driver's source rows in isolation and after scalar work
-        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c).
+        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c), each
+        # path alone and after scalar work, in processes of their own: the passes the rows' producers reach, what the
+        # rows add to the emission (the emit pass) and the unit built from the rows it makes (the build pass: their
+        # lines, the rows kept and the sections), whose inputs a change to the emission, the lowering or Tier 0 changes.
+        # Where the rows' own passes change (`check_debug_rows`: c_check_debug*.c and debug.c), and on the daily and
+        # dispatched runs, every pass at once, whose 200 ms of scalar work before each sample is most of the step's 22 s.
         if: needs.changes.outputs.check_debug != 'false'
+        env:
+          ROWS: ${{ needs.changes.outputs.check_debug_rows != 'false' }}
         run: |
-          taskset -c 2 ./build/compiler benchmark-check-debug --path scalar
-          taskset -c 2 ./build/compiler benchmark-check-debug --path vector
-          taskset -c 2 ./build/compiler benchmark-check-debug --path vector --after-scalar 200
+          passes=(emit build)
+          if [ "$ROWS" = true ]; then
+            passes=(every)
+          fi
+          for pass in "${passes[@]}"; do
+            only=(--only "$pass")
+            if [ "$pass" = every ]; then
+              only=()
+            fi
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path scalar
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector
+            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector --after-scalar 200
+          done
 
       - name: Benchmark the deferred bodies' reader on frozen SQLite
         # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart,
@@ -1289,39 +1308,60 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-bindings --passes 5 "${system[@]}" "$corpus/sqlite/sqlite3.c"
 
       - name: Benchmark the checker's binding handoff in repeated processes, in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the handoff's sources: `checker_bindings`).
+        # Where `changes` doesn't rule it out (the handoff's timed path: `checker_bindings`), the default (direct) alone
+        # and after 100 ms of the scalar twin's reader. Where the handoffs themselves change (`checker_binding_modes`),
+        # and on the daily and dispatched runs, also every mode on the large input and SQLite, and the old default
+        # (parser-batch) alone and after the same scalar work: the comparison #336 chose direct by.
         if: needs.changes.outputs.checker_bindings != 'false'
+        env:
+          MODES: ${{ needs.changes.outputs.checker_binding_modes != 'false' }}
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          modes=(direct)
+          if [ "$MODES" = true ]; then
+            modes+=(parser-batch)
+          fi
           for sample in 1 2 3; do
             echo "Binding handoff process $sample"
-            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input large
-            taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            # The new default against the old one, each alone and after 100 ms of the scalar twin's reader.
-            for mode in direct parser-batch; do
+            if [ "$MODES" = true ]; then
+              taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input large
+              taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            fi
+            for mode in "${modes[@]}"; do
               taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" "${system[@]}" "$corpus/sqlite/sqlite3.c"
               taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
             done
           done
 
       - name: Benchmark binding handoffs through parsing, checking and cleanup
-        # Where `changes` doesn't rule it out (the handoff's sources: `checker_bindings`).
+        # Where `changes` doesn't rule it out (the handoff's timed path: `checker_bindings`), the default (direct) after
+        # 100 ms of the scalar twin's reader. Where the handoffs themselves change (`checker_binding_modes`), and on the
+        # daily and dispatched runs, also every mode on each input, and the old default (parser-batch) after the same
+        # scalar work.
         if: needs.changes.outputs.checker_bindings != 'false'
+        env:
+          MODES: ${{ needs.changes.outputs.checker_binding_modes != 'false' }}
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          modes=(direct)
+          if [ "$MODES" = true ]; then
+            modes+=(parser-batch)
+          fi
           for sample in 1 2 3; do
             echo "Binding pipeline process $sample"
-            for input in small headers large; do
-              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" --input "$input"
-            done
-            taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            for mode in direct parser-batch; do
+            if [ "$MODES" = true ]; then
+              for input in small headers large; do
+                taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" --input "$input"
+              done
+              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" "$corpus/sqlite/sqlite3.c"
+            fi
+            for mode in "${modes[@]}"; do
               taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
             done
           done

@@ -1095,7 +1095,11 @@ designs and the compilers already built this way.
   `benchmark-files`.
 - `src/buster/compiler/c_parser.c` is the parser (#127): the preprocessor's
   token stream to a tree, a parent, a role and a node depth for every token,
-  and for a unit without errors its postorder with each subtree's size. The
+  and for a unit without errors its postorder and the tree's columns
+  (`parse_tree_columns`, #186/#544: each token's position in the postorder,
+  subtree end, first child and next sibling; with `ParseOptions.sizes` each
+  subtree's size), which the checker's reader derives itself from the C
+  driver's `tree_only` parse. The
   vector path builds it with kernels in AVX-512, each with an exact scalar
   twin, and a pass of checks that flags what C's grammar doesn't allow, whose
   top-level declarations go to the scalar parser; the scalar parser alone
@@ -1263,7 +1267,14 @@ there at a time, so everything takes one lock:
   which no `*_test.c` matches: tests don't change what the samples measure).
   Keep the pattern to what the samples measure: a module's own decision
   campaign (#336's binding handoff) has a module of its own, not the whole
-  checker's. A step gated so also runs on the pull request that changes it.
+  checker's. Samples of different code split by what changes each: #336's
+  time the default handoff (`direct`) where its inputs change, and the
+  comparison of every mode only where the handoffs themselves do
+  (`checker_binding_modes`); #395's time the passes the rows' producers reach
+  (`emit` and `build`) where the emission, the lowering or Tier 0 change, and
+  every pass only where the rows' own passes do (`check_debug_rows`).
+  The daily and dispatched runs time them all. A step gated so also runs on
+  the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
   foreign phases, `clang -E`'s times beside the preprocessor's benchmark
   (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
@@ -4717,7 +4728,9 @@ tree: the same parent, node depth and role on every token. The tree must keep
 its invariants (every parent another token or the root, at no greater depth;
 every opener's parent its closer, after it; no cycle), and its postorder and
 subtree sizes must be a depth-first walk's, whose in-order walk gives the tokens
-back in order. Then each kernel against its scalar twin, from the twins'
+back in order, and so must both paths' tree's columns and their twin's
+(`parse_tree_links`): each token's position, subtree end, first child and next
+sibling, and the sentinels. Then each kernel against its scalar twin, from the twins'
 outputs before it: K1 (depths, enclosing openers and each block's view), K3's
 classification, K2 (roles, flags, typed states and statement contexts, also
 from random roles and with every block in the twin's loop), K1's second part,
@@ -4807,7 +4820,8 @@ and times `--passes` interleaved passes (21) after a warm-up: the whole paths
 over every file (the input's conversion and its twin, the scalar parser, the
 twins together and the vector path), then each stage per file on shared arrays,
 after the stages before it (each kernel and its twin, K4's three loops, the
-fallback, and the postorder by its branch-free passes and by a walk). It reports
+fallback, the tree's columns with and without the subtree sizes, their twin from
+that postorder, and the postorder by a walk). It reports
 medians per token of time, cycles (with the fastest and slowest pass) and
 instructions, the events of the `--counters` set, and the share of top-level
 declarations and tokens the fallback took. `--only` times one path or stage
