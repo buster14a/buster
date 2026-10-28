@@ -153,7 +153,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
             // earlier retained bytes; an ordinary nonconstant result does not reject the automatic object.
             const uint64_t output_mark = output->length;
             CheckInitializer constant = { 0 };
-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                        input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
                                        true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
@@ -357,7 +357,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         if (eligible)
         {
             CheckInitializer plan = { 0 };
-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, input->static_objects[declaration] != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
             const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
@@ -478,7 +478,7 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
     {
         const uint32_t token = declarations[at];
         CheckInitializer* plan = result->plans + at;
-        valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+        valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
                                       input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
@@ -496,6 +496,7 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         {
             result->status = plan->status;
             result->token = plan->failed_token;
+
         }
     }
     if (valid)

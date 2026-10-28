@@ -684,6 +684,28 @@ ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
 combined object/data output uses the program's actual symbol space.
+All-zero writes and large clear ranges remain symbolic. For ordinary nonzero
+objects, a bounded proof inspects at most eight final writes for a nonzero
+integer representation untouched by later writes. When the retained byte suffix
+already fits, validation and serialization then run together in source order,
+without a scalar cache or replay. Capacity failures still take the validating
+symbolic path, so an earlier invalid write retains diagnostic precedence.
+Other aggregates validate and encode their scalar writes once before replay. When
+overwrites can remove earlier nonzero bytes, a backwards last-writer walk over
+sorted bit-range boundaries determines the final state; each interval is visited
+once, with scratch proportional to checked writes rather than declared storage.
+Only a surviving nonzero byte or relocation requires an object-sized payload,
+built directly in the unpublished retained suffix. Encoded scalar slots use the widest actual scalar representation in
+that object rather than an unconditional 32-byte slot; CLEAR/BYTES-only objects
+allocate none; mixed plans may retain stride-sized positions for other part kinds.
+Replay releases its cache before the next object is planned,
+retaining only payload and fixups. Zero plans release their unused per-write
+caches as well. Const zero objects keep RODATA and are filled directly during publication;
+negative floating zero is classified by its encoded bytes. The byte-range scan
+has bounded AVX-512 loads and an exact scalar twin, including partial-byte tails;
+both stop after the first nonzero block/byte. Overlap boundaries reuse the existing
+stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
+constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
 The standalone source bridge refuses a referenced overloadable symbol until
 its ABI symbol name is available, before publishing any Link state. An unused
@@ -696,6 +718,28 @@ still expression-checked, but produce no stores, runtime evaluations or live
 data references. The direct initializer API retains its strict rejection
 contract. Diagnostic-only scans borrow complete checked roots, restore both
 arenas and never publish an initializer or a supposedly clean stream.
+
+String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
+index retained in the output arena. Every adjacent literal part names the same
+record. An array-valued expression also resolves its ordinary literal through
+its object identity (`token + 1`), preserving parenthesized string copies;
+predefined function-name arrays remain excluded from literal initialization.
+The planner checks the indexed record's bounds and identity instead of scanning
+all literals for every initializer, including nonstring elements of a record.
+Deferred bodies remap this existing column together with their merged literal
+pool, and corpus comparisons include the retained indices.
+
+Static-assert messages contribute no expression value. The reader's existing
+constant-context pass marks each message span once, after identifying its
+assertion's top-level comma. String operands in the condition remain checked.
+This removes a parser-ancestor walk per string, whose repeated traversal of a
+long initializer's separator chain was quadratic (#593). Both changes consume
+existing reader facts; they add no search pass or per-initializer allocation.
+The parser rejects nonstring message operands before this span is ignored;
+regressions also check a C23 assertion with no message. The retained scaling
+campaign measures the default production path. Scalar/vector semantic checks
+establish equality, while the scalar reference's separate value-chain walks
+remain outside this string-specific scaling claim.
 
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be

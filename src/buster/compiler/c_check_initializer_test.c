@@ -289,6 +289,61 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
 
 #include "c_check_initializer_overload_test.c"
 
+// Reverse the pool, as a body merge can reorder its literals, and remap the published token index. Check syntax
+// and object lookup independently, without assuming that pool order, token order and object identity coincide.
+static void check_init_test_string_index(CheckTest* test, const CheckInput* input, const Parser* parser, TypeTable* types, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    CheckInitString* strings = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitString, input->string_count);
+    uint32_t* ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser->tokens.count + 1);
+    bool valid = strings != NULL && ids != NULL;
+    for (uint32_t token = 0; valid && token < parser->tokens.count; token += 1)
+    {
+        const uint32_t id = input->string_ids[token];
+        valid = id == BUSTER_CHECK_NONE || id < input->string_count;
+        ids[token] = id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE;
+    }
+    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
+    {
+        strings[input->string_count - 1 - i] = input->strings[i];
+    }
+    CheckValue value = { 0 };
+    CheckStream stream = {
+        .values = &value,
+        .count = 1,
+    };
+    CheckInitWalker walker = {
+        .types = types,
+        .parser = parser,
+        .stream = &stream,
+        .strings = strings,
+        .string_count = input->string_count,
+        .string_ids = ids,
+    };
+    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
+    {
+        const CheckInitString* string = strings + i;
+        value = (CheckValue){
+            .type = string->type,
+            .object = string->object,
+        };
+        const CheckInitString* expected = string->predefined ? NULL : string;
+        valid = check_init_string(&walker, 0, 0, 0) == expected;
+        if (!string->predefined)
+        {
+            valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == string;
+            value.offset = 1;
+            valid = valid && check_init_string(&walker, 0, 0, 0) == NULL;
+            const uint32_t id = ids[string->token];
+            ids[string->token] = input->string_count;
+            valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == NULL;
+            ids[string->token] = id;
+        }
+    }
+    check_test_expect(test, valid, "string initializer indices survive pool reordering, preserve object offsets and exclude predefined arrays");
+    arena_pop_to(scratch, mark);
+}
+
 static void check_init_test_source_language(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
                                             bool accept, bool emit, const char* clang, CLanguage language)
 {
@@ -328,6 +383,10 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
         check_test_expect(test, checked == accept, description);
         if (checked)
         {
+            if (input.string_count != 0)
+            {
+                check_init_test_string_index(test, &input, &parser, &types.table, &scratch);
+            }
             check_init_test_overload_parts(test, &input, &stream, &parser, &identifiers, &types.table, &initializers, source, clang);
             for (uint32_t i = 0; i < initializers.count; i += 1)
             {
@@ -335,7 +394,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                 {
                     const uint32_t declaration = initializers.declaration_tokens[i];
                     CheckInitializer strict = { 0 };
-                    const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
+                    const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
                                                                  input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
                                                                  input.static_objects[declaration] != 0, &output, &scratch, &strict);
                     check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
@@ -368,7 +427,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
                     Arena tiny = output;
                     tiny.capacity = sizeof(CheckInitPart);
                     CheckInitializer rejected = { 0 };
-                    const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
+                    const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
                                                                 input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
@@ -797,6 +856,67 @@ static void check_init_test_flexible(CheckTest* test, const char* clang)
         },
     };
     check_init_test_source(test, strings, string_expected, BUSTER_ARRAY_LENGTH(string_expected), true, true, clang);
+    static const char indexed[] =
+        "_Static_assert(sizeof \"condition\" == 10,\"message\" \" tail\");\n"
+        "_Static_assert(sizeof (char[][4]){\"abc\",\"def\"} == 8,\"nested strings\");\n"
+        "char joined[][4]={\"a\" \"b\",(\"cd\")};\n"
+        "int wide_joined[][3]={L\"a\" L\"b\",(L\"cd\")};\n"
+        "unsigned short short_joined[][3]={u\"a\" u\"b\",(u\"cd\")};\n"
+        "struct StringRow{char text[4];int wide[3];} string_rows[]={\n"
+        "{\"a\" \"b\",L\"cd\"},{(\"cd\"),L\"a\" L\"b\"}};\n";
+    static const CheckInitExpected indexed_expected[] = {
+        {
+            .name = "joined",
+            .bytes = {
+                [0] = 'a',
+                [1] = 'b',
+                [4] = 'c',
+                [5] = 'd',
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "wide_joined",
+            .bytes = {
+                [0] = 'a',
+                [4] = 'b',
+                [12] = 'c',
+                [16] = 'd',
+            },
+            .size = 24,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "short_joined",
+            .bytes = {
+                [0] = 'a',
+                [2] = 'b',
+                [6] = 'c',
+                [8] = 'd',
+            },
+            .size = 12,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "string_rows",
+            .bytes = {
+                [0] = 'a',
+                [1] = 'b',
+                [4] = 'c',
+                [8] = 'd',
+                [16] = 'c',
+                [17] = 'd',
+                [20] = 'a',
+                [24] = 'b',
+            },
+            .size = 32,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, indexed, indexed_expected, BUSTER_ARRAY_LENGTH(indexed_expected), true, true, clang);
+    const CLanguage c23 = { .standard = 2023 };
+    check_init_test_source_language(test, "static_assert(sizeof \"condition\" == 10);\n", 0, 0, true, false, clang, c23);
     check_init_test_source(test, "void f(void){struct F{int n;int v[];} empty={1,{}};}", 0, 0, true, false, clang);
     static const char* invalid[] = {
         "void f(void){struct F{int n;int v[];} local={1,{2,3}};}",
@@ -1654,6 +1774,62 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
         },
     };
     check_init_test_source(test, copy_override, copy_override_expected, BUSTER_ARRAY_LENGTH(copy_override_expected), true, true, 0);
+    static const char zero_source[] =
+        "unsigned char explicit_zero[64]={0},final_zero[64]={[63]=0},overwrite_zero[64]={[63]=255,[63]=0};\n"
+        "_Thread_local unsigned char tls_explicit_zero[64]={0},tls_overwrite_zero[64]={[63]=255,[63]=0};\n"
+        "const unsigned char const_explicit_zero[64]={0};\n"
+        "struct Z{unsigned a:9;unsigned b:7;} bit_zero={.a=511,.b=127,.a=0,.b=0};\n"
+        "int zero_target;union ZU{int *p;long n;} reloc_zero={.p=&zero_target,.n=0};\n"
+        "double negative_zero_array[2]={-0.0,0.0};\n";
+    static const CheckInitExpected zero_expected[] = {
+        {
+            .name = "explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "final_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "overwrite_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "tls_explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_TBSS,
+        },
+        {
+            .name = "tls_overwrite_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_TBSS,
+        },
+        {
+            .name = "const_explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_RODATA,
+        },
+        {
+            .name = "bit_zero",
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "reloc_zero",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "negative_zero_array",
+            .bytes = { [7] = 0x80 },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    check_init_test_source(test, zero_source, zero_expected, BUSTER_ARRAY_LENGTH(zero_expected), true, true, clang);
     static const char automatic[] = "int f(int x){struct S{int a,b;};struct S s={x,x+1};int a[2]={x,3};return s.a+a[0];}";
     check_init_test_source(test, automatic, 0, 0, true, false, clang);
     static const char* invalid[] = {

@@ -398,7 +398,16 @@ designs and the compilers already built this way.
   `#pragma clang section text = ".text.buster_checker"` and its reset, a
   section that starts on a page, so that code compiled before them doesn't
   move the driver's hot loops in the instruction caches (#502,
-  `docs/profiling.md`'s "Placement"): a new one goes there too.
+  `docs/profiling.md`'s "Placement"): a new one goes there too. The checker
+  unit's own tests (`c_checker_test.c` with the sections it includes, and its
+  commands' other `*_test.c`) are included between `#pragma clang optimize
+  off` and `on` (#681): the build waits for that unit, and their code was a
+  fifth of its compile (on the 9700X, 33.7 s in the build and 27.4 s
+  unoptimized; the build 33.7 and 28.5 s), while the tests ran as fast,
+  their time being the compiler's code and clang's processes, and `-c` of
+  sqlite3.c as fast too (+0.10% wall). No benchmark's timed code calls them.
+  A new test of the checker's goes inside them; a test whose own code is its
+  time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
   stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
   encoding, the object's build and write, the release; on several lanes their run is one stage, `lanes`), with its
