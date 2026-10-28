@@ -710,7 +710,7 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    bool recoverable = resolved && input->report_count != 0 && !input->resource;
+    bool recoverable = resolved && input->report_count != 0 && !input->resource && input->deferred_tokens == NULL;
     for (uint32_t report = 0; recoverable && report < input->report_count; report += 1)
     {
         const CheckInputReport* item = input->reports + report;
@@ -755,17 +755,7 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     }
 }
 
-static void check_input_pragma_report(CheckInputReader* reader)
-{
-    const uint32_t before = reader->output->report_count;
-    const uint32_t token = reader->resolve_position != BUSTER_CHECK_NONE ? reader->resolve_position :
-                           reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
-    check_input_report(reader, token, reader->resolve_message);
-    if (reader->output->report_count != before && reader->resolve_diagnostic_token == BUSTER_CHECK_NONE)
-    {
-        reader->output->reports[before].pragma = reader->resolve_pragma + 1;
-    }
-}
+static void check_input_pragma_report(CheckInputReader* reader);
 
 static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
 {
@@ -1588,6 +1578,24 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_pack_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
+
+static void check_input_pragma_report(CheckInputReader* reader)
+{
+    const uint32_t before = reader->output->report_count;
+    const uint32_t token = reader->resolve_position != BUSTER_CHECK_NONE ? reader->resolve_position :
+                           reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
+    check_input_report(reader, token, reader->resolve_message);
+    if (reader->output->report_count != before && reader->resolve_diagnostic_token == BUSTER_CHECK_NONE)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->pragma = reader->resolve_pragma + 1;
+        const CheckInputLoopDiagnostic* loop = reader->output->loop_diagnostic;
+        if (loop != NULL && loop->pragma == report->pragma && loop->position == token)
+        {
+            report->completion = token;
+        }
+    }
+}
 
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
@@ -6133,7 +6141,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         if (!input->resource && reader.bindings.valid)
         {
-            const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && deferred == NULL;
+            // A successful deferred merge clears its mask and supplies the same complete unit as source order.
+            // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
+            const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
             check_input_diagnostic_recover(&reader, resolved);
             for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)

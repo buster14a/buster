@@ -1426,7 +1426,9 @@ the same local completion cuts, including whole-switch completion barriers,
 and independent tentative-definition constraints still run at translation-unit
 end. Type-query/declarator failures, unsupported pragmas, resource failures and
 unfinished resolver states retain the conservative prefix. Repaired/deferred
-views do not enable this new binding recovery. All these views remain
+views with skipped bodies do not enable this new binding recovery. A successful
+deferred merge has the same complete unit as source order and uses the same cuts.
+All these views remain
 diagnostic-only and preserve the original source rejection.
 
 ### What the lowering costs (#531)
