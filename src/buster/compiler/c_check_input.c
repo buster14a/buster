@@ -1290,7 +1290,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 reader->ignored[token] |= job == 0 || job->keyword != i || token <= i + 1 || token == close;
             }
-            if (selected != 0 && kind == PARSE_KIND_TYPEOF)
+            if (selected != 0 && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC))
             {
                 valid &= check_input_vla_query(reader, i + 2, close, selected);
             }

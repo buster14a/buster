@@ -129,6 +129,11 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "for(int i=0;i<4;i++){a[i]=n+i;h=fold(h,(unsigned)++a[i]);}return (int)h;}",
         },
         {
+            "atomic-variable-stride-pointer",
+            "int tested(int n){int k=(unsigned)n%5+1;int values[3][k];_Atomic(int(*)[k]) pointer=values;"
+            "++pointer;++pointer;return (int)(((char*)pointer-(char*)values)/(k*sizeof(int)));}",
+        },
+        {
             "atomic-representation-classes",
             "struct Tiny{unsigned char a,b,c;};struct Big{unsigned long a,b,c;};"
             "static _Atomic(struct Tiny) tiny=(struct Tiny){1,2,3};static _Atomic(struct Big) big;"
