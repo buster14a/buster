@@ -10,10 +10,14 @@ The disjoint typed-operation decoder reads #717's real `Tier0Operation` rows.
 It recognizes exact EVEX i32 arithmetic/bitwise forms and compare-mask plus
 mask-to-0/-1 expansion at all three widths, retaining operand classes and byte
 widths. Output-target AVX-512F/VL, and DQ for compare expansion, are explicit
-requirements. Floating/other element widths, unmodeled predicates, changed
-register roles, addresses and predicated record decorations refuse before
+requirements. Lane arithmetic/comparisons on floating or non-i32 elements,
+unmodeled predicates, changed register roles, addresses and predicated record decorations refuse before
 publishing a semantic action. Tests use the actual producer to make rows;
 baseline and native compiler-host modes must make identical admission decisions.
+Bitwise AND/OR/XOR/complement rows carry no element type in `Tier0Operation`:
+the producer uses identical records for i8/i16/i32/i64 elements at equal total
+byte widths. These representation-independent operations normalize to the i32
+bit container without inferring narrow/wide lane arithmetic or signedness.
 This decoder does not yet translate a complete VECTOR/X86 typed function; that
 handoff remains coordinated with the active #131 corpus-adapter owner.
 

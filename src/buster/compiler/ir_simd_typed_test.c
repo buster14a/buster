@@ -9,7 +9,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     TypeTestTable table = { 0 };
     const bool ready = type_test_table_open(&table, 256);
     ir_test_expect(tally, ready, "typed SIMD operation fixtures initialize a real C type table");
-    const uint64_t target = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512DQ);
+    const uint64_t target = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512BW);
     static const CheckOp operations[] = {
         CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR, CHECK_OP_BIT_NOT,
         CHECK_OP_LESS, CHECK_OP_LESS_EQUAL, CHECK_OP_GREATER, CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL,
@@ -75,6 +75,33 @@ static void ir_simd_typed_test(IrTestTally* tally)
             IrSimdTypedOperation decoded = { 0 };
             ir_test_expect(tally, reason == NULL && ir_simd_typed_operation(&unsupported, target, &decoded) == IR_SIMD_TYPED_UNSUPPORTED,
                            "an otherwise valid floating producer operation remains explicitly outside the integer lane subset");
+        }
+    }
+    // The typed row has no element type. Logical bit operations are identical for all integer element widths;
+    // normalize those records as raw bits, while refusing arithmetic/comparison opcodes with different lanes.
+    static const TypeId integer_elements[] = { BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT, BUSTER_TYPE_LLONG, BUSTER_TYPE_ULLONG };
+    static const CheckOp integer_operations[] = { CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR, CHECK_OP_BIT_NOT, CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_LESS };
+    for (uint32_t width = 0; ready && width < 3; width += 1)
+    {
+        const TypeId normalized = type_vector(&table.table, BUSTER_TYPE_INT, 4u << width, false);
+        for (uint32_t element = 0; element < sizeof(integer_elements) / sizeof(*integer_elements); element += 1)
+        {
+            const uint64_t element_bytes = type_size(&table.table, integer_elements[element]);
+            const TypeId vector = type_vector(&table.table, integer_elements[element], (uint32_t)((16u << width) / element_bytes), false);
+            for (uint32_t operation = 0; operation < sizeof(integer_operations) / sizeof(*integer_operations); operation += 1)
+            {
+                Tier0Operation row = { 0 };
+                Tier0Operation canonical = { 0 };
+                const char* reason = check_vector_lower_row(&table.table, target, integer_operations[operation], vector, BUSTER_TYPED_CLASS_VOID, &row);
+                const char* normalized_reason = check_vector_lower_row(&table.table, target, integer_operations[operation], normalized, BUSTER_TYPED_CLASS_VOID, &canonical);
+                IrSimdTypedOperation result = { 0 };
+                const IrSimdTypedStatus status = ir_simd_typed_operation(&row, target, &result);
+                const bool bitwise = operation < 4;
+                ir_test_expect(tally, reason == NULL && normalized_reason == NULL && (bitwise ?
+                               status == IR_SIMD_TYPED_OK && result.shape == (IrSimdShape)(IR_SIMD_V4I32 + width) && !result.expand_mask &&
+                               memcmp(&row, &canonical, sizeof(row)) == 0 : status == IR_SIMD_TYPED_UNSUPPORTED),
+                               "representation-independent integer bitwise rows normalize exactly; other integer lane arithmetic/comparisons refuse");
+            }
         }
     }
     IrSimdTypedOperation decoded = { 0 };
