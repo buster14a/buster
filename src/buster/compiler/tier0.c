@@ -529,18 +529,17 @@ typedef enum Tier0Error
 // entry_records is null and entry_count 0. With Tier0Function.choice_requests, the `choice_count` requests the form
 // choice took (x86_choose_forms's): each one's record before the choice (its template's form, the row's widest
 // immediate), and its row, value and context; without it they are null and 0. `deferred` counts the entries the vector
-// path left to tier0_emit_deferred
-// (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
-// (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
-// in their order (0 for a function without them): the label's first record. The frame is the one tier0_emit_prologue
-// made, for its unwind tables (unwind_tier0_frame, #395): the callee-saved registers it pushed (Tier0Frame.saved's
-// bits, in tier0_callee_saved's order), whether it pushed rbp first and pointed it at the push (a frame pointer, which
-// a function that moves rsp as it runs has, and one whose frame is realigned), the bytes it reserved below the pushes,
-// the log2 of the alignment it realigned rsp to after them (0 for none: `and rsp, -alignment`, a frame pointer's alone)
-// and whether it then copied rsp into r15, the realigned frame's base where the body moves rsp (`frame_base`, r15 among
-// the pushes). The prologue's pushes, the frame pointer's mov, the reservation, the realignment and the base's mov are
-// the code's first records, and the epilogue's release (an add, or with a frame pointer the lea or mov), pops and ret
-// its last.
+// path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose values
+// went to the deep slots (tier0_select_deep). `label_records` has a record index for each of
+// Tier0Function.label_entries, label_count of them in their order (0 for a function without them): the label's first
+// record. The frame is the one tier0_emit_prologue made, for its unwind tables (unwind_tier0_frame, #395): the
+// callee-saved registers it pushed (Tier0Frame.saved's bits, in tier0_callee_saved's order), whether it pushed rbp
+// first and pointed it at the push (a frame pointer, which a function that moves rsp as it runs has, and one whose
+// frame is realigned), the bytes it reserved below the pushes, the log2 of the alignment it realigned rsp to after them
+// (0 for none: `and rsp, -alignment`, a frame pointer's alone) and whether it then copied rsp into r15, the realigned
+// frame's base where the body moves rsp (`frame_base`, r15 among the pushes). The prologue's pushes, the frame
+// pointer's mov, the reservation, the realignment and the base's mov are the code's first records, and the epilogue's
+// release (an add, or with a frame pointer the lea or mov), pops and ret its last.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {

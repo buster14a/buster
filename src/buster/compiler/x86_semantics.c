@@ -626,7 +626,7 @@ static const X86Effects x86_effects_unknown = {
 
 // The form table's row of a record's form, without its segment override or fixup flag (form 0, uncovered, past the
 // table).
-static uint32_t x86_semantics_row(uint32_t form)
+static __attribute__((unused)) uint32_t x86_semantics_row(uint32_t form)
 {
     uint32_t row = form & BUSTER_X86_FORM_NUMBER;
     row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : row >= BUSTER_X86_FORM_FS ? BUSTER_X86_FORM_FS : 0;
