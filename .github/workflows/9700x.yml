@@ -1329,14 +1329,14 @@ jobs:
           done
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,') || contains(env.MEASURE, ',streaming,')
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
 
       - name: Benchmark streaming on distinct physical cores
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,') || contains(env.MEASURE, ',streaming,')
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',streaming,')
         run: |
           allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
           mapfile -t core_cpus < <(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
