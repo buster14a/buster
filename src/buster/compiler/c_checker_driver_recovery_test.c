@@ -90,6 +90,8 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         "enum { A=2147483647+1\n#warning inside_enum\n};\nint first(void){return missing;}\n",
         "int array[1]={1,2}\n#error after_initializer\n;\n",
         "struct P{int x;};\nint f(void){struct P p={.x=(int[1]){1,2}[0]\n#warning after_inner\n};return p.x;}\nint bad(void){return missing;}\n",
+        "typedef int T;\nvoid g(void){int a __attribute__((cleanup(T)));}\n",
+        "typedef int T;\nvoid f(int*);\nvoid g(void){int a __attribute__((cleanup(T),cleanup(f)));}\n",
     };
     static const char* const limits[] = { NULL, "-ferror-limit=0", "-ferror-limit=1", "-ferror-limit=2", "-ferror-limit=20" };
     static const char* const policies[] = { NULL, "error", "ignored", "-w" };
