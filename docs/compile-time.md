@@ -550,6 +550,35 @@ traversal; they are not a measured sum of those independent improvements.
 
 ## The passes after checking (#592)
 
+#641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
+`declaration_tokens`; `check_initializers_plan_index` returns an index plus one by a bounded lower bound, with zero
+for an absent token, including the empty unit. The plans and their tokens are immutable after successful planning.
+The source adapter, VLA/compound-literal lowering and x86 diagnostic consumers all use that lookup.
+
+The warning producers maintain counts while they write or clear warnings: declaration-time constant rows,
+the final expression-warning rows, and ignored asm labels. The diagnostic collector omits an empty column and
+sizes its ordering arrays from those counts. Prepared flags distinguish completed producer metadata from a
+hand-built input or stream, which retains the full scan. Mutating a completed warning column requires updating
+its count through the producer helper or clearing that column's prepared flag; the metadata is part of the
+immutable source snapshot. Randomized dense-oracle tests exercise both cases, including suppression and
+speculative constant-call restoration.
+
+Where static-data preparation already ran, the program consumes its declaration keys instead of selecting
+the same tokens again. Syntax-only users retain the original selection. The emission initializes `defined`
+only at symbol objects, its only readable domain, and scans static-storage declarations instead of initialized
+automatic locals. Attribute collection selects nonnull pointers before testing declaration identity; its
+retained-object bytes are initialized only at the collected objects. Parameters remain in this collection,
+so their alias/retain refusal is preserved. The current warning-range index updates the count in its existing
+scalar or masked blocks, including deferred merges and speculative restoration, without a new final pass.
+
+[Frozen 9700X qualification](https://github.com/buster14a/buster-performance/blob/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-641/target/README.md)
+retains only this first slice: its 2,852 SQLite objects and 1,760 small-corpus pairs matched the base bytes.
+The post-check construction/handoff/consumer sum fell from 32.320 to 31.489 ms, with about 2.1 MiB less RSS,
+but whole-compile changes stayed within the A/A dispersion. A second compact selection-metadata slice was
+rejected after ablation. Selection maps and attributed-declaration lists remain future #641 work. These
+measurements apply to the frozen revisions in that report; this refreshed main-321 stack claims correctness
+and representation savings, with no new whole-compile speedup attribution.
+
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
 `--time-stages` runs of each build, pinned to CPU 2, the order rotating by
 round: `main` at `8ab9a208` and #592's head (`d4be6a47`), both built as the
