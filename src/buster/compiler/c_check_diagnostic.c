@@ -318,6 +318,15 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     {
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
+        valid = valid && check_input_visibility_pragmas(&reader, handled);
+        if (valid && result->visibility_pragmas != NULL)
+        {
+            CheckInputVisibilityPragmas* history = result->visibility_pragmas;
+            while (history->count != 0 && history->records[history->count - 1].token >= before_token)
+            {
+                history->count -= 1;
+            }
+        }
     }
     for (uint32_t i = 0; valid && i < count; i += 1)
     {

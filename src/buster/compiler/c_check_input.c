@@ -3264,7 +3264,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         }
         reader->linked_types[name] = composite;
     }
-    if (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL))
+    if (!reader->lane && (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL)))
     {
         check_input_visibility_declare(reader, token, point);
     }

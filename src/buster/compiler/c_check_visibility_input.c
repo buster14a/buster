@@ -104,6 +104,60 @@ static bool check_input_visibility_record(const CheckInputReader* reader, uint32
     return matched;
 }
 
+// Clang delivers a well-formed visibility directive to the parser as an annotation: it can stand where a
+// declaration or statement begins, but cannot interrupt a declarator/expression or appear among record members.
+// Malformed directives have no annotation and keep their syntax warning even in those positions.
+static void check_input_visibility_placement(CheckInputReader* reader, CheckInputVisibilityPragma* record,
+                                              uint32_t* links, uint32_t* cursor, uint32_t* group, uint32_t* structs)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    while (*cursor < record->token)
+    {
+        const uint32_t token = *cursor;
+        const uint8_t role = parser->tree.roles[token];
+        if (role < PARSE_ROLE_COUNT && parse_closer_roles[role] != PARSE_ROLE_NONE)
+        {
+            links[token] = *group;
+            *group = token;
+            *structs += role == PARSE_ROLE_OPEN_STRUCT;
+        }
+        else if (*group < count && parser->tree.parents[*group] == token)
+        {
+            *structs -= parser->tree.roles[*group] == PARSE_ROLE_OPEN_STRUCT;
+            *group = links[*group];
+        }
+        *cursor += 1;
+    }
+    if (record->warning != 1 && record->token != 0)
+    {
+        const uint32_t before = record->token - 1;
+        const uint8_t role = parser->tree.roles[before];
+        const uint32_t parent = parser->tree.parents[before];
+        const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+        const uint8_t group_role = *group < count ? parser->tree.roles[*group] : PARSE_ROLE_NONE;
+        const bool statement = *group == BUSTER_CHECK_NONE || group_role == PARSE_ROLE_OPEN_BODY || group_role == PARSE_ROLE_OPEN_BLOCK;
+        const bool boundary = role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_CLOSE_BODY ||
+                              role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR ||
+                              role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE ||
+                              (role == PARSE_ROLE_CLOSE_CONDITION && parent_role != PARSE_ROLE_TERMINATOR);
+        if (*structs != 0 || !statement || !boundary)
+        {
+            record->message = *structs != 0 ? "this pragma cannot appear in struct declaration" :
+                              group_role == PARSE_ROLE_OPEN_FUNCTION ? "expected parameter declarator" :
+                              role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_CLOSE_SPECIFIER || *group == BUSTER_CHECK_NONE ?
+                              "expected identifier or '('" : "expected expression";
+            record->diagnostic_source = record->source + 3;
+            record->diagnostic_location = 0;
+            record->warning = 0;
+            record->error = true;
+            record->push = false;
+            record->pop = false;
+            reader->output->visibility_error = true;
+        }
+    }
+}
+
 static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* handled)
 {
     const uint64_t mark = reader->arena->length;
@@ -122,19 +176,24 @@ static bool check_input_visibility_pragmas(CheckInputReader* reader, uint8_t* ha
         CheckInputVisibilityPragmas* history = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputVisibilityPragmas, 1);
         CheckInputVisibilityPragma* records = history != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputVisibilityPragma, capacity) : NULL;
         uint8_t* stack = records != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, capacity) : NULL;
-        valid = stack != NULL;
+        uint32_t* links = stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)reader->parser->tokens.count + 1) : NULL;
+        valid = links != NULL;
         if (valid)
         {
             *history = (CheckInputVisibilityPragmas){ .records = records };
             previous_end = 0;
             previous_token = 0;
             uint32_t depth = 0;
+            uint32_t cursor = 0;
+            uint32_t group = BUSTER_CHECK_NONE;
+            uint32_t structs = 0;
             uint8_t state = 0;
             for (uint32_t p = 0; p < reader->parser->tokens.pragma_count; p += 1)
             {
                 CheckInputVisibilityPragma record;
                 if (check_input_visibility_record(reader, p, &previous_end, &previous_token, &record))
                 {
+                    check_input_visibility_placement(reader, &record, links, &cursor, &group, &structs);
                     if (record.push)
                     {
                         stack[depth++] = state;

@@ -60,7 +60,9 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         "#pragma GCC visibility push(protected)\nint protected_value=5;\n#pragma GCC visibility pop\n"
         "int hidden_again=6;\n#pragma GCC visibility push(bad)\nint ignored_bad=9;\n#pragma GCC visibility pop\nint restored=7;"
         "int prior(void){return outside+hidden+external_hidden+local+protected_value+hidden_again+restored+tls_hidden;}\n"
-        "#pragma GCC visibility push(internal)\nint internal_value=8;\n#pragma GCC visibility pop\n";
+        "#pragma GCC visibility push(internal)\nint internal_value=8;\n#pragma GCC visibility pop\n"
+        "int crossing(void){\n#pragma GCC visibility push(protected)\nreturn 0;}\n"
+        "int after_body=10;\n#pragma GCC visibility pop\n";
     static const struct
     {
         const char* name;
@@ -79,6 +81,8 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         { "ignored_bad", STV_HIDDEN, STB_GLOBAL },
         { "restored", STV_DEFAULT, STB_GLOBAL },
         { "internal_value", STV_HIDDEN, STB_GLOBAL },
+        { "crossing", STV_DEFAULT, STB_GLOBAL },
+        { "after_body", STV_PROTECTED, STB_GLOBAL },
     };
     char path[512];
     char objects[3][512] = { { 0 } };
@@ -119,6 +123,14 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         "#pragma GCC visibility what\nint x;\n",
         "#pragma GCC visibility push(hidden\nint x;\n",
         "#pragma GCC visibility pop()\nint x;\n",
+        "#pragma GCC visibility push(bad)\n#pragma clang diagnostic ignored \"-Wignored-attributes\"\nint x;\n",
+        "#pragma clang diagnostic ignored \"-Wignored-attributes\"\n#pragma GCC visibility push(bad)\nint x;\n",
+        "#pragma GCC visibility push\n#pragma clang diagnostic ignored \"-Wignored-pragmas\"\nint x;\n",
+        "#pragma clang diagnostic error \"-Wignored-pragmas\"\n#pragma GCC visibility push\nint x;\n",
+        "#pragma GCC visibility push(hidden)\n#pragma GCC visibility pop\n",
+        "int\n#pragma GCC visibility push(hidden)\nx;\n",
+        "int f(void){return\n#pragma GCC visibility push(hidden)\n0;}\n",
+        "struct S {\n#pragma GCC visibility push(hidden)\nint x;};\n",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(malformed); c += 1)
     {
