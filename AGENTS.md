@@ -4895,10 +4895,14 @@ reversed one/eight-lane body schedules and guarded columns.
 file-scope function body apart from the top level, out of order on any number
 of lanes, from the reader's state at the body's opening (the history's heads,
 a view of the top level's table), and merges the bodies in source order
-(`c_types.c`'s change records and `type_replay`), into source order's result.
-A unit it can't merge yet (a body with a declaration with linkage, a
-transparent union or an intrinsic, a completion of its parameter-list tag, an
-error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
+(`c_types.c`'s change records and `type_replay`), into source order's result:
+the merge's pass over the binding events and the token columns runs on the
+lanes the bodies ran on, each a share of whole bodies by their tokens
+(`check_deferred_pass_items`). A unit it can't merge yet (a body whose
+declaration with linkage changes its entity's linked state, one that makes a
+union of the top level's transparent, one whose walk reports an error, and a
+unit with overloadable functions) is checked in source order, with the reason.
+The driver still checks in source order.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
 (and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
@@ -4944,7 +4948,8 @@ left to source order by reason. `./build/compiler benchmark-checker-deferred
 [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
 file...` times source order's reader against the deferred one on one lane and
 on up to N, with the parse, the top level, the bodies' walks, their position
-checks, the lanes' span and the merge apart, and what a lane costs: its copy of
+checks, the lanes' span and the merge apart (and the merge's parts: its replay,
+appended tables, events, tags, pass and rest), and what a lane costs: its copy of
 the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
 waits for, and the lanes' arenas before the lanes start; and in how many passes
 the first lane read the largest body. Each deferred reading releases its state,

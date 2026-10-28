@@ -405,12 +405,11 @@ static bool check_deferred_test_memory(void)
     return valid;
 }
 
-// The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
-// from the rule (docs/c-deferred-bodies.md, "How many lanes").
-// The merge's scan for a column's entries (check_deferred_entries, check_deferred_entries64) against its scalar twin,
-// on columns of every length to 300 that end at a PROT_NONE page, with entries at random tokens at four densities, of
-// 32-bit values whose none is 0 or BUSTER_CHECK_NONE and of 64-bit ones: the same positions in order, and no read past a
-// column, which faults.
+// The merge's scans of a column's tokens (check_deferred_entries, check_deferred_entries64 and check_deferred_count_bytes)
+// against their scalar twins, on ranges of every length to 300 from five starts, of columns that end at a PROT_NONE page,
+// with entries at random tokens at four densities: of 32-bit values whose none is 0 or BUSTER_CHECK_NONE, of 64-bit ones
+// and of bytes. The same positions in order, each in the range, the same counts, and no read past a column, which
+// faults.
 static bool check_deferred_test_entries(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -419,40 +418,61 @@ static bool check_deferred_test_entries(void)
     uint32_t vector_positions[301];
     uint32_t scalar_positions[301];
     uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
-    // Entries per 64 tokens.
+    // Entries per 64 tokens, and the ranges' starts.
     const uint32_t densities[] = { 0, 3, 32, 64 };
-    for (uint32_t length = 0; valid && length <= 300; length += 1)
+    const uint32_t begins[] = { 0, 1, 13, 64, 65 };
+    for (uint32_t end = 0; valid && end <= 300; end += 1)
     {
-        for (uint32_t d = 0; valid && d < BUSTER_ARRAY_LENGTH(densities); d += 1)
+        for (uint32_t s = 0; valid && s < BUSTER_ARRAY_LENGTH(begins) && begins[s] <= end; s += 1)
         {
-            for (uint32_t kind = 0; valid && kind < 3; kind += 1)
+            const uint32_t begin = begins[s];
+            for (uint32_t d = 0; valid && d < BUSTER_ARRAY_LENGTH(densities); d += 1)
             {
-                uint32_t vector_count = 0;
-                uint32_t scalar_count = 0;
-                if (kind < 2)
+                for (uint32_t kind = 0; valid && kind < 4; kind += 1)
                 {
-                    uint32_t* column = (uint32_t*)(mapping + page) - length;
-                    const uint32_t none = kind == 0 ? 0 : BUSTER_CHECK_NONE;
-                    for (uint32_t i = 0; i < length; i += 1)
+                    uint32_t vector_count = 0;
+                    uint32_t scalar_count = 0;
+                    if (kind < 2)
                     {
-                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
-                        column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint32_t)(state >> 16) % 1000 + 1 : none;
+                        uint32_t* column = (uint32_t*)(mapping + page) - end;
+                        const uint32_t none = kind == 0 ? 0 : BUSTER_CHECK_NONE;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint32_t)(state >> 16) % 1000 + 1 : none;
+                        }
+                        vector_count = check_deferred_entries(column, begin, end, none, true, vector_positions);
+                        scalar_count = check_deferred_entries(column, begin, end, none, false, scalar_positions);
                     }
-                    vector_count = check_deferred_entries(column, length, none, true, vector_positions);
-                    scalar_count = check_deferred_entries(column, length, none, false, scalar_positions);
-                }
-                else
-                {
-                    uint64_t* column = (uint64_t*)(mapping + page) - length;
-                    for (uint32_t i = 0; i < length; i += 1)
+                    else if (kind == 2)
                     {
-                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
-                        column[i] = (uint32_t)(state >> 58) < densities[d] ? state | 1 : 0;
+                        uint64_t* column = (uint64_t*)(mapping + page) - end;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? state | 1 : 0;
+                        }
+                        vector_count = check_deferred_entries64(column, begin, end, true, vector_positions);
+                        scalar_count = check_deferred_entries64(column, begin, end, false, scalar_positions);
                     }
-                    vector_count = check_deferred_entries64(column, length, true, vector_positions);
-                    scalar_count = check_deferred_entries64(column, length, false, scalar_positions);
+                    else
+                    {
+                        uint8_t* column = mapping + page - end;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint8_t)(state >> 24 | 1) : 0;
+                        }
+                        vector_count = check_deferred_count_bytes(column, begin, end, true);
+                        scalar_count = check_deferred_count_bytes(column, begin, end, false);
+                    }
+                    const uint32_t listed = kind < 3 ? vector_count : 0;
+                    valid = vector_count == scalar_count && memcmp(vector_positions, scalar_positions, (uint64_t)listed * sizeof(uint32_t)) == 0;
+                    for (uint32_t e = 0; valid && e < listed; e += 1)
+                    {
+                        valid = begin <= vector_positions[e] && vector_positions[e] < end && (e == 0 || vector_positions[e - 1] < vector_positions[e]);
+                    }
                 }
-                valid = vector_count == scalar_count && memcmp(vector_positions, scalar_positions, (uint64_t)vector_count * sizeof(uint32_t)) == 0;
             }
         }
     }
@@ -463,6 +483,8 @@ static bool check_deferred_test_entries(void)
     return valid;
 }
 
+// The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
+// from the rule (docs/c-deferred-bodies.md, "How many lanes").
 static uint64_t check_deferred_test_lane_tokens(uint64_t top)
 {
     return BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
@@ -961,7 +983,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
     failures += !entries;
     if (!entries)
     {
-        fprintf(stderr, "test-checker-deferred: the merge's scan for a column's entries and its scalar twin differ\n");
+        fprintf(stderr, "test-checker-deferred: the merge's scans of a column's tokens and their scalar twins differ\n");
     }
     const bool memory = check_deferred_test_memory();
     checks += 1;
