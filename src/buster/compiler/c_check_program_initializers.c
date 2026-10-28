@@ -25,54 +25,13 @@ struct CheckLowerInitializers
     SymbolId symbol_base;
 };
 
-// A record can contain an omitted volatile member as well as its explicitly initialized parts. Walk object
-// containment, never pointed-to types; repeated types are visited once and nesting uses an explicit stack.
-static bool check_lower_init_volatile(const TypeTable* types, TypeId type, Arena* scratch)
+// Pooling and aggregate COPY share the frozen unit's by-value containment facts. Top-level qualifiers remain in
+// TypeId (including qualified arrays/aligned types); a lookup does no allocation or type-sized walk per initializer.
+static bool check_lower_init_volatile(TypeId type, const uint8_t* facts, uint32_t count)
 {
-    TypeId base = type_strip_aligned(types, type);
-    while ((type_qualifiers(base) & BUSTER_TYPE_VOLATILE) == 0 && type_kind_is_array(type_kind(types, base)))
-    {
-        base = type_strip_aligned(types, type_element(types, base));
-    }
-    bool found = (type_qualifiers(base) & BUSTER_TYPE_VOLATILE) != 0;
-    const uint8_t kind = type_kind(types, base);
-    const uint64_t mark = scratch->length;
-    if (!found && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
-    {
-        uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, types->types.count);
-        TypeId* stack = BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, types->types.count);
-        found = seen == NULL || stack == NULL;
-        uint32_t depth = 0;
-        if (!found)
-        {
-            memset(seen, 0, types->types.count);
-            seen[type_index(base)] = 1;
-            stack[depth++] = base;
-        }
-        while (!found && depth != 0)
-        {
-            const TypeId at = stack[--depth];
-            const uint8_t child_kind = type_kind(types, at);
-            const bool record = child_kind == BUSTER_TYPE_KIND_STRUCT || child_kind == BUSTER_TYPE_KIND_UNION;
-            const bool array = type_kind_is_array(child_kind);
-            const uint32_t tag = record ? types->types.index[type_index(at)] : 0;
-            const uint32_t first = record ? types->tags.member_begin[tag] : 0;
-            const uint32_t count = record ? types->tags.member_count[tag] : array ? 1 : 0;
-            for (uint32_t m = 0; !found && m < count; m += 1)
-            {
-                const TypeId child = type_strip_aligned(types, record ? types->members.type[first + m] : type_element(types, at));
-                found = (type_qualifiers(child) & BUSTER_TYPE_VOLATILE) != 0;
-                const uint32_t index = type_index(child);
-                if (!found && !seen[index])
-                {
-                    seen[index] = 1;
-                    stack[depth++] = child;
-                }
-            }
-        }
-    }
-    arena_pop_to(scratch, mark);
-    return found;
+    const uint32_t index = type_index(type);
+    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 || index >= count || facts == NULL ||
+           (facts[index] & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0;
 }
 
 // Whether the selected program can initialize this automatic object. Compound literals initialize at evaluation,
@@ -171,7 +130,8 @@ static bool check_lower_init_image(const CheckProgram* program, const CheckIniti
     return valid;
 }
 
-static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckProgram* program, Arena* output, Arena* scratch)
+static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckProgram* program, const uint8_t* type_facts, uint32_t type_count,
+                                   Arena* output, Arena* scratch)
 {
     *pools = (CheckLowerInitializers){ 0 };
     const uint32_t count = program->initializers != NULL ? program->initializers->count : 0;
@@ -197,7 +157,7 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
         const CheckInitializer* plan = program->initializers->plans + i;
         selected[i] = plan->object_size > BUSTER_CHECK_LOWER_INIT_UNROLLED && check_lower_init_selected(program, i, selected);
         prefixes[i] = selected[i] ? check_lower_init_prefix(program, plan) : 0;
-        if (prefixes[i] != 0 && check_lower_init_volatile(program->types, plan->type, scratch))
+        if (prefixes[i] != 0 && check_lower_init_volatile(plan->type, type_facts, type_count))
         {
             prefixes[i] = 0;
         }

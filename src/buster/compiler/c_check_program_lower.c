@@ -69,6 +69,15 @@ struct CheckLowerTable
     uint32_t fallback;
 };
 
+// Immutable type facts shared by pool preparation and expression/body lowering.
+#define BUSTER_CHECK_LOWER_TYPE_AGGREGATE 0x01u
+#define BUSTER_CHECK_LOWER_TYPE_COMPLEX 0x02u
+#define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
+#define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
+#define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
+#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
+#define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
+
 #include "c_check_program_initializers.c"
 
 typedef struct CheckProgramLowered CheckProgramLowered;
@@ -515,14 +524,6 @@ static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 // which nothing loads through: a function's, an array's or an aggregate's; whether it is a pointer; and whether it is
 // _Bool. BUSTER_CHECK_LOWER_TYPE_KIND marks the kinds whose types take their class and facts from the kind alone
 // (check_lower_kind_facts), in that table alone.
-#define BUSTER_CHECK_LOWER_TYPE_AGGREGATE 0x01u
-#define BUSTER_CHECK_LOWER_TYPE_COMPLEX 0x02u
-#define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
-#define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
-#define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
-#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
-#define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
-
 // A type's facts (BUSTER_CHECK_LOWER_TYPE_*): the rule that the table of every type's holds (check_lower_classify_types),
 // which the bodies read (check_lower_facts).
 static uint8_t check_lower_type_facts(const TypeTable* types, TypeId type)
@@ -5473,7 +5474,25 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         lowered->token = lowered->asms.token;
         valid = false;
     }
-    if (valid && !check_lower_init_pools(&lowered->initializers, program, output, scratch))
+    // Freeze each type's class and by-value containment facts before pooling. Bodies and pool eligibility read
+    // the same columns; preparing a record initializer never allocates or clears a unit-sized traversal table.
+    shared->type_count = valid ? types->types.count : 0;
+    shared->type_classes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
+    shared->type_facts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
+    valid = valid && shared->type_classes != 0 && shared->type_facts != 0;
+    if (valid)
+    {
+        if (scalar)
+        {
+            check_lower_classify_types_scalar(types, shared->type_count, shared->type_classes, shared->type_facts);
+        }
+        else
+        {
+            check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
+        }
+        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
+    }
+    if (valid && !check_lower_init_pools(&lowered->initializers, program, shared->type_facts, shared->type_count, output, scratch))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
         valid = false;
@@ -5553,23 +5572,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             abi_classify_all(&shared->table, types);
         }
     }
-    // Every type's class and facts, which the bodies ask of each node's types (check_lower_class): for the types the unit
-    // has, as the lowering makes none.
-    shared->type_count = valid ? types->types.count : 0;
-    shared->type_classes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
-    shared->type_facts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
-    valid = valid && shared->type_classes != 0 && shared->type_facts != 0;
     if (valid)
     {
-        if (scalar)
-        {
-            check_lower_classify_types_scalar(types, shared->type_count, shared->type_classes, shared->type_facts);
-        }
-        else
-        {
-            check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
-        }
-        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         // One bounded lookup obtains both columns for the leaf and vector kernels. The optional table's
         // failure retains scalar expression expansion; scalar/source-row lowering allocates none.
         shared->type_templates = valid && !scalar && !sources && program->body_count != 0 ?

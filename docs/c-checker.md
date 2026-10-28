@@ -750,6 +750,12 @@ What the lowering covers past scalars (#145's programs):
   payload keep the existing writes, avoiding large readonly zero gaps for sparse
   initializers. This preserves checked string truncation,
   embedded NULs, wide characters, designated overrides and local mutability.
+  Pool preparation reads the same immutable by-value volatile-containment facts
+  as aggregate-copy lowering. The unit prepares those facts once before pool
+  planning; each initializer uses one bounded lookup, without a type-sized
+  visited table or graph walk. The many-record regression retains complete
+  prefixes using only 256 bytes of plan scratch despite hundreds of unused
+  types in the unit.
   A mixed runtime plan retains its ordered parts, pooling an individual string
   part above the same threshold. Small payloads, volatile parts, bit-fields and
   values needing address relocations retain their existing lowering. Pools are

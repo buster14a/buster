@@ -1085,8 +1085,72 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     check_test_program_source_char(test, source, name, clang, false);
 }
 
+static void check_test_program_initializer_facts(CheckTest* test)
+{
+    enum
+    {
+        COUNT = 32,
+        SIZE = 131,
+    };
+    CheckTestTypes types = { 0 };
+    Arena output = arena_reserve(65536);
+    Arena scratch = arena_reserve(65536);
+    bool ready = check_test_types_open(&types) && output.base != NULL && scratch.base != NULL;
+    for (uint32_t i = 0; ready && i < 256; i += 1)
+    {
+        ready = type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, i + 100) != 0;
+    }
+    const TypeId array = ready ? type_array(&types.table, BUSTER_TYPE_CHAR, SIZE) : 0;
+    const TypeId record = ready ? type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, 1) : 0;
+    const TypeMember member = { .name = 1, .type = array, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
+    uint8_t* facts = ready ? BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, types.table.types.count) : NULL;
+    ready = ready && facts != NULL;
+    if (ready)
+    {
+        memset(facts, 0, types.table.types.count);
+        ready = check_lower_copy_type_facts(&types.table, types.table.types.count, facts, &scratch, false);
+    }
+    check_test_expect(test, ready, "initializer pool containment facts are prepared once for a large frozen type table");
+    if (ready)
+    {
+        uint8_t literal[SIZE];
+        memset(literal, 1, sizeof(literal));
+        CheckInitPart part = { .kind = CHECK_INIT_BYTES, .type = array, .bytes = literal, .byte_count = SIZE };
+        CheckInitializer plans[COUNT];
+        CheckControl controls[COUNT];
+        uint32_t declarations[COUNT];
+        uint8_t flags[COUNT] = { 0 };
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            plans[i] = (CheckInitializer){ .type = record, .parts = &part, .count = 1, .object_size = SIZE, .status = CHECK_INIT_OK };
+            controls[i] = (CheckControl){ .kind = CHECK_CONTROL_INITIALIZE, .target = i };
+            declarations[i] = i;
+        }
+        const CheckInput input = { .token_count = COUNT, .static_objects = flags };
+        const CheckInitializers initializers = { .plans = plans, .count = COUNT, .declaration_tokens = declarations };
+        const CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
+                                       .controls = controls, .control_count = COUNT };
+        scratch.capacity = 256;
+        CheckLowerInitializers pools = { 0 };
+        bool pooled = check_lower_init_pools(&pools, &program, facts, types.table.types.count, &output, &scratch) && pools.count == COUNT;
+        for (uint32_t i = 0; pooled && i < COUNT; i += 1)
+        {
+            pooled = pools.items[i].part == BUSTER_CHECK_NONE && pools.items[i].size == SIZE &&
+                     memcmp(pools.items[i].bytes, literal, SIZE) == 0;
+        }
+        check_test_expect(test, pooled && scratch.length == 0,
+                          "many dense record pools need only plan-sized scratch, never a type-sized traversal per initializer");
+        scratch.capacity = 65536;
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    check_test_types_close(&types);
+}
+
 static void check_test_program_initializers(CheckTest* test, const char* clang)
 {
+    check_test_program_initializer_facts(test);
     const uint32_t sizes[] = { 127, 128, 129, 135, 136, 137, 257, 512, 2049, 8193, 32769 };
     char* source = malloc(40000);
     check_test_expect(test, source != NULL, "large automatic initializer fixture allocation");
