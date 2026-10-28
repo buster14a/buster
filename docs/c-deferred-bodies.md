@@ -183,8 +183,9 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 74 fixtures, 65 of the
-  issue's cases, 400 bodies that call each other and 8 of the lanes' rule, each
+- `./build/compiler test-checker-deferred [--keep]`: 80 fixtures, 65 of the
+  issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
+  of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
   scalar path, the vector path, and the vector path with every body read apart,
   on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct binding
@@ -419,7 +420,13 @@ eight changes are in `h64x3.c`, whose largest bodies tie: the former first
 part groups header helpers, while the corrected order reserves the part of
 the first largest body. The other 42 inputs, including SQLite and the four
 c-testsuite programs, retain identical orders. This is a scheduling identity
-check; it supplies no new runtime measurements for the correction.
+check; it supplies no new runtime measurements for the correction. A screen
+of `h64x3.c` alone then timed it on the 9700X, before the correction and
+after (the record's "The fix for grouped parts"), by the rule on 8 lanes,
+which takes 3, and with every lane on 2, 3, 4 and 8, five rounds of 24
+passes: the first lane read the largest body in all 120 passes of each,
+where it read it in none, and each change against one lane stayed within
+the rounds' spread of the other build's (by the rule, −1.6% against −0.5%).
 
 A lane costs its copy of the top level's reader and its wake-up, which only its
 share of the bodies' walks can pay for. On the 9700X, with `--cpus
@@ -430,7 +437,7 @@ c-testsuite's programs (`00182.c`, `00200.c`, `00204.c` and `00213.c`), the
 frozen `sqlite3.c`, and 38 synthetic units of 2 to 70 bodies after `stdio.h`,
 `stdlib.h` and `string.h`, after thirty of the C library's headers or after
 none, among them one large body beside smaller ones and two large bodies of
-different sizes ([the corrected record](https://github.com/buster14a/buster-performance/tree/ba2f0ffec9b07f2047902111fa9fe868d644f3b6/docs/measurements/deferred-lane-costs-113-2026-10-27)):
+different sizes ([the corrected record](https://github.com/buster14a/buster-performance/tree/e4ae6019ed75575d49f9e75fba752820a1da9050/docs/measurements/deferred-lane-costs-113-2026-10-27)):
 
 - **A lane's copy** (the median of the 42 units but `sqlite3.c`, then
   `sqlite3.c`'s): when each lane reserved its five arenas inside the lane, 101
