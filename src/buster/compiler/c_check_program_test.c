@@ -1135,6 +1135,13 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
              "int bad=(s.x!=(char)n)|(s.y!=n+1)|(k!=n+2);for(int i=0;i<130;i++)bad|=s.a[i]!=('a'+i%%26);"
              "bad|=s.a[130];return bad?123456:n;}", letters);
     check_test_program_source_limits(test, text, "automatic-mixed-runtime-string", clang, false, 1, 320);
+    snprintf(text, sizeof(text),
+             "int tested(int n){char a[]=\"%s\";double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x;}", letters);
+    check_test_program_source_limits(test, text, "automatic-pool-synthesized-errno-symbol", clang, false, 1, 320);
+    snprintf(text, sizeof(text),
+             "int*__errno_location(void);int tested(int n){char a[]=\"%s\";*__errno_location()=7;"
+             "double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x+*__errno_location();}", letters);
+    check_test_program_source_limits(test, text, "automatic-pool-existing-errno-symbol", clang, false, 1, 320);
     check_test_program_source_limits(test,
         "int tested(int n){int a[257]={[0 ... 256]=3,[31]=9,[256]=17};int bad=0;"
         "for(int i=0;i<257;i++)bad|=a[i]!=(i==31?9:i==256?17:3);return bad?123456:n;}",

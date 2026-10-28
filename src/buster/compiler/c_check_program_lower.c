@@ -4987,7 +4987,7 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
         }
         if (lowered->status == CHECK_PROGRAM_OK && lowered->errno_symbol == 0)
         {
-            const uint64_t symbol = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
+            const uint64_t symbol = (uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + 1;
             if (symbol >= UINT32_MAX)
             {
                 lowered->status = CHECK_PROGRAM_RESOURCE;
