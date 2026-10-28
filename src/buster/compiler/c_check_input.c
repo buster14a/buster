@@ -213,6 +213,9 @@ struct CheckInput
     uint32_t asm_capacity;
     uint32_t* asm_ids;
     CheckInitString* strings;
+    // Literal index by token, including every part of an adjacent literal sequence; NONE for other tokens.
+    // Retained from the reader so initializer planning also resolves an array-valued literal by object - 1.
+    uint32_t* string_ids;
     uint32_t string_count;
     uint32_t token_count;
     CBindingStatistics binding_statistics;
@@ -4261,16 +4264,8 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         else if ((reader->syntax[token] & BUSTER_CHECK_SYNTAX_STRING) != 0 && role == PARSE_ROLE_OPERAND)
         {
-            uint32_t ancestor = parser->tree.parents[token];
-            while (ancestor < parser->tokens.count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_KEYWORD && parser->tree.roles[ancestor] != PARSE_ROLE_TERMINATOR)
-            {
-                ancestor = parser->tree.parents[ancestor];
-            }
-            const uint32_t keyword = ancestor < parser->tokens.count ? reader->first_child[ancestor] : BUSTER_CHECK_NONE;
-            const uint32_t separator = keyword < ancestor ? check_constant_punctuation(parser, keyword + 2, ancestor, PARSE_KIND_COMMA) : ancestor;
-            const bool message = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && token > separator;
             const CheckInitString* string = check_input_string(reader, token);
-            if (!message && string != 0)
+            if (string != 0)
             {
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
@@ -4528,13 +4523,8 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         else if (kind == PARSE_KIND_STRING)
         {
-            // Static assertions' messages do not contribute a value; other string objects need the string-pool adapter.
-            uint32_t ancestor = parser->tree.parents[token];
-            while (ancestor < parser->tokens.count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_KEYWORD && parser->tree.roles[ancestor] != PARSE_ROLE_TERMINATOR)
-            {
-                ancestor = parser->tree.parents[ancestor];
-            }
-            supported = ancestor < parser->tokens.count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_KEYWORD;
+            // Static-assert messages and concatenated tails are already ignored. Other literals need an operand.
+            supported = false;
         }
         else if (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH ||
                  kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
@@ -4925,6 +4915,12 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
         {
             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
             memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
+            if (separator < close)
+            {
+                // A message contributes no expression value. Mark its span once instead of walking the parser
+                // ancestors of every string, which is quadratic in a long initializer's separator chain (#593).
+                memset(reader->ignored + separator + 1, 1, close - separator - 1);
+            }
         }
     }
     if (parser->tokens.kinds[token] == PARSE_KIND_CASE)
@@ -4937,8 +4933,9 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
     }
 }
 
-// The constant contexts of every token. Only static objects, static assertions and case labels open one, so the vector
-// path visits those alone, the scalar path every token. Each writes constant_contexts alone, which no scan reads.
+// The constant contexts of every token, and the static-assert message spans that contribute no expression value.
+// Only static objects, static assertions and case labels open one, so the vector path visits those alone, the scalar
+// path every token. Neither the context writes nor the ignored message spans affect the selection scans.
 static void check_input_constant_contexts(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -5311,6 +5308,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
+    BUSTER_CHECK_OUTPUT_ARRAY(string_ids, uint32_t);
 #undef BUSTER_CHECK_OUTPUT_ARRAY
     if (valid && deferred_tokens != 0)
     {
@@ -5354,7 +5352,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(initializers, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_declarations, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_heads, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(string_ids, uint32_t);
+    reader.string_ids = input->string_ids;
+
     BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(expression_commas, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(conditions, uint8_t);

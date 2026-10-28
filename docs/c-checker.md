@@ -719,6 +719,28 @@ data references. The direct initializer API retains its strict rejection
 contract. Diagnostic-only scans borrow complete checked roots, restore both
 arenas and never publish an initializer or a supposedly clean stream.
 
+String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
+index retained in the output arena. Every adjacent literal part names the same
+record. An array-valued expression also resolves its ordinary literal through
+its object identity (`token + 1`), preserving parenthesized string copies;
+predefined function-name arrays remain excluded from literal initialization.
+The planner checks the indexed record's bounds and identity instead of scanning
+all literals for every initializer, including nonstring elements of a record.
+Deferred bodies remap this existing column together with their merged literal
+pool, and corpus comparisons include the retained indices.
+
+Static-assert messages contribute no expression value. The reader's existing
+constant-context pass marks each message span once, after identifying its
+assertion's top-level comma. String operands in the condition remain checked.
+This removes a parser-ancestor walk per string, whose repeated traversal of a
+long initializer's separator chain was quadratic (#593). Both changes consume
+existing reader facts; they add no search pass or per-initializer allocation.
+The parser rejects nonstring message operands before this span is ignored;
+regressions also check a C23 assertion with no message. The retained scaling
+campaign measures the default production path. Scalar/vector semantic checks
+establish equality, while the scalar reference's separate value-chain walks
+remain outside this string-specific scaling claim.
+
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be
 distinct. The lower-level emitter accepts an existing Link and object-to-symbol

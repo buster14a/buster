@@ -1616,7 +1616,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
                 left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
                 left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
-                left->token_nodes[token] == right->token_nodes[token] && left->body_declarations[token] == right->body_declarations[token] &&
+                left->token_nodes[token] == right->token_nodes[token] && left->string_ids[token] == right->string_ids[token] &&
+                left->body_declarations[token] == right->body_declarations[token] &&
                 left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
                 left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
                 left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
