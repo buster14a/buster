@@ -217,6 +217,14 @@ and grammar controls must be rejected with matching complete diagnostics; no
 invalid IR is interpreted. Allocation failures must preserve unpublished views
 and arena prefixes.
 
+`--max-ms` is checked between bounded consumer calls, rather than interrupting
+an individual public API call. Interpretation has the separate `--max-steps`
+limit; the enclosing CI command also has its process timeout. Resource limits
+from rebuilding, printing, either parser, verification and optimization stay
+resource outcomes. Constrained-arena controls check those boundaries, and an
+independent control requires rejection when a correct return value accompanies
+different final global memory.
+
 Artifact capture requires `--revision` (or `GITHUB_SHA`) to identify the source
 used to build the tool. The caller is responsible for that association; it is
 not inferred from a possibly newer working checkout. The record also stores

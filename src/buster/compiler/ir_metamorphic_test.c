@@ -91,6 +91,90 @@ static bool ir_meta_artifact_contracts(IrMetaTally* tally, const IrFunction* fun
     return valid;
 }
 
+static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* function, String8 generated)
+{
+    uint8_t storage[4][8192] __attribute__((aligned(64)));
+    Arena arenas[4];
+    bool valid = true;
+    for (uint32_t a = 0; a < 4; a += 1)
+    {
+        memset(storage[a], 0x51 + a, 16);
+        arenas[a] = (Arena){ .base = storage[a], .length = 16, .capacity = sizeof(storage[a]) };
+    }
+    for (uint32_t stage = 0; stage < 4; stage += 1)
+    {
+        for (uint32_t a = 0; a < 4; a += 1)
+        {
+            arenas[a].length = 16;
+            arenas[a].capacity = a == stage ? 16 : sizeof(storage[a]);
+        }
+        const IrMetaFailure failure = ir_meta_roundtrip(function, arenas, arenas + 1, arenas + 2, arenas + 3, NULL);
+        bool preserved = failure == IR_META_RESOURCE;
+        for (uint32_t a = 0; a < 4; a += 1)
+        {
+            preserved = preserved && arenas[a].length == 16;
+            for (uint32_t b = 0; b < 16; b += 1)
+            {
+                preserved = preserved && storage[a][b] == 0x51 + a;
+            }
+        }
+        valid = ir_meta_expect(tally, preserved, "text/parse/twin/scratch exhaustion retains resource classification and every arena prefix") && valid;
+    }
+    for (uint32_t stage = 1; stage < 4; stage += 1)
+    {
+        for (uint32_t a = 0; a < 4; a += 1)
+        {
+            arenas[a].length = 16;
+            arenas[a].capacity = a == stage ? 16 : sizeof(storage[a]);
+        }
+        IrFunction unpublished[2];
+        memset(unpublished, 0x5a, sizeof(unpublished));
+        IrFunction unchanged[2];
+        memcpy(unchanged, unpublished, sizeof(unpublished));
+        const IrMetaFailure failure = ir_meta_parse_pair(generated, arenas + 1, arenas + 2, arenas + 3,
+                                                        unpublished, unpublished + 1, IR_META_GENERATION);
+        valid = ir_meta_expect(tally, failure == IR_META_RESOURCE && memcmp(unpublished, unchanged, sizeof(unpublished)) == 0 &&
+                              arenas[1].length == 16 && arenas[2].length == 16 && arenas[3].length == 16,
+                              "initial parser-pair exhaustion is resource failure and publishes neither partial function") && valid;
+    }
+    arenas[1].capacity = sizeof(storage[1]);
+    arenas[2].capacity = sizeof(storage[2]);
+    arenas[3].capacity = 16;
+    IrFunction unpublished;
+    memset(&unpublished, 0x5a, sizeof(unpublished));
+    const IrFunction unchanged = unpublished;
+    bool changed = false;
+    const IrMetaFailure rebuilt = ir_meta_transform(function, 0, false, arenas + 1, arenas + 3, &unpublished, &changed);
+    valid = ir_meta_expect(tally, rebuilt == IR_META_RESOURCE && memcmp(&unpublished, &unchanged, sizeof(unpublished)) == 0 &&
+                          arenas[1].length == 16 && arenas[3].length == 16,
+                          "source-verifier exhaustion remains resource failure during rebuilding") && valid;
+    valid = ir_meta_expect(tally, ir_meta_validate(function, arenas + 3) == IR_META_RESOURCE && arenas[3].length == 16,
+                          "complete-verifier exhaustion retains its own category") && valid;
+    arenas[1].capacity = 16;
+    arenas[3].capacity = sizeof(storage[3]);
+    const IrMetaFailure optimized = ir_meta_optimize(function, 4, false, arenas + 1, arenas + 3, &unpublished);
+    valid = ir_meta_expect(tally, optimized == IR_META_RESOURCE && memcmp(&unpublished, &unchanged, sizeof(unpublished)) == 0 &&
+                          arenas[1].length == 16 && arenas[3].length == 16,
+                          "optimizer output exhaustion is inconclusive resource failure, never a correctness difference") && valid;
+    arenas[0].capacity = 16;
+    const String8 unprinted = { .pointer = "unpublished", .length = 11 };
+    String8 printed = unprinted;
+    const IrMetaFailure text_failure = ir_meta_print(function, arenas, arenas + 3, &printed);
+    valid = ir_meta_expect(tally, text_failure == IR_META_RESOURCE && printed.pointer == unprinted.pointer && printed.length == unprinted.length &&
+                          arenas[0].length == 16 && arenas[3].length == 16,
+                          "text output exhaustion cannot publish a partial canonical string") && valid;
+    bool prefixes = true;
+    for (uint32_t a = 0; a < 4; a += 1)
+    {
+        for (uint32_t b = 0; b < 16; b += 1)
+        {
+            prefixes = prefixes && storage[a][b] == 0x51 + a;
+        }
+    }
+    valid = ir_meta_expect(tally, prefixes, "every resource consumer preserves existing arena-prefix bytes") && valid;
+    return valid;
+}
+
 static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena* output, Arena* scratch)
 {
     const uint64_t source_mark = source->length;
@@ -178,7 +262,7 @@ static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena*
     {
         bool changed = false;
         IrFunction bad = { 0 };
-        ready = ir_meta_transform(&function, 0, false, output, scratch, &bad, &changed);
+        ready = ir_meta_transform(&function, 0, false, output, scratch, &bad, &changed) == IR_META_OK;
         valid = ir_meta_expect(tally, ready && !changed, "identity rebuilding preserves a verified function") && valid;
         if (ready)
         {
@@ -212,10 +296,11 @@ static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena*
             IrFunction unpublished;
             memset(&unpublished, 0x5a, sizeof(unpublished));
             const IrFunction untouched = unpublished;
-            const bool built = ir_meta_transform(&function, 3, true, &tiny, scratch, &unpublished, &changed);
-            valid = ir_meta_expect(tally, !built && tiny.length == tiny_mark && memcmp(&unpublished, &untouched, sizeof(unpublished)) == 0 &&
+            const IrMetaFailure built = ir_meta_transform(&function, 3, true, &tiny, scratch, &unpublished, &changed);
+            valid = ir_meta_expect(tally, built == IR_META_RESOURCE && tiny.length == tiny_mark && memcmp(&unpublished, &untouched, sizeof(unpublished)) == 0 &&
                                   scratch->length == scratch_mark, "failed rebuilding leaves arenas and the unpublished view unchanged") && valid;
             valid = ir_meta_artifact_contracts(tally, &function, scratch, &resource) && valid;
+            valid = ir_meta_resource_contracts(tally, &function, generated) && valid;
         }
     }
     arena_pop_to(output, output_mark);
@@ -244,6 +329,20 @@ static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena*
         const IrMetaObservation observation = ir_meta_execute(&undefined, 7, 100000, scratch);
         valid = ir_meta_expect(tally, ir_meta_observation(&observation, 0) == IR_META_UNDEFINED,
                               "consuming an undefined value is distinguished from unsupported execution and semantic mismatch") && valid;
+    }
+    const char memory_source[] = "function (i64) -> i64 {\nb0:\n%0 = param.i64 0\n%1 = symbol_addr.ptr @2\n%2 = const.i64 0x33\n%3 = store.void %1, %2 align=8\n%4 = ret.void %0\n}\n";
+    const String8 memory_text = { .pointer = (char*)memory_source, .length = sizeof(memory_source) - 1 };
+    IrFunction memory_only = { 0 };
+    const bool memory_ready = ir_parse(memory_text, output, scratch, &memory_only).error == IR_PARSE_OK &&
+                              ir_meta_validate(&memory_only, scratch) == IR_META_OK;
+    valid = ir_meta_expect(tally, memory_ready, "independent memory-only difference control is valid IR") && valid;
+    if (memory_ready)
+    {
+        const IrMetaObservation observation = ir_meta_execute(&memory_only, 7, 100000, scratch);
+        valid = ir_meta_expect(tally, observation.execution.status == INTERPRETER_OK && observation.execution.value.low == 7 &&
+                              observation.execution.value.high == 0 && observation.memory == 0x33 && observation.guards &&
+                              ir_meta_observation(&observation, 7) == IR_META_SEMANTICS,
+                              "a correct return value cannot hide a different final global-memory effect") && valid;
     }
     const char malformed[] = "function (i64) -> i64 {\nb0:\n%0 = unknown_opcode.i64\n}\n";
     const String8 invalid_text = { .pointer = (char*)malformed, .length = sizeof(malformed) - 1 };

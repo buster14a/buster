@@ -280,12 +280,28 @@ static void ir_meta_remap_column(uint32_t* column, const uint8_t* masks, uint32_
     }
 }
 
-static bool ir_meta_transform(const IrFunction* source, uint32_t variant, bool scalar, Arena* output, Arena* scratch, IrFunction* result, bool* changed)
+static IrMetaFailure ir_meta_transform(const IrFunction* source, uint32_t variant, bool scalar, Arena* output, Arena* scratch, IrFunction* result, bool* changed)
 {
     const uint64_t mark = output->length;
-    bool valid = source->instruction_count < BUSTER_IR_META_INSTRUCTIONS - 2 && source->block_count < BUSTER_IR_META_BLOCKS - 1 &&
-                 source->call_count == 0 && variant < BUSTER_IR_META_VARIANTS;
+    IrMetaFailure failure = IR_META_OK;
+    if (source->instruction_count >= BUSTER_IR_META_INSTRUCTIONS - 2 || source->block_count >= BUSTER_IR_META_BLOCKS - 1)
+    {
+        failure = IR_META_RESOURCE;
+    }
+    else if (source->call_count != 0)
+    {
+        failure = IR_META_UNSUPPORTED;
+    }
+    else if (variant >= BUSTER_IR_META_VARIANTS)
+    {
+        failure = IR_META_TRANSFORM;
+    }
+    bool valid = failure == IR_META_OK;
     const IrCheck verified = valid ? ir_verify_complete(source, scratch, !scalar) : (IrCheck){ .error = IR_ERROR_LIMIT };
+    if (valid && verified.error != IR_OK)
+    {
+        failure = verified.error == IR_ERROR_MEMORY || verified.error == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_VERIFY;
+    }
     valid = valid && verified.error == IR_OK;
     uint32_t blocks[BUSTER_IR_META_BLOCKS];
     uint32_t values[BUSTER_IR_META_INSTRUCTIONS];
@@ -313,6 +329,10 @@ static bool ir_meta_transform(const IrFunction* source, uint32_t variant, bool s
                     op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_ICMP || op == IR_SELECT || op == IR_NEG || op == IR_NOT ||
                     op == IR_STACK_ADDR || op == IR_SYMBOL_ADDR || op == IR_ADDRESS || op == IR_LOAD || op == IR_STORE ||
                     op == IR_PHI || op == IR_BR || op == IR_CBR || op == IR_SWITCH || op == IR_RET || op == IR_UNREACHABLE;
+            if (!valid)
+            {
+                failure = IR_META_UNSUPPORTED;
+            }
             if (variant == 2 && swap == BUSTER_IR_NONE && row < last && op == IR_CONST && source->op[row + 1] == IR_CONST)
             {
                 swap = row;
@@ -332,7 +352,12 @@ static bool ir_meta_transform(const IrFunction* source, uint32_t variant, bool s
         .parameter_count = source->parameter_count,
     };
     IrFunction built = { 0 };
-    valid = valid && ir_create(output, &sizes, &built) == IR_OK;
+    if (valid)
+    {
+        const IrError created = ir_create(output, &sizes, &built);
+        failure = created == IR_OK ? IR_META_OK : created == IR_ERROR_MEMORY || created == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_TRANSFORM;
+        valid = failure == IR_META_OK;
+    }
     if (valid)
     {
         built.result_type = source->result_type;
@@ -469,7 +494,12 @@ static bool ir_meta_transform(const IrFunction* source, uint32_t variant, bool s
                 }
             }
         }
-        valid = valid && ir_verify_complete(&built, scratch, !scalar).error == IR_OK;
+        if (valid)
+        {
+            const IrCheck check = ir_verify_complete(&built, scratch, !scalar);
+            failure = check.error == IR_OK ? IR_META_OK : check.error == IR_ERROR_MEMORY || check.error == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_TRANSFORM;
+            valid = failure == IR_META_OK;
+        }
     }
     if (valid)
     {
@@ -478,15 +508,19 @@ static bool ir_meta_transform(const IrFunction* source, uint32_t variant, bool s
     else
     {
         arena_pop_to(output, mark);
+        failure = failure == IR_META_OK ? IR_META_TRANSFORM : failure;
     }
-    return valid;
+    return failure;
 }
 
-static bool ir_meta_print(const IrFunction* function, Arena* text, Arena* scratch, String8* result)
+static IrMetaFailure ir_meta_print(const IrFunction* function, Arena* text, Arena* scratch, String8* result)
 {
     const uint64_t mark = text->length;
     FILE* file = tmpfile();
-    bool valid = file != NULL && ir_print(function, scratch, file) == IR_OK && fseek(file, 0, SEEK_END) == 0;
+    const IrError printed = file != NULL ? ir_print(function, scratch, file) : IR_ERROR_IO;
+    IrMetaFailure failure = printed == IR_OK ? IR_META_OK : printed == IR_ERROR_MEMORY || printed == IR_ERROR_LIMIT || printed == IR_ERROR_IO ?
+                            IR_META_RESOURCE : IR_META_TEXT;
+    bool valid = failure == IR_META_OK && fseek(file, 0, SEEK_END) == 0;
     const long length = valid ? ftell(file) : -1;
     valid = valid && length >= 0 && (uint64_t)length < BUSTER_IR_META_TEXT && fseek(file, 0, SEEK_SET) == 0;
     char* bytes = valid ? BUSTER_ARENA_PUSH_ARRAY(text, char, (uint64_t)length + 1) : NULL;
@@ -503,8 +537,9 @@ static bool ir_meta_print(const IrFunction* function, Arena* text, Arena* scratc
     else
     {
         arena_pop_to(text, mark);
+        failure = failure == IR_META_OK ? IR_META_RESOURCE : failure;
     }
-    return valid;
+    return failure;
 }
 
 static bool ir_meta_same_text(String8 left, String8 right)
@@ -525,24 +560,54 @@ static IrMetaFailure ir_meta_validate(const IrFunction* function, Arena* scratch
     return failure;
 }
 
+static IrMetaFailure ir_meta_parse_pair(String8 text, Arena* output, Arena* twin, Arena* scratch, IrFunction* result,
+                                       IrFunction* result_twin, IrMetaFailure invalid)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t twin_mark = twin->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrFunction parsed[2] = { 0 };
+    const IrParseResult vector = ir_parse(text, output, scratch, parsed);
+    const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, parsed + 1);
+    IrMetaFailure failure = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == text.length && scalar.consumed == text.length ?
+                            IR_META_OK : vector.error == IR_PARSE_MEMORY || vector.error == IR_PARSE_LIMIT || scalar.error == IR_PARSE_MEMORY || scalar.error == IR_PARSE_LIMIT ?
+                            IR_META_RESOURCE : invalid;
+    failure = scratch->length == scratch_mark ? failure : IR_META_VERIFY;
+    if (failure == IR_META_OK)
+    {
+        *result = parsed[0];
+        *result_twin = parsed[1];
+    }
+    else
+    {
+        arena_pop_to(twin, twin_mark);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(scratch, scratch_mark);
+    }
+    return failure;
+}
+
 static IrMetaFailure ir_meta_roundtrip(const IrFunction* function, Arena* text, Arena* output, Arena* twin, Arena* scratch, uint64_t* fingerprint)
 {
     const uint64_t text_mark = text->length;
     const uint64_t output_mark = output->length;
     const uint64_t twin_mark = twin->length;
     String8 printed = { 0 };
-    IrMetaFailure failure = ir_meta_print(function, text, scratch, &printed) ? IR_META_OK : IR_META_TEXT;
+    IrMetaFailure failure = ir_meta_print(function, text, scratch, &printed);
     IrFunction parsed[2] = { 0 };
-    const IrParseResult vector = failure == IR_META_OK ? ir_parse(printed, output, scratch, parsed) : (IrParseResult){ .error = IR_PARSE_SYNTAX };
-    const IrParseResult scalar = failure == IR_META_OK ? ir_parse_scalar(printed, twin, scratch, parsed + 1) : (IrParseResult){ .error = IR_PARSE_SYNTAX };
-    if (failure == IR_META_OK && (vector.error != IR_PARSE_OK || scalar.error != IR_PARSE_OK || vector.consumed != printed.length || scalar.consumed != printed.length))
+    if (failure == IR_META_OK)
     {
-        failure = IR_META_TEXT;
+        failure = ir_meta_parse_pair(printed, output, twin, scratch, parsed, parsed + 1, IR_META_TEXT);
     }
     for (uint32_t path = 0; failure == IR_META_OK && path < 2; path += 1)
     {
         String8 again = { 0 };
-        if (ir_meta_validate(parsed + path, scratch) != IR_META_OK || !ir_meta_print(parsed + path, text, scratch, &again) || !ir_meta_same_text(printed, again))
+        failure = ir_meta_validate(parsed + path, scratch);
+        if (failure == IR_META_OK)
+        {
+            failure = ir_meta_print(parsed + path, text, scratch, &again);
+        }
+        if (failure == IR_META_OK && !ir_meta_same_text(printed, again))
         {
             failure = IR_META_TEXT;
         }
@@ -666,7 +731,7 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
             *result = optimized.function;
         }
     }
-    const IrMetaFailure failure = check.error == IR_OK ? IR_META_OK : check.error == IR_ERROR_MEMORY ? IR_META_RESOURCE : IR_META_OPTIMIZE;
+    const IrMetaFailure failure = check.error == IR_OK ? IR_META_OK : check.error == IR_ERROR_MEMORY || check.error == IR_ERROR_LIMIT ? IR_META_RESOURCE : IR_META_OPTIMIZE;
     if (failure != IR_META_OK)
     {
         arena_pop_to(output, mark);
@@ -735,10 +800,7 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
         }
         else
         {
-            const IrParseResult vector = ir_parse(record.source, &original, &scratch, &function);
-            const IrParseResult scalar = ir_parse_scalar(record.source, &twin, &scratch, &function_twin);
-            failure = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == record.source.length &&
-                      scalar.consumed == record.source.length ? IR_META_OK : IR_META_GENERATION;
+            failure = ir_meta_parse_pair(record.source, &original, &twin, &scratch, &function, &function_twin, IR_META_GENERATION);
         }
         record.original = failure == IR_META_OK ? &function : NULL;
         if (failure == IR_META_OK && options->replay != NULL && !ir_meta_replay_one(options->replay, "original.ir", &function, record.source, &scratch))
@@ -764,16 +826,19 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
             record.actual = (IrMetaObservation){ 0 };
             IrFunction changed[2] = { 0 };
             bool alteration[2] = { 0 };
-            const bool vector = ir_meta_transform(&function, variant, false, &transformed, &scratch, changed, alteration);
-            const bool scalar = ir_meta_transform(&function, variant, true, &twin, &scratch, changed + 1, alteration + 1);
-            failure = vector && scalar && alteration[0] == alteration[1] ? IR_META_OK : IR_META_TRANSFORM;
+            const IrMetaFailure vector = ir_meta_transform(&function, variant, false, &transformed, &scratch, changed, alteration);
+            const IrMetaFailure scalar = ir_meta_transform(&function, variant, true, &twin, &scratch, changed + 1, alteration + 1);
+            failure = vector != IR_META_OK ? vector : scalar != IR_META_OK ? scalar : alteration[0] == alteration[1] ? IR_META_OK : IR_META_TRANSFORM;
             record.transformed_view = changed[0];
-            record.transformed = vector ? &record.transformed_view : NULL;
+            record.transformed = vector == IR_META_OK ? &record.transformed_view : NULL;
             record.variant_view = changed[0];
-            record.variant_input = vector ? &record.variant_view : NULL;
+            record.variant_input = vector == IR_META_OK ? &record.variant_view : NULL;
             String8 texts[2] = { 0 };
-            if (failure == IR_META_OK && (!ir_meta_print(changed, &printed, &scratch, texts) ||
-                !ir_meta_print(changed + 1, &printed, &scratch, texts + 1) || !ir_meta_same_text(texts[0], texts[1])))
+            for (uint32_t path = 0; failure == IR_META_OK && path < 2; path += 1)
+            {
+                failure = ir_meta_print(changed + path, &printed, &scratch, texts + path);
+            }
+            if (failure == IR_META_OK && !ir_meta_same_text(texts[0], texts[1]))
             {
                 failure = IR_META_TRANSFORM;
             }
@@ -809,8 +874,8 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
                     {
                         IrFunction private_candidate = { 0 };
                         bool altered = false;
-                        injecting = ir_meta_transform(&candidate, 0, scalar_path != 0, &optimized, &scratch, &private_candidate, &altered);
-                        failure = injecting ? IR_META_OK : IR_META_RESOURCE;
+                        failure = ir_meta_transform(&candidate, 0, scalar_path != 0, &optimized, &scratch, &private_candidate, &altered);
+                        injecting = failure == IR_META_OK;
                         if (injecting)
                         {
                             candidate = private_candidate;
