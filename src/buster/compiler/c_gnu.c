@@ -243,10 +243,14 @@ static uint64_t gnu_syntax_candidates_scalar(const uint8_t* kinds, uint32_t coun
 
 static uint64_t gnu_syntax_candidates(const uint8_t* kinds, uint32_t count)
 {
+#if !BUSTER_HOST_VECTOR
+    return gnu_syntax_candidates_scalar(kinds, count);
+#else
     const uint64_t active = count == 64 ? UINT64_MAX : (1ull << count) - 1;
     const __m512i values = _mm512_maskz_loadu_epi8(active, kinds);
     return active & (_mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ATTRIBUTE)) |
                      _mm512_cmpeq_epi8_mask(values, _mm512_set1_epi8(PARSE_KIND_ASM)));
+#endif
 }
 
 // Resets counts, retaining the caller's arrays/capacities. On any failure all counts are zero, even when earlier
@@ -254,6 +258,8 @@ static uint64_t gnu_syntax_candidates(const uint8_t* kinds, uint32_t count)
 // structural checks defend the slices this reader follows, not every invariant of an arbitrary foreign tree.
 static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const ParseTree* tree, GnuSyntax* syntax, bool scalar, bool measure)
 {
+    (void)scalar;
+
     syntax->group_count = 0;
     syntax->attribute_count = 0;
     syntax->asm_label_count = 0;
@@ -272,7 +278,7 @@ static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const Parse
     for (uint32_t begin = 0; result == GNU_SYNTAX_OK && begin < tokens->count; begin += 64)
     {
         const uint32_t count = tokens->count - begin < 64 ? tokens->count - begin : 64;
-        uint64_t candidates = scalar ? gnu_syntax_candidates_scalar(tokens->kinds + begin, count) : gnu_syntax_candidates(tokens->kinds + begin, count);
+        uint64_t candidates = BUSTER_SCALAR_PATH(scalar) ? gnu_syntax_candidates_scalar(tokens->kinds + begin, count) : gnu_syntax_candidates(tokens->kinds + begin, count);
         while (result == GNU_SYNTAX_OK && candidates != 0)
         {
             const uint32_t token = begin + (uint32_t)__builtin_ctzll(candidates);
@@ -303,9 +309,11 @@ static GnuSyntaxStatus gnu_syntax_collect(const ParseTokens* tokens, const Parse
 
 static GnuSyntaxStatus gnu_syntax_build(const ParseTokens* tokens, const ParseTree* tree, Arena* arena, GnuSyntax* syntax, bool scalar)
 {
+    (void)scalar;
+
     const uint64_t mark = arena->length;
     GnuSyntax result = { 0 };
-    GnuSyntaxStatus status = gnu_syntax_collect(tokens, tree, &result, scalar, true);
+    GnuSyntaxStatus status = gnu_syntax_collect(tokens, tree, &result, BUSTER_SCALAR_PATH(scalar), true);
     if (status == GNU_SYNTAX_OK)
     {
         result.group_capacity = result.group_count;
@@ -321,7 +329,7 @@ static GnuSyntaxStatus gnu_syntax_build(const ParseTokens* tokens, const ParseTr
         }
         else
         {
-            status = gnu_syntax_collect(tokens, tree, &result, scalar, false);
+            status = gnu_syntax_collect(tokens, tree, &result, BUSTER_SCALAR_PATH(scalar), false);
         }
     }
     if (status != GNU_SYNTAX_OK)

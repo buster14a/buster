@@ -322,6 +322,8 @@ static void cbuiltin_varargs_aggregate(CBuiltinLowerRecipe* recipe, const CBuilt
 
 static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call, bool vector)
 {
+    (void)vector;
+
     CBuiltinLowerResult result = { 0 };
     CBuiltinLowerRecipe recipe = { 0 };
     const bool start = call != 0 && (call->id == CBUILTIN_VA_START || call->id == CBUILTIN_C23_VA_START);
@@ -389,7 +391,7 @@ static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, 
             result.result_class = argument ? call->result_class : BUSTER_TYPED_CLASS_VOID;
             result.temporary_first = buffer->local_count;
             result.temporary_count = recipe.temporary_count;
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 for (uint32_t i = 0; i < recipe.count; i += 64)
                 {
@@ -423,10 +425,16 @@ static CBuiltinLowerResult cbuiltin_varargs_append(CBuiltinLowerBuffer* buffer, 
     return result;
 }
 
+static CBuiltinLowerResult cbuiltin_varargs_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call);
+
 static CBuiltinLowerResult cbuiltin_varargs_lower(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call)
 {
+#if !BUSTER_HOST_VECTOR
+    return cbuiltin_varargs_lower_scalar(buffer, call);
+#else
     const CBuiltinLowerResult result = cbuiltin_varargs_append(buffer, call, true);
     return result;
+#endif
 }
 
 static CBuiltinLowerResult cbuiltin_varargs_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinVaLowerCall* call)

@@ -1283,8 +1283,10 @@ In the oracle's mode, clang's sanitizer features (`address_sanitizer`,
 `undefined_behavior_sanitizer`, `coverage_sanitizer` and the rest of
 `Features.def`'s) follow the sanitizers the options leave on, which the
 predefines read too ("The sanitizers" below). `__is_target_vendor` answers for the
-target triple's vendor: `pc` (clang's default triple is `x86_64-pc-linux-gnu`)
-without `-target`, the triple's own, or `unknown` for one that names none. The
+target triple's vendor: the explicit target's own, or the build Clang driver's
+default when no target is given. `build.sh` records that driver's `-dumpmachine`
+as `BUSTER_CLANG_DEFAULT_TARGET`; direct builds that leave it undefined retain
+`x86_64-pc-linux-gnu`. A target that names no vendor answers `unknown`. The
 four `__is_target_*` compare a name as clang does, ASCII case aside, and read an
 operating system or an environment as clang's triple parser does (`linux2` is
 Linux, and `gnu2` is GNU but `gnux32` isn't).
@@ -1430,7 +1432,7 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | `-f[no-]signed-char`, `-f[no-]unsigned-char` | `__CHAR_UNSIGNED__` |
 | `-f[no-]short-wchar` | the `wchar_t` macros |
 | `-f[no-]pic`, `-f[no-]PIC`, `-f[no-]pie`, `-f[no-]PIE` (level 2 PIE by default) | `__pic__`, `__PIC__`, `__pie__`, `__PIE__` |
-| `-f[no-]stack-protector[-strong\|-all]` (this clang's default is `-strong`, which `-fstack-protector` keeps) | `__SSP__`, `__SSP_STRONG__`, `__SSP_ALL__` |
+| `-f[no-]stack-protector[-strong\|-all]` (`-fstack-protector` keeps a stronger configured default) | `__SSP__`, `__SSP_STRONG__`, `__SSP_ALL__` |
 | `-f[no-]asynchronous-unwind-tables`, `-f[no-]unwind-tables`, `-f[no-]dwarf2-cfi-asm`, `-f[no-]exceptions`, the `-g` options (the last of clang's `g_Group`, `-gcodeview` among them; `-gmodules` turns debug information on unless `-gno-modules` follows it), `-ffreestanding` | `__GCC_HAVE_DWARF2_CFI_ASM` |
 | `-f[no-]exceptions`; `-fsjlj-exceptions`, `-fseh-exceptions`, `-fdwarf-exceptions`, `-fwasm-exceptions` | `__EXCEPTIONS`; `__USING_SJLJ_EXCEPTIONS__`, `__SEH__` |
 | `-fgnuc-version=` (0 turns them off); `-f[no-]gnu89-inline` | `__GNUC__` and the others, GCC's atomics; `__GNUC_GNU_INLINE__` or `__GNUC_STDC_INLINE__` |
@@ -1442,6 +1444,12 @@ for one of them wins. An unknown host is x86-64, as in clang's driver.
 | `-municode` (joined: `-municodeANYTHING` too) | `UNICODE`, in `<command line>` before the command line's `-D` and `-U`, as clang's driver adds it |
 | `-mcmodel=`, `-mlong-double-64`/`80`/`128` | `__code_model_*__`, the `long double` macros |
 | `-mfpmath=` | none, but it must agree with SSE |
+
+The stack-protection default follows the compiler building Buster:
+`__SSP_ALL__`, `__SSP_STRONG__` or `__SSP__` selects all, strong or ordinary
+protection, and no such macro selects off. The supported build supplies no
+explicit stack-protector flag, so these macros record that driver's configured
+default.
 
 The options that would make clang predefine or compile something buster doesn't
 follow are refused by name: `-m32`, `-mx32`, `-m16`, `-miamcu`, `-mcpu=`, `-mkernel`,

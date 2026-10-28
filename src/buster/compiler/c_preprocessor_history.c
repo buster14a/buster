@@ -135,7 +135,7 @@ static void pp_history_fill(Preprocessor* pp, PPTokens* target, uint32_t begin, 
         {
             target->origins[begin] = origin;
         }
-        else if (pp->vectorized)
+        else if (BUSTER_VECTOR_PATH(pp->vectorized))
         {
             const __m512i value = _mm512_set1_epi32((int)origin);
             for (uint32_t i = begin; i < end; i += 16)
@@ -164,7 +164,7 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
         {
             const uint32_t slot = target == &pp->arguments ? 0 : target == &pp->captures ? 1 : 2;
             pp->origin_peak[slot] = pp->origin_peak[slot] < at + end - begin ? at + end - begin : pp->origin_peak[slot];
-            if (pp->vectorized)
+            if (BUSTER_VECTOR_PATH(pp->vectorized))
             {
                 memmove(target->origins + at, source->origins + begin, (uint64_t)(end - begin) * sizeof(uint32_t));
             }
@@ -183,7 +183,7 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
                 }
             }
         }
-        else if (pp->vectorized)
+        else if (BUSTER_VECTOR_PATH(pp->vectorized))
         {
             uint32_t previous = source->origins[begin];
             pp_history_change(pp, at, previous);
@@ -315,9 +315,11 @@ static uint32_t pp_history_at(const Preprocessor* pp, uint32_t token)
 // Sixteen independent binary searches. Record loads are scalar on Zen 5; bounds/decisions run in vectors.
 static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, const uint32_t* tokens, uint32_t* origins, uint32_t count, bool scalar)
 {
-    for (uint32_t i = 0; i < count; i += scalar ? 1 : 16)
+    (void)scalar;
+
+    for (uint32_t i = 0; i < count; i += BUSTER_SCALAR_PATH(scalar) ? 1 : 16)
     {
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             origins[i] = pp_history_at(pp, tokens[i]);
         }

@@ -24,7 +24,7 @@ static void check_input_x86_contexts(CheckInputReader* reader)
         for (uint32_t first = 0; first < count; first += 16)
         {
             const uint32_t end = count - first < 16 ? count : first + 16;
-            uint32_t present = parser->options.scalar ? (uint32_t)check_input_scan_all(first, end) :
+            uint32_t present = BUSTER_SCALAR_PATH(parser->options.scalar) ? (uint32_t)check_input_scan_all(first, end) :
                                check_input_scan_below(reader->selected_tokens, first, count, BUSTER_CHECK_NONE);
             for (; present != 0; present &= present - 1)
             {
@@ -38,12 +38,12 @@ static void check_input_x86_contexts(CheckInputReader* reader)
                 }
             }
         }
-        check_input_packed_analyzed(events, selected, count, parser->options.scalar);
+        check_input_packed_analyzed(events, selected, count, BUSTER_SCALAR_PATH(parser->options.scalar));
         memset(events, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t first = 0; first < count; first += 16)
         {
             const uint32_t end = count - first < 16 ? count : first + 16;
-            uint32_t present = parser->options.scalar ? (uint32_t)check_input_scan_all(first, end) :
+            uint32_t present = BUSTER_SCALAR_PATH(parser->options.scalar) ? (uint32_t)check_input_scan_all(first, end) :
                                check_input_scan_below(reader->selected_tokens, first, count, BUSTER_CHECK_NONE) |
                                (uint32_t)check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_SIZEOF) |
                                (uint32_t)check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_TYPEOF);
@@ -71,7 +71,7 @@ static void check_input_x86_contexts(CheckInputReader* reader)
                 }
             }
         }
-        check_input_packed_analyzed(events, evaluated, count, parser->options.scalar);
+        check_input_packed_analyzed(events, evaluated, count, BUSTER_SCALAR_PATH(parser->options.scalar));
         for (uint32_t i = 0; i < graph->x86_count; i += 1)
         {
             CheckX86Call* call = graph->x86_calls + i;
