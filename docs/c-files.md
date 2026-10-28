@@ -117,7 +117,8 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   units and lanes read it at once.
 - **A path entry per path looked up:** the path's record, or none (no file, a
   directory, a file too big or unreadable). A translation unit's include
-  search then makes no system call for a path the cache already looked up.
+  search then makes no file probe for a path the cache already looked up;
+  optional directory metadata is recorded separately below.
 - **Directory snapshots for negative include candidates (#653):** on the
   first missing candidate in an explicit or standard search directory, its entry-name hashes are retained in
   an optional arena of at most 16 MiB. An absent first path component needs
