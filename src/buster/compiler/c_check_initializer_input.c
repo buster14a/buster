@@ -281,9 +281,10 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     {
         cutoff = before_token;
     }
-    for (uint32_t i = 0; valid && i < input->report_count; i += 1)
+    for (uint32_t i = valid ? input->diagnostic_report_count : 0; valid && i < input->report_count; i += 1)
     {
-        cutoff = input->reports[i].token < cutoff ? input->reports[i].token : cutoff;
+        const uint32_t position = input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
+        cutoff = position < cutoff ? position : cutoff;
     }
     for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
     {
@@ -298,7 +299,9 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     for (uint32_t node = 0; valid && node < stream->count; node += 1)
     {
         const CheckGraph* graph = &input->graph;
-        bool checked = graph->tokens[node] < cutoff && (graph->source_positions == 0 || graph->source_positions[node] <= cutoff) &&
+        const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
+        const uint32_t limit = local < cutoff ? local : cutoff;
+        bool checked = graph->tokens[node] < limit && (graph->source_positions == 0 || graph->source_positions[node] <= limit) &&
                        stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
         const uint32_t operands[] = {
             graph->operand0[node],
@@ -348,7 +351,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         const uint32_t declaration = declarations[d];
         const uint32_t begin = input->initializer_begins[declaration];
         const uint32_t end = input->initializer_ends[declaration];
-        bool eligible = begin < end && end <= cutoff && type_is_valid(types, input->declared_types[declaration]);
+        bool eligible = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
         for (uint32_t token = begin; eligible && token < end; token += 1)
         {
             const uint32_t node = input->token_nodes[token];

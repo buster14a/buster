@@ -884,11 +884,15 @@ static void check_input_asm_finish(CheckInputReader* reader)
     for (uint32_t statement = 0; statement < input->asm_count && !input->resource; statement += 1)
     {
         CheckInputAsm* assembly = input->asm_statements + statement;
+        if (assembly->closing >= check_input_expression_limit(reader, assembly->closing))
+        {
+            continue;
+        }
         for (uint32_t operand = 0; operand < assembly->output_count + assembly->input_count; operand += 1)
         {
             CheckAsmOperand* value = assembly->operands + operand;
             value->node = input->token_nodes[value->closing];
-            if (value->node == BUSTER_CHECK_NONE && value->closing < reader->expression_limit)
+            if (value->node == BUSTER_CHECK_NONE && value->closing < check_input_expression_limit(reader, value->closing))
             {
                 check_input_report(reader, value->token, CHECK_INPUT_DECLARATION);
             }
@@ -1034,9 +1038,10 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
     }
     uint32_t cutoff = valid ? input->token_count : 0;
     cutoff = before_token < cutoff ? before_token : cutoff;
-    for (uint32_t i = 0; valid && i < input->report_count; i += 1)
+    for (uint32_t i = valid ? input->diagnostic_report_count : 0; valid && i < input->report_count; i += 1)
     {
-        cutoff = input->reports[i].token < cutoff ? input->reports[i].token : cutoff;
+        const uint32_t position = input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
+        cutoff = position < cutoff ? position : cutoff;
     }
     for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
     {
@@ -1052,7 +1057,9 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
     for (uint32_t node = 0; valid && needed && node < stream->count; node += 1)
     {
         const CheckGraph* graph = &input->graph;
-        bool checked = graph->tokens[node] < cutoff && (graph->source_positions == NULL || graph->source_positions[node] <= cutoff) &&
+        const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
+        const uint32_t limit = local < cutoff ? local : cutoff;
+        bool checked = graph->tokens[node] < limit && (graph->source_positions == NULL || graph->source_positions[node] <= limit) &&
                        stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
         const uint32_t operands[] =
         {
@@ -1084,7 +1091,8 @@ static bool check_asms_diagnose(CheckAsmDiagnostic* result, const CheckInput* in
         for (uint32_t operand = 0; valid && operand < assembly->output_count + assembly->input_count; operand += 1)
         {
             const CheckAsmOperand* source = assembly->operands + operand;
-            bool eligible = assembly->closing < cutoff && source->closing < cutoff && source->node < stream->count && complete[source->node];
+            bool eligible = assembly->closing < cutoff && assembly->closing < check_input_diagnostic_limit(input, assembly->closing) &&
+                            source->closing < cutoff && source->node < stream->count && complete[source->node];
             if (eligible && (source->flags & CHECK_ASM_MATCH) != 0)
             {
                 eligible = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count &&

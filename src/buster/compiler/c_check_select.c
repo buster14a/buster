@@ -172,7 +172,7 @@ static bool check_input_selections(CheckInputReader* reader)
         const uint32_t close = reader->postorder[position];
         const uint32_t keyword = reader->first_child[close];
         const uint32_t name = keyword < parser->tokens.count ? parser->tokens.names[keyword] : 0;
-        if (reader->ends[close] < reader->expression_limit && !reader->ignored[close] && parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD &&
+        if (reader->ends[close] < check_input_expression_limit(reader, close) && !reader->ignored[close] && parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD &&
             (name == C_NAME_GENERIC || name == C_NAME_BUILTIN_CHOOSE_EXPR))
         {
             const uint32_t first = keyword + 2;

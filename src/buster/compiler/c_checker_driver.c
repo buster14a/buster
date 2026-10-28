@@ -136,6 +136,41 @@ static uint64_t check_driver_warning_key(uint32_t token, uint32_t flags, uint32_
     return (uint64_t)token << 32 | (uint64_t)(uint16_t)flags << 16 | (uint16_t)enabled;
 }
 
+static uint32_t check_driver_publication_position(const Parser* parser, const Preprocessor* pp, uint32_t boundary)
+{
+    return boundary < parser->tokens.count ? parser->tokens.sources[boundary] :
+           boundary == parser->tokens.count ? pp->output.count : pp->output.count + 1u;
+}
+
+// Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
+// brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
+// sparse warning; no clean unit acquires a token-wide completion column.
+static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair, uint32_t token, uint32_t warning)
+{
+    const uint32_t runtime = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
+                             CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW;
+    uint32_t boundary = token;
+    const uint32_t constant = input->constant_warnings != NULL && token < input->token_count ? input->constant_warnings[token] : 0;
+    if ((warning & runtime) != 0 && (constant & warning) == 0)
+    {
+        const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        if (node < input->graph.count && input->graph.source_positions != NULL)
+        {
+            boundary = input->graph.source_positions[node];
+        }
+        for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            if (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY)
+            {
+                boundary = repair != NULL && parent >= repair->original_end ? parser->tokens.count + 1u : parent + 1u;
+                break;
+            }
+            parent = parser->tree.parents[parent];
+        }
+    }
+    return check_driver_publication_position(parser, pp, boundary);
+}
+
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
     if ((record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0)
@@ -394,7 +429,8 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning_flag));
+                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, token, warning_flag);
+                    pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;
             }
@@ -418,10 +454,23 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                      check_driver_input_report_message(input, input->reports + index);
-                const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                const uint32_t located = phase == 2 ? extra[index].token : token;
+                const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
+                const uint32_t node = phase == 1 ? stream->reports[index].node : BUSTER_CHECK_NONE;
+                const uint32_t completion = phase == 0 ? input->reports[index].completion :
+                                            phase == 2 ? extra[index].position :
+                                            node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
                 if (source != BUSTER_CHECK_NONE)
                 {
-                    pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    if (completion != 0)
+                    {
+                        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, check_driver_publication_position(parser, pp, completion), "%s", message);
+                    }
+                    else
+                    {
+                        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    }
                 }
                 else
                 {
@@ -1308,7 +1357,16 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             bool original_pragmas_ready = false;
             bool original_pragmas_printed = false;
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
+            pp.options.collect_diagnostics = true;
             ready = pp_run(&pp, path);
+            if (!ready && pp.errors != 0 && !pp.diagnostic_collection_failed && !pp.history_failed)
+            {
+                // Only the produced source prefix is parsed after a real preprocessing fatal. Nonfatal errors
+                // leave the whole stream. Either remains a rejected unit, independent of publication's cutoff.
+                pp.fatal = false;
+                ready = true;
+            }
+            pp.diagnostic_source = true;
             check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
             // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
             memcpy(pp_ticks, pp.ticks, sizeof(pp_ticks));
@@ -1501,7 +1559,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         {
                             check_driver_dump(&input.graph, &stream, &types, &scratch);
                         }
-                        result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 ? 0 : 1;
+                        result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 &&
+                                 !pp.diagnostic_collection_failed && !pp.history_failed ? 0 : 1;
                         CheckProgram program;
                         CheckDataPrepared data = { 0 };
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
@@ -1601,7 +1660,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+        pp_diagnostic_publish(&pp);
         pp_diagnostic_summary(&pp);
+        result = pp.errors != 0 ? 1 : result;
         if (release)
         {
             parse_release(&parser);

@@ -586,6 +586,186 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     scratch_end(scratch);
 }
 
+// A cold source-command queue, allocated only for diagnostics. Messages and the optional explicit note are owned;
+// origin indices keep the recording preprocessor alive until publication. No rendered include-stack state is saved:
+// its suppression follows the final source order, not the order in which compiler stages discover reports.
+static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments)
+{
+    const bool failed_before = pp->diagnostic_collection_failed;
+    va_list copy;
+    va_copy(copy, arguments);
+    const int length = vsnprintf(NULL, 0, format, copy);
+    va_end(copy);
+    const uint64_t note_bytes = note != NULL && note->message != NULL ? strlen(note->message) + 1u : 0;
+    const uint64_t bytes = length >= 0 ? sizeof(PPDiagnosticRecord) + (uint64_t)(uint32_t)length + 1u + note_bytes : 0;
+    PPDiagnosticRecord* record = bytes != 0 && !pp->diagnostic_collection_failed ? arena_push(&pp->arena, bytes, _Alignof(PPDiagnosticRecord)) : NULL;
+    if (record != NULL)
+    {
+        char* message = (char*)(record + 1);
+        va_copy(copy, arguments);
+        const int written = vsnprintf(message, (uint64_t)(uint32_t)length + 1u, format, copy);
+        va_end(copy);
+        pp->diagnostic_collection_failed = written != length;
+        if (!pp->diagnostic_collection_failed)
+        {
+            *record = (PPDiagnosticRecord){
+                .owner = pp,
+                .position = position,
+                .location = location,
+                .origin = origin,
+                .note_location = note != NULL ? note->location : 0,
+                .note_macro = note != NULL ? note->macro : 0,
+                .message = message,
+                .note_message = note_bytes != 0 ? message + length + 1 : NULL,
+                .severity = (uint8_t)severity,
+            };
+            if (note_bytes != 0)
+            {
+                memcpy((char*)record->note_message, note->message, note_bytes);
+            }
+            if (pp->diagnostic_last != NULL)
+            {
+                pp->diagnostic_last->next = record;
+            }
+            else
+            {
+                pp->diagnostic_first = record;
+            }
+            pp->diagnostic_last = record;
+        }
+    }
+    else
+    {
+        pp->diagnostic_collection_failed = true;
+    }
+    pp->fatal |= pp->diagnostic_collection_failed;
+    pp->errors += pp->diagnostic_collection_failed && !failed_before ? 1u : 0u;
+}
+
+static void pp_diagnostic_take(Preprocessor* pp, Preprocessor* replay)
+{
+    if (replay->diagnostic_first != NULL)
+    {
+        if (pp->diagnostic_last != NULL)
+        {
+            pp->diagnostic_last->next = replay->diagnostic_first;
+        }
+        else
+        {
+            pp->diagnostic_first = replay->diagnostic_first;
+        }
+        pp->diagnostic_last = replay->diagnostic_last;
+    }
+    pp->diagnostic_collection_failed |= replay->diagnostic_collection_failed;
+}
+
+// Stable bottom-up merging needs no second allocation on the rejected-unit path. The order key is the expansion
+// output boundary for preprocessing and the exact output token for parser/checker groups. Equal keys retain the
+// discovery order, including several directive reports before the next source token.
+static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
+{
+    uint64_t width = 1;
+    bool sorting = first != NULL;
+    while (sorting)
+    {
+        PPDiagnosticRecord* cursor = first;
+        PPDiagnosticRecord* last = NULL;
+        first = NULL;
+        uint64_t merges = 0;
+        while (cursor != NULL)
+        {
+            merges += 1;
+            PPDiagnosticRecord* left = cursor;
+            uint64_t left_count = 0;
+            for (; left_count < width && cursor != NULL; left_count += 1)
+            {
+                cursor = cursor->next;
+            }
+            PPDiagnosticRecord* right = cursor;
+            uint64_t right_count = width;
+            while (left_count != 0 || (right_count != 0 && right != NULL))
+            {
+                const bool take_left = left_count != 0 && (right_count == 0 || right == NULL || left->position <= right->position);
+                PPDiagnosticRecord* next = take_left ? left : right;
+                left = take_left ? left->next : left;
+                right = !take_left ? right->next : right;
+                left_count -= take_left ? 1u : 0u;
+                right_count -= !take_left ? 1u : 0u;
+                if (last != NULL)
+                {
+                    last->next = next;
+                }
+                else
+                {
+                    first = next;
+                }
+                last = next;
+            }
+            cursor = right;
+        }
+        last->next = NULL;
+        sorting = merges > 1;
+        width *= 2;
+    }
+    return first;
+}
+
+static void pp_render_message(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_render_diagnostic(pp, severity, location, origin, note, format, arguments);
+    va_end(arguments);
+}
+
+BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
+{
+    if (pp->options.collect_diagnostics)
+    {
+        pp->options.collect_diagnostics = false;
+        pp->errors = 0;
+        pp->warnings = 0;
+        pp->fatal = false;
+        pp->diagnostic_include_range = BUSTER_PP_NONE;
+        if (pp->diagnostic_collection_failed)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "diagnostic collection capacity exhausted");
+        }
+        else
+        {
+            pp->diagnostic_first = pp_diagnostic_order(pp->diagnostic_first);
+            for (PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && !pp->fatal; record = record->next)
+            {
+                PPSeverity severity = (PPSeverity)record->severity;
+                bool limited;
+                const bool accepted = pp_diagnostic_begin(pp, &severity, &limited);
+                if (accepted && !pp->options.quiet && limited)
+                {
+                    pp_diagnostic_limit(pp);
+                }
+                else if (accepted && !pp->options.quiet)
+                {
+                    Preprocessor* owner = record->owner;
+                    const bool owner_fatal = owner->fatal;
+                    owner->fatal = pp->fatal;
+                    owner->diagnostic_include_range = pp->diagnostic_include_range;
+                    const PPDiagnosticNote note = {
+                        .location = record->note_location,
+                        .message = record->note_message,
+                        .macro = record->note_macro,
+                    };
+                    pp_render_message(owner, severity, record->location, record->origin,
+                                      record->note_message != NULL || record->note_macro != 0 ? &note : NULL, "%s", record->message);
+                    pp->diagnostic_include_range = owner->diagnostic_include_range;
+                    owner->fatal = owner_fatal;
+                }
+            }
+        }
+        pp->diagnostic_first = NULL;
+        pp->diagnostic_last = NULL;
+    }
+}
+
 static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor* pp, PPSeverity severity, uint32_t location, const PPDiagnosticNote* note, const char* format, ...)
 {
     bool limited;
@@ -594,16 +774,24 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
     {
         pp_diagnostic_limit(pp);
     }
-    else if (accepted && !pp->options.quiet)
+    else if (accepted && (!pp->options.quiet || (pp->options.collect_diagnostics && !pp->history_deferred)))
     {
         va_list arguments;
         va_start(arguments, format);
-        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+        const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
+        if (pp->options.collect_diagnostics)
+        {
+            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+        }
+        else
+        {
+            pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+        }
         va_end(arguments);
     }
 }
 
-BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
+static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, const char* format, va_list arguments)
 {
     pp_history_ensure(pp);
     bool limited;
@@ -612,11 +800,35 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_
     {
         pp_diagnostic_limit(pp);
     }
-    else if (accepted && !pp->options.quiet)
+    else if (accepted && (!pp->options.quiet || (pp->options.collect_diagnostics && !pp->history_deferred)))
     {
-        va_list arguments;
-        va_start(arguments, format);
-        pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), 0, format, arguments);
-        va_end(arguments);
+        if (pp->options.collect_diagnostics)
+        {
+            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2 + 1u, token < pp->output.count ? pp->output.locations[token] : 0,
+                                  pp_history_at(pp, token), NULL, format, arguments);
+        }
+        else
+        {
+            pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), NULL, format, arguments);
+        }
     }
+}
+
+// The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes
+// after its function's closing brace and the preprocessor lookahead before the next source token. A boundary
+// one past output.count is reserved for translation-unit final checks, after ordinary EOF completion groups.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 5, 6))) void pp_diagnose_output_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_arguments(pp, severity, token, position, format, arguments);
+    va_end(arguments);
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_arguments(pp, severity, token, token, format, arguments);
+    va_end(arguments);
 }
