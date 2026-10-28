@@ -4007,14 +4007,17 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
-        const CheckLowerTaskPacked packed = writer->tasks[--writer->depth];
-        const CheckLowerTaskKind kind = (CheckLowerTaskKind)((packed.control >> 32) & UINT8_MAX);
-        const uint32_t node = (uint32_t)packed.control;
-        const TypeId type = (uint32_t)packed.payload;
-        const uint64_t value = packed.payload;
+        const CheckLowerTaskPacked* task = writer->tasks + --writer->depth;
+        // The x86 host word has node bytes 0..3, kind 4, flags 5 and instruction class 6.
+        const uint8_t* control = (const uint8_t*)&task->control;
+        const uint8_t flags = control[5];
+        const CheckLowerTaskKind kind = (CheckLowerTaskKind)control[4];
+        const uint32_t node = (uint32_t)task->control;
+        const TypeId type = (uint32_t)task->payload;
+        const uint64_t value = task->payload;
         if (sources)
         {
-            check_lower_task_source(writer, check_lower_task_unpack(packed));
+            check_lower_task_source(writer, check_lower_task_unpack(*task));
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
@@ -4022,16 +4025,17 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             if (kind == CHECK_LOWER_EXPRESSION)
             {
-                const bool simple = !sources && !writer->scalar && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
-                                    check_lower_value(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0);
-                const bool plain = !simple && !sources && !writer->scalar && check_lower_plain(writer, node, ((packed.control >> 40) & 1) != 0);
-                const bool batched = !plain && !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
+                const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
+                const bool simple = !value_node && !sources && !writer->scalar && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
+                                    check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
+                const bool plain = !value_node && !simple && !sources && !writer->scalar && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
                                      check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
                     if (!simple && !plain)
                     {
-                        check_lower_expand(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0, ((packed.control >> 42) & 1) != 0);
+                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0);
                     }
                     expression_nodes += 1;
                 }
@@ -4043,7 +4047,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                                      ((writer->tasks[writer->depth - 2].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION && check_lower_instruction_batch(writer);
                 if (!batched)
                 {
-                    check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
+                    check_lower_emit(writer, (uint8_t)node, control[6], value);
                 }
             }
         }
@@ -4061,15 +4065,15 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_BUILTIN)
         {
-            check_lower_builtin_emit(writer, check_lower_task_unpack(packed));
+            check_lower_builtin_emit(writer, check_lower_task_unpack(*task));
         }
         else if (kind == CHECK_LOWER_BUILTIN_MISC)
         {
-            check_lower_miscellaneous_emit(writer, check_lower_task_unpack(packed));
+            check_lower_miscellaneous_emit(writer, check_lower_task_unpack(*task));
         }
         else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
-            check_lower_floating_emit(writer, check_lower_task_unpack(packed));
+            check_lower_floating_emit(writer, check_lower_task_unpack(*task));
         }
         else if (kind == CHECK_LOWER_CONSTANT)
         {
@@ -4089,7 +4093,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_COPY)
         {
-            check_lower_copy(writer, value, ((packed.control >> 40) & 1) != 0);
+            check_lower_copy(writer, value, (flags & 1) != 0);
         }
         else if (kind == CHECK_LOWER_FILL)
         {
@@ -4106,11 +4110,11 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_BIT_STORE)
         {
-            check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((packed.control >> 42) & 1) != 0);
+            check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((flags >> 2) & 1) != 0);
         }
         else if (kind == CHECK_LOWER_VARARGS)
         {
-            check_lower_varargs_emit(writer, check_lower_task_unpack(packed));
+            check_lower_varargs_emit(writer, check_lower_task_unpack(*task));
         }
         else if (kind == CHECK_LOWER_SIZE)
         {
@@ -4119,7 +4123,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind >= CHECK_LOWER_COMPLEX)
         {
             // The complex values' tasks, the kinds' last, behind one compare: few functions have them.
-            check_lower_complex_task(writer, check_lower_task_unpack(packed));
+            check_lower_complex_task(writer, check_lower_task_unpack(*task));
         }
     }
     writer->expression_nodes += expression_nodes;

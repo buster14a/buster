@@ -12,20 +12,36 @@ static void check_test_program_instruction_batch(CheckTest* test)
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* memory = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0;
+    CheckOp leaf_op = CHECK_OP_VALUE;
+    uint32_t leaf_token = 1234;
+    uint32_t no_operand = BUSTER_CHECK_NONE;
+    CheckValue leaf = { .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 7 };
+    CheckNodeConversions conversion = { 0 };
+    CheckInput input = { .graph = { .ops = &leaf_op, .tokens = &leaf_token, .operand0 = &no_operand, .operand1 = &no_operand, .count = 1 } };
+    CheckStream stream = { .values = &leaf, .conversions = &conversion, .count = 1 };
+    CheckProgram program = { .input = &input, .stream = &stream };
+    uint8_t type_classes[256] = { 0 };
+    uint8_t type_facts[256] = { 0 };
+    uint32_t type_templates[256] = { 0 };
+    type_classes[type_index(BUSTER_TYPE_INT)] = BUSTER_TYPED_CLASS_I32;
+    type_templates[type_index(BUSTER_TYPE_INT)] = BUSTER_TYPED_CLASS_I32;
     check_test_expect(test, ready, "instruction task batches have a protected stack tail");
     for (uint32_t count = 1; ready && count <= 17; count += 1)
     {
         CheckLowerTaskPacked* tasks = (CheckLowerTaskPacked*)(memory + page - count * sizeof(CheckLowerTaskPacked));
-        for (uint32_t mode = 0; mode < 3; mode += 1)
+        for (uint32_t mode = 0; mode < 7; mode += 1)
         {
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const bool label = mode == 1 && i == count / 2;
+                const bool expression = mode >= 3 && i % 3 == 0;
                 tasks[count - 1 - i] = check_lower_task_pack((CheckLowerTask){
-                    .kind = label ? CHECK_LOWER_LABEL : CHECK_LOWER_INSTRUCTION,
-                    .node = label ? 0 : i % 2 == 0 ? BUSTER_TYPED_CONST : BUSTER_TYPED_NEG,
-                    .type = label ? 0 : mode == 2 && i == count / 2 ? UINT8_MAX : i % BUSTER_TYPED_CLASSES,
-                    .value = label ? 0 : UINT64_C(0x1234567800000000) + i,
+                    .kind = expression ? CHECK_LOWER_EXPRESSION : label ? CHECK_LOWER_LABEL : CHECK_LOWER_INSTRUCTION,
+                    .node = expression || label ? 0 : i % 2 == 0 ? BUSTER_TYPED_CONST : BUSTER_TYPED_NEG,
+                    .type = expression || label ? 0 : (mode == 2 || mode == 4) && i == count / 2 ? UINT8_MAX : i % BUSTER_TYPED_CLASSES,
+                    .value = expression || label ? 0 : UINT64_C(0x1234567800000000) + i,
+                    .discard = expression && mode == 5 && i == count / 2,
+                    .address = expression && mode == 6 && i == count / 2,
                 });
             }
             for (uint32_t capacity = 0; capacity <= count + 1; capacity += 1)
@@ -43,6 +59,7 @@ static void check_test_program_instruction_batch(CheckTest* test)
                 {
                     writers[path] = (CheckLowerWriter){
                         .output = status + path,
+                        .program = &program,
                         .tasks = tasks,
                         .depth = count,
                         .capacity = capacity,
@@ -53,6 +70,10 @@ static void check_test_program_instruction_batch(CheckTest* test)
                         .label_count = 1,
                         .token = 123,
                         .scalar = path == 0,
+                        .type_classes = type_classes,
+                        .type_facts = type_facts,
+                        .type_templates = type_templates,
+                        .type_count = BUSTER_ARRAY_LENGTH(type_classes),
                     };
                     if (path == 1 && count == 8 && mode == 0 && capacity == 8)
                     {
@@ -69,6 +90,7 @@ static void check_test_program_instruction_batch(CheckTest* test)
                 }
                 check_test_expect(test, status[0].status == status[1].status && status[0].token == status[1].token &&
                                   writers[0].count == writers[1].count && writers[0].depth == writers[1].depth && labels[0][0] == labels[1][0] &&
+                                  writers[0].token == writers[1].token && writers[0].expression_nodes == writers[1].expression_nodes &&
                                   memcmp(kinds[0], kinds[1], sizeof(kinds[0])) == 0 && memcmp(classes[0], classes[1], sizeof(classes[0])) == 0 &&
                                   memcmp(values[0], values[1], sizeof(values[0])) == 0,
                                   "guarded instruction batches preserve columns, untouched tails, labels and the first capacity/class failure");

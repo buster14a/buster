@@ -175,17 +175,18 @@ scalar expression expansion remains the oracle (`--scalar`).
 Ordinary unary and binary operations can join their immediately preceding leaf
 operands when their consuming edges need no conversion. Bounded gathers and
 byte permutes classify the partial vector of operator/type records, up to 16
-rows per invocation. Each 32-bit result word carries kind, class and type
+rows per invocation. A fragment of at most four rows uses scalar type loads and
+a 256-bit two-table byte permute; larger vectors use bounded gathers. Each 32-bit result word carries kind, class and type
 facts in registers. Reached leaves supply their payloads. Occupied slots form
-a mask, whose prefix popcounts give output positions; compress stores expand
-the slots into the kind, class and value columns. A wrapper has no final slot.
+a mask, whose prefix popcounts give output positions; register compression
+and masked stores expand the slots into the kind, class and value columns. A wrapper has no final slot.
 The join proves evaluation order, entry room and a conservative bound on the
 original task stack before publishing a bulk write. There is no graph-sized
 workspace, persistent plan or recursive traversal.
 
-Isolated `VALUE` nodes and proven integer constants use scalar leaf templates
-and a packed type lookup. Addressed lvalues keep the original address helper,
-including storage flags and VLA indirection. Casts, selections and truth tests
+Standalone `VALUE` nodes retain the original expression handler, including
+addresses, storage flags and VLA indirection. Proven integer constants use a
+scalar template and a packed type lookup. Casts, selections and truth tests
 with no constant annotation directly schedule their checked operand through
 the original conversion and truth helpers. These scalar paths retain tracked
 emission and are excluded from the reported vector share. Empty conversion

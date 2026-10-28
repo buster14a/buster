@@ -41,20 +41,43 @@ static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWr
 {
     const CheckStream* stream = writer->program->stream;
     const CheckGraph* graph = &writer->program->input->graph;
-    const __mmask16 active = (__mmask16)((1u << count) - 1);
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
-    const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + first, 1);
-    const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
-    const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)writer->type_count));
-    const __m512i metadata = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), typed, indices, writer->type_templates, 4);
-    const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
-    const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
-    const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
-    const __m128i selected = _mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, _mm512_load_si512(check_lower_batch_ops)));
-    const __m512i recipes = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(selected));
+    __m512i result;
+    if (count <= 4)
+    {
+        uint32_t metadata[4] = { 0 };
+#pragma clang loop vectorize(disable) unroll_count(4)
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t index = type_index(stream->values[first + i].type);
+            metadata[i] = index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
+        }
+        const __mmask8 active = (__mmask8)((1u << count) - 1);
+        const __m128i ops = _mm_maskz_loadu_epi32(active, graph->ops + first);
+        const __mmask8 small = active & _mm_cmplt_epu32_mask(ops, _mm_set1_epi32(64));
+        const __m256i keys = _mm256_zextsi128_si256(_mm_cvtepi32_epi8(ops));
+        const __m256i selected = _mm256_permutex2var_epi8(_mm256_load_si256((const __m256i*)check_lower_batch_ops), keys,
+                                                        _mm256_load_si256((const __m256i*)(check_lower_batch_ops + 32)));
+        const __m128i recipes = _mm_maskz_mov_epi32(small, _mm_cvtepu8_epi32(_mm256_castsi256_si128(selected)));
+        result = _mm512_zextsi128_si512(_mm_or_si128(_mm_loadu_si128((const __m128i*)metadata), _mm_slli_epi32(recipes, 16)));
+    }
+    else
+    {
+        const __mmask16 active = (__mmask16)((1u << count) - 1);
+        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
+        const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + first, 1);
+        const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
+        const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)writer->type_count));
+        const __m512i metadata = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), typed, indices, writer->type_templates, 4);
+        const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
+        const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
+        const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
+        const __m128i selected = _mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, _mm512_load_si512(check_lower_batch_ops)));
+        const __m512i recipes = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(selected));
+        result = _mm512_or_si512(metadata, _mm512_slli_epi32(recipes, 16));
+    }
     writer->classified_nodes += count;
-    return _mm512_or_si512(metadata, _mm512_slli_epi32(recipes, 16));
+    return result;
 }
 
 static bool check_lower_batch_proof(const CheckValue* value, CheckOp op)
@@ -150,14 +173,19 @@ static bool check_lower_batch_target(const CheckLowerWriter* writer, TypeId targ
 // counts are the popcounts of the occupied slot masks; compress expands those templates into all three columns.
 static void check_lower_batch_write(CheckLowerWriter* writer, uint32_t kinds, uint32_t classes, uint64_t left, uint64_t right, uint8_t occupied)
 {
-    _mm_mask_compressstoreu_epi8(writer->kinds + writer->count, occupied, _mm_cvtsi32_si128((int)kinds));
-    _mm_mask_compressstoreu_epi8(writer->classes + writer->count, occupied, _mm_cvtsi32_si128((int)classes));
-    _mm512_mask_compressstoreu_epi64(writer->values + writer->count, occupied, _mm512_setr_epi64((int64_t)left, (int64_t)right, 0, 0, 0, 0, 0, 0));
-    writer->count += (uint32_t)__builtin_popcount(occupied);
+    const uint32_t count = (uint32_t)__builtin_popcount(occupied);
+    const __mmask8 prefix = (__mmask8)((1u << count) - 1);
+    const __m128i kind_bytes = _mm_maskz_compress_epi8(occupied, _mm_cvtsi32_si128((int)kinds));
+    const __m128i class_bytes = _mm_maskz_compress_epi8(occupied, _mm_cvtsi32_si128((int)classes));
+    _mm_mask_storeu_epi8(writer->kinds + writer->count, prefix, kind_bytes);
+    _mm_mask_storeu_epi8(writer->classes + writer->count, prefix, class_bytes);
+    // The unary's skipped middle value is zero, as is its native entry's payload.
+    _mm256_mask_storeu_epi64(writer->values + writer->count, prefix, _mm256_setr_epi64x((int64_t)left, (int64_t)right, 0, 0));
+    writer->count += count;
 }
 
-// Isolated VALUE nodes need no speculative window. Their scalar template uses the same packed type
-// lookup; taking an address keeps the original helper, including VLA indirection and storage flags.
+// Scalar leaf templates share their payload rule with joined nodes. Standalone VALUE tasks retain
+// the original expression handler; the hot loop uses this helper for proven constants of other ops.
 static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized)
 {
     const CheckProgram* program = writer->program;
