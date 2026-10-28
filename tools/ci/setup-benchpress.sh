@@ -47,6 +47,9 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
     for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj; do
         test -x "$temporary/tree/bin/$tool"
     done
+    # Older PR workflows still recognize .complete. Retain it so they can use
+    # this superset without replacing it with a compiler-only cache again.
+    printf '%s\n' "$digest" > "$temporary/tree/.complete"
     printf '%s\n' "$digest" > "$temporary/tree/.correctness-complete"
     # A failed earlier publication is incomplete and never used.
     if [ -e "$destination" ]; then rm -rf "$destination"; fi
