@@ -570,3 +570,22 @@ times link-foreign's `--lanes=1` on every CPU too ("1 thread, its CPUs"),
 beside its default, its `--lanes=8` and its pinned one thread. On 102,400
 workers the default, 8 lanes, took 37% to 46% off one lane pinned to CPU 2,
 every kind, and was `--lanes=8`'s time within 1.5% (5 rounds).
+
+The [completed redesigned confirmation](https://github.com/buster14a/buster-performance/tree/7d88ad05cf3b8a6461b79762db73231b5dd92ebb/docs/measurements/link-foreign-lanes-594-2026-10-27/confirmation2)
+on October 28 retains 7,750 successful processes and 6,560 non-warm-up
+samples. Every one of 28 output families is byte-identical across variants.
+For small links, default against forced one at the same unpinned placement
+is −1.58% to +5.21% in paired medians; pinned against pinned, −3.10% to
++2.63%. Every interquartile range spans zero: these noisy results establish
+neither exact neutrality nor a universal never-slower guarantee. At 10,000
+workers the default improves 7.10% to 19.76% against unpinned one; at
+40,000, 28.14% to 38.84%; at 102,400, 37.28% to 46.53%.
+
+The first-input opening retains a cost against forcing eight: at 40,000
+workers, +1.60% to +5.85% in paired medians; at 102,400, −1.12% to +2.12%.
+The largest shared case's interval is positive. This supports the adaptive
+default against the previous one-lane policy, not an optimal lane count for
+every input. The report retains all placement comparisons and phase costs.
+Its preserved executable matches every PR-head compiler source except the
+later benchmark-row change; the final four benchmark rows are separately
+qualified by [the successful PR-head hardware job](https://github.com/buster14a/buster/actions/runs/40577932661/job/122449332690).
