@@ -4924,6 +4924,10 @@ bodies, take the rest in the remaining cost order from the counter
 and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
+A lane copies the top level's table but none of its per-name columns, which are
+the lane's own at places they keep from one reading to the next
+(`check_deferred_lane_names`), each set for the names a body spells before its
+walk.
 
 `./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
@@ -4939,13 +4943,16 @@ first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
 that lane delayed under the reader's rule and with all lanes forced. Each that
 merges must give source
 order's result again with its merge failing after the replay and when a state
-that read it before reads it again (its memory poisoned or as left, and kept),
+that read it before reads it again (its memory poisoned or as left, and kept,
+or its lanes' stamps then at their last, which its bodies wrap),
 and count as a resource failure with its state's allocation failing; timed, one
 lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+A lane's per-name columns must be laid out, kept, cleared after a poisoned
+reading and laid out again for more names (`check_deferred_test_lane_names`).
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
 opening must be selected. The merge's scans of the token columns

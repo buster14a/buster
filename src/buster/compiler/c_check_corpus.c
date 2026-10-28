@@ -632,7 +632,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
 // what it wrote, or with check_corpus_deferred_poison every byte it pushed poisoned (check_deferred_poison), and the
 // path's reading, on fresh arenas of its own, takes the state's memory over from it: check_corpus_deferred_kept says
-// whether it kept every arena the first reading had.
+// whether it kept every arena the first reading had. With check_corpus_deferred_stamp, every lane's last body's stamp is
+// set to it between the readings (check_deferred_stamp).
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
@@ -645,6 +646,7 @@ static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
 static uint32_t check_corpus_deferred_reread;
 static bool check_corpus_deferred_poison;
+static uint32_t check_corpus_deferred_stamp;
 static bool check_corpus_deferred_kept;
 static CheckDeferredMemory check_corpus_deferred_before;
 
@@ -741,6 +743,10 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     if (check_corpus_deferred_poison)
                     {
                         check_deferred_poison(path->deferred, 0xa5);
+                    }
+                    if (check_corpus_deferred_stamp != 0)
+                    {
+                        check_deferred_stamp(path->deferred, check_corpus_deferred_stamp);
                     }
                     check_corpus_deferred_before = path->deferred->memory;
                     Arena* arenas[] = { &path->types_arena, &path->index_arena, &path->input_arena, &path->scratch };

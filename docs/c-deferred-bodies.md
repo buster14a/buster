@@ -50,21 +50,30 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 
    A lane copies the top level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
-   nothing (#432's review): its binding stacks (the top level's events, then
-   room for the largest body), the per-name and per-tag arrays the walk writes,
-   the scope stacks and reports, the appended tables, and the table
-   (`type_copy`, with room for the largest body's types). The copies are
-   columns with room for the largest body that a lane mostly never touches, so
-   a lane's arenas are base pages throughout: the kernel clears a huge page
-   whole the first time any of it is touched. The table's index has room for
-   the top level's types and a slack more (at most 4,096 and the top level's
-   own count, and at least 512), and grows past them as any index does. Where
-   the top level's index has that room already, its slots are copied as they
-   are, rather than its types placed again.
+   nothing (#432's review): its binding stream (the top level's events, then
+   room for the largest body), the per-tag arrays the walk writes, the scope
+   stacks and reports, the appended tables, and the table (`type_copy`, with
+   room for the largest body's types), whose columns a body's withdrawals
+   change (step 4). The copies are columns with room for the largest body that
+   a lane mostly never touches, so a lane's arenas are base pages throughout:
+   the kernel clears a huge page whole the first time any of it is touched. The
+   table's index has room for the top level's types and a slack more (at most
+   4,096 and the top level's own count, and at least 512), and grows past them
+   as any index does. Where the top level's index has that room already, its
+   slots are copied as they are, rather than its types placed again.
+
+   A lane copies none of the top level's per-name columns (#697's item 2).
+   Its binding heads, parameters' and members' marks, stamps, linked
+   declarations and types, and intrinsics' and builtins' caches are its own,
+   in its sixth arena, at places they keep from one reading to the next
+   (`check_deferred_lane_names`). Before its walk, a body sets them for the
+   names it spells (step 4). After the walk it takes the ones that start as
+   none back to none, so that no reading clears them. A reading with more
+   names than the places have room for lays them out again, on zero pages.
 
    The state (`CheckDeferred`) keeps its memory (`CheckDeferredMemory`) from one
    reading to the next: its own arena, the top level's table and index, and
-   each lane's five arenas, one mapping a lane, which the calling thread
+   each lane's six arenas, one mapping a lane, which the calling thread
    reserves before the lanes start, the first time the state runs that lane
    (`check_deferred_lane_arenas`). Each reading takes the memory back to empty,
    and `check_deferred_release` unmaps it. Before, each lane mapped and advised
@@ -92,7 +101,8 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      name). An upper-bound binary search selects the last equal-position update
      at or before the opening, so many later redeclarations do not make each
      body scan the name's suffix again. It also gets its intrinsic's cache entry, a hit not yet decoded where the
-     top level decoded it after the opening, as source order's is there;
+     top level decoded it after the opening, as source order's is there, and its builtins' cache entry, the top
+     level's;
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
      transparency after it withdrawn (`type_tag_withdraw`). The withdrawals
@@ -115,8 +125,8 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    completion positions and transparency of the tags it made, those of the
    top level's tags it completed (its definition's parameter-list tags, #436),
    the top level's VLAs it changed (its parameters') and the predefined types
-   it made. Then the lane takes its names' heads, its view and the top level's
-   tags it changed back (`type_tag_restore`).
+   it made. Then the lane takes its names' heads and marks, its view and the
+   top level's tags it changed back (`type_tag_restore`).
 5. **The merge** (`check_deferred_merge`), in source order, on the caller's
    thread but for its pass, which runs on the lanes the bodies ran on:
    - `type_replay` makes the top level's changes and each body's again in the
