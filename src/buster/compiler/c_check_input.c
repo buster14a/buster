@@ -3578,8 +3578,6 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
-#include "c_check_literal_table_input.c"
-
 // The C90 compatibility rule is a declaration at the first direct call's source point, with block scope and
 // external linkage. Reuse the ordinary declaration/binding path so later prototypes share its entity while calls
 // made before a prototype keep default argument promotions. C23 removed this rule even when its warning is off.
@@ -3634,6 +3632,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
     }
 }
 
+#include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
