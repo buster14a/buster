@@ -936,8 +936,10 @@ designs and the compilers already built this way.
   measurements.
 - `src/buster/compiler/c_check_actions.c` supplies the reader-independent
   expression rules and constant folding for #133. `c_checker.c` checks an
-  explicit postorder operand graph either in source order or in stable
-  dependency levels, with scalar barriers for actions that intern types.
+  explicit postorder operand graph either a node at a time or in batches of
+  consecutive nodes that read none of each other (or, with
+  `CheckOptions.level_order`, in stable dependency levels), with scalar
+  barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
@@ -952,9 +954,14 @@ designs and the compilers already built this way.
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
-  source bodies.
+  source bodies by the scalar schedule, the vector path's postorder batches and its level order
+  (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
+  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
   `test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]` compares fresh scalar/vector tables,
-  protected tails and original source fixtures against Clang.
+  protected tails and original source fixtures against Clang, and checks the constraint catalogue
+  (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
+  a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
+  file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
@@ -5187,8 +5194,8 @@ mutants of the units it found no difference in (#133's last "Done when" item,
 It prints each kind's sites, mutants, clang's rejections and differences, and
 exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
 and semantic mutations") has the four corpora's configurations, the campaigns'
-counts and the two base differences left (two of #148's builtins in the libc
-corpus; Lua's labels as values agree since #133 took them). The 9700X job's test step checks 8
+counts and the base differences the comparisons found, all fixed (the libc corpus's last two, `fmaxl.c` and
+`fminl.c`, by #148's floating comparison builtins; Lua's labels as values since #133 took them). The 9700X job's test step checks 8
 mutants of the frozen SQLite source and 96 of the oracle's four musl sources
 with seed 133; a run that differs fails it, and `--keep` with `--minimize`
 reproduces it locally.

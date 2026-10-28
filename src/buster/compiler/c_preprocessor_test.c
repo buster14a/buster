@@ -1347,6 +1347,14 @@ static const PPTestCase pp_test_cases[] = {
     { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
     { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },
     { "a stringized argument isn't expanded", "#define BAD(x,y) x\n#define S(x) #x\nS(BAD(1))\n", 0, "c17", "\"BAD(1)\"\n", false },
+    { "defined function-like and bare names in conditions", "#define VALUE 1\n#define F(x) x\n#define EMPTY\n#if VALUE && F(1) && EMPTY(1) && !MISSING && !F\nkept\n#endif\n",
+      0, "c17", "kept\n", false },
+    { "undefined calls in skipped conditional groups remain skipped", "#if 0\n#if MISSING(1)\n#endif\n#elif 1\nkept\n#elif UNKNOWN(2)\nbad\n#endif\n",
+      0, "c23", "kept\n", false },
+    { .name = "C23 keyword spellings before parentheses are undefined macro calls", .source = "#if true(1)\n#endif\n#if false(1)\n#endif\n#if nullptr(1)\n#endif\nafter\n",
+      .standard = "c23", .expected = "after\n", .fails = true, .errors = 3 },
+    { .name = "embed limit diagnoses an undefined function-like name", .source = "#embed \"other.h\" limit(MISSING(1))\nafter\n", .other = "",
+      .standard = "c23", .expected = "after\n", .fails = true, .errors = 1 },
     { "a dead arm's macros still expand", "#define BAD(x,y) x\n#if 0 && BAD(1)\n#endif\n", 0, "c17", "", true },
     { "a dead arm's division isn't evaluated", "#if 0 && (1/0)\nx\n#else\ny\n#endif\n", 0, "c17", "y\n", false },
     { "a dead arm's division skips an #error", "#if 0 && (1/0)\n#error unexpected\n#endif\nint x;\n", 0, "c17", "int x;\n", false },
@@ -7147,6 +7155,12 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_CIMAG, "__builtin_cimag", false },
         { CBUILTIN_CIMAGF, "__builtin_cimagf", false },
         { CBUILTIN_CIMAGL, "__builtin_cimagl", false },
+        { CBUILTIN_ISGREATER, "__builtin_isgreater", false },
+        { CBUILTIN_ISGREATEREQUAL, "__builtin_isgreaterequal", false },
+        { CBUILTIN_ISLESS, "__builtin_isless", false },
+        { CBUILTIN_ISLESSEQUAL, "__builtin_islessequal", false },
+        { CBUILTIN_ISLESSGREATER, "__builtin_islessgreater", false },
+        { CBUILTIN_ISUNORDERED, "__builtin_isunordered", false },
         { CBUILTIN_SQRT, "__builtin_sqrt", false },
         { CBUILTIN_SQRTF, "__builtin_sqrtf", false },
         { CBUILTIN_COPYSIGN, "__builtin_copysign", false },
@@ -7368,6 +7382,7 @@ static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_print_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
@@ -7663,6 +7678,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_print_offsets();
+        passed_all &= pp_test_print_batches(directory);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);

@@ -898,6 +898,8 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
+          taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
 
       - name: Benchmark the C driver's source rows
         # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g

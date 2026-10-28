@@ -2529,6 +2529,67 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
         "fpclassify-known-category-effects", clang);
+    // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the
+    // identifier list's, a struct and a register parameter, a call through the prototype of their promoted types, which
+    // converts its arguments as clang's does, and an empty list's definition after its declaration.
+    check_test_program_source(test,
+        "struct P{int x,y;};int add(a,b)int a;long b;{return a+(int)b;}char at(p,n)const char*p;int n;{return p[n];}"
+        "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
+        "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
+        "kr-definitions", clang);
+    // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
+    // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
+    // order, and mingw's fmaxl, which the libc corpus's comparison found.
+    check_test_program_source(test,
+        "double fp_special(int);float fp_specialf(int);int clear_fp(void);int fp_state(void);int seen;"
+        "double mark(int k,double v){seen=seen*10+k;return v;}"
+        "int bits(double x,double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsf(float x,float y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsl(long double x,long double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "long double fmaxl_like(long double x,long double y){return (__builtin_isgreaterequal(x,y)||__builtin_isnan(y))?x:y;}"
+        "int tested(int n){double x=fp_special(n),y=fp_special(n*7+3);float a=fp_specialf(n),b=fp_specialf(n*5+1);"
+        "long double l=x,m=(long double)b;clear_fp();unsigned k=(unsigned)bits(x,y);k=k*32+(unsigned)fp_state();clear_fp();"
+        "k=k*64+(unsigned)bitsf(a,b);k=k*32+(unsigned)fp_state();clear_fp();k=k*64+(unsigned)bitsl(l,m);k=k*32+(unsigned)fp_state();"
+        "seen=0;k=k*2+(unsigned)__builtin_islessgreater(mark(1,x),mark(2,(double)n));k=k*100+(unsigned)seen;"
+        "k=k*8+(unsigned)(__builtin_isunordered(n,b)+__builtin_isgreater(n,2.5f)*2+__builtin_isless(a,y)*4);"
+        "long double r=fmaxl_like(l,m);unsigned long u;unsigned short e;__builtin_memcpy(&u,&r,8);__builtin_memcpy(&e,(char*)&r+8,2);"
+        "k=k*31+(unsigned)u+(unsigned)(u>>32);k=k*7+e;return (int)k;}",
+        "floating-comparison-builtins", clang);
+    // The native common format's DAZ policy applies to the ordered comparisons as well as EQ and NE. An x87
+    // promotion would keep these subnormals nonzero while clang's ucomiss/ucomisd compare them as zero under DAZ.
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "double fp_special(int);float fp_specialf(int);int change_daz(int);int clear_fp(void);int fp_state(void);"
+        "int bits(double x,double y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int bitsf(float x,float y){return __builtin_isgreater(x,y)|__builtin_isgreaterequal(x,y)<<1|__builtin_isless(x,y)<<2|"
+        "__builtin_islessequal(x,y)<<3|__builtin_islessgreater(x,y)<<4|__builtin_isunordered(x,y)<<5;}"
+        "int tested(int n){int old=change_daz(n);double x=fp_special(6+(((unsigned)n>>1)&1u));float y=fp_specialf(6+(((unsigned)n>>1)&1u));"
+        "clear_fp();unsigned k=(unsigned)bits(x,0.0);k=k*32+(unsigned)fp_state();clear_fp();"
+        "k=k*64+(unsigned)bitsf(y,0.0f);k=k*32+(unsigned)fp_state();change_daz(old);return (int)k;}",
+        "floating-comparison-native-daz", clang);
+    // Both arguments must finish before a compare raises FE_INVALID. Converting the first signaling NaN to x87
+    // would quiet it before the second argument clears the flags. Both quiet self-tests must run even when the
+    // first argument is a quiet NaN and the second signals.
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "double fp_special(int);float fp_specialf(int);int clear_fp(void);int fp_state(void);int seen;"
+        "double second(double x){seen++;clear_fp();return x;}float secondf(float x){seen++;clear_fp();return x;}"
+        "int tested(int n){double s=fp_special(5),q=fp_special(4);float fs=fp_specialf(5),fq=fp_specialf(4);"
+        "seen=0;clear_fp();unsigned k=(unsigned)__builtin_isgreater(s,second(0.0));k|=(unsigned)(fp_state()!=1)<<1;"
+        "k|=(unsigned)__builtin_isgreaterequal(s,second(0.0))<<2;k|=(unsigned)(fp_state()!=1)<<3;"
+        "k|=(unsigned)__builtin_isless(s,second(0.0))<<4;k|=(unsigned)(fp_state()!=1)<<5;"
+        "k|=(unsigned)__builtin_islessequal(s,second(0.0))<<6;k|=(unsigned)(fp_state()!=1)<<7;"
+        "k|=(unsigned)__builtin_isgreater(fs,secondf(0.0f))<<8;k|=(unsigned)(fp_state()!=1)<<9;"
+        "k|=(unsigned)__builtin_isgreaterequal(fs,secondf(0.0f))<<10;k|=(unsigned)(fp_state()!=1)<<11;"
+        "k|=(unsigned)__builtin_isless(fs,secondf(0.0f))<<12;k|=(unsigned)(fp_state()!=1)<<13;"
+        "k|=(unsigned)__builtin_islessequal(fs,secondf(0.0f))<<14;k|=(unsigned)(fp_state()!=1)<<15;"
+        "k|=(unsigned)__builtin_isgreater(q,second(s))<<16;k|=(unsigned)(fp_state()!=1)<<17;"
+        "k|=(unsigned)__builtin_isless(fq,secondf(fs))<<18;k|=(unsigned)(fp_state()!=1)<<19;return (int)(k|((unsigned)seen<<20));}",
+        "floating-comparison-argument-exception-order", clang);
     check_test_program_source(test,
         "int calls;double make(int n){calls++;return n<0?-__builtin_inf():n==0?-0.0:(double)(-n)-0.25;}int tested(int n){calls=0;"
         "double d=__builtin_fabs(make(n));float f=__builtin_fabsf((float)n-7.5f);return __builtin_isinf_sign(make(n))*1000+"
@@ -3134,6 +3195,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
     // C; __float128 is its spelling).
     check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    // A K&R definition (#154's decision: as clang): its callers pass its parameters' promoted types, which a parameter of a
+    // type the promotions change would convert from on entry, not lowered yet.
+    check_test_program_boundary_reason(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true,
+                                       false, 1, 0, "K&R parameters the default argument promotions change");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
