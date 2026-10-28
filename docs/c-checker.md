@@ -715,8 +715,10 @@ Whole compiles of `sqlite3.c` (with `-DSQLITE_OMIT_LOAD_EXTENSION
 | `-c` | 127.95 ms, 599.5M cycles, 1,274.5M instructions | 127.39 ms (−0.44%), 595.8M (−0.61%), 1,275.3M | 126.46 ms (−1.16%), 591.3M (−1.37%), 1,269.2M |
 | `-fsyntax-only` | 102.41 ms, 464.1M cycles, 988.9M instructions | 102.38 ms (−0.03%), 464.3M (+0.03%), 989.6M | 101.25 ms (−1.13%), 458.1M (−1.29%), 983.5M |
 
-The switch to the postorder batches saved 6.08M instructions a compile, about
-18 for each of the unit's 336,460 nodes. The first build's other changes (the
+The switch to the postorder batches saved 6.08M instructions a whole compile
+with these four SQLite defines. The graph benchmark above uses a different
+preprocessing configuration, so its node count does not normalize that
+instruction delta. The first build's other changes (the
 catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
 `-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
 the commands, the trees and the logs.
