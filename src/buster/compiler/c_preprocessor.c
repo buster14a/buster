@@ -319,6 +319,9 @@ struct PPOptions
     bool quiet;
     // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
     bool system_header_warnings;
+    // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy.
+    const char* const* semantic_warning_options;
+    uint32_t semantic_warning_option_count;
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
     // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
     uint32_t error_limit;
@@ -19897,6 +19900,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     const char** macros = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** includes = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** embeds = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
+    const char** warnings = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     *options = (PPOptions){ .language = { .standard = 2017, .gnu = true }, .error_limit = BUSTER_PP_DEFAULT_ERROR_LIMIT };
     *input = 0;
     *output = 0;
@@ -19918,12 +19922,17 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     PPFamilies families = { .charsets = { 0, 0 } };
     memset(families.last, -1, sizeof(families.last));
     bool refused = false;
-    result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0 && embeds != 0;
+    result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0 && embeds != 0 && warnings != NULL;
+    options->semantic_warning_options = warnings;
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
         // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
         const char* argument = predefines_alias(arguments[i]);
+        if (strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        {
+            warnings[options->semantic_warning_option_count++] = argument;
+        }
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
         // The target's options and the others that change the predefined macros (c_predefines.c) come first.
         const PredefinesParse predefined = predefines_option(&options->predefines, argument, next);
@@ -19936,6 +19945,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->freestanding &= strcmp(argument, "-fhosted") != 0;
             options->suppress_warnings |= strcmp(argument, "-w") == 0;
+        }
+        else if (strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        {
+            // The semantic warning consumer reads these from the ordered options above.
         }
         else if (strncmp(argument, "-ferror-limit=", 14) == 0)
         {
