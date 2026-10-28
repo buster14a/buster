@@ -74,6 +74,7 @@ static void check_test_program_task_stack(CheckTest* test)
                         .type_facts = type_facts,
                         .type_templates = type_templates,
                         .type_count = BUSTER_ARRAY_LENGTH(type_classes),
+                        .class_limit = BUSTER_TYPED_CLASSES,
                     };
                     check_lower_drain(writers + path);
                 }
@@ -165,6 +166,7 @@ static void check_test_program_batch(CheckTest* test)
             .type_classes = type_classes,
             .type_facts = type_facts,
             .type_count = types.table.types.count,
+            .class_limit = BUSTER_TYPED_CLASSES,
         };
         CheckLowerWriter packed = columns;
         packed.type_templates = type_templates;
@@ -323,6 +325,7 @@ static void check_test_program_batch(CheckTest* test)
                         .type_facts = type_facts,
                         .type_templates = path == 2 ? NULL : type_templates,
                         .type_count = types.table.types.count,
+                        .class_limit = BUSTER_TYPED_CLASSES,
                     };
                     indirect[path][0] = mode == 6 ? BUSTER_CHECK_LOWER_VLA_ALLOCATED : BUSTER_CHECK_LOWER_VLA_NONE;
                     local_flags[path][0] = 0;
@@ -464,6 +467,7 @@ static void check_test_program_batch(CheckTest* test)
             .type_facts = type_facts,
             .type_templates = type_templates,
             .type_count = types.table.types.count,
+            .class_limit = BUSTER_TYPED_CLASSES,
         };
         (void)check_lower_batch_classify(&writer, 0, 2);
         const bool lowered = check_lower_value(&writer, 0, false, false);
