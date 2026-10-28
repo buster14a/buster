@@ -54,9 +54,16 @@ It starts through `posix_spawn` and an immediate internal command, so its addres
 space retains no front-end mappings during emission. The nonempty-token check
 still precedes process creation, and no credit is held during front-end work.
 The guardian closes unrelated inherited handles; the caller's signal handlers
-and masks are preserved. The implicit slot is
-never returned. Failed guardian setup, descriptor or process limits leave the
+and masks are preserved. The implicit slot is never returned. Failed guardian
+setup, descriptor or process limits leave the
 compiler on one lane; failure to return owned slots refuses output.
+
+The lease and team size stay fixed for the emission phase. Tokens which another
+file returns after dispatch cannot enlarge an already running team. In an uneven
+build, two large files can receive seven lanes and one lane; when the first team
+finishes, the one-lane team can leave capacity idle at the tail. Active-team
+resizing and changes to the existing profitability rule remain separate work.
+This ownership policy uses no machine-wide idle sampling or racy retuning.
 
 With `--time-stages`, `worker-budget` reports the external mode, explicit cap,
 requested and granted workers, attempted active team and serial-fallback reason.
@@ -70,6 +77,49 @@ physical-CPU mask, with a separate pinned-process control, and compare actual
 make file jobs times internal teams at 1/2/4/8 jobs. Preserve statuses, objects,
 diagnostics, team size, RSS, switches, migrations and physical traffic; neither
 protocol tests nor a one-file gain establishes full-build throughput.
+
+### Qualification and bounds
+
+The clean-launch source `1d076d6736df9b7350610ec646dc1fe1ef39f7dc` was qualified
+on the 9700X with frozen SQLite inputs, GNU make 4.4.1 and the same physical
+CPU mask 0–7 for all shared-affinity controls. The separate pinned-process
+controls keep their own label. A three-repeat matrix covers external jobs
+1/2/4/8 and forced one lane, default lanes, forced eight lanes, explicit cap one
+and the real make jobserver. All 120 cohorts produce the same object bytes;
+their resource variation makes this matrix a characterization screen.
+
+The policy comparison uses one locked group per workload, a full-size primer
+and a cyclic nine-edge role sequence repeated four times. Each of the nine
+predecessor/current policy pairs occurs four times, for twelve measured cohorts
+per policy. The independent reader checks the actual schedule, zero exit status,
+output comparisons and full counter coverage. An earlier mixed-workload list
+rotation is retained as rejected evidence because preceding workloads were
+confounded with the policy.
+
+All three policies request eight emission lanes. The jobserver policy has a
+worker cap of eight; cap one has a worker cap of one; the unrestricted control
+clears `MAKEFLAGS` for each compiler. Every policy uses the same real make
+recipes and resource wrappers. Median whole-cohort wall times were:
+
+| Eight-file workload | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
+| --- | ---: | ---: | ---: |
+| Eight SQLite units | 408.827 | 408.011 | 428.449 |
+| Eight tiny units | 8.766 | 9.101 | 9.323 |
+| Two SQLite and six tiny | 180.681 | 177.824 | 172.410 |
+
+The saturated large cohort uses 4.58% less wall time than unrestricted teams.
+The uneven cohort costs 4.80% more wall time, alongside fewer cycles, switches
+and migrations; its fixed leases expose the tail limitation above. Tiny-file
+ranges overlap. These are one-placement workload results with retained major
+faults, not a universal throughput or neutrality guarantee.
+
+A same-head one-file control with spare tokens uses eight lanes in both cases:
+134.221 ms with the jobserver and 134.277 ms without it, with overlapping ranges
+and 4,912 versus 4,910 minor faults. The superseded post-front-end fork guardian
+had added 1,549 faults and 1.28% wall time in its matched control. Clean spawning
+removes that measured copy-on-write amplification without reserving credits
+during the front end. Exact method, counters, identities and rejected controls
+are retained with #673's performance evidence.
 
 ## The phase
 
