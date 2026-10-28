@@ -455,6 +455,7 @@ struct CheckInputReader
     uint8_t* linkage;
     uint32_t* objects;
     uint8_t* ignored;
+    // Assignment modes 1 (scalar) and 2 (list); 3 marks a complete compact #embed list item.
     uint8_t* initializers;
     uint8_t* static_initializers;
     uint32_t* initializer_declarations;
@@ -1551,7 +1552,17 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
     uint32_t length = 0;
     *result = (CheckLiteral){ 0 };
     const uint32_t name = reader->parser->tokens.names[token];
-    if (name == C_NAME_TRUE || name == C_NAME_FALSE)
+    uint32_t embed_length = 0;
+    const uint8_t* embed = parse_embed_bytes(reader->parser, token, &embed_length);
+    if (embed != NULL)
+    {
+        // A multi-element resource is accepted only as a complete list item, marked by initializer preparation.
+        // Treating it as one value in a call or expression would silently change the preprocessing token sequence.
+        result->type = BUSTER_TYPE_INT;
+        result->integer = embed[0];
+        result->valid = embed_length == 1 || reader->initializers[token] == 3;
+    }
+    else if (name == C_NAME_TRUE || name == C_NAME_FALSE)
     {
         result->type = BUSTER_TYPE_BOOL;
         result->integer = name == C_NAME_TRUE;

@@ -1107,6 +1107,24 @@ for token as clang does, and compile with clang.
 
 `#embed` (C23 6.10.3) works as clang 23's does (#117).
 
+The checker accepts a resource as a complete initializer-list item in ordinary
+`char`, `signed char` and `unsigned char` arrays, for static and automatic
+storage (#621). The parser retains one operand and the initializer planner
+borrows the immutable byte span. Inferred bounds count every resource byte;
+explicit bounds retain the fitting prefix and diagnose excess elements as for
+an ordinary list. Designated starting indices and brace elision use the same
+subobject cursor. `prefix` and `suffix` retain their ordinary tokens and must
+supply any separators; a resource adds neither a separator nor a terminating
+zero. An empty resource or `limit(0)` retains only `if_empty`'s tokens.
+
+Multi-byte resources currently require character subobjects without volatile
+or bit-field access, and cannot be the value of a GNU range designator. A
+resource inside a call or expression, including a `prefix` or `suffix` operator
+that binds to its first or last byte, is refused instead of being treated as
+one scalar. A one-byte resource is an ordinary `int` constant and follows the
+normal expression and conversion rules. Wider arrays and general expression
+sequences need a separate compact conversion representation.
+
 - **The header name** is read as an `#include`'s (`pp_read_header_name`, which
   `pp_include` shares): `<...>` or a string literal as written, or a computed
   one from the line's expanded tokens. The file was lexed before the name was

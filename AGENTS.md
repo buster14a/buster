@@ -953,10 +953,13 @@ designs and the compilers already built this way.
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
   source bodies.
-  `test-checker [--seed N] [--clang PATH] [--program-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
+  `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
+  initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
+  exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,

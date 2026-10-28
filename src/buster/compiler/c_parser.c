@@ -414,6 +414,8 @@ static void parse_kind_table_initialize(void)
     };
     memset(parse_kind_table, PARSE_KIND_UNKNOWN, sizeof(parse_kind_table));
     memcpy(parse_kind_table, lexer_kinds, sizeof(lexer_kinds));
+    // An embedded resource remains one operand. The initializer cursor consumes its byte span without expanding it.
+    parse_kind_table[BUSTER_PP_KIND_EMBED] = PARSE_KIND_NUMBER;
     for (uint32_t i = 0; i < sizeof(parse_keyword_kinds) / sizeof(parse_keyword_kinds[0]); i += 1)
     {
         parse_kind_table[BUSTER_PP_KIND_KEYWORD + parse_keyword_kinds[i].name - 1] = parse_keyword_kinds[i].kind;
@@ -11783,6 +11785,8 @@ struct Parser
 {
     ParseOptions options;
     CLanguage language;
+    // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
+    const Preprocessor* preprocessor;
     ParseTokens tokens;
     ParseTree tree;
     // The tree in postorder, for a unit without errors: the token at each position, and with ParseOptions.sizes its
@@ -11817,6 +11821,29 @@ struct Parser
     ParseVectorBuffers buffers;
     IdentId predeclared[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
 };
+
+// A compact #embed operand's immutable bytes. Synthetic parsers have no preprocessor and therefore no resources.
+static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* parser, uint32_t token, uint32_t* length)
+{
+    const Preprocessor* pp = parser->preprocessor;
+    const uint8_t* result = NULL;
+    *length = 0;
+    if (pp != NULL && pp->embed_count != 0 && token < parser->tokens.count && parser->tokens.sources != NULL)
+    {
+        const uint32_t source = parser->tokens.sources[token];
+        if (source < pp->output.count && pp->output.kinds[source] == BUSTER_PP_KIND_EMBED && pp->output.values[source] < pp->embed_count)
+        {
+            const PPEmbed* embed = pp->embeds + pp->output.values[source];
+            if (embed->data < pp->data_count && embed->offset <= pp->datas[embed->data].length &&
+                embed->length != 0 && embed->length <= pp->datas[embed->data].length - embed->offset)
+            {
+                result = pp->datas[embed->data].bytes + embed->offset;
+                *length = embed->length;
+            }
+        }
+    }
+    return result;
+}
 
 static bool parse_tables_ready;
 
@@ -11902,6 +11929,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
 BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp)
 {
     const PPTokens* output = &pp->output;
+    parser->preprocessor = pp;
     bool result = output->count <= BUSTER_PARSE_MAX_TOKENS / 2;
     const uint64_t capacity = 2 * (uint64_t)output->count + 64;
     parser->diagnostic_count = 0;
