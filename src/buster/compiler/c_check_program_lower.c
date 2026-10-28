@@ -579,13 +579,16 @@ static bool check_lower_wide_class(uint8_t class)
     return class == BUSTER_TYPED_CLASS_I128 || class == BUSTER_TYPED_CLASS_U128;
 }
 
-// A complex type's element, unqualified, for one of a floating element (_Complex float, double and long double), or 0:
-// GNU's complex integer types aren't lowered.
+// A complex type's element, unqualified, for one the lowering takes, or 0: a floating element (_Complex float, double and
+// long double), or an integer one of up to 64 bits (GNU's complex integer types, _Complex char to _Complex unsigned long
+// long; not the _Complex __int128 or the complex _BitInt that the usual arithmetic conversions make).
 static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_unqualified(type_strip_aligned(types, type));
     const TypeId element = type_kind(types, base) == BUSTER_TYPE_KIND_COMPLEX ? type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
-    return element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE || element == BUSTER_TYPE_LONG_DOUBLE ? element : 0;
+    const bool floating = element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE || element == BUSTER_TYPE_LONG_DOUBLE;
+    const bool integer = element >= BUSTER_TYPE_CHAR && element <= BUSTER_TYPE_ULLONG;
+    return floating || integer ? element : 0;
 }
 
 // A type's facts for the lowering (BUSTER_CHECK_LOWER_TYPE_*), from its aligned typedef's type (type_strip_aligned):
@@ -858,10 +861,11 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
-        // One check_lower_complex doesn't take: GNU's complex integer types, or a complex type of another floating
-        // type (_Complex _Float128, _Complex _Float16).
+        // One check_lower_complex doesn't take: a complex integer type of __int128 or of a _BitInt, or a complex type of
+        // another floating type (_Complex _Float128, _Complex _Float16).
         const TypeId element = type_unqualified(type_strip_aligned(types, type_element(types, base)));
-        feature = type_kind(types, element) == BUSTER_TYPE_KIND_INTEGER ? "complex integer types" : "complex types other than _Complex float, double and long double";
+        feature = type_kind(types, element) == BUSTER_TYPE_KIND_FLOATING ? "complex types other than _Complex float, double and long double" :
+                                                                           "complex integer types of __int128 and _BitInt";
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -2325,25 +2329,79 @@ static void check_lower_complex_part(CheckLowerWriter* writer, CheckLowerComplex
     }
 }
 
+// Part `part` of `operand` onto the stack in `computing`, its element's class (`class`) or, for a complex integer type of
+// 8 or 16 bits, the 32-bit class Tier 0 computes in (check_lower_computed).
+static void check_lower_complex_value(CheckLowerWriter* writer, CheckLowerComplexOperand operand, uint32_t part, uint8_t class, uint8_t computing, uint64_t size)
+{
+    check_lower_complex_part(writer, operand, part, class, size);
+    if (computing != class)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, computing, 0);
+    }
+}
+
+// The value on top, computed in `computing`, as clang's code of a complex integer type of `class` has it: wrapped to the
+// element's width and extended back (nothing for a class Tier 0 computes in itself).
+static void check_lower_complex_wrap(CheckLowerWriter* writer, uint8_t class, uint8_t computing)
+{
+    if (computing != class)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, computing, 0);
+    }
+}
+
+// A complex integer quotient's part `part` (#137), as clang -O0 computes it in the element's type whatever the operands'
+// domains (a real one has an imaginary part of 0): (ac + bd) / (cc + dd) for the real part and (bc - ad) / (cc + dd) for
+// the imaginary one, each product and sum wrapped to the element's width before the division.
+static void check_lower_complex_quotient(CheckLowerWriter* writer, CheckLowerComplexOperand a, CheckLowerComplexOperand b, uint32_t part, uint8_t class,
+                                         uint8_t computing, uint64_t size)
+{
+    check_lower_complex_value(writer, a, part, class, computing, size);
+    check_lower_complex_value(writer, b, 0, class, computing, size);
+    check_lower_emit(writer, BUSTER_TYPED_MUL, computing, 0);
+    check_lower_complex_value(writer, a, 1 - part, class, computing, size);
+    check_lower_complex_value(writer, b, 1, class, computing, size);
+    check_lower_emit(writer, BUSTER_TYPED_MUL, computing, 0);
+    check_lower_emit(writer, part == 0 ? BUSTER_TYPED_ADD : BUSTER_TYPED_SUB, computing, 0);
+    check_lower_complex_wrap(writer, class, computing);
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        check_lower_complex_value(writer, b, k, class, computing, size);
+        check_lower_complex_value(writer, b, k, class, computing, size);
+        check_lower_emit(writer, BUSTER_TYPED_MUL, computing, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_ADD, computing, 0);
+    check_lower_complex_wrap(writer, class, computing);
+    check_lower_emit(writer, BUSTER_TYPED_DIV, computing, 0);
+}
+
 // `op` (ADD, SUBTRACT, MULTIPLY, DIVIDE, NEGATIVE, BIT_NOT, the conjugate, or EQUAL and NOT_EQUAL) of `a` and `b` (`a`
 // alone for a unary one) in complex type `type`: a result in a frame object of its own, which it returns, or for a
-// comparison an I32 onto the stack, and BUSTER_CHECK_NONE.
+// comparison an I32 onto the stack, and BUSTER_CHECK_NONE. A complex integer type's (#137) computes in its element's
+// class, or in 32 bits for one of 8 or 16, and is stored back in its own: its product of two complex values is
+// (ac - bd) + (ad + bc)i and its quotient check_lower_complex_quotient's, as clang's code has them, where a floating one's
+// are libgcc's.
 static uint32_t check_lower_complex_compute(CheckLowerWriter* writer, CheckOp op, TypeId type, CheckLowerComplexOperand a, CheckLowerComplexOperand b)
 {
     const TypeTable* types = writer->program->types;
     const TypeId element = check_lower_complex_element(types, type);
     const uint8_t class = check_lower_class(writer, element);
+    const uint8_t computing = check_lower_computed(class);
     const uint64_t size = type_size(types, element);
+    const bool integer = type_kind(types, element) == BUSTER_TYPE_KIND_INTEGER;
     const bool sum = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
-    const bool library = (op == CHECK_OP_MULTIPLY && a.complex && b.complex) || (op == CHECK_OP_DIVIDE && b.complex);
+    const bool library = !integer && ((op == CHECK_OP_MULTIPLY && a.complex && b.complex) || (op == CHECK_OP_DIVIDE && b.complex));
+    const bool product = integer && op == CHECK_OP_MULTIPLY && a.complex && b.complex;
+    const bool quotient = integer && op == CHECK_OP_DIVIDE;
     uint32_t result = BUSTER_CHECK_NONE;
     if (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL)
     {
         // Both parts compared, as clang compares them: equal when both are, unequal when either is (an unordered part is).
         for (uint32_t part = 0; part < 2; part += 1)
         {
-            check_lower_complex_part(writer, a, part, class, size);
-            check_lower_complex_part(writer, b, part, class, size);
+            check_lower_complex_value(writer, a, part, class, computing, size);
+            check_lower_complex_value(writer, b, part, class, computing, size);
             check_lower_emit(writer, op == CHECK_OP_EQUAL ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
         }
         check_lower_emit(writer, op == CHECK_OP_EQUAL ? BUSTER_TYPED_AND : BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
@@ -2369,34 +2427,53 @@ static uint32_t check_lower_complex_compute(CheckLowerWriter* writer, CheckOp op
     for (uint32_t part = 0; result != BUSTER_CHECK_NONE && !library && part < 2; part += 1)
     {
         check_lower_complex_place(writer, result, part, size);
-        if (op == CHECK_OP_NEGATIVE || (op == CHECK_OP_BIT_NOT && part == 1))
+        if (quotient)
         {
-            check_lower_complex_part(writer, a, part, class, size);
-            check_lower_emit(writer, BUSTER_TYPED_NEG, class, 0);
+            check_lower_complex_quotient(writer, a, b, part, class, computing, size);
+        }
+        else if (product)
+        {
+            // ac - bd for the real part, ad + bc for the imaginary one.
+            check_lower_complex_value(writer, a, 0, class, computing, size);
+            check_lower_complex_value(writer, b, part, class, computing, size);
+            check_lower_emit(writer, BUSTER_TYPED_MUL, computing, 0);
+            check_lower_complex_value(writer, a, 1, class, computing, size);
+            check_lower_complex_value(writer, b, 1 - part, class, computing, size);
+            check_lower_emit(writer, BUSTER_TYPED_MUL, computing, 0);
+            check_lower_emit(writer, part == 0 ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD, computing, 0);
+        }
+        else if (op == CHECK_OP_NEGATIVE || (op == CHECK_OP_BIT_NOT && part == 1))
+        {
+            check_lower_complex_value(writer, a, part, class, computing, size);
+            check_lower_emit(writer, BUSTER_TYPED_NEG, computing, 0);
         }
         else if (op == CHECK_OP_BIT_NOT)
         {
-            check_lower_complex_part(writer, a, part, class, size);
+            check_lower_complex_value(writer, a, part, class, computing, size);
         }
         else if (sum && part == 1 && !a.complex)
         {
             // A real value plus or minus a complex one: the complex one's imaginary part, negated for a difference.
-            check_lower_complex_part(writer, b, 1, class, size);
+            check_lower_complex_value(writer, b, 1, class, computing, size);
             if (op == CHECK_OP_SUBTRACT)
             {
-                check_lower_emit(writer, BUSTER_TYPED_NEG, class, 0);
+                check_lower_emit(writer, BUSTER_TYPED_NEG, computing, 0);
             }
         }
         else if (sum && part == 1 && !b.complex)
         {
-            check_lower_complex_part(writer, a, 1, class, size);
+            check_lower_complex_value(writer, a, 1, class, computing, size);
         }
         else
         {
             // The parts' sum or difference, or a product with a real value or a quotient by one, which each part takes.
-            check_lower_complex_part(writer, a, a.complex ? part : 0, class, size);
-            check_lower_complex_part(writer, b, b.complex ? part : 0, class, size);
-            check_lower_emit(writer, check_lower_binary(op), class, 0);
+            check_lower_complex_value(writer, a, a.complex ? part : 0, class, computing, size);
+            check_lower_complex_value(writer, b, b.complex ? part : 0, class, computing, size);
+            check_lower_emit(writer, check_lower_binary(op), computing, 0);
+        }
+        if (computing != class)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
         }
         check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
     }
@@ -2404,18 +2481,20 @@ static uint32_t check_lower_complex_compute(CheckLowerWriter* writer, CheckOp op
 }
 
 // The truth of the complex value of `type` whose address is on top of the stack, as an I32: 1 when either part isn't
-// zero (an unordered one isn't), as clang tests one, or with `negate` its negation.
+// zero (an unordered one isn't), as clang tests one, or with `negate` its negation. A part of 8 or 16 bits compares in
+// 32 (check_lower_computed).
 static void check_lower_complex_truth(CheckLowerWriter* writer, TypeId type, bool negate)
 {
     const TypeTable* types = writer->program->types;
     const TypeId element = check_lower_complex_element(types, type);
     const uint8_t class = check_lower_class(writer, element);
+    const uint8_t computing = check_lower_computed(class);
     const CheckLowerComplexOperand value = { .local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), .complex = true };
     check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value.local);
     for (uint32_t part = 0; part < 2; part += 1)
     {
-        check_lower_complex_part(writer, value, part, class, type_size(types, element));
-        check_lower_emit(writer, BUSTER_TYPED_CONST, class, 0);
+        check_lower_complex_value(writer, value, part, class, computing, type_size(types, element));
+        check_lower_emit(writer, BUSTER_TYPED_CONST, computing, 0);
         check_lower_emit(writer, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
     }
     check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_I32, 0);
@@ -2581,7 +2660,12 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     const uint8_t class = check_lower_class(writer, element);
     const uint64_t size = type_size(types, element);
     const long double parts[2] = { value->floating, value->constant_kind == CHECK_CONSTANT_COMPLEX ? value->imaginary : 0.0L };
-    if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != CHECK_CONSTANT_FLOATING)
+    // A complex integer type's (#137): its real part in the integer's low 64 bits and its imaginary one in the high 64, each
+    // masked to the element's width, or a real constant's value alone.
+    const bool integer = type_kind(types, element) == BUSTER_TYPE_KIND_INTEGER;
+    const uint64_t halves[2] = { (uint64_t)value->integer, value->constant_kind == CHECK_CONSTANT_COMPLEX ? (uint64_t)(value->integer >> 64) : 0 };
+    const CheckConstantKind real = integer ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_FLOATING;
+    if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
@@ -2590,8 +2674,17 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
         const uint32_t result = check_lower_object(writer, 2 * size, type_alignment_log2(types, element));
         for (uint32_t part = 0; part < 2; part += 1)
         {
+            uint64_t bits = halves[part];
+            const uint32_t width = 8u << ((class - 1) / 2);
+            if (integer && width < 64)
+            {
+                // The part's bits, sign- or zero-extended through 64 as its class has them (check_lower_constant).
+                const uint64_t mask = (UINT64_C(1) << width) - 1;
+                bits &= mask;
+                bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
+            }
             check_lower_complex_place(writer, result, part, size);
-            check_lower_emit(writer, BUSTER_TYPED_CONST, class, check_lower_float_bits(writer, class, parts[part]));
+            check_lower_emit(writer, BUSTER_TYPED_CONST, class, integer ? bits : check_lower_float_bits(writer, class, parts[part]));
             check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
         }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);

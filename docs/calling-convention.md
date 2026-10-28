@@ -1114,7 +1114,7 @@ and has a fixture:
 
 GCC 16.2 lays out or passes these otherwise than clang 23. The module follows
 clang in every one, and the cross-check's GCC worlds leave them out, each
-named in the test where it is. Five are GCC bugs, which crash GCC or make it
+named in the test where it is. Six are GCC bugs, which crash GCC or make it
 disagree with itself.
 
 **Classification:**
@@ -1148,6 +1148,14 @@ disagree with itself.
 - **`_Complex _Float16` in an aggregate (a GCC bug):** GCC 16 classifies one
   at any offset but an eightbyte's start as two classes, the second the next
   eightbyte's (`classify_argument`'s `HCmode`).
+- **Arrays of complex chars and shorts (a GCC bug):** GCC classifies an array
+  member by its first element and repeats that element's classes, and a
+  `_Complex char` or `_Complex short` element that crosses an eightbyte gives
+  the next one GCC's INTEGERSI class, of which it passes 4 bytes once the
+  record is 16: in `struct { char c[6]; _Complex short s[2]; }` aligned to 4,
+  `s[1]`'s imaginary part, at bytes 12 and 13, reaches neither GCC's callee
+  nor, from GCC's caller, clang's. GCC's worlds pass no type that holds an
+  array of a type holding one (`abi_test_holds`).
 
 **Passing:**
 
@@ -1460,7 +1468,9 @@ and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
 bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
-(#133's lowering, as aggregates of their two parts), at 64 bytes the vectors
+(#133's lowering, as aggregates of their two parts) and GNU's complex integer
+types of up to 64 bits (`_Complex char` to `_Complex unsigned long long`, the
+same), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
 `char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
 clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
@@ -1469,8 +1479,8 @@ them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
-no `_BitInt` past 128 bits, vector of another size or of `bool`, complex integer
-or `_Atomic` type, and none of clang's directed records, whose bit-fields span
+no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
+`__int128` or complex `_BitInt`, or `_Atomic` type, and none of clang's directed records, whose bit-fields span
 more than 8 bytes. C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as

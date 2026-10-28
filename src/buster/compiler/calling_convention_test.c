@@ -3805,9 +3805,10 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool valid = type_is_valid(table, builtin);
         const bool complex_floating = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
                                       code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE;
+        const bool complex_integer = code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULLONG;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
                                                              builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
-                                                             complex_floating));
+                                                             complex_floating || complex_integer));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -4378,7 +4379,7 @@ static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
 // to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
-// float, double or long double, a struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
+// float, double or long double, a complex integer of up to 64 bits (GNU's), a struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
 // up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
 // aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
@@ -4395,7 +4396,8 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
     const bool vector = element != 0 && (size == 16 || size == 32 || size == 64) && table->types.size[element] <= 8 && table->types.code[element] != BUSTER_TYPE_CODE_BOOL &&
                         (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING);
     const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
-                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
+                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE ||
+                                                              (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULLONG));
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
                       ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
                       kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
@@ -4782,10 +4784,18 @@ static uint64_t abi_test_llvm_bytes(const TypeTable* table, TypeId type)
 //     that fills its bytes, of narrow _BitInts or of long doubles: abi_test_packed_bits).
 //   - HOLDS_UNION_PACKS: a union that holds such a vector. As the union's LLVM type, which takes its most aligned member
 //     (lowerUnion), the vector makes clang's copies of the union lose the other members' bits past its own.
+//   - HOLDS_NARROW_COMPLEX: a complex char or short, GCC's CQImode and CHImode.
+//   - HOLDS_NARROW_COMPLEX_ARRAY: an array of a type that holds one. GCC's classify_argument classifies an array member by
+//     its first element and repeats that element's classes, and a CQImode or CHImode element that crosses an eightbyte
+//     gives the next one X86_64_INTEGERSI_CLASS, of which construct_container passes 4 bytes (SImode) once the record
+//     is 16 bytes, losing the later elements' bytes past them: struct { char c[6]; _Complex short s[2]; } aligned to 4
+//     passes s[1]'s imaginary part in neither GCC's call nor GCC's callee.
 // Worked out in passes over the table until one changes nothing; 0 without the memory.
 #define BUSTER_ABI_TEST_HOLDS_QUAD 1u
 #define BUSTER_ABI_TEST_HOLDS_PACKS 2u
 #define BUSTER_ABI_TEST_HOLDS_UNION_PACKS 4u
+#define BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX 8u
+#define BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY 16u
 
 static uint8_t* abi_test_holds(const TypeTable* table)
 {
@@ -4809,9 +4819,18 @@ static uint8_t* abi_test_holds(const TypeTable* table)
                 const uint64_t llvm_bits = bits == 1 ? (count < 8 ? 8 : count) : count * bits;
                 value |= bits != 0 && llvm_bits < table->types.size[index] * 8 ? BUSTER_ABI_TEST_HOLDS_PACKS : 0;
             }
+            else if (kind == BUSTER_TYPE_KIND_COMPLEX)
+            {
+                const uint8_t code = table->types.code[index];
+                value |= code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_USHORT ?
+                             BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX : 0;
+            }
             else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
             {
-                value |= holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint8_t base_holds = holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+                const bool array = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+                value |= base_holds;
+                value |= array && (base_holds & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX) != 0 ? BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY : 0;
             }
             else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
             {
@@ -6539,8 +6558,13 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // fewer bits than its bytes (abi_test_holds).
                 const bool quad_pair = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_QUAD) != 0 && classes == BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE);
                 const bool union_packs = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_UNION_PACKS) != 0;
+                // GCC classifies an array by its first element alone: a complex char or short element that crosses an
+                // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
+                // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
+                const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
                 if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
-                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && (!compiled || abi_test_compiled_passes(table, type)))
+                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
+                    (!compiled || abi_test_compiled_passes(table, type)))
                 {
                     types[type_count] = type;
                     type_count += 1;
