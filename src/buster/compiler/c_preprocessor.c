@@ -20048,6 +20048,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
         {
             options->system_header_warnings = strcmp(argument, "-Wsystem-headers") == 0;
+            options->implicit_function_system = options->system_header_warnings;
         }
         else if (strcmp(argument, "-dM") == 0)
         {
@@ -20151,10 +20152,6 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-Weverything") == 0)
         {
             implicit_everything = true;
-        }
-        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
-        {
-            options->implicit_function_system = strcmp(argument, "-Wsystem-headers") == 0;
         }
         else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
         {

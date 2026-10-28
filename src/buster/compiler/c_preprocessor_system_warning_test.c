@@ -45,6 +45,51 @@ static char* pp_test_system_warning_clang(const char* path, const char* director
     return text;
 }
 
+static bool pp_test_system_warning_options(void)
+{
+    static const struct
+    {
+        const char* arguments[3];
+        bool shown;
+    } cases[] = {
+        { { NULL }, false },
+        { { "-Wsystem-headers" }, true },
+        { { "-Wno-system-headers" }, false },
+        { { "-Wsystem-headers", "-Wno-system-headers" }, false },
+        { { "-Wno-system-headers", "-Wsystem-headers" }, true },
+        { { "-Wsystem-headers", "-Wno-system-headers", "-Wsystem-headers" }, true },
+        { { "-Wno-system-headers", "-Wsystem-headers", "-Wno-system-headers" }, false },
+        { { "-Wsystem-headers", "-w" }, true },
+        { { "-Wno-error=implicit", "-Wsystem-headers" }, true },
+    };
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        Arena arena = arena_reserve(UINT64_C(1) << 24);
+        PPOptions options = { 0 };
+        const char* input = NULL;
+        const char* output = NULL;
+        bool markers = false;
+        char* arguments[4] = { "system-warning-options.c" };
+        uint32_t count = 1;
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(cases[c].arguments) && cases[c].arguments[a] != NULL; a += 1)
+        {
+            arguments[count++] = (char*)cases[c].arguments[a];
+        }
+        const bool passed = arena.base != NULL && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers) &&
+                            options.system_header_warnings == cases[c].shown && options.implicit_function_system == cases[c].shown;
+        failures += !passed;
+        if (!passed)
+        {
+            fprintf(stderr, "system warning option case %u: preprocessing=%u implicit=%u expected=%u\n", c,
+                    options.system_header_warnings, options.implicit_function_system, cases[c].shown);
+        }
+        arena_release(&arena);
+    }
+    printf("system warning options: %u cases, %u failures\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), failures);
+    return failures == 0;
+}
+
 static bool pp_test_system_warnings(const char* directory, bool with_clang)
 {
     static const char messages[] = "#warning kept\n#pragma message(\"message\")\n#pragma GCC warning \"gcc warning\"\n#define VALUE 1\n#define VALUE 2\n#pragma clang diagnostic pop\n";
@@ -69,7 +114,7 @@ static bool pp_test_system_warnings(const char* directory, bool with_clang)
     snprintf(nested, sizeof(nested), "%s/nested.h", directory);
     const char* directories[] = { directory };
     const char* macros[] = { "D__INT64_C(c)=c##L" };
-    uint32_t failures = 0;
+    uint32_t failures = !pp_test_system_warning_options();
     uint32_t runs = 0;
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(cases); fixture += 1)
     {
