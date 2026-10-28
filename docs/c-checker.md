@@ -632,6 +632,45 @@ back all its output on failure and validates the completed Link on success.
 Tests pass these atoms through the production ELF writer and independently
 compare bytes, symbol targets and relocation addends with Clang's object files.
 
+Materialized payloads are constructed directly in an unpublished suffix of
+`bytes`, with no second payload copy when atoms are published. A zero-fill
+candidate releases its suffix; a failed batch restores the original length
+before returning. When the byte arena cannot fit a candidate, temporary scratch
+storage permits its zero-fill classification and exact capacity demand to
+complete; a nonzero payload in that storage can never be published. Scratch
+otherwise holds metadata proportional to objects and initializer references,
+not a second image of every payload. Live input prefixes in either arena remain
+valid throughout planning. Literal pools, non-TLS readonly objects and objects
+with live relocations already determine their section without scanning bytes.
+Other materialized objects use an early-exit 64-byte zero test with bounded
+masked tails. Avoiding materialization of explicit-zero aggregates is separate
+work in [#596](https://github.com/buster14a/buster/issues/596).
+
+For [#600](https://github.com/buster14a/buster/issues/600), the locked 9700X
+comparison of `92c025e7` and `4e21ef63` measured complete single-lane `-c`
+processes, with fixed output files, two executable copies and both build
+orders (36 processes per build/input). The
+[qualification record](https://github.com/buster14a/buster-performance/tree/b9552b4f387d9673dd9e6e55dd4d04d16e51a491/docs/measurements/static-data-600-2026-10-27)
+retains all sizes, counters, arena probes, assembly and correctness evidence.
+
+| 64 MiB object | Before, ms | After, ms | Change |
+| --- | ---: | ---: | ---: |
+| writable array | 27.412 | 22.894 | -16.48% |
+| readonly array | 27.426 | 22.858 | -16.66% |
+| array with one relocation | 27.354 | 22.912 | -16.24% |
+
+A 64 MiB array's emitter scratch peak fell from 64 MiB + 48 bytes to 48
+bytes; readonly/literal/relocation-bearing objects scanned no payload bytes
+for classification. Whole `-c` peak RSS stayed about 149 MiB for the arrays:
+the ELF writer later constructs its complete output image in scratch while
+retained bytes remain live. SQLite's 147.103 to 146.697 ms was within the
+observed spread. The 1 MiB writable median rose by 0.054 ms (+2.46%) with
+overlapping ranges; the explicit-zero control retained its materialization
+and used about 2 MiB more peak RSS. Neither a general small-input speedup nor
+an improvement to #596 is claimed. All nineteen source cases matched the
+baseline's entire object and Clang's data oracle, and the checker, driver,
+Link, object-writer and call-graph qualification groups passed.
+
 ## Backend handoff
 
 `c_check_program.c` consumes the typed stream, source control records, asm
