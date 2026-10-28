@@ -406,6 +406,14 @@ jobs:
           # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
           # so asking clang -fsyntax-only again (--clang) only repeats that.
           ./build/compiler test-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+          == Check the repository's translation units with the checker
+          # #619: -fsyntax-only of each unit build.sh compiles, but main_unit_*.c, with build.sh's flags. clang takes them in
+          # the build, and so must the checker: a construct the sources take up that it doesn't (a pragma, a builtin) fails
+          # here, rather than at the next measurement of main.c's lowering (#129).
+          flags=$(sed -n 's/^flags=(\(.*\))$/\1/p' build.sh)
+          for unit in $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_); do
+              ./build/compiler -fsyntax-only $flags "$unit"
+          done
           == Test the object writer
           # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
           # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)

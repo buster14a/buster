@@ -219,6 +219,47 @@ does, each rule checked against clang's answers on probes of it:
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
+- **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
+  `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
+  number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
+  read as clang's `PragmaClangSectionHandler` reads them, adjacent ordinary
+  strings joined, an empty name clearing its kind and a line of no settings
+  doing nothing, with a setting before an error in its line kept. Its three
+  errors are at clang's places with clang's messages: a kind that isn't one
+  (also for anything after a complete setting), a missing `=`, and a name that
+  isn't an ordinary string. Then the section type conflicts, as Sema's
+  `UnifySection` takes a unit's uses of section names in order
+  (`check_input_section_conflicts`, one pass after the walk over a unit's few
+  section events): the settings, each function declaration's own `section`
+  attribute and each definition of a variable with static storage, its
+  attribute inherited from earlier declarations (a tentative one's at the
+  unit's end, at its last tentative declaration, unless the unit defines it).
+  Each section name has its first use's flags, and a use that gives it others
+  is clang's conflict, at the use, with clang's message. Refused by name rather
+  than guessed: a line with a name, where clang reads it macro-expanded (the
+  first kind and every `=`), that was a macro's anywhere in the unit (the
+  retained line keeps its tokens as written), and an error at the line's end,
+  whose place the retained line doesn't keep. A setting applies to the
+  definitions after it that have no section attribute of their own: text to
+  the functions', the others to the variables' with static storage. `-c` and
+  the direct path refuse the first such definition they emit by name ("a
+  definition '#pragma clang section' places in a section"), as they refuse a
+  `section` attribute, until definitions go into named sections (#619's part
+  2). The deferred reader leaves a unit with a setting to source order, and a
+  lane refuses a body with a section attribute.
+- **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
+  `on` `main.c` puts around the checker unit's own tests (#681): one
+  identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
+  with its two errors at clang's places with clang's messages (any other
+  argument, and a token after it). An `off` makes the function definitions
+  after it `optnone` and `noinline` until an `on`, which changes nothing a
+  Tier 0 compile emits, so the reader only checks the line. Refused by name: an
+  argument or a token after it that was a macro's name in the unit (clang reads
+  both expanded), and a missing argument, an error at the line's end. The 9700X
+  job checks each translation unit `build.sh` compiles, `main.c` among them,
+  with `build.sh`'s flags (#619's part 3), so that a construct the build's
+  sources take up and the checker doesn't fails the job rather than waiting
+  for the next measurement of `main.c`.
 - **`no_builtin`**, on a function's definition only: on another declaration of
   a function it is an error, and on anything else it is ignored, as clang has
   it.
@@ -1324,6 +1365,13 @@ The test command fails if the oracle cannot run. It covers:
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
   (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- `#pragma clang section` and `#pragma clang optimize` (#619;
+  `test-checker-driver`'s `check_test_driver_section_pragmas` and
+  `check_test_driver_optimize_pragmas`, on all four routes): each line's
+  settings and errors, and the section type conflicts in clang's order, against
+  clang's first error, place and message; the refusals by name pinned; and
+  `-c` of each unit clang takes, which must refuse a definition a setting or
+  an attribute places, by name, and write the object of every other.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on
