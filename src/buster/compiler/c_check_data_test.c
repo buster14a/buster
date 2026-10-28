@@ -1811,7 +1811,8 @@ static void check_data_test_dense_cache(CheckTest* test, TypeTable* types)
     uint8_t expected[SIZE];
     for (uint32_t i = 0; i < SIZE; i += 1)
     {
-        expected[i] = (uint8_t)(i + 1);
+        // Eight final zero writes keep this on the cached path even when the bounded direct-writer proof exists.
+        expected[i] = i + BUSTER_CHECK_DATA_WITNESS_PARTS >= SIZE ? 0 : (uint8_t)(i + 1);
         parts[i] = (CheckInitPart){
             .kind = CHECK_INIT_VALUE,
             .type = BUSTER_TYPE_UCHAR,
@@ -1855,6 +1856,95 @@ static void check_data_test_dense_cache(CheckTest* test, TypeTable* types)
         fixture.scratch.capacity = 65536;
     }
     check_data_test_close(&fixture);
+}
+
+static void check_data_test_direct_writes(CheckTest* test, TypeTable* types)
+{
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, 16);
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    for (uint32_t mode = 0; mode < 6; mode += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 4);
+        check_test_expect(test, ready, "direct validated write fixture");
+        if (ready)
+        {
+            SymbolId map[3] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "direct", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckInitPart parts[] = {
+                { .kind = CHECK_INIT_CLEAR, .type = array, .byte_count = 16 },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .value = check_test_integer(BUSTER_TYPE_UCHAR, mode == 1 ? 0 : 17) },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .bit_offset = 8, .value = check_test_integer(BUSTER_TYPE_UCHAR, 18) },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .bit_offset = 8, .value = check_test_integer(BUSTER_TYPE_UCHAR, 0) },
+            };
+            if (mode == 2 || mode == 3)
+            {
+                parts[1] = (CheckInitPart){
+                    .kind = CHECK_INIT_VALUE,
+                    .type = pointer,
+                    .bit_offset = 64,
+                    .value = {
+                        .type = pointer,
+                        .category = CHECK_RVALUE,
+                        .flags = BUSTER_CHECK_STATIC_OBJECT,
+                        .constant_kind = CHECK_CONSTANT_ADDRESS,
+                        .object = 2,
+                    },
+                };
+                parts[2] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = pointer, .bit_offset = 64, .byte_count = 8 };
+                parts[3] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .value = check_test_integer(BUSTER_TYPE_UCHAR, 17) };
+                if (mode == 3)
+                {
+                    parts[2].byte_count = 0;
+                    map[2] = check_data_test_symbol(&fixture.link, "target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+                }
+            }
+            else if (mode >= 4)
+            {
+                parts[1].value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+                parts[3].bit_offset = 15 * 8;
+                parts[3].value.integer = 19;
+                if (mode == 5)
+                {
+                    fixture.bytes.capacity = 0;
+                }
+            }
+            const CheckInitializer initializer = { .type = array, .parts = parts, .count = BUSTER_ARRAY_LENGTH(parts) };
+            const CheckDataObject object = { .type = array, .object = 1, .initializer = BUSTER_CHECK_NONE, .initializer_plan = &initializer };
+            const Link previous = fixture.link;
+            uint8_t tables[4096];
+            const bool fits = fixture.tables.length <= sizeof(tables);
+            if (fits)
+            {
+                memcpy(tables, fixture.tables.base, fixture.tables.length);
+            }
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                 &fixture.bytes, &fixture.scratch, &result);
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            if (mode < 4)
+            {
+                uint8_t expected[16] = { 0 };
+                expected[0] = mode == 1 ? 0 : 17;
+                const uint8_t class = mode == 1 ? BUSTER_LINK_CLASS_BSS : BUSTER_LINK_CLASS_DATA;
+                check_test_expect(test, emitted && atom != 0 && fixture.link.atoms.class[atom] == class &&
+                                       (mode == 1 ? fixture.link.atoms.bytes[atom] == 0 : memcmp(fixture.link.atoms.bytes[atom], expected, 16) == 0) &&
+                                       result.fixup_count == (mode == 3 ? 1u : 0u) && fixture.scratch.length == 0 &&
+                                       link_check(&fixture.link) == LINK_ERROR_NONE,
+                                  "direct/cached writes preserve overwritten integer and relocation bytes, including final zero classification");
+            }
+            else
+            {
+                check_test_expect(test, !emitted && result.status == CHECK_DATA_NON_CONSTANT && fits &&
+                                       memcmp(&previous, &fixture.link, sizeof(previous)) == 0 &&
+                                       memcmp(tables, fixture.tables.base, fixture.tables.length) == 0 &&
+                                       fixture.bytes.length == 0 && fixture.scratch.length == 0,
+                                  "direct admission and insufficient retained capacity preserve source-order diagnostics and complete rollback");
+            }
+            fixture.bytes.capacity = 16384;
+        }
+        check_data_test_close(&fixture);
+    }
 }
 
 static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
@@ -1950,6 +2040,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_zero_batch(test, types);
     check_data_test_boundary_sort(test);
     check_data_test_dense_cache(test, types);
+    check_data_test_direct_writes(test, types);
     check_data_test_overwrite_oracle(test, types);
 }
 

@@ -31,6 +31,7 @@
 // that scan stops at the first nonzero block and uses masked tails within the logical input.
 #ifndef BUSTER_C_CHECK_DATA_INCLUDED
 #define BUSTER_C_CHECK_DATA_INCLUDED
+#define BUSTER_CHECK_DATA_WITNESS_PARTS 8u
 
 #include <float.h>
 #include <limits.h>
@@ -462,6 +463,35 @@ static void check_data_copy_scalar(uint8_t* destination, const uint8_t* source, 
     }
 }
 
+// A validated nonzero integer write survives if no later write touches its bytes. Inspect at most eight final
+// parts, so ordinary dense initializers (including a short zero suffix) need no cache or second writer pass.
+// This is only an admission proof conditional on subsequent source-order validation, not skipped validation.
+static bool check_data_initializer_witness(const TypeTable* types, const CheckInitializer* initializer, uint64_t size)
+{
+    bool nonzero = false;
+    for (uint32_t index = initializer->count; !nonzero && index != 0 && initializer->count - index < BUSTER_CHECK_DATA_WITNESS_PARTS; index -= 1)
+    {
+        const CheckInitPart* part = &initializer->parts[index - 1];
+        uint32_t width = 0;
+        bool is_signed = false;
+        uint64_t bits = 0;
+        bool witness = part->kind == CHECK_INIT_VALUE && part->bit_width == 0 &&
+                       part->value.constant_kind == CHECK_CONSTANT_INTEGER && part->value.integer != 0 &&
+                       check_action_integer_type(types, part->type, &width, &is_signed) &&
+                       check_initializer_part_bits(types, part, &bits) == CHECK_INIT_OK && bits != 0 &&
+                       part->bit_offset <= size * 8 && bits <= size * 8 - part->bit_offset;
+        for (uint32_t after = index; witness && after < initializer->count; after += 1)
+        {
+            const CheckInitPart* later = &initializer->parts[after];
+            uint64_t later_bits = 0;
+            witness = check_initializer_part_bits(types, later, &later_bits) == CHECK_INIT_OK &&
+                      (later->bit_offset >= part->bit_offset + bits || later->bit_offset + later_bits <= part->bit_offset);
+        }
+        nonzero = witness;
+    }
+    return nonzero;
+}
+
 // All writes were validated and encoded in source order. Usually every write is zero, or an unoverwritten write
 // proves the object nonzero. Otherwise sort their bit boundaries and walk backwards, assigning each disjoint interval
 // to its last writer with the initializer's next-uncovered disjoint set. Each interval is visited once; large
@@ -653,6 +683,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     uint32_t live_count = 0;
     uint8_t* values = 0;
     uint32_t value_stride = 0;
+    bool direct = false;
     bool nonzero = false;
     bool surviving_nonzero = false;
     uint64_t nonzero_begin = 0;
@@ -673,9 +704,20 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
             status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
             plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
+            // arena_push is capacity-only and leaves the arena unchanged on failure. Admit direct construction
+            // only in a retained suffix that already fits: a capacity failure must still validate all writes first.
+            direct = status == CHECK_DATA_OK && plan->size <= bytes->capacity - bytes->length &&
+                     check_data_initializer_witness(types, initializer, plan->size);
+            if (direct)
+            {
+                plan->bytes = arena_push(bytes, plan->size, 1);
+                assert(plan->bytes != 0);
+                memset(plan->bytes, 0, plan->size);
+                nonzero = true;
+            }
             // Cache only the representation width the scalar writes actually use. Dense byte arrays need one
             // byte per part, not a 32-byte maximum-size scalar slot; CLEAR/BYTES-only plans need no slots.
-            for (uint32_t i = 0; status == CHECK_DATA_OK && i < initializer->count; i += 1)
+            for (uint32_t i = 0; !direct && status == CHECK_DATA_OK && i < initializer->count; i += 1)
             {
                 const CheckInitPart* part = &initializer->parts[i];
                 if (part->kind == CHECK_INIT_VALUE)
@@ -776,10 +818,24 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             {
                 status = CHECK_DATA_INVALID;
             }
-            else if (part->kind == CHECK_INIT_BYTES && size != 0)
+            else if (direct && size != 0)
+            {
+                if (part->kind == CHECK_INIT_CLEAR && part->bit_width != 0)
+                {
+                    check_data_bit_field_clear(plan->bytes + offset, shift, part->bit_width);
+                }
+                else if (part->kind == CHECK_INIT_CLEAR)
+                {
+                    memset(plan->bytes + offset, 0, size);
+                }
+                else
+                {
+                    memcpy(plan->bytes + offset, part->bytes, size);
+                }
+            }
+            else if (!direct && part->kind == CHECK_INIT_BYTES && size != 0)
             {
                 part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
-
             }
         }
         else if (part->kind == CHECK_INIT_VALUE)
@@ -811,10 +867,26 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
             if (status == CHECK_DATA_OK)
             {
-                uint8_t* encoded = values + (uint64_t)i * value_stride;
-                check_data_copy_scalar(encoded, scalar.bytes, scalar.size);
-                const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
-                part_nonzero = check_data_nonzero_bits(encoded, 0, bits, false);
+                if (direct)
+                {
+                    if (part->bit_width != 0)
+                    {
+                        unsigned __int128 bits;
+                        memcpy(&bits, scalar.bytes, sizeof(bits));
+                        check_data_bit_field_value(plan->bytes + offset, shift, part->bit_width, bits);
+                    }
+                    else
+                    {
+                        check_data_copy_scalar(plan->bytes + offset, scalar.bytes, scalar.size);
+                    }
+                }
+                else
+                {
+                    uint8_t* encoded = values + (uint64_t)i * value_stride;
+                    check_data_copy_scalar(encoded, scalar.bytes, scalar.size);
+                    const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
+                    part_nonzero = check_data_nonzero_bits(encoded, 0, bits, false);
+                }
                 if (part->bit_width == 0 && scalar.object != 0 && live_parts[i])
                 {
                     if (offset > UINT32_MAX)
@@ -837,7 +909,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         {
             status = CHECK_DATA_INVALID;
         }
-        if (size != 0)
+        if (!direct && size != 0)
         {
             const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
             nonzero |= part_nonzero;
@@ -853,11 +925,11 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
         }
     }
-    if (status == CHECK_DATA_OK && initializer != 0 && nonzero && !surviving_nonzero && plan->fixup_count == 0)
+    if (!direct && status == CHECK_DATA_OK && initializer != 0 && nonzero && !surviving_nonzero && plan->fixup_count == 0)
     {
         status = check_data_initializer_nonzero(types, initializer, values, value_stride, scratch, &nonzero);
     }
-    if (status == CHECK_DATA_OK && initializer != 0 && (nonzero || plan->fixup_count != 0))
+    if (!direct && status == CHECK_DATA_OK && initializer != 0 && (nonzero || plan->fixup_count != 0))
     {
         plan->bytes = check_data_payload(bytes, scratch, plan->size);
         if (plan->bytes == 0)

@@ -97,7 +97,19 @@ static void check_data_test_bit_field_tails(CheckTest* test)
 static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
 {
     CheckDataTestLink fixture;
-    const bool ready = check_data_test_open(&fixture, 8);
+    bool ready = check_data_test_open(&fixture, 8);
+    const Arena retained = fixture.bytes;
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[2];
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        mappings[i] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    if (ready)
+    {
+        fixture.bytes = (Arena){ .base = mappings[1] + page - 40, .capacity = 40 };
+    }
     check_test_expect(test, ready, "static bit-field ordered plan storage");
     if (ready)
     {
@@ -111,10 +123,15 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
         };
         for (uint32_t width = 1; width <= 128; width += 1)
         {
-            for (uint32_t shift = 0; shift < 8; shift += 1)
+            for (uint32_t variant_shift = 0; variant_shift < 16; variant_shift += 1)
             {
+                const uint32_t variant = variant_shift / 8;
+                const uint32_t shift = variant_shift % 8;
                 uint8_t expected[40];
                 memset(expected, 0xa5, sizeof(expected));
+                uint8_t* source = mappings[0] + page - sizeof(expected);
+                memcpy(source, expected, sizeof(expected));
+                const uint32_t field_base = width == 128 ? 179 : 32;
                 const TypeId type = width <= 65 ? signed_bit65 : BUSTER_TYPE_INT128;
                 const unsigned __int128 value = width <= 65 ? ((unsigned __int128)1 << 65) - 3 : ~(unsigned __int128)2;
                 CheckValue first_value = check_test_integer(type, value);
@@ -134,26 +151,26 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                     {
                         .kind = CHECK_INIT_BYTES,
                         .type = array,
-                        .bytes = expected,
+                        .bytes = source,
                         .byte_count = sizeof(expected),
                     },
                     {
                         .kind = CHECK_INIT_VALUE,
                         .type = first_value.type,
-                        .bit_offset = 32 + shift,
+                        .bit_offset = field_base + shift,
                         .bit_width = width,
                         .value = first_value,
                     },
                     {
                         .kind = CHECK_INIT_CLEAR,
                         .type = array,
-                        .bit_offset = 35 + shift,
+                        .bit_offset = field_base + 3 + shift,
                         .bit_width = width + 3,
                     },
                     {
                         .kind = CHECK_INIT_VALUE,
                         .type = BUSTER_TYPE_UINT128,
-                        .bit_offset = 33 + shift,
+                        .bit_offset = field_base + 1 + shift,
                         .bit_width = width,
                         .value = check_test_integer(BUSTER_TYPE_UINT128, value ^ (value >> 1)),
                     },
@@ -170,11 +187,17 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                             .offset = 12,
                         },
                     },
+                    {
+                        .kind = CHECK_INIT_VALUE,
+                        .type = BUSTER_TYPE_UCHAR,
+                        .bit_offset = 24 * 8,
+                        .value = check_test_integer(BUSTER_TYPE_UCHAR, 17),
+                    },
                 };
                 const CheckInitializer initializer = {
                     .type = array,
                     .parts = parts,
-                    .count = BUSTER_ARRAY_LENGTH(parts),
+                    .count = BUSTER_ARRAY_LENGTH(parts) - (variant == 0),
                 };
                 const CheckDataObject object = {
                     .type = array,
@@ -185,19 +208,31 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                 CheckDataPlan plan;
                 const CheckDataStatus status = check_data_plan_object(types, NULL, &object, map, BUSTER_ARRAY_LENGTH(map), &fixture.link,
                                                                       &fixture.bytes, &fixture.scratch, &plan);
-                check_data_test_bit_field_reference(expected, 32 + shift, width, first_bits, false);
-                check_data_test_bit_field_reference(expected, 35 + shift, width + 3, 0, true);
-                check_data_test_bit_field_reference(expected, 33 + shift, width, value ^ (value >> 1), false);
+                check_data_test_bit_field_reference(expected, field_base + shift, width, first_bits, false);
+                check_data_test_bit_field_reference(expected, field_base + 3 + shift, width + 3, 0, true);
+                check_data_test_bit_field_reference(expected, field_base + 1 + shift, width, value ^ (value >> 1), false);
                 memset(expected + 32, 0, 8);
+                if (variant != 0)
+                {
+                    expected[24] = 17;
+                }
                 const bool fixup = plan.fixup_count == 1 && plan.fixups[0].offset == 32 && plan.fixups[0].target == map[2] && plan.fixups[0].addend == 12;
                 check_test_expect(test, status == CHECK_DATA_OK && plan.size == sizeof(expected) && memcmp(plan.bytes, expected, sizeof(expected)) == 0 && fixup,
-                                  "static bit-field plans preserve ordered signed/wide overlapping writes and an adjacent relocation");
+                                  "cached/direct static bit-field plans preserve guarded signed/wide overlapping writes and an adjacent relocation");
                 arena_pop_to(&fixture.scratch, 0);
                 arena_pop_to(&fixture.bytes, 0);
             }
         }
     }
+    fixture.bytes = retained;
     check_data_test_close(&fixture);
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], page * 2);
+        }
+    }
 }
 
 static void check_data_test_bit_fields(CheckTest* test, TypeTable* types)
