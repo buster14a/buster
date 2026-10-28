@@ -1422,6 +1422,8 @@ What the lowering covers past scalars (#145's programs):
   arguments and result unsigned longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`,
   `mwaitx` (whose leaf saves rbx, as its unwind table says) and `tzcnt_u16`,
   `_u32` and `_u64` (bsf and cmov, the width for 0, as clang's code gives it).
+  XGETBV requires the output target's XSAVE feature; MONITORX and MWAITX require
+  MWAITX. The baseline target still takes PAUSE, RDTSC and the BSF-based counts.
   `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
   nothing: its operand isn't evaluated, as clang's isn't. clang's header
   builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
@@ -1452,8 +1454,10 @@ What the lowering covers past scalars (#145's programs):
     has no class for, with a compound literal of constants) are VPMOV's
     truncation, which zeroes the rest of its register, where every element past
     the conversion's is a zero of the literal's; else that, then VPERMT2 with
-    the literal's bytes as its second table. Such a literal has no local and
-    isn't evaluated, and one evaluated anywhere else is refused by name;
+    the literal's bytes as its second table. This requires a nonvolatile literal
+    whose initializer values have no effects. A nonconstant or effectful second
+    operand is refused by name. Such a literal has no local and isn't evaluated,
+    and one evaluated anywhere else is refused by name;
   - max and min, the saturating sums and differences of 8- and 16-bit elements,
     abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
     blended in where an element is zero) and the funnel shifts (VPSHLDV and

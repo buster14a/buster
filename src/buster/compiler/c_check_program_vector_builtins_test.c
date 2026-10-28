@@ -221,7 +221,20 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         const char* source;
         const char* reason;
         uint32_t initializations;
+        uint32_t references;
     } fixtures[] = {
+        { "x86-64", "unsigned long tested(int n){return __builtin_ia32_xgetbv((unsigned)n);}", "xgetbv without XSAVE", 0 },
+        { "x86-64", "int x;int tested(int n){__builtin_ia32_monitorx(&x,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0, 1 },
+        { "x86-64", "int tested(int n){__builtin_ia32_mwaitx(0,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0 },
+        { "znver5", "int calls;int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
+          "(v4qs){(calls++,7),8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);return calls+c[n&15];}",
+          "narrow vector shuffle operands with nonconstant values or side effects", 2, 1 },
+        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
+          "(v4qs){(n++,7),8,9,10},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return n+c[0];}",
+          "narrow vector shuffle operands with nonconstant values or side effects", 2 },
+        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
+          "(volatile v4qs){7,8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);return c[n&15];}",
+          "narrow vector shuffle operands with nonconstant values or side effects", 2 },
         { "znver5", "int tested(int n){v4ss a={n};v4sf c=__builtin_convertvector(a,v4sf);return (int)c[0];}", "vector conversions of floating elements", 2 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
         { "znver5", "int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
@@ -237,7 +250,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector funnel shifts of 8-bit elements", 3 },
         { "znver5", "int tested(int n){return ((v4qs){(signed char)n,1,2,3})[1];}", "vector types of other than 16, 32 or 64 bytes", 0 },
         { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),(v4qs){(signed char)n},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);"
-          "return c[0];}", "vector types of other than 16, 32 or 64 bytes", 2 },
+          "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
         { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
           "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_popcount(a);return c[0];}",
@@ -257,9 +270,26 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         if (parsed && source != 0)
         {
             snprintf(source, length, "%s%s", types, fixtures[i].source);
-            check_test_program_boundary_target(test, source, "vector-builtin-refusal", true, false, 0, fixtures[i].initializations, fixtures[i].reason, &target);
+            check_test_program_boundary_target(test, source, "vector-builtin-refusal", true, false, fixtures[i].references, fixtures[i].initializations, fixtures[i].reason, &target);
         }
         free(source);
+    }
+    // The target check applies to the unavailable instruction, rather than all helper calls. These are compile-only
+    // controls: even an eligible output target need not be executable on the testing host.
+    X86Target baseline = { 0 };
+    X86Target zen = { 0 };
+    const bool targets = x86_target_parse("x86-64", 6, &baseline) && x86_target_parse("znver5", 6, &zen);
+    check_test_expect(test, targets, "leaf target eligibility controls");
+    if (targets)
+    {
+        check_test_program_boundary_target(test, "unsigned long tested(int n){return __builtin_ia32_xgetbv((unsigned)n);}",
+                                           "eligible-xgetbv", true, true, 0, 0, NULL, &zen);
+        check_test_program_boundary_target(test, "int x;int tested(int n){__builtin_ia32_monitorx(&x,0,0);return n;}",
+                                           "eligible-monitorx", true, true, 1, 0, NULL, &zen);
+        check_test_program_boundary_target(test, "int tested(int n){__builtin_ia32_mwaitx(0,0,0);return n;}",
+                                           "eligible-mwaitx", true, true, 0, 0, NULL, &zen);
+        check_test_program_boundary_target(test, "unsigned long tested(int n){__builtin_ia32_pause();return __rdtsc()+__builtin_ia32_tzcnt_u64((unsigned long)n);}",
+                                           "baseline-leaves", true, true, 0, 0, NULL, &baseline);
     }
 }
 

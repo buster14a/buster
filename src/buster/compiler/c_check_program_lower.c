@@ -4335,7 +4335,17 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
-        check_lower_helper(writer, node);
+        const bool xgetbv = check_lower_x86_named(info, "__builtin_ia32_xgetbv");
+        const bool waits = check_lower_x86_named(info, "__builtin_ia32_monitorx") || check_lower_x86_named(info, "__builtin_ia32_mwaitx");
+        const uint64_t needed = xgetbv ? BUSTER_X86_FEATURE(XSAVE) : waits ? BUSTER_X86_FEATURE(MWAITX) : 0;
+        if ((program->target_features & needed) != needed)
+        {
+            check_lower_unsupported(writer, xgetbv ? "xgetbv without XSAVE" : "monitorx or mwaitx without MWAITX");
+        }
+        else
+        {
+            check_lower_helper(writer, node);
+        }
     }
     else if (check_lower_x86_named(info, "__builtin_unpredictable") && program->input->graph.argument_counts[node] == 1)
     {
@@ -4416,13 +4426,13 @@ static uint32_t check_lower_vector_size(const CheckLowerWriter* writer, TypeId t
 }
 
 // The bytes of a compound literal of `size` bytes (at most 64) whose every initializer part is an integer constant or
-// clears its bytes (a vector's elements: the intrinsics' zeros), or false.
+// clears its bytes (a vector's elements: the intrinsics' zeros), with no initializer effects, or false.
 static bool check_lower_constant_bytes(const CheckLowerWriter* writer, uint32_t node, uint8_t bytes[64], uint32_t size)
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
     const CheckValue* value = node < program->stream->count ? program->stream->values + node : NULL;
-    bool result = value != NULL && program->input->graph.ops[node] == CHECK_OP_VALUE && value->object != 0 && value->object < program->object_count &&
+    bool result = value != NULL && !check_lower_copy_volatile(writer, value, 0) && program->input->graph.ops[node] == CHECK_OP_VALUE && value->object != 0 && value->object < program->object_count &&
                   program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1] &&
                   program->initializers != 0 && size != 0 && size <= 64;
     const uint32_t selected = result ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
@@ -4442,7 +4452,8 @@ static bool check_lower_constant_bytes(const CheckLowerWriter* writer, uint32_t 
             uint32_t width = 0;
             bool is_signed = false;
             result = constant->constant_kind == CHECK_CONSTANT_INTEGER && constant->fault == CHECK_FAULT_NONE &&
-                     check_action_integer_type(types, part->type, &width, &is_signed) && width == part_bytes * 8 && part_bytes <= 8;
+                     (constant->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(types, part->type, &width, &is_signed) &&
+                     width == part_bytes * 8 && part_bytes <= 8;
             for (uint32_t byte = 0; result && byte < part_bytes; byte += 1)
             {
                 bytes[part->bit_offset / 8 + byte] = (uint8_t)(constant->integer >> (8 * byte));
@@ -4529,7 +4540,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             // the row takes at compile time: it is never evaluated, as it has no effects.
             uint8_t b_bytes[64];
             const bool constant = !b_undefined && check_lower_constant_bytes(writer, b, b_bytes, check_lower_vector_size(writer, source));
-            reason = !b_undefined && !constant ? "vector types of other than 16, 32 or 64 bytes" :
+            reason = !b_undefined && !constant ? "narrow vector shuffle operands with nonconstant values or side effects" :
                                                  check_vector_narrow_shuffle_row(types, target, operand, source, result, indices, constant ? b_bytes : NULL, rows, &plan);
         }
         else
