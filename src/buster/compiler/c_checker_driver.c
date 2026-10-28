@@ -68,6 +68,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
+        case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
     }
     return result;
 }
@@ -75,7 +77,10 @@ static const char* check_driver_input_message(CheckInputMessage message)
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
-    return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text : check_driver_input_message(report->message);
+    const CheckInputSectionDiagnostic* section = check_input_section_report(input, report);
+    const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
+    return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
+           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)
@@ -221,7 +226,7 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
 // expressions' nodes 16 at a time, where they have any (the scalar path, parser->options.scalar's, takes every token
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
-// first of its keys.
+// first of its keys, but for a pragma's report of the reader's whose place comes before that one's (#619).
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
@@ -276,6 +281,18 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32))
             {
                 firsts[first_count++] = firsts[i];
+            }
+            else
+            {
+                // Of two of the reader's reports at one token, the one whose place comes first: a pragma's, before the
+                // token, comes first even when the walk reported the token first (#619's section conflicts, found after
+                // it).
+                const uint32_t kept = (uint32_t)firsts[first_count - 1];
+                const uint32_t later = (uint32_t)firsts[i];
+                const bool earlier = kept < input->report_count && later < input->report_count && input->reports[later].pragma != 0 &&
+                                     check_diagnostic_input_report_source(input, parser, input->reports + later) <
+                                     check_diagnostic_input_report_source(input, parser, input->reports + kept);
+                firsts[first_count - 1] = earlier ? firsts[i] : firsts[first_count - 1];
             }
         }
         if (reports)

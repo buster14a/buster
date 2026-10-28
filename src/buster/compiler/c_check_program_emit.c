@@ -1102,7 +1102,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t d = 0; valid && d < attributed; d += 1)
+        // The first emitted definition under active #pragma clang section settings, or BUSTER_CHECK_NONE (#619).
+        // Static objects are conservative candidates under any active object setting; section-kind selection belongs
+        // with actual section emission, so the refusal must not claim that this object would use the named section.
+        const CheckInputSections* sections = program->input->sections;
+        uint32_t placed = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; sections != NULL && placed == BUSTER_CHECK_NONE && i < sections->definition_count; i += 1)
+        {
+            const uint32_t token = sections->definitions[i];
+            const uint32_t object = token < program->input->token_count ? program->input->objects[token] : 0;
+            placed = object != 0 && object < program->object_count && program->object_symbols[object] != 0 ? token : placed;
+        }
+        for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
         {
             const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
@@ -1148,6 +1159,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     }
                 }
             }
+        }
+        // A definition under active #pragma clang section settings (#619) is refused as a section attribute is, where no
+        // attribute's refusal comes before it: the loop above stops at its token. Such a definition needn't have an
+        // attribute at all (a section attribute of its own keeps it out), so the settings list them (CheckInputSections).
+        if (valid && placed != BUSTER_CHECK_NONE)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a definition under active '#pragma clang section' settings";
+            result->token = placed;
+            valid = false;
         }
     }
     arena_pop_to(scratch, attributes_mark);

@@ -1160,6 +1160,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build.sh
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror src/buster/compiler/main.c
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
