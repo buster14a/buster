@@ -2552,6 +2552,15 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         L,
         L,
+        // 216: long x6, struct aligned(16) {long}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        aligned16,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -2767,13 +2776,14 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
-        // 194: the hidden result in rdi; the struct an i64 at stack 0 and the following long at 8.
+        // 194: the hidden result in rdi; the struct an i64 at stack 0, its low eightbyte alone (LOW), and the following long
+        // at 8.
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, BUSTER_ABI_FLAG_LOW, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
         // 201: as 151.
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
@@ -2793,6 +2803,15 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        // 216: clang's count at 0, a copy of the struct, its 16 bytes in a slot of its own (not LOW), the long at 16.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 16 },
     };
     const uint32_t counts[] = {
         7,
@@ -2828,6 +2847,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
+        8,
     };
     const uint32_t named[] = {
         7,
@@ -2863,6 +2883,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
+        8,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -2898,8 +2919,10 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         bools1024,
         BUSTER_TYPE_VOID,
         bits513,
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
+        0,
         0,
         0,
         0,
@@ -5254,7 +5277,8 @@ static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
     return (value + alignment - 1) / alignment * alignment;
 }
 
-// What clang passes of a value in registers: no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
+// What clang passes of a value in registers (or an eightbyte at a time in 8-byte slots: a STACK location's HIGH or LOW
+// eightbyte): no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
 // past the eightbyte it starts in, which clang classifies by its start alone (an 8-byte enum at offset 4 of a record
 // passes its low half); and of an SSE eightbyte, only its type's bytes (GetSSETypeAtOffset over its LLVM type, as
 // abi_sse_part reads the module's layout), but for a low one GetX86_64ByValArgumentPair widens to 8 bytes, as it does
@@ -5569,7 +5593,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             {
                 const uint32_t i = signature->first + a;
                 const uint8_t kind = cross->locations[i].kind;
-                if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT)
+                const bool eightbyte = kind == BUSTER_ABI_LOCATION_STACK && (cross->locations[i].flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0;
+                if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT || eightbyte)
                 {
                     abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i], !cross->gcc);
                 }
@@ -6149,9 +6174,11 @@ static void abi_test_emit_caller(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         const AbiLocation location = locations[a];
         const TypeId type = cross->arguments[signature->first + a];
         const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
-        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0)
         {
-            abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + 8);
+            // One eightbyte in its slot: the high one alone, or the low one alone of a larger value.
+            const uint32_t eightbyte = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+            abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + eightbyte);
             abi_test_add(code, link_program_memory(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, (int32_t)location.stack_offset));
         }
         else if (location.kind == BUSTER_ABI_LOCATION_STACK)
@@ -6250,10 +6277,11 @@ static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         const TypeId type = cross->arguments[signature->first + a];
         const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
         const int32_t slot = (int32_t)location.stack_offset + 8;
-        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0)
         {
+            const uint32_t eightbyte = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
             abi_test_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, slot));
-            abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + 8);
+            abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + eightbyte);
         }
         else if (location.kind == BUSTER_ABI_LOCATION_STACK)
         {

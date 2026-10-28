@@ -981,19 +981,6 @@ static const char* check_lower_passed(const CheckLowerWriter* writer, TypeId typ
     return feature;
 }
 
-// The bytes a struct or union passes as an argument, and arrives with as a parameter: its size, but 8 for one of more than 8
-// bytes whose high eightbyte is padding (NO_CLASS), which the convention passes as its low eightbyte alone (#137): in a
-// register, in an 8-byte stack slot with the next argument's after it, or in a slot of its size whose rest is padding. A
-// stack copy of its size would run into the next slot, and a parameter kept in its slot would reach past it.
-static uint32_t check_lower_passed_bytes(const CheckLowerWriter* writer, TypeId type)
-{
-    const uint64_t size = type_size(writer->program->types, type);
-    const uint32_t pass = writer->abi_table->pass[type_index(type)];
-    const uint32_t high = BUSTER_ABI_PASS_HIGH_INTEGER | BUSTER_ABI_PASS_HIGH_SSE | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR;
-    const bool low = (pass & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_LOW_SSE)) != 0 && (pass & high) == 0;
-    return low && size > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_SLOT_BYTES : (uint32_t)size;
-}
-
 // A pointer's stride: its pointee's size, or 0 for a variable-length array's, which its extents give at run time
 // (check_lower_scale and CHECK_LOWER_SIZE).
 static uint64_t check_lower_stride(CheckLowerWriter* writer, TypeId pointer)
@@ -2823,7 +2810,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
             const uint32_t vector = check_lower_vector_of(writer, argument);
             const bool wide = check_lower_wide(writer, argument) || vector != 0;
             abi->arguments[abi->argument_count++] = passed_type;
-            writer->argument_sizes[writer->argument_count] = aggregate ? check_lower_passed_bytes(writer, passed_type) : vector != 0 ? vector : wide ? 16 : 0;
+            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, passed_type) : vector != 0 ? vector : wide ? 16 : 0;
             writer->aggregates |= aggregate || wide;
             writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, argument);
         }
@@ -6924,7 +6911,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->result_size = check_lower_wide(writer, result) ? 16 : check_lower_vector_of(writer, result);
         }
         uint32_t declared = 0;
-        bool lows = false;
         // A K&R definition's callers pass its parameters' promoted types, its ABI's (CHECK_INPUT_FUNCTION_KR).
         const bool kr = (input->function_flags[body.declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
         for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
@@ -6954,13 +6940,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_unsupported(writer, passed);
             }
-            // (A struct or union that arrives as its low eightbyte alone (check_lower_passed_bytes) is an object of those 8
-            // bytes, which its own object takes after the parameters, below.)
-            const uint64_t bytes = aggregate ? check_lower_passed_bytes(writer, parameter_type) : type_size(types, parameter_type);
-            const bool low = bytes < type_size(types, parameter_type);
-            const uint32_t local = object ? check_lower_object(writer, bytes, low ? BUSTER_ABI_SLOT_LOG2 : alignment) :
+            const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
                                             check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            lows |= low;
             if (((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 ||
                  type_kind(types, type_strip_aligned(types, parameter_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
             {
@@ -7005,30 +6986,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
             writer->result_object = check_lower_temporary_of(writer, result);
-        }
-        // A struct or union parameter that arrives as its low eightbyte alone (check_lower_passed_bytes), an object of those
-        // 8 bytes, has an object of its whole size too, the C parameter's, which the function's first entries copy them
-        // into.
-        for (uint32_t parameter = lows ? input->parameters[body.opening] : BUSTER_CHECK_NONE; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
-        {
-            const TypeId parameter_type = input->declared_types[parameter];
-            const uint64_t size = type_size(types, parameter_type);
-            if (check_lower_aggregate(writer, parameter_type) && check_lower_passed_bytes(writer, parameter_type) < size)
-            {
-                const CheckInputAttributes* attributes = input->attributes[parameter];
-                const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
-                const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
-                const uint32_t arrival = writer->local_map[input->objects[parameter]];
-                const uint32_t own = check_lower_object(writer, size, alignment);
-                if ((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 && own < writer->local_count)
-                {
-                    writer->local_flags[own] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-                }
-                writer->local_map[input->objects[parameter]] = own;
-                check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, own);
-                check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, arrival);
-                check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_ABI_SLOT_BYTES);
-            }
         }
         for (uint32_t declaration = bare ? BUSTER_CHECK_NONE : shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
         {
