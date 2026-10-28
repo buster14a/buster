@@ -4,7 +4,7 @@
 // CLI regressions for the self-test workspace lifetime (#575). Run from the repository root with the compiler and
 // Clang paths. Each child gets a private TMPDIR; check its status, actual files and reported artifact path separately.
 // Expected failures keep their evidence inside this driver's workspace, which rm removes only after every case passes.
-// The driver also acts as a failing compiler and as a no-op rm through a private symlink, without shell fixtures.
+// The driver also acts as a failing compiler and as a failing or no-op rm through a private symlink, without shell fixtures.
 
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -194,7 +194,34 @@ static bool lifecycle_report(const char* log, const char* artifact, const Lifecy
     return valid && summary && cleanup_failed == expected_cleanup_failure;
 }
 
-static bool lifecycle_case(const LifecycleCase* test, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* empty_path, const char* no_op_path)
+// Report the captured child output on failure; it remains in the retained workspace too.
+static void lifecycle_dump_log(const char* log)
+{
+    FILE* file = fopen(log, "r");
+    if (file != 0)
+    {
+        char buffer[4096];
+        size_t total = 0;
+        size_t count;
+        fprintf(stderr, "differential lifecycle: captured output from %s:\n", log);
+        while (total < 65536 && (count = fread(buffer, 1, sizeof(buffer), file)) > 0)
+        {
+            fwrite(buffer, 1, count, stderr);
+            total += count;
+        }
+        if (!feof(file))
+        {
+            fputs("\ndifferential lifecycle: captured output truncated\n", stderr);
+        }
+        fclose(file);
+    }
+    else
+    {
+        fprintf(stderr, "differential lifecycle: cannot open captured output %s: %s\n", log, strerror(errno));
+    }
+}
+
+static bool lifecycle_case(const LifecycleCase* test, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* no_op_path)
 {
     char temporary[PATH_MAX];
     char log[PATH_MAX];
@@ -217,9 +244,16 @@ static bool lifecycle_case(const LifecycleCase* test, const char* root, const ch
             {
                 close(output);
             }
-            if ((test->kind == LIFECYCLE_CLEANUP_FAILURE || test->kind == LIFECYCLE_CLEANUP_NO_OP) && setenv("PATH", test->kind == LIFECYCLE_CLEANUP_FAILURE ? empty_path : no_op_path, 1) != 0)
+            if (test->kind == LIFECYCLE_CLEANUP_FAILURE || test->kind == LIFECYCLE_CLEANUP_NO_OP)
             {
-                _exit(125);
+                const char* original_path = getenv("PATH");
+                char path[PATH_MAX * 2];
+                const int path_length = snprintf(path, sizeof(path), "%s:%s", no_op_path, original_path ? original_path : "");
+                if (path_length < 0 || (size_t)path_length >= sizeof(path) || setenv("PATH", path, 1) != 0 ||
+                    setenv("BUSTER_LIFECYCLE_RM_FAIL", test->kind == LIFECYCLE_CLEANUP_FAILURE ? "1" : "0", 1) != 0)
+                {
+                    _exit(125);
+                }
             }
             const char* option = test->kind == LIFECYCLE_KEEP ? "--keep" : test->kind == LIFECYCLE_INVALID_OPTION ? "--unknown-option" : 0;
             const char* arguments[] =
@@ -241,6 +275,11 @@ static bool lifecycle_case(const LifecycleCase* test, const char* root, const ch
         const bool workspace = lifecycle_workspace(temporary, test->retained, artifact, sizeof(artifact));
         const bool report = lifecycle_report(log, artifact, test);
         valid = status == test->status && workspace && report;
+        if (!valid)
+        {
+            fprintf(stderr, "differential lifecycle: %s workspace=%s report=%s\n", test->name, workspace ? "valid" : "invalid", report ? "valid" : "invalid");
+            lifecycle_dump_log(log);
+        }
     }
     printf("differential lifecycle: %s %s (status=%d, expected=%d)\n", test->name, valid ? "PASS" : "FAIL", status, test->status);
     return valid;
@@ -261,10 +300,9 @@ static int lifecycle_tests(int argc, char** argv)
     valid = valid && lifecycle_path(root, sizeof(root), temporary, "buster-differential-lifecycle-XXXXXX") && mkdtemp(root);
     const bool made = valid;
     char failing_fixture[PATH_MAX];
-    char empty_path[PATH_MAX];
     char no_op_path[PATH_MAX];
     char no_op_rm[PATH_MAX];
-    valid = valid && lifecycle_path(failing_fixture, sizeof(failing_fixture), root, "failing-fixture.c") && lifecycle_path(empty_path, sizeof(empty_path), root, "empty-path") && mkdir(empty_path, 0700) == 0 && lifecycle_path(no_op_path, sizeof(no_op_path), root, "no-op-path") && mkdir(no_op_path, 0700) == 0 && lifecycle_path(no_op_rm, sizeof(no_op_rm), no_op_path, "rm") && symlink(self, no_op_rm) == 0;
+    valid = valid && lifecycle_path(failing_fixture, sizeof(failing_fixture), root, "failing-fixture.c") && lifecycle_path(no_op_path, sizeof(no_op_path), root, "no-op-path") && mkdir(no_op_path, 0700) == 0 && lifecycle_path(no_op_rm, sizeof(no_op_rm), no_op_path, "rm") && symlink(self, no_op_rm) == 0;
     FILE* file = valid ? fopen(failing_fixture, "w") : 0;
     valid = valid && file && fputs("int main(void) { return 1; }\n", file) >= 0;
     if (file)
@@ -278,7 +316,7 @@ static int lifecycle_tests(int argc, char** argv)
         for (unsigned i = 0; i < sizeof(lifecycle_cases) / sizeof(lifecycle_cases[0]); ++i)
         {
             ++count;
-            const bool passed = lifecycle_case(&lifecycle_cases[i], root, compiler, clang, fixture, failing_fixture, self, empty_path, no_op_path);
+            const bool passed = lifecycle_case(&lifecycle_cases[i], root, compiler, clang, fixture, failing_fixture, self, no_op_path);
             failures += !passed;
         }
     }
@@ -311,7 +349,12 @@ int main(int argc, char** argv)
     {
         result = 1;
     }
-    else if (strcmp(name, "rm") != 0)
+    else if (strcmp(name, "rm") == 0)
+    {
+        const char* fail = getenv("BUSTER_LIFECYCLE_RM_FAIL");
+        result = fail && strcmp(fail, "1") == 0 ? 1 : 0;
+    }
+    else
     {
         result = lifecycle_tests(argc, argv);
     }

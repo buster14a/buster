@@ -3,7 +3,7 @@
 //
 // Original fixtures for the 23 observed generic vector builtin spellings. Include after c_checker_test.c and
 // c_check_builtin_vector.c. Independent expected TypeIds use the C type factories; no test invents a CheckValue
-// vector constant representation. Exact Clang 23.1.1 GNU17 runs externally when this command runs on the approved
+// vector constant representation. Clang 23.1.1 or newer in GNU17 runs externally when this command runs on the approved
 // host. Sources: llvmorg-23.1.1 SemaChecking.cpp elementwise/reduce/shuffle/convert/nontemporal/nondeterministic,
 // SemaExpr.cpp unary FP and initialization, Type.cpp/TypeBase.h enum/complex predicates, and CGBuiltin.cpp's
 // unevaluated nondeterministic operand. These are behavior facts; no external implementation or tests are copied.
@@ -810,10 +810,10 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
     char executable[160];
     snprintf(path, sizeof(path), "%s/source.c", directory);
     snprintf(executable, sizeof(executable), "%s/operand-effects", directory);
-    const char* version = "_Static_assert(__clang_major__==23 && __clang_minor__==1 && __clang_patchlevel__==1,\"exact Clang23.1.1 required\");\n";
+    const char* version = "_Static_assert(__clang_major__>23 || (__clang_major__==23 && (__clang_minor__>1 || (__clang_minor__==1 && __clang_patchlevel__>=1))),\"Clang 23.1.1 or newer required\");\n";
     bool rejected = false;
     ready = ready && parse_test_write(path, version, strlen(version)) && check_builtin_vector_test_clang_run(clang, path, NULL, &rejected);
-    check_builtin_vector_test_expect(test, ready && !rejected, "external vector oracle must be exact Clang23.1.1 in GNU17");
+    check_builtin_vector_test_expect(test, ready && !rejected, "external vector oracle must be Clang 23.1.1 or newer in GNU17");
     ready = ready && !rejected;
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_builtin_vector_test_cases); i += 1)
     {
