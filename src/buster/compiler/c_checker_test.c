@@ -1958,6 +1958,16 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             char resource_message[256];
             snprintf(resource_message, sizeof(resource_message), "%s: %s source adapter exhausted fixture resources", fixture->name, p == 0 ? "scalar" : "vector");
             check_test_expect(test, !input[p].resource, resource_message);
+            snprintf(resource_message, sizeof(resource_message), "%s: the %s path acts at %u tokens the vector path's walks would skip", fixture->name,
+                     p == 0 ? "scalar" : "vector", input[p].visit_misses);
+            check_test_expect(test, input[p].visit_misses == 0, resource_message);
+            if (p == 1 && adapted && !rejected[0] && input[0].token_count >= 16)
+            {
+                // The vector path's walks skip tokens (#529): fewer visits than the scalar path's, which visit them all.
+                snprintf(resource_message, sizeof(resource_message), "%s: the vector path's walks visit %u and %u of %u tokens, the scalar path's %u and %u",
+                         fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
+                check_test_expect(test, input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits, resource_message);
+            }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
             for (uint32_t i = 0; i < input[p].report_count; i += 1)
