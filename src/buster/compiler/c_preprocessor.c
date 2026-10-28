@@ -19036,7 +19036,7 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
         const __m512i ends = _mm512_add_epi16(pp_prefix_sum_words(sizes), _mm512_set1_epi16((short)total));
         _mm512_mask_storeu_epi16(offsets + first, (__mmask32)_bzhi_u64(~0ull, take), _mm512_sub_epi16(ends, sizes));
         // Inactive words are zero, so the final lane also holds the last active word's end.
-        total = (uint16_t)_mm256_extract_epi16(_mm512_extracti64x4_epi64(ends, 1), 15);
+        total = (uint16_t)((__v32hi)ends)[31];
     }
     return ordinary ? total : 0;
 }
