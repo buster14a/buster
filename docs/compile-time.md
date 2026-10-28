@@ -223,6 +223,12 @@ Every reader uses a zero-default accessor or a guarded vector load, and deferred
 ID remapping preserves an absent column. No arena freshness or high-water mark
 is assumed.
 
+The [frozen main416 qualification record](https://github.com/buster14a/buster-performance/blob/32b96dd2a12c12c7aaf25be3639a31b7fc87cdd9/docs/measurements/unclaimed-perf-2026-10-28/issue-628/ASM-COLUMN-RESULTS.md)
+measured about 8 MiB lower native peak RSS for the parser and empty-ID changes
+together on the pinned SQLite input. Wall and system-time improvements were
+not established; the record's compiler, source, controls and remaining scope
+are explicit.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:
