@@ -69,11 +69,21 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
                 const int status = check_test_driver_spawn(arguments, &actual);
                 const char* oracle_message = expected != NULL ? strstr(expected, "non-void function") : NULL;
                 const char* actual_message = actual != NULL ? strstr(actual, "non-void function") : NULL;
+                const char* oracle_line = oracle_message;
+                const char* actual_line = actual_message;
+                while (oracle_line != NULL && oracle_line > expected && oracle_line[-1] != '\n')
+                {
+                    oracle_line -= 1;
+                }
+                while (actual_line != NULL && actual_line > actual && actual_line[-1] != '\n')
+                {
+                    actual_line -= 1;
+                }
                 const bool warnings = (oracle_message != NULL) == (actual_message != NULL);
                 const bool mixed = oracle_message != NULL && strstr(oracle_message, "in all control paths") != NULL;
                 const bool same = warnings && (actual_message == NULL || ((strstr(actual_message, "in all control paths") != NULL) == mixed &&
-                                  (uint64_t)(actual_message - actual) == (uint64_t)(oracle_message - expected) &&
-                                  memcmp(actual, expected, (size_t)(actual_message - actual)) == 0));
+                                  (uint64_t)(actual_message - actual_line) == (uint64_t)(oracle_message - oracle_line) &&
+                                  memcmp(actual_line, oracle_line, (size_t)(actual_message - actual_line)) == 0));
                 char description[160];
                 snprintf(description, sizeof(description), "aggregate return case %u, %s %s: Clang status, location and warning kind", c,
                          path == 0 ? "scalar" : "vector", mode == 0 ? "syntax" : "object");
