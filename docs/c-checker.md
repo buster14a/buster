@@ -445,6 +445,11 @@ columns without renumbering or expanding the graph:
   arithmetic, assignment, explicit-cast or null-pointer conversion flags.
 - `argument_conversions` contains one record for each call-argument slot,
   including prototype conversions and default argument promotions.
+- `member_offsets` stores a `MEMBER` or `ARROW` node's member's offset in bits
+  from its record's start, through anonymous members, as the action's lookup
+  found it (`docs/c-types.md`, "Member lookup"), and 0 for every other node:
+  the lowering takes its member accesses' places from it rather than looking
+  the members up again (#591).
 - `diagnostics` stores the node's constraint diagnostic. `reports` is the
   compact diagnostic list, sorted stably by source token; `report_count` is its
   logical length and never exceeds the node count.
@@ -1409,10 +1414,69 @@ both paths. The scratch the reader writes grew by 3.5 MB (`value_counts` and
 record](https://github.com/buster14a/buster-performance/tree/6929480812d31868d77a515f88ddca3bad408429/docs/measurements/check-input-529-2026-10-27)
 has the scripts, the raw outputs and the trees' manifests.
 
-What is left of the reader's per-token work is in its two walks, each of
-which still reads about ten sparse columns at every token, and in
-`check_input_run`'s fill of 22 columns with `NONE` (#528). Building the
-expression graph data-parallel is the next step for the walks.
+### The walks' visits
+
+The two walks still made their tests at every token: the walk in source
+order, some fifteen columns' at each, though it acts at about a quarter of
+`sqlite3.c`'s tokens, and the expressions' walk its chain of tests, though at
+about a quarter it only writes the token's first value. Each now visits the
+tokens it may act at, and tests there only what may make it act. On SQLite
+3.53.4's `sqlite3.c` (716,380 tokens), the walk in source order visits
+263,473 of them and the expressions' walk 525,518
+(`benchmark-checker-bindings` prints both):
+
+- **The walk in source order** visits the tokens marked in a byte column,
+  `CheckInputReader.visits`, the next marked one found 64 bytes at a time
+  (`check_input_resolve_next`). Two kinds of writes mark them, each with a
+  reason (`BUSTER_CHECK_RESOLVE_*`):
+  - `check_input_count_tokens`' pass marks the tokens whose syntax the walk
+    tests: their roles and kinds, and their successors', looked up 64 at a
+    time in tables of the walk's tests (`check_input_role_tests`,
+    `check_input_kind_tests`, with `vpermi2b`), and the syntax bits;
+  - each write ahead of the walk to a column it tests marks its token
+    (`check_input_visit`): an activation, a scope's end, an initializer's
+    finish, a declarator's or an initializer's start, or a type query's, a
+    designator's or a builtin's operand.
+
+  A visit tests only the columns its marks give reasons for, each read when
+  the walk tests it, after its earlier steps at the token may have marked it.
+- **The expressions' walk** takes each token's classes from a pass before it
+  (`check_input_expression_classes`): whether the walk acts at the token (it
+  has children, its role or kind is one the walk's tests take, by the same
+  tables, or one of seven sparse columns has an entry for it, 16 tokens' at a
+  time), and whether a sparse column does. It skips the tokens it doesn't act
+  at, whose first values, `NONE`, the pass writes, and tests the sparse
+  columns only of the tokens that have an entry.
+- **Deferred bodies** (#113) need no marks of their own: each starts at an
+  `OPEN_BODY`, which the walk tests, and the walk jumps over the body from
+  there. Lanes share the column, each writing only its own body's tokens.
+- **The twins.** The scalar path, `--scalar`, still visits every token and
+  makes every test. At each token it also checks what the vector path would
+  have done: each test that could act there, without the mark or the class
+  that would make the vector path make it, counts in `CheckInput.visit_misses`,
+  which `test-checker`'s fixtures and `test-checker-corpus` require to be 0. A
+  mutant without the activations' mark failed 3,243 of `test-checker`'s checks.
+  `test-checker` also requires the vector path's walks to visit fewer tokens
+  than the scalar path's (`resolve_visits`, `expression_visits`), which a mark
+  on every token, passing every comparison, would not. The scans' test checks
+  the marks and the classes by both paths against its own reading, with every
+  column ending at a `PROT_NONE` page.
+
+On the locked 9700X, CPU 2, main `92c025e7` against `60732582`, the completed
+final comparison gives `check-input` 63.682 → 58.927 ms, the direct reader
+53.912 → 49.375 ms, and whole `-c` perf task clock 146.340 → 141.725 ms.
+User cycles fall 3.77% and instructions 5.21%; all observations, unchanged
+scalar/one/eight-lane objects and the 16 target checker-suite results are
+in the [record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/check-input-529-walks-2026-10-27).
+This is the sparse-walk snapshot, before the later combined storage/traversal
+integration, not a new measurement of that combination.
+
+What is left of the reader's per-token work is the walks' work where they
+act, the expression-comma propagation, graph construction and the remaining
+output fills. Since #572 the graph stores `CheckValue` only for VALUE leaves;
+since #186 the parser and reader share one retained traversal. The sparse
+walk consumes that reader-owned postorder, and the continuation's dynamic
+visit mark is retained even when zero-valued sparse stores are skipped.
 
 ## Benchmark and validation limits
 

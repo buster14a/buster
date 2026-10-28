@@ -1427,6 +1427,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .parameters = types->parameters.capacity,
         .tags = types->tags.capacity - 1,
         .members = types->members.capacity - 1,
+        .lookups = types->lookup.capacity - 1,
     };
     valid = valid && type_initialize(&deferred->top, &deferred->top_arena, &deferred->top_index_arena, capacity) &&
             type_changes_initialize(&deferred->top_changes, &deferred->top_arena, types->types.capacity + types->tags.capacity * 4, types->parameters.capacity,

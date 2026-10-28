@@ -4374,6 +4374,8 @@ static bool type_test_batch_after_completion(void)
 
 // #113's deferred bodies: the change records, views and replay.
 #include "c_types_deferred_test.c"
+// #591's member lookup: the index, the scan and the walk.
+#include "c_types_lookup_test.c"
 
 static int run_type_tests(int argc, char** argv)
 {
@@ -4426,6 +4428,7 @@ static int run_type_tests(int argc, char** argv)
         passed = type_test_deferred(seed, (uint32_t)count / 20) && passed;
         passed = type_test_layout_fixtures_check() && passed;
         passed = type_test_member_lookup() && passed;
+        passed = type_test_lookups(seed, (uint32_t)count / 6) && passed;
         passed = type_test_layout_twins(seed, (uint32_t)count / 4) && passed;
         passed = type_test_conversion_kernels(seed) && passed;
         passed = type_test_conversion_types() && passed;

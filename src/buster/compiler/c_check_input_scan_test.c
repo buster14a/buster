@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The reader's scans of its token columns (#529), against the test's own reading of the columns: the masks the passes
-// that act on few tokens take (check_input_scan_*), and check_input_count_tokens' counts and syntax bits, by both of
-// its paths. Every column ends at a PROT_NONE page, for every length to 200, so a load or a store past a column's end
-// faults. Included by c_checker_test.c.
+// that act on few tokens take (check_input_scan_*), check_input_count_tokens' counts, syntax bits and the walk in source
+// order's marks, and check_input_expression_classes' classes and first values, each by both of its paths. Every column
+// ends at a PROT_NONE page, for every length to 200, so a load or a store past a column's end faults. Included by
+// c_checker_test.c.
 
 // A column of `count` entries of `size` bytes that ends at a PROT_NONE page: `page_end` minus the column.
 static void* check_test_scan_column(uint8_t* page_end, uint32_t count, uint32_t size)
@@ -12,12 +13,100 @@ static void* check_test_scan_column(uint8_t* page_end, uint32_t count, uint32_t 
     return page_end - (uint64_t)count * size;
 }
 
+// Whether the walk in source order may act at token `i` of these columns by its syntax (`syntax`, its syntax bits), as
+// the test reads its tests: the twin of check_input_visit_of, for the marks of both of check_input_count_tokens' paths.
+static bool check_test_visit_mark(const uint8_t* kinds, const uint8_t* roles, uint32_t count, uint32_t i, uint8_t syntax)
+{
+    static const uint8_t resolve_roles[] = { PARSE_ROLE_SPECIFIER, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_OPEN_FOR, PARSE_ROLE_OPEN_CONDITION,
+                                             PARSE_ROLE_RETURN, PARSE_ROLE_OPEN_CAST, PARSE_ROLE_OPEN_SIZEOF, PARSE_ROLE_OPEN_COMPOUND, PARSE_ROLE_LABEL,
+                                             PARSE_ROLE_OPEN_CASE };
+    static const uint8_t resolve_kinds[] = { PARSE_KIND_STRUCT, PARSE_KIND_ENUM, PARSE_KIND_TYPEOF, PARSE_KIND_ATOMIC, PARSE_KIND_ASM, PARSE_KIND_GOTO,
+                                             PARSE_KIND_SWITCH };
+    bool mark = syntax != 0;
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(resolve_roles); r += 1)
+    {
+        mark |= roles[i] == resolve_roles[r];
+    }
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(resolve_kinds); k += 1)
+    {
+        mark |= kinds[i] == resolve_kinds[k];
+    }
+    mark |= kinds[i] == PARSE_KIND_IDENTIFIER && roles[i] != PARSE_ROLE_MEMBER && roles[i] != PARSE_ROLE_TAG && roles[i] != PARSE_ROLE_LEAF_RIGHT;
+    if (i + 1 < count)
+    {
+        mark |= roles[i] == PARSE_ROLE_OPEN_GROUP && roles[i + 1] == PARSE_ROLE_OPEN_BLOCK;
+        mark |= kinds[i] == PARSE_KIND_EXTENSION && (roles[i + 1] == PARSE_ROLE_SPECIFIER || kinds[i + 1] == PARSE_KIND_STRUCT || kinds[i + 1] == PARSE_KIND_ENUM);
+    }
+    return mark;
+}
+
+// The expressions' walk's classes of token `i` of the reader's columns (BUSTER_CHECK_EXPRESSION_*), as the test reads its
+// tests: the twin of check_input_expression_class, for both of check_input_expression_classes' paths.
+static uint8_t check_test_expression_class(const CheckInputReader* reader, uint32_t i)
+{
+    // The roles and kinds the walk acts at, in the order its tests take them, and an ignored token's list roles.
+    static const uint8_t roles[] = { PARSE_ROLE_OPERAND, PARSE_ROLE_RETURN, PARSE_ROLE_PREFIX, PARSE_ROLE_MULTIPLICATIVE, PARSE_ROLE_ADDITIVE, PARSE_ROLE_SHIFT,
+                                     PARSE_ROLE_RELATIONAL, PARSE_ROLE_EQUALITY, PARSE_ROLE_BITWISE_AND, PARSE_ROLE_BITWISE_XOR, PARSE_ROLE_BITWISE_OR,
+                                     PARSE_ROLE_LOGICAL_AND, PARSE_ROLE_LOGICAL_OR, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR,
+                                     PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_OPEN_TERNARY, PARSE_ROLE_ASSOCIATION,
+                                     PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_POSTFIX,
+                                     PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_CLOSE_CONDITION,
+                                     PARSE_ROLE_TERMINATOR, PARSE_ROLE_CLOSE_FOR, PARSE_ROLE_CLOSE_INITIALIZER, PARSE_ROLE_CLOSE_COMPOUND_BODY,
+                                     PARSE_ROLE_RANGE, PARSE_ROLE_CLOSE_CASE, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_ENUM, PARSE_ROLE_CLOSE_SPECIFIER,
+                                     PARSE_ROLE_CLOSE_ASM, PARSE_ROLE_LABEL, PARSE_ROLE_TAG, PARSE_ROLE_BITFIELD };
+    static const uint8_t kinds[] = { PARSE_KIND_STRING, PARSE_KIND_GOTO, PARSE_KIND_BREAK, PARSE_KIND_CONTINUE, PARSE_KIND_LABEL, PARSE_KIND_SWITCH,
+                                     PARSE_KIND_CASE, PARSE_KIND_DEFAULT, PARSE_KIND_STRUCT, PARSE_KIND_ENUM, PARSE_KIND_ASM, PARSE_KIND_ATTRIBUTE,
+                                     PARSE_KIND_ALIGNAS, PARSE_KIND_ATOMIC, PARSE_KIND_CALLING_CONVENTION, PARSE_KIND_TYPEOF, PARSE_KIND_GENERIC,
+                                     PARSE_KIND_TYPE_ARGUMENT, PARSE_KIND_REAL_IMAG, PARSE_KIND_EXTENSION };
+    static const uint8_t lists[] = { PARSE_ROLE_SPECIFIER, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR, PARSE_ROLE_CLOSE_ATTRIBUTE, PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER,
+                                     PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT, PARSE_ROLE_CLOSE_SPECIFIER };
+    const uint8_t role = reader->parser->tree.roles[i];
+    const uint8_t kind = reader->parser->tokens.kinds[i];
+    const bool sparse = reader->output->expression_regions[i] != 0 || reader->constant_present[i] != 0 || reader->selected_tokens[i] < reader->parser->tokens.count ||
+                        reader->vararg_calls[i] != 0 || reader->designator_tokens[i] != 0 || reader->vla_ends[i] != 0 || reader->output->asm_ids[i] != 0;
+    bool taken = false;
+    for (uint32_t r = 0; reader->ignored[i] == 0 && r < BUSTER_ARRAY_LENGTH(roles); r += 1)
+    {
+        taken |= role == roles[r];
+    }
+    for (uint32_t k = 0; reader->ignored[i] == 0 && k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+    {
+        taken |= kind == kinds[k];
+    }
+    for (uint32_t r = 0; reader->ignored[i] != 0 && r < BUSTER_ARRAY_LENGTH(lists); r += 1)
+    {
+        taken |= role == lists[r];
+    }
+    const bool acts = reader->first_child[i] != BUSTER_CHECK_NONE || sparse || taken;
+    return (uint8_t)((acts ? BUSTER_CHECK_EXPRESSION_ACTS : 0) | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0));
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    // Five columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), pointers and the
-    // syntax bits count_tokens writes.
-    enum { COLUMNS = 5 };
+    // The columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), pointers, and the
+    // syntax bits and the marks count_tokens writes; then the expressions' classes' inputs (ignored tokens, first children
+    // and the sparse columns) and the first values they write, with the classes in the marks' column.
+    enum
+    {
+        KINDS,
+        ROLES,
+        NAMES,
+        POINTERS,
+        SYNTAX,
+        VISITS,
+        IGNORED,
+        FIRST_CHILD,
+        REGIONS,
+        CONSTANTS,
+        SELECTIONS,
+        VARARGS,
+        DESIGNATORS,
+        BOUNDS,
+        STATEMENTS,
+        FIRST_VALUE,
+        COLUMNS,
+    };
     uint8_t* mappings[COLUMNS];
     bool ready = true;
     for (uint32_t i = 0; i < COLUMNS; i += 1)
@@ -32,7 +121,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     const uint8_t groups[] = { 0, 0, 1, 1, 2, 2, 3, 4, 4 };
     const uint8_t kind_values[] = { PARSE_KIND_L_SQUARE, PARSE_KIND_ASM, PARSE_KIND_SIZEOF, PARSE_KIND_PERIOD, PARSE_KIND_IDENTIFIER, PARSE_KIND_ATTRIBUTE,
                                     PARSE_KIND_CASE, PARSE_KIND_STATIC_ASSERT, PARSE_KIND_COMMA, PARSE_KIND_ALIGNAS, PARSE_KIND_CALLING_CONVENTION, PARSE_KIND_STRING,
-                                    PARSE_KIND_L_SQUARE };
+                                    PARSE_KIND_L_SQUARE, PARSE_KIND_STRUCT, PARSE_KIND_ENUM, PARSE_KIND_TYPEOF, PARSE_KIND_EXTENSION, PARSE_KIND_IDENTIFIER,
+                                    PARSE_KIND_GOTO, PARSE_KIND_SWITCH };
     // The names whose tokens the syntax bits mark, each as its bit.
     const uint32_t syntax_names[] = { C_NAME_BUILTIN_VA_ARG, C_NAME_BUILTIN_CONVERTVECTOR, C_NAME_BUILTIN_BIT_CAST, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR,
                                       C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_NORETURN, C_NAME_NONNULL, C_NAME_NULLABLE,
@@ -41,29 +131,47 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                                     BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_NAMED, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
                                     BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_ATTRIBUTE,
                                     BUSTER_CHECK_SYNTAX_ATTRIBUTE, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING, BUSTER_CHECK_SYNTAX_STRING };
-    const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR };
+    const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR,
+                                    PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_SPECIFIER, PARSE_ROLE_MEMBER, PARSE_ROLE_TAG,
+                                    PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
+                                    PARSE_ROLE_TERMINATOR };
     uint32_t mismatches = 0;
+    uint32_t mark_differences = 0;
+    uint32_t class_differences = 0;
     for (uint32_t count = 0; ready && count <= 200; count += 1)
     {
-        uint8_t* kinds = check_test_scan_column(mappings[0] + page, count, 1);
-        uint8_t* roles = check_test_scan_column(mappings[1] + page, count, 1);
-        uint32_t* names = check_test_scan_column(mappings[2] + page, count, 4);
-        void** pointers = check_test_scan_column(mappings[3] + page, count, 8);
-        uint8_t* syntax = check_test_scan_column(mappings[4] + page, count + 1, 1);
+        uint8_t* kinds = check_test_scan_column(mappings[KINDS] + page, count, 1);
+        uint8_t* roles = check_test_scan_column(mappings[ROLES] + page, count, 1);
+        uint32_t* names = check_test_scan_column(mappings[NAMES] + page, count, 4);
+        void** pointers = check_test_scan_column(mappings[POINTERS] + page, count, 8);
+        uint8_t* syntax = check_test_scan_column(mappings[SYNTAX] + page, count + 1, 1);
+        uint8_t* visits = check_test_scan_column(mappings[VISITS] + page, count + 1, 1);
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t draw = check_test_random(test);
             const uint32_t pick = check_test_random(test);
-            kinds[i] = (draw & 3) == 0 ? (uint8_t)(draw >> 8) : kind_values[(draw >> 2) % BUSTER_ARRAY_LENGTH(kind_values)];
-            roles[i] = (draw & 0x30) == 0 ? (uint8_t)(draw >> 16) : role_values[(draw >> 6) % BUSTER_ARRAY_LENGTH(role_values)];
+            // Kinds and roles below 128, as the parser's are.
+            kinds[i] = (draw & 3) == 0 ? (uint8_t)((draw >> 8) % PARSE_KIND_COUNT) : kind_values[(draw >> 2) % BUSTER_ARRAY_LENGTH(kind_values)];
+            roles[i] = (draw & 0x30) == 0 ? (uint8_t)((draw >> 16) % PARSE_ROLE_COUNT) : role_values[(draw >> 6) % BUSTER_ARRAY_LENGTH(role_values)];
             names[i] = (pick & 7) == 0 ? syntax_names[(pick >> 3) % BUSTER_ARRAY_LENGTH(syntax_names)] : (draw >> 24) % 34;
             pointers[i] = (draw & 0xc0000) == 0 ? (void*)&pointers : 0;
         }
-        // An attribute's `[[` across two blocks of 64 tokens, and a `[` without a successor.
+        // An attribute's `[[` across two blocks of 64 tokens, and a `[` without a successor; a group of a block and an
+        // __extension__ before a struct across them too.
         if (count > 64)
         {
             kinds[63] = PARSE_KIND_L_SQUARE;
             kinds[64] = PARSE_KIND_L_SQUARE;
+        }
+        if (count > 128)
+        {
+            roles[127] = PARSE_ROLE_OPEN_GROUP;
+            roles[128] = PARSE_ROLE_OPEN_BLOCK;
+        }
+        if (count > 192)
+        {
+            kinds[191] = PARSE_KIND_EXTENSION;
+            kinds[192] = PARSE_KIND_STRUCT;
         }
         if (count % 2 == 1)
         {
@@ -133,13 +241,14 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
             memset(syntax, 0xa5, (uint64_t)count + 1);
-            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, scalar != 0);
+            memset(visits, 0xa5, (uint64_t)count + 1);
+            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits, scalar != 0);
             char description[200];
             snprintf(description, sizeof(description), "token counts of %u tokens by the %s path: subscripts %u (%u), operands %u (%u), group 0 %u (%u)", count,
                      scalar != 0 ? "scalar" : "vector", counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
                      expected.groups[0]);
             check_test_expect(test, memcmp(&counts, &expected, sizeof(counts)) == 0, description);
-            // Each token's syntax bits, as the test reads its kind, its successor's and its name.
+            // Each token's syntax bits, as the test reads its kind, its successor's and its name, and its mark.
             for (uint32_t i = 0; i < count; i += 1)
             {
                 uint8_t bits = 0;
@@ -162,13 +271,67 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
                         break;
                 }
                 syntax_differences += syntax[i] != bits;
+                mark_differences += visits[i] != check_test_visit_mark(kinds, roles, count, i, bits);
             }
             syntax_differences += syntax[count] != 0;
+            mark_differences += visits[count] != 0;
         }
         mismatches += syntax_differences;
+        // The expressions' classes of a reader of these columns and sparse ones, by both paths: each token's classes must
+        // be the test's own reading, and its first value NONE where the walk doesn't act at it and as it was elsewhere.
+        CheckInput input = { 0 };
+        input.expression_regions = check_test_scan_column(mappings[REGIONS] + page, count, 4);
+        input.asm_ids = check_test_scan_column(mappings[STATEMENTS] + page, count, 4);
+        CheckInputReader reader = { 0 };
+        reader.parser = &parser;
+        reader.output = &input;
+        reader.visits = visits;
+        reader.ignored = check_test_scan_column(mappings[IGNORED] + page, count, 1);
+        uint32_t* first_child = check_test_scan_column(mappings[FIRST_CHILD] + page, count, 4);
+        reader.first_child = first_child;
+        reader.constant_present = check_test_scan_column(mappings[CONSTANTS] + page, count, 4);
+        reader.selected_tokens = check_test_scan_column(mappings[SELECTIONS] + page, count, 4);
+        reader.vararg_calls = check_test_scan_column(mappings[VARARGS] + page, count, 4);
+        reader.designator_tokens = check_test_scan_column(mappings[DESIGNATORS] + page, count, 4);
+        reader.vla_ends = check_test_scan_column(mappings[BOUNDS] + page, count, 4);
+        reader.first_value = check_test_scan_column(mappings[FIRST_VALUE] + page, count, 4);
+        uint32_t* sparse_columns[] = { input.expression_regions, input.asm_ids, reader.constant_present, reader.vararg_calls, reader.designator_tokens, reader.vla_ends };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t draw = check_test_random(test);
+            reader.ignored[i] = (draw & 3) == 0;
+            first_child[i] = (draw & 0x1c) == 0 ? draw >> 8 : BUSTER_CHECK_NONE;
+            // A runtime selection (below the count), a proof's (the high bit) or none.
+            const uint32_t selection = (draw >> 5) & 7;
+            reader.selected_tokens[i] = selection == 0 ? draw % (count + 1) : selection == 1 ? CHECK_INPUT_SOURCE_SELECTION | i : BUSTER_CHECK_NONE;
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sparse_columns); c += 1)
+            {
+                sparse_columns[c][i] = ((draw >> (8 + 4 * c)) & 15) == 0 ? 1 + (draw >> 28) : 0;
+            }
+        }
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            parser.options.scalar = scalar != 0;
+            memset(visits, 0xa5, (uint64_t)count + 1);
+            memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
+            const uint32_t acting = check_input_expression_classes(&reader);
+            uint32_t expected_acting = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint8_t classes = check_test_expression_class(&reader, i);
+                const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+                class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+                class_differences += check_input_expression_class(&reader, i) != classes;
+                expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+            }
+            class_differences += visits[count] != 0xa5 || acting != expected_acting;
+        }
+        parser.options.scalar = false;
     }
-    char description[120];
-    snprintf(description, sizeof(description), "the reader's token scans: %u masks differ from the test's", mismatches);
+    mismatches += mark_differences + class_differences;
+    char description[200];
+    snprintf(description, sizeof(description), "the reader's token scans: %u masks differ from the test's (%u marks, %u classes)", mismatches, mark_differences,
+             class_differences);
     check_test_expect(test, ready && mismatches == 0, description);
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {

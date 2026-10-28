@@ -903,8 +903,11 @@ designs and the compilers already built this way.
   form and the measurements.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
-  clang's record layout (one record at a time, and 16 at once in vectors), the
-  conversions as `vpermb` tables 64 pairs at a time, compatibility and
+  clang's record layout (one record at a time, and 16 at once in vectors), each
+  record's member lookup (#591: a scan of its names, or an index of the names
+  its anonymous members hold too, built when it is defined, with
+  `type_lookup_member_scalar` its twin and a walk where an index doesn't fit),
+  the conversions as `vpermb` tables 64 pairs at a time, compatibility and
   composite types, and clang's spelling of a type, all as clang 23 has them on
   x86-64. `c_types_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-types` runs them) and `c_types_benchmark.c` provides
@@ -5002,6 +5005,19 @@ the one `--clang` names:
   by the scalar layout in one table and by `type_layout_records` in another:
   identical offsets, sizes, alignments and completion order; and member lookup
   of a fresh table's first member, directly and through an anonymous member;
+- member lookup (#591, `c_types_lookup_test.c`): the lookup, its scalar twin,
+  the walk and `type_find_member` against an oracle that lists a record's
+  named members depth first through its anonymous members (member, offset and
+  qualifiers), on random worlds of records of 0 to 459 members that hold one
+  another as anonymous members, qualified and aligned, by every name and
+  absent ones, with the default room for indices and with room for 48 buckets,
+  past which records walk; the scan's limit of 16 members, a name that an
+  anonymous member finds before a named member has it, and 24 names in one
+  bucket of eight; a copy, a view taken back and a tag withdrawn and restored;
+  unions that hold the one before them twice, 64 levels deep; a record of
+  100,000 members; the walk with every amount of room to 16 KB left in its
+  scratch arena; and the scan at every count to 16 of names ending at a
+  `PROT_NONE` page;
 - conversions: every pair of codes through both vector kernels and the scalar
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
@@ -5027,9 +5043,9 @@ runs it.
 ## Type benchmark
 
 `./build/compiler benchmark-types [--seed N] [--requests N] [--records N]
-[--pairs N] [--only construction|layout|conversions]` checks that each vector
-path agrees with its scalar twin, then reports 21 interleaved-pass medians per
-item (time, cycles, instructions, IPC):
+[--pairs N] [--lookups N] [--only construction|layout|conversions|lookups]`
+checks that each vector path agrees with its scalar twin, then reports 21
+interleaved-pass medians per item (time, cycles, instructions, IPC):
 
 - construction: 65,536 derivation requests over a working set of derived
   types, every one a hit and then 1 in 8 a miss into a fresh table, one at a
@@ -5040,7 +5056,11 @@ item (time, cycles, instructions, IPC):
 - conversions: 65,536 pairs of arithmetic codes, drawn as a C program's
   operands are, through the scalar twin and the `vpermb` and `vpermi2b`
   kernels; the promotions; and the same pairs as TypeIds through
-  `type_usual_arithmetic_types` and `type_usual_arithmetic`.
+  `type_usual_arithmetic_types` and `type_usual_arithmetic`;
+- lookups (#591): 65,536 member accesses, skewed toward a few, of 4,096 records
+  shaped as a unit has them (most scanned, some indexed, one in 10 with an
+  anonymous member), by `type_lookup_member`, its scalar twin and the walk; and
+  every record's lookup built again, per member.
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
