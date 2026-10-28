@@ -181,7 +181,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 72 fixtures, 63 of the
+- `./build/compiler test-checker-deferred [--keep]`: 74 fixtures, 65 of the
   issue's cases, 400 bodies that call each other and 8 of the lanes' rule, each
   written to a file and checked as `test-checker-corpus` checks one: on the
   scalar path, the vector path, and the vector path with every body read apart,
@@ -258,10 +258,12 @@ passes every checker test.
   body; tags completed, redeclared and shadowed around bodies, and completed
   between bodies where the walk itself needs them complete or not (a local
   object, local records, an enum, a typedef); block-scope declarations with
-  linkage; strings and `__func__`, statement expressions, VLAs, varargs, a
-  predefined type first made in a body, asm statements, cached constants and
-  `_Generic`, compound literals and statics; recursion and forward calls,
-  labels; unions made transparent in a body and at file scope between bodies;
+  linkage; strings and `__func__`, string initializers' indices, statement
+  expressions, VLAs, varargs, a predefined type first made in a body, asm
+  statements, cached constants and `_Generic`, compound literals and statics;
+  recursion and forward calls, labels; unions made transparent in a body and
+  at file scope between bodies; naked functions' bodies, among others' and
+  with what a naked body refuses; loop hints, and those clang refuses;
   tags first named in a prototype's parameter, a sizeof in an array's bound
   and a definition's parameter, and one declared before its prototype; a
   definition's parameter-list tag used in its body, which merges, and
@@ -269,7 +271,8 @@ passes every checker test.
   underlying type in bodies beside plain enums, structs and unions, read with
   `-std=gnu23`: a fixed one before a plain one and after it, eight bodies of
   them, and a file-scope one shadowed in a body;
-  errors in a body, at the top level, in the syntax and in a later phase; and
+  errors in a body, at the top level, in the syntax and in a later phase, and
+  warnings inside nested selections in three bodies; and
   400 bodies that call each other. Mutants that skip a lane's withdrawals
   when it moves back, or its restores when it moves on, fail 12 and 9 checks;
   one without the restores' check of the history's declarations fails the
