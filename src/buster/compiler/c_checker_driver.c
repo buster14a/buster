@@ -194,34 +194,44 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
     }
     if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
     {
-        // Repair may replace a real, completed body's final brace with a synthetic one. Its original tree still
-        // proves that body's lookahead; only genuinely unfinished bodies need the repaired TU-end boundary.
-        const uint32_t original_end = original != parser ? check_diagnostic_parse_end(original) : 0;
-        for (uint32_t parent = token, steps = 0; original != parser && parent < original->tokens.count && steps < original->tokens.count; steps += 1)
+        const uint32_t expression = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        const bool eager = warning == CHECK_WARNING_INTEGER_OVERFLOW && expression < input->graph.count && input->graph.source_positions != NULL &&
+                           input->graph.source_positions[expression] <= parser->tokens.count;
+        if (eager)
         {
-            if (original->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY && original->tokens.kinds[parent] == PARSE_KIND_R_BRACE && parent + 1u < original_end)
-            {
-                boundary = parent + 1u;
-                publication_parser = original;
-                break;
-            }
-            parent = original->tree.parents[parent];
+            boundary = input->graph.source_positions[expression];
         }
-        if (publication_parser == parser)
+        else
         {
-            const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-            if (node < input->graph.count && input->graph.source_positions != NULL)
+            // Repair may replace a real, completed body's final brace with a synthetic one. Its original tree still
+            // proves that body's lookahead; only genuinely unfinished bodies need the repaired TU-end boundary.
+            const uint32_t original_end = original != parser ? check_diagnostic_parse_end(original) : 0;
+            for (uint32_t parent = token, steps = 0; original != parser && parent < original->tokens.count && steps < original->tokens.count; steps += 1)
             {
-                boundary = input->graph.source_positions[node];
-            }
-            for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
-            {
-                if (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY)
+                if (original->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY && original->tokens.kinds[parent] == PARSE_KIND_R_BRACE && parent + 1u < original_end)
                 {
-                    boundary = repair != NULL && parent >= repair->original_end ? parser->tokens.count + 1u : parent + 1u;
+                    boundary = parent + 1u;
+                    publication_parser = original;
                     break;
                 }
-                parent = parser->tree.parents[parent];
+                parent = original->tree.parents[parent];
+            }
+            if (publication_parser == parser)
+            {
+                const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+                if (node < input->graph.count && input->graph.source_positions != NULL)
+                {
+                    boundary = input->graph.source_positions[node];
+                }
+                for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+                {
+                    if (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY)
+                    {
+                        boundary = repair != NULL && parent >= repair->original_end ? parser->tokens.count + 1u : parent + 1u;
+                        break;
+                    }
+                    parent = parser->tree.parents[parent];
+                }
             }
         }
     }
@@ -240,8 +250,8 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
                                                                            CHECK_WARNING_UNKNOWN_PRAGMA, false);
         if (severity != CHECK_WARNING_IGNORE)
         {
-            const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+            const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                           severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
             pp_diagnose_output(pp, pp_severity, check_diagnostic_pragma_source(record), "%s", check_diagnostic_message(CHECK_WARNING_UNKNOWN_PRAGMA));
         }
     }
@@ -253,8 +263,8 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     const CheckWarningSeverity severity = check_diagnostic_severity(input, member->token, CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER);
     if (severity != CHECK_WARNING_IGNORE)
     {
-        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         pp_diagnose_output(pp, pp_severity, parser->tokens.sources[member->token],
                            "taking address of packed member '%.*s' of class or structure '%.*s' may result in an unaligned pointer value",
                            (int)member->member_name.length, member->member_name.pointer,
@@ -262,18 +272,20 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     }
 }
 
-static void check_driver_visibility_report(Preprocessor* pp, const CheckInput* input, const CheckInputVisibilityPragma* record, bool quiet)
+static void check_driver_visibility_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckInputVisibilityPragma* record, bool quiet)
 {
     const uint32_t flag = record->warning == 2 ? CHECK_WARNING_IGNORED_ATTRIBUTES : CHECK_WARNING_VISIBILITY_PRAGMA;
     const CheckWarningSeverity severity = record->error ? CHECK_WARNING_ERROR :
         check_diagnostic_severity_at(input, record->token, record->source, flag, false);
     if ((record->error || record->warning != 0) && severity != CHECK_WARNING_IGNORE && (!quiet || record->error))
     {
-        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        const PPSeverity pp_severity = record->error ? PP_SEVERITY_ERROR : severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        const uint32_t publication = record->warning == 1 && !record->error ? record->source :
+                                     check_driver_publication_position(parser, pp, record->token, pp->output.count);
         if (record->warning == 2)
         {
-            pp_diagnose_output(pp, pp_severity, record->diagnostic_source, "unknown visibility '%.*s' [%s-Wignored-attributes]",
+            pp_diagnose_output_at(pp, pp_severity, record->diagnostic_source, publication, "unknown visibility '%.*s' [%s-Wignored-attributes]",
                                (int)record->name.length, record->name.pointer, severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
         }
         else
@@ -288,37 +300,60 @@ static void check_driver_visibility_report(Preprocessor* pp, const CheckInput* i
             }
             if (record->diagnostic_location != 0)
             {
+                const uint32_t saved_position = pp->diagnostic_position;
+                pp->diagnostic_position = publication;
                 pp_diagnose(pp, pp_severity, record->diagnostic_location, "%s", message);
+                pp->diagnostic_position = saved_position;
             }
             else
             {
-                pp_diagnose_output(pp, pp_severity, record->diagnostic_source, "%s", message);
+                pp_diagnose_output_at(pp, pp_severity, record->diagnostic_source, publication, "%s", message);
             }
         }
     }
 }
 
-static void check_driver_return_reports(const Parser* parser, Preprocessor* pp, const CheckProgram* program, CheckWarningSeverity baseline, bool quiet)
+static void check_driver_return_reports(const Parser* parser, const Parser* original, Preprocessor* pp, const CheckProgram* program, CheckWarningSeverity baseline, bool quiet)
 {
+    uint64_t first_error = UINT64_MAX;
+    for (const PPDiagnosticRecord* record = pp->diagnostic_first; !quiet && record != NULL && pp->errors != 0; record = record->next)
+    {
+        if (record->severity == PP_SEVERITY_ERROR || record->severity == PP_SEVERITY_FATAL)
+        {
+            first_error = record->position < first_error ? record->position : first_error;
+        }
+    }
+    for (uint32_t i = 0; !quiet && i < original->diagnostic_count; i += 1)
+    {
+        const ParseDiagnostic* diagnostic = original->diagnostics + i;
+        if (diagnostic->error)
+        {
+            const uint32_t source = diagnostic->token < original->tokens.count ? original->tokens.sources[diagnostic->token] : pp->output.count;
+            const uint64_t position = (uint64_t)source * 2 + 1u;
+            first_error = position < first_error ? position : first_error;
+        }
+    }
     for (uint32_t b = 0; !quiet && !pp->fatal && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
         const uint32_t token = parser->tree.parents[body->opening];
-        if (body->return_warning != 0 && token < parser->tokens.count && !check_graph_system_token(&program->input->graph, token))
+        const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
+        if (body->return_warning != 0 && token < parser->tokens.count && (uint64_t)publication * 2 + 1u < first_error &&
+            (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)))
         {
             const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
             if (severity != CHECK_WARNING_IGNORE)
             {
-                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "non-void function does not return a value%s [-Wreturn-type]",
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "non-void function does not return a value%s [-Wreturn-type]",
                                    body->return_warning == 2 ? " in all control paths" : "");
             }
         }
     }
 }
 
-static void check_driver_remaining_pragmas(Preprocessor* pp, const CheckInput* input, uint32_t* fp, uint32_t* visibility, bool quiet)
+static void check_driver_remaining_pragmas(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t* fp, uint32_t* visibility, bool quiet)
 {
     const CheckInputVisibilityPragmas* history = input->visibility_pragmas;
     const uint32_t count = history != NULL ? history->count : 0;
@@ -333,7 +368,7 @@ static void check_driver_remaining_pragmas(Preprocessor* pp, const CheckInput* i
         }
         else
         {
-            check_driver_visibility_report(pp, input, history->records + *visibility, quiet);
+            check_driver_visibility_report(parser, pp, input, history->records + *visibility, quiet);
             *visibility += 1;
         }
     }
@@ -371,8 +406,8 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
                 {
                     *--text = '-';
                 }
-                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                 pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token],
                                    "argument value %s is outside the valid range [%u, %u]", text, event->low, event->high);
             }
@@ -590,7 +625,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 {
                     if (retained)
                     {
-                        check_driver_visibility_report(pp, pragma_input, visibility_history->records + visibility, quiet);
+                        check_driver_visibility_report(original, pp, pragma_input, visibility_history->records + visibility, quiet);
                     }
                     visibility += 1;
                 }
@@ -606,8 +641,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning_flag, ignored);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
-                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                     const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag, publication_end, original);
                     pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "%s", check_diagnostic_message(warning_flag));
                 }
@@ -633,8 +668,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
-                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
+                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     if (input->implicit_function_c99)
@@ -691,7 +726,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         // source spelling and warning policy are independent of that expression and precede the parser failure.
         if (original_pragmas != NULL)
         {
-            check_driver_remaining_pragmas(pp, pragma_input, &pragma, &visibility, quiet);
+            check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
         }
     }
     arena_pop_to(scratch, mark);
@@ -1824,8 +1859,16 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         const bool program_diagnostics = result == 0 ||
                             (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp.errors != 0 &&
                              !pp.diagnostic_collection_failed && !pp.history_failed);
+                        CheckInput diagnostic_input;
+                        const CheckInput* program_input = &input;
+                        if (program_diagnostics && result != 0 && input.visibility_error)
+                        {
+                            diagnostic_input = input;
+                            diagnostic_input.visibility_error = false;
+                            program_input = &diagnostic_input;
+                        }
                         const bool program_checked = program_diagnostics &&
-                            check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch);
+                            check_program(&program, checking, program_input, &stream, &types, program_options, &output_arena, &scratch);
                         if (program_diagnostics && !program_checked)
                         {
                             const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
@@ -1833,13 +1876,13 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             check_driver_diagnose(checking, &pp, program.token, message);
                             result = 1;
                         }
-                        if (result == 0)
+                        check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
+                        if (program_checked)
                         {
                             const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                                 return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
-                            check_driver_return_reports(checking, &pp, &program, baseline, quiet);
+                            check_driver_return_reports(checking, &parser, &pp, &program, baseline, quiet);
                         }
-                        check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
                         result = pp.errors != 0 ? 1 : result;
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                         if (result == 0 && emit_object && !prefix_only)
@@ -1905,7 +1948,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                 {
                     uint32_t fp = 0;
                     uint32_t visibility = 0;
-                    check_driver_remaining_pragmas(&pp, &original_pragmas, &fp, &visibility, quiet);
+                    check_driver_remaining_pragmas(&parser, &pp, &original_pragmas, &fp, &visibility, quiet);
                 }
                 if (!pp.fatal)
                 {

@@ -823,6 +823,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
 {
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
+    const PPSeverity requested = severity;
     const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
     bool limited = false;
     const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
@@ -837,7 +838,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
         }
         else
         {
@@ -854,6 +855,7 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     const uint32_t origin = pp_history_at(pp, token);
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
+    const PPSeverity requested = severity;
     const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, origin);
     bool limited = false;
     const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
@@ -865,7 +867,7 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2 + 1u, token < pp->output.count ? pp->output.locations[token] : 0,
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 2 + 1u, token < pp->output.count ? pp->output.locations[token] : 0,
                                   pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
         }
         else

@@ -1571,6 +1571,9 @@ typedef enum PPSeverity
     PP_SEVERITY_NOTE,
     // #warning's diagnostic is explicitly visible in system headers, unlike ordinary preprocessing warnings.
     PP_SEVERITY_WARNING_ALWAYS,
+    // Warning policy can promote a group without making it a genuine error for analysis-based warnings.
+    PP_SEVERITY_MAPPED_ERROR,
+    PP_SEVERITY_MAPPED_FATAL,
 } PPSeverity;
 
 typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
@@ -1602,6 +1605,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Pre
 // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
 static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
 {
+    *severity = *severity == PP_SEVERITY_MAPPED_ERROR ? PP_SEVERITY_ERROR :
+                *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
     const bool accepted = !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
     *limited = accepted && !pp->options.collect_diagnostics && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
     if (accepted)
@@ -1643,6 +1648,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 {
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
+    const PPSeverity requested = severity;
     const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
     bool limited = false;
     const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
@@ -1657,7 +1663,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
         }
         else
         {
