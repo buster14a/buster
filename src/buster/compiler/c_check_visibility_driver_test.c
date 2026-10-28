@@ -54,9 +54,11 @@ static bool check_test_visibility_symbol(const char* path, const char* name, uin
 
 static void check_test_driver_visibility(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char source[] = "int outside=1;\n#pragma GCC visibility push(hidden)\n"
-        "int hidden=2;extern int external_hidden;_Thread_local int tls_hidden;static int local=3;"
+    static const char source[] = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+        "int outside=1;\n#pragma GCC visibility push(hidden)\n"
+        "int hidden=2;extern int external_hidden;_Thread_local int tls_hidden;extern _Thread_local int external_tls;static int local=3;"
         "int prior(void);int explicit_default __attribute__((visibility(\"default\")))=4;\n"
+        "int implicit_caller(void){return missing_function(1)+external_tls;}\n"
         "#pragma GCC visibility push(protected)\nint protected_value=5;\n#pragma GCC visibility pop\n"
         "int hidden_again=6;\n#pragma GCC visibility push(bad)\nint ignored_bad=9;\n#pragma GCC visibility pop\nint restored=7;"
         "int prior(void){return outside+hidden+external_hidden+local+protected_value+hidden_again+restored+tls_hidden;}\n"
@@ -73,6 +75,9 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         { "hidden", STV_HIDDEN, STB_GLOBAL },
         { "external_hidden", STV_HIDDEN, STB_GLOBAL },
         { "tls_hidden", STV_HIDDEN, STB_GLOBAL },
+        { "external_tls", STV_HIDDEN, STB_GLOBAL },
+        { "implicit_caller", STV_HIDDEN, STB_GLOBAL },
+        { "missing_function", STV_HIDDEN, STB_GLOBAL },
         { "local", STV_DEFAULT, STB_LOCAL },
         { "prior", STV_HIDDEN, STB_GLOBAL },
         { "explicit_default", STV_DEFAULT, STB_GLOBAL },
