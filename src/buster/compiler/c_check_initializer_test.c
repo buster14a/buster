@@ -1505,6 +1505,60 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
         },
     };
     check_init_test_source(test, padding_source, padding_expected, BUSTER_ARRAY_LENGTH(padding_expected), true, true, clang);
+    static const char bit_field_source[] =
+        "struct __attribute__((packed)) W{unsigned char a:3;unsigned __int128 b:128;unsigned char c:5;};\n"
+        "struct W wide={5,(unsigned __int128)-1,19};\n"
+        "struct W overwritten={.a=5,.b=(unsigned __int128)-1,.c=19,.b=3};\n"
+        "struct W cleared={.a=5,.b=(unsigned __int128)-1,.c=19,.b={}};\n"
+        "extern int target;union U{int*p;struct W w;} switched={.p=&target,.w={5,3,19}};\n"
+        "struct A{unsigned long bits:31;} absolute={(unsigned long)(void*)0x1234};\n";
+    CheckInitExpected bit_field_expected[] = {
+        {
+            .name = "wide",
+            .size = 17,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "overwritten",
+            .bytes = {
+                [0] = 0x1d,
+                [16] = 0x98,
+            },
+            .size = 17,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "cleared",
+            .bytes = {
+                [0] = 5,
+                [16] = 0x98,
+            },
+            .size = 17,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "switched",
+            .bytes = {
+                [0] = 0x1d,
+                [16] = 0x98,
+            },
+            .size = 24,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+        {
+            .name = "absolute",
+            .bytes = {
+                0x34,
+                0x12,
+            },
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
+    };
+    memset(bit_field_expected[0].bytes, 0xff, 17);
+    bit_field_expected[0].bytes[0] = 0xfd;
+    bit_field_expected[0].bytes[16] = 0x9f;
+    check_init_test_source(test, bit_field_source, bit_field_expected, BUSTER_ARRAY_LENGTH(bit_field_expected), true, true, clang);
     static const char compound_source[] =
         "struct Pair{int x,y;};struct Pair plain=(struct Pair){3,4};struct Pair paren=((struct Pair){5,6});\n"
         "struct Wrap{int a;struct Pair p;} wrapped={1,(struct Pair){2,3}};struct Pair *address=&(struct Pair){7,8};\n"

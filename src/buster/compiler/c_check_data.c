@@ -522,6 +522,57 @@ static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, co
     return status;
 }
 
+// The caller has checked the exact destination extent. Only the boundary bytes need a read/modify/write;
+// interior bytes are replaced once. Values have at most 128 bits, but a clear can cover a larger range.
+// Shifts consume at most eight bits at a time, including for a full-width value and a 17-byte packed field.
+static void check_data_bit_field_value(uint8_t* bytes, uint32_t shift, uint32_t width, unsigned __int128 value)
+{
+    if (shift != 0 && width != 0)
+    {
+        const uint32_t first = width < 8 - shift ? width : 8 - shift;
+        const uint8_t mask = (uint8_t)(((1u << first) - 1) << shift);
+        *bytes = (uint8_t)((*bytes & ~mask) | (((uint8_t)value << shift) & mask));
+        bytes += 1;
+        value >>= first;
+        width -= first;
+    }
+    for (; width >= 8; width -= 8)
+    {
+        *bytes = (uint8_t)value;
+        bytes += 1;
+        value >>= 8;
+    }
+    if (width != 0)
+    {
+        const uint8_t mask = (uint8_t)((1u << width) - 1);
+        *bytes = (uint8_t)((*bytes & ~mask) | ((uint8_t)value & mask));
+    }
+}
+
+static void check_data_bit_field_clear(uint8_t* bytes, uint32_t shift, uint32_t width)
+{
+    if (shift != 0 && width != 0)
+    {
+        const uint32_t first = width < 8 - shift ? width : 8 - shift;
+        const uint8_t mask = (uint8_t)(((1u << first) - 1) << shift);
+        *bytes &= (uint8_t)~mask;
+        bytes += 1;
+        width -= first;
+    }
+    const uint32_t whole = width / 8;
+    if (whole != 0)
+    {
+        memset(bytes, 0, whole);
+        bytes += whole;
+    }
+    const uint32_t tail = width % 8;
+    if (tail != 0)
+    {
+        *bytes &= (uint8_t)(0xffu << tail);
+    }
+
+}
+
 static CheckDataStatus check_data_plan_object(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
                                              const SymbolId* object_symbols, uint32_t object_count, const Link* link,
                                              Arena* bytes, Arena* scratch, CheckDataPlan* plan)
@@ -712,6 +763,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             else if (part->kind == CHECK_INIT_BYTES && size != 0)
             {
                 part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
+
             }
         }
         else if (part->kind == CHECK_INIT_VALUE)
@@ -739,6 +791,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                 {
                     status = CHECK_DATA_INVALID;
                 }
+
             }
             if (status == CHECK_DATA_OK)
             {
@@ -806,12 +859,18 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             const uint64_t size = part->kind == CHECK_INIT_VALUE ? type_size(types, part->type) : part->byte_count;
             if (part->bit_width != 0)
             {
-                for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
+                const uint32_t shift = (uint32_t)(part->bit_offset % 8);
+                if (part->kind == CHECK_INIT_CLEAR)
                 {
-                    const uint64_t destination = part->bit_offset + bit;
-                    const uint8_t mask = (uint8_t)(1u << (destination % 8));
-                    const bool value_bit = part->kind == CHECK_INIT_VALUE && ((values[(uint64_t)i * value_stride + bit / 8] >> (bit % 8)) & 1) != 0;
-                    plan->bytes[destination / 8] = (uint8_t)((plan->bytes[destination / 8] & ~mask) | (value_bit ? mask : 0));
+                    check_data_bit_field_clear(plan->bytes + offset, shift, part->bit_width);
+                }
+                else
+                {
+                    // Compact scalar slots can be shorter than 128 bits. Read only this field's meaningful
+                    // bytes and zero-extend them before the bounded writer; absolute address bits stay encoded.
+                    unsigned __int128 bits = 0;
+                    memcpy(&bits, values + (uint64_t)i * value_stride, (part->bit_width + 7) / 8);
+                    check_data_bit_field_value(plan->bytes + offset, shift, part->bit_width, bits);
                 }
             }
             else if (size != 0 && part->kind == CHECK_INIT_CLEAR)

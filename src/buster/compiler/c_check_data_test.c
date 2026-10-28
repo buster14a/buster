@@ -1929,6 +1929,7 @@ static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
         check_data_test_close(&fixture);
     }
 }
+#include "c_check_data_bit_field_test.c"
 
 static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
@@ -1938,6 +1939,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_aggregate_transaction(test, types);
     check_data_test_many_fixups(test, types);
     check_data_test_address_bit_fields(test, types);
+    check_data_test_bit_fields(test, types);
     check_data_test_complex(test, types);
     check_data_test_limits(test, types);
     check_data_test_floating(test);
