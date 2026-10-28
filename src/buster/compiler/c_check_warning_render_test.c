@@ -74,6 +74,13 @@ static void check_test_warning_render(CheckTest* test)
             check_test_expect(test, !pp.options.collect_diagnostics || mode == 2 ||
                                    (pp.diagnostic_last != NULL && pp.diagnostic_last->severity == PP_SEVERITY_MAPPED_ERROR),
                               "a promoted sparse warning retains warning-origin class for later body analysis");
+            if (mode != 1 && mode != 2)
+            {
+                const PPDiagnosticRecord* mapped = pp.diagnostic_last;
+                check_test_expect(test, mapped != NULL && mapped->severity == PP_SEVERITY_MAPPED_ERROR &&
+                                       mapped->position == ((uint64_t)(pp.output.count + 1u) << 2 | PP_DIAGNOSTIC_SEMANTIC),
+                                  "a promoted sparse warning retains its mapped class and raw completion becomes the semantic phase once");
+            }
             pp_diagnostic_publish(&pp);
             fflush(output);
             const char* diagnostic = text != NULL ? strstr(text, "error: expression which evaluates to zero treated as a null pointer constant of type 'int *' [-Werror,-Wnon-literal-null-conversion]") : NULL;

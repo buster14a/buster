@@ -850,7 +850,10 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
-            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                 ? BUSTER_TIER0_ACCESS_GOT
+                                 : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
