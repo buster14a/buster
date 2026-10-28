@@ -1946,6 +1946,8 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     bool valid = true;
     if (placements != 0 || code->asm_atom_count != 0)
     {
+        uint32_t refused = BUSTER_CHECK_NONE;
+        const char* reason = NULL;
         ObjectAtomSection* descriptors = BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, link->atoms.count);
         valid = descriptors != 0;
         code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
@@ -1993,11 +1995,12 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             };
             if (atom != 0 && !fits)
             {
-                code->status = CHECK_PROGRAM_UNSUPPORTED;
-                code->reason = typed ? "a section of a name ELF gives another type (a note, an init or fini array)" :
-                                       "a definition in a section whose name gives it another kind";
-                code->token = placement->token;
-                valid = false;
+                // The placements are in source order but for the unit's end's tentative definitions, after the rest:
+                // the refusal is the earliest's.
+                refused = placement->token < refused ? placement->token : refused;
+                reason = placement->token == refused ? (typed ? "a section of a name ELF gives another type (a note, an init or fini array)" :
+                                                                "a definition in a section whose name gives it another kind") :
+                                                       reason;
             }
             else if (atom != 0)
             {
@@ -2020,6 +2023,13 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 }
                 descriptors[atom] = descriptor;
             }
+        }
+        if (valid && refused != BUSTER_CHECK_NONE)
+        {
+            code->status = CHECK_PROGRAM_UNSUPPORTED;
+            code->reason = reason;
+            code->token = refused;
+            valid = false;
         }
     }
     return valid;

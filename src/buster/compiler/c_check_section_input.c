@@ -113,7 +113,8 @@ struct CheckInputSections
     // emits.
     uint32_t* definitions;
     uint32_t definition_count;
-    // The definitions in named sections, their names' tokens ascending: the emission puts each it emits in its section.
+    // The definitions in named sections, by their names' tokens: the walk's in source order, then the unit's end's
+    // tentative definitions. The emission puts each it emits in its section.
     CheckInputSectionPlacement* placements;
     uint32_t placement_count;
 };
@@ -681,28 +682,9 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                     };
                 }
             }
-            // The walk's events are in source order, but for the unit's end's tentative definitions; keep the tokens
-            // ascending anyway: the emission refuses the first variable it emits that a setting places.
-            for (uint32_t i = 1; i < count; i += 1)
-            {
-                const uint32_t token = placed[i];
-                uint32_t j = i;
-                for (; j > 0 && placed[j - 1] > token; j -= 1)
-                {
-                    placed[j] = placed[j - 1];
-                }
-                placed[j] = token;
-            }
-            for (uint32_t i = 1; i < placement_count; i += 1)
-            {
-                const CheckInputSectionPlacement placement = placements[i];
-                uint32_t j = i;
-                for (; j > 0 && placements[j - 1].token > placement.token; j -= 1)
-                {
-                    placements[j] = placements[j - 1];
-                }
-                placements[j] = placement;
-            }
+            // The refusal candidates are the walk's, in source order, so ascending: the emission refuses the first it
+            // emits. The placements are too, but for the unit's end's tentative definitions after them, whose refusals
+            // check_program_sections orders itself.
             sections->definitions = placed;
             sections->definition_count = count;
             sections->placements = placements;
