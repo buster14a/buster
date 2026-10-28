@@ -3,19 +3,57 @@ on:
   push:
     branches: [chatgpt/issue-659-work]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: issue-659-isolated-work
+  cancel-in-progress: true
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - name: Archive the checked-out source
-        run: git archive --format=tar.gz -o "$RUNNER_TEMP/buster-source.tar.gz" HEAD
+          fetch-depth: 0
+      - name: Apply checked patch to clean source base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/issue-659.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/issue-659.patch"
+          printf '9740f427347e4fd0d4f9ad327ecd778e5d9b9ffec992bc6f574d34c6425eb0bf  %s\n' "$RUNNER_TEMP/issue-659.patch" | sha256sum -c
+          git switch --detach 1282643d4b125113d7b658dbd1a4079f08056390
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-659.patch"
+          git diff --check
+          git switch -c chatgpt/issue-659-kr-completion
+          git add src/buster/compiler
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(checker): support promoted K&R parameters and non-prototype calls (#659)'
+          git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
+          git show --stat --oneline HEAD
+      - name: Install official Clang 23.1.4 and test tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-659-build.log"
+      - name: Validate checker and driver
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue-659-checker.log" || status=1
+          build/compiler test-checker-driver --executable build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-659-driver.log" || status=1
+          exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-659-source
-          path: ${{ runner.temp }}/buster-source.tar.gz
-          retention-days: 1
+          name: issue-659-validation
+          path: |
+            ${{ runner.temp }}/issue-659-*.log
+            ${{ runner.temp }}/issue-659.patch
+            build/compiler
+          retention-days: 7
