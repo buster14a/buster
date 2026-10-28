@@ -2046,9 +2046,10 @@ static void check_test_program_many_arguments(CheckTest* test, const char* clang
                 fprintf(text, "%sa%u*%u", a != 0 ? "+" : "", a, a + 1);
             }
             fprintf(text, ";}int tested(int n){");
-            if (counts[c] <= 127)
+            if (counts[c] <= 238)
             {
-                fprintf(text, "__typeof__(many)*volatile p=many;return (int)((many(");
+                // Keep the direct result in a local: holding it on the value stack would exhaust the indirect limit.
+                fprintf(text, "__typeof__(many)*volatile p=many;long direct=many(");
             }
             else
             {
@@ -2065,14 +2066,21 @@ static void check_test_program_many_arguments(CheckTest* test, const char* clang
                     fprintf(text, "%s(long)n", a != 0 ? "," : "");
                 }
             }
-            if (counts[c] <= 127)
+            if (counts[c] <= 238)
             {
-                fprintf(text, ")+p(");
+                fprintf(text, ");long indirect=p(");
                 for (uint32_t a = 0; a < counts[c]; a += 1)
                 {
-                    fprintf(text, "%s(long)n-%u", a != 0 ? "," : "", a);
+                    if (counts[c] <= 127)
+                    {
+                        fprintf(text, "%s(long)n-%u", a != 0 ? "," : "", a);
+                    }
+                    else
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
                 }
-                fprintf(text, "))%%1000003);}");
+                fprintf(text, ");return (int)((direct+indirect)%%1000003);}");
             }
             else
             {
