@@ -6,7 +6,7 @@
 // its initializer. Structural preparation emits no future binding events; the source pass executes each bound
 // job at its actual opener. The token scan skips expression groups and uses no recursive descent.
 
-static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment)
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
@@ -70,6 +70,15 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
         }
         else
         {
+            uint32_t embed_length = 0;
+            const uint8_t* embed = parse_embed_bytes(parser, token, &embed_length);
+            if (embed != NULL && token > begin && token + 1 < end &&
+                (parser->tokens.kinds[token - 1] == PARSE_KIND_L_BRACE || parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA ||
+                 parser->tokens.kinds[token - 1] == PARSE_KIND_EQUAL) &&
+                (parser->tokens.kinds[token + 1] == PARSE_KIND_COMMA || parser->tokens.kinds[token + 1] == PARSE_KIND_R_BRACE))
+            {
+                reader->initializers[token] = 3;
+            }
             item = false;
             if (kind == PARSE_KIND_STRING)
             {
@@ -99,6 +108,13 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
+    return valid;
+}
+
+static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+{
+    const bool compact = check_input_literal_table_prepare(reader, assignment);
+    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
     return valid;
 }
 
@@ -173,6 +189,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             if (reader->linkage[declaration] != 0)
             {
                 reader->linked_types[name] = type;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
             }
         }
     }

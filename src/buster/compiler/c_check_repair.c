@@ -250,7 +250,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
     if (repair->status == CHECK_REPAIR_READY)
     {
         repair->preprocessor = do_count != 0 ? check_repair_preprocessor(pp, output) : pp;
-        *view = (Parser){ .options = original->options, .language = original->language };
+        *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = repair->preprocessor };
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
         view->tokens.count = total;
         view->tokens.capacity = total;
@@ -516,8 +516,7 @@ static bool check_repair_graph_report(const CheckRepair* repair, const CheckGrap
                 case CHECK_FAULT_SIGNED_OVERFLOW:
                 case CHECK_FAULT_DIVIDE_BY_ZERO:
                 case CHECK_FAULT_SHIFT_COUNT:
-                case CHECK_FAULT_SHIFT_VALUE:
-                case CHECK_FAULT_FLOAT_RANGE: result = true; break;
+                case CHECK_FAULT_SHIFT_VALUE: result = true; break;
                 default: break;
             }
         }

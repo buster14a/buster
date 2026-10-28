@@ -68,9 +68,16 @@ static void check_test_warning_render(CheckTest* test)
             const CheckWarningEvents view = check_warning_view(&facts);
             const uint64_t mark = scratch.length;
             const bool promoted = check_driver_warning_promoted(&pp, &input, &view, NULL);
-            ready = ready && check_driver_warning_events(&parser, &pp, &input, &types.table, &view, NULL, &scratch);
+            ready = ready && check_driver_warning_events(&parser, &pp, pp.output.count, &input, &types.table, &view, NULL, &scratch);
             check_test_expect(test, ready && scratch.length == mark && promoted == (mode != 2),
                               "source mappings and -w govern promotion while sparse rendering releases temporary storage");
+            if (mode != 1 && mode != 2)
+            {
+                const PPDiagnosticRecord* mapped = pp.diagnostic_last;
+                check_test_expect(test, mapped != NULL && mapped->severity == PP_SEVERITY_MAPPED_ERROR &&
+                                       mapped->position == ((uint64_t)(pp.output.count + 1u) << 2 | PP_DIAGNOSTIC_SEMANTIC),
+                                  "a promoted sparse warning retains its mapped class and raw completion becomes the semantic phase once");
+            }
             pp_diagnostic_publish(&pp);
             fflush(output);
             const char* diagnostic = text != NULL ? strstr(text, "error: expression which evaluates to zero treated as a null pointer constant of type 'int *' [-Werror,-Wnon-literal-null-conversion]") : NULL;
@@ -90,7 +97,7 @@ static void check_test_warning_render(CheckTest* test)
             const CheckWarningEvents suppressed_view = check_warning_view(&suppressed_facts);
             check_test_expect(test, suppressed_ready && check_driver_warning_severity(&pp, &input, &suppressed) == CHECK_WARNING_IGNORE &&
                                    !check_driver_warning_promoted(&pp, &input, &suppressed_view, NULL) &&
-                                   check_driver_warning_events(&parser, &pp, &input, &types.table, &suppressed_view, NULL, &scratch) && pp.errors == before_errors,
+                                   check_driver_warning_events(&parser, &pp, pp.output.count, &input, &types.table, &suppressed_view, NULL, &scratch) && pp.errors == before_errors,
                               "semantic suppression survives a source error mapping without reviving its primary or attached note");
             if (mode == 3)
             {
@@ -113,7 +120,7 @@ static void check_test_warning_render(CheckTest* test)
                 simple.note_count = 0;
                 const CheckWarningEvents one = { .events = &simple, .count = 1 };
                 const uint32_t errors = pp.errors;
-                check_test_expect(test, !check_driver_warning_events(&parser, &pp, &input, &types.table, &one, NULL, &limited) &&
+                check_test_expect(test, !check_driver_warning_events(&parser, &pp, pp.output.count, &input, &types.table, &one, NULL, &limited) &&
                                        limited.length == scratch.length && pp.errors == errors,
                                   "renderer allocation failure publishes no partial primary and releases all temporary text");
             }

@@ -182,6 +182,8 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
+    bool keyword;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
@@ -833,6 +835,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 }
             }
             attributes->packed |= attribute.kind == CHECK_ATTRIBUTE_PACKED;
+            // The walk's section events start at the first section attribute (CheckInputReader.section_record_from).
+            reader->section_record_from = attribute.kind == CHECK_ATTRIBUTE_SECTION && attribute.first < reader->section_record_from ? attribute.first :
+                                          reader->section_record_from;
             const uint32_t index = attributes->count;
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
             if (valid && attribute.kind == CHECK_ATTRIBUTE_ALIGNED && attribute.argument_count == 0)
@@ -907,6 +912,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                         kind == PARSE_KIND_CALLING_CONVENTION ? CHECK_ATTRIBUTE_CALLING_CONVENTION : name == C_NAME_NORETURN ? CHECK_ATTRIBUTE_NORETURN : CHECK_ATTRIBUTE_NULLABILITY,
                 .schema = kind == PARSE_KIND_ALIGNAS ? CHECK_ATTRIBUTE_INTEGER : kind == PARSE_KIND_ASM ? CHECK_ATTRIBUTE_STRING : CHECK_ATTRIBUTE_NO_ARGUMENTS,
                 .resolved = kind != PARSE_KIND_ALIGNAS,
+                .keyword = true,
             };
             i += 1;
             if (kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ASM)

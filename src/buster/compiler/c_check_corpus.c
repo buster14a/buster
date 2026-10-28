@@ -833,6 +833,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .asms = &path->asms,
             .identifiers = pp->table,
             .scalar = BUSTER_SCALAR_PATH(scalar),
+            .target_features = pp->options.target.features,
         };
         path->programmed = check_program(&path->program, view, &path->input, &path->stream, &path->types, options,
                                          &path->output_arena, &path->scratch);
@@ -1189,6 +1190,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         .identifiers = pp->table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
+        .target_features = pp->options.target.features,
     };
     valid = valid && check_program(&program, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&selected, &program, &data, false, &path->output_arena, &path->scratch);
@@ -1200,9 +1202,13 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
             check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
                                                      &path->scratch, NULL, NULL, true, true);
-    const bool published = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
-                                                         selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
-    const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !published && emission.status == CHECK_DATA_UNSUPPORTED));
+    const bool emitted = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
+                                                       selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
+    // The definitions' named sections, as -c places them (#619).
+    ObjectAtomSection* sections = 0;
+    const bool published = emitted && check_program_sections(&code, &selected.program, &bytes, &output, &sections);
+    const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !emitted && emission.status == CHECK_DATA_UNSUPPORTED) ||
+                                       (emitted && !published && code.status == CHECK_PROGRAM_UNSUPPORTED));
     char ours_path[PATH_MAX];
     char theirs_path[PATH_MAX];
     snprintf(ours_path, sizeof(ours_path), "%s/symbols-ours.o", symbols->directory);
@@ -1212,7 +1218,8 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     char report[1024] = { 0 };
     uint64_t written_report = 0;
     const char* failure = !valid ? "the checked program couldn't be selected" : !lowered && !unsupported ? "the backend failed" :
-                          lowered && !published && !unsupported ? "its static data couldn't be published" : NULL;
+                          lowered && !emitted && !unsupported ? "its static data couldn't be published" :
+                          emitted && !published && !unsupported ? "its sections couldn't be placed" : NULL;
     if (published)
     {
         ObjectUnits units = { 0 };
@@ -1221,7 +1228,11 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
                        object_map_symbols(&object_symbols, &code.link, &path->scratch);
         if (written)
         {
-            const Object object = object_build(&code.link, &units, &object_symbols, 0, (ObjectOptions){ 0 }, (String8){ .pointer = (char*)file, .length = strlen(file) },
+            const ObjectOptions object_options = {
+                .atom_sections = sections,
+                .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
+            };
+            const Object object = object_build(&code.link, &units, &object_symbols, 0, object_options, (String8){ .pointer = (char*)file, .length = strlen(file) },
                                                &path->scratch);
             written = object.error == OBJECT_ERROR_NONE && object_write_file(ours_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
         }

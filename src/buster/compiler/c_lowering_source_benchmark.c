@@ -110,12 +110,22 @@ static bool lowering_source_run(LoweringSourceWay* way, const CheckProgram* full
     }
     way->unsupported |= lowered && !valid && emission.status == CHECK_DATA_UNSUPPORTED;
     way->failure = lowered && !valid ? (way->unsupported ? "unsupported: its static data's publication" : "its static data couldn't be published") : way->failure;
+    // The definitions' named sections, as -c places them (#619).
+    ObjectAtomSection* sections = 0;
+    const bool published = valid;
+    valid = valid && check_program_sections(&code, &selected.program, bytes, code_output, &sections);
+    way->unsupported |= published && !valid && code.status == CHECK_PROGRAM_UNSUPPORTED;
+    way->failure = published && !valid ? (way->unsupported ? "unsupported: a definition's section" : "its sections couldn't be placed") : way->failure;
     ObjectUnits units = { 0 };
     ObjectSymbols symbols = { 0 };
     valid = valid && link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) && object_map_symbols(&symbols, &code.link, scratch);
     if (valid)
     {
-        const Object object = object_build(&code.link, &units, &symbols, 0, (ObjectOptions){ 0 }, (String8){ .pointer = (char*)file, .length = strlen(file) }, scratch);
+        const ObjectOptions options = {
+            .atom_sections = sections,
+            .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
+        };
+        const Object object = object_build(&code.link, &units, &symbols, 0, options, (String8){ .pointer = (char*)file, .length = strlen(file) }, scratch);
         valid = object.error == OBJECT_ERROR_NONE;
         way->object_bytes = object.size;
     }
@@ -188,6 +198,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         .identifiers = pp.table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
+        .target_features = pp.options.target.features,
     };
     prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
     if (prepared && fault.stage == LOWERING_SOURCE_STAGE_PREPARE)
