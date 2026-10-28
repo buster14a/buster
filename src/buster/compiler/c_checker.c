@@ -2404,9 +2404,11 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
+#if !BUSTER_HOST_VECTOR
     CheckOptions host_options = *options;
-    host_options.scalar |= !BUSTER_HOST_VECTOR;
+    host_options.scalar = true;
     options = &host_options;
+#endif
     const uint64_t output_start = output->length;
     const uint64_t scratch_start = scratch->length;
     *stream = (CheckStream){
