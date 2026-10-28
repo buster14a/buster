@@ -409,8 +409,9 @@ void check_actions(TypeTable* types, const CheckAction* actions,
                     CheckActionResult* results, uint32_t count);
 ```
 
-The parser must retain its complete tree and postorder; `tree_only` mode is not
-enough. Parser tokens and the preprocessor's interned identifiers remain alive
+The parser must retain its complete tree. The reader derives shared traversal
+metadata when `tree_only` omits the parser's postorder; optional parser size
+metadata is not required. Parser tokens and the preprocessor's interned identifiers remain alive
 while adapting and diagnosing that source. The adapter puts its graph,
 declaration identities and reports in the supplied output arena, and releases
 its temporary scratch allocations before returning. `CheckInput.resource`
@@ -1898,3 +1899,29 @@ Frozen SQLite has a small measured cost in this paired build: syntax checking
 byte-identical objects. The record separates the deep Clang enum oracle's
 limit, focused sanitizer evidence, full checker/driver/deferred suites and
 whole-process measurements. It makes no whole-compiler sanitizer/corpus claim.
+
+### Statement-expression jump-region checks (#657)
+
+The control reader uses its existing postorder intervals when checking
+whether a case, goto or asm-goto enters a GNU statement expression. A unit with
+no statement-expression regions needs no region walk. Otherwise the target's
+ancestors are checked only up to the first subtree containing the source: every
+region above that ancestor also contains the source. A case therefore stops at
+its switch instead of revisiting every enclosing switch. The subtree test uses
+the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
+new token column and does not require the parser's optional size metadata.
+The scalar reader keeps the full ancestor walk as an independent diagnostic
+oracle. Both use the same strict region-boundary rules, including jumps out of
+nested regions and refusals when entering sibling regions.
+
+`test-checker` compares both walks for every pair of tokens in nested and sibling
+regions, including boundaries and absent tokens, on scalar/vector normal and
+tree-only parser schedules with no parser-owned size column. It also checks 65,533 transfers
+in a depth-65,536 chain, with and without an enclosing region, within one CPU
+second, and runs the source-level legality fixtures against Clang. This bound
+checks the repeated-walk regression; it is not a throughput measurement.
+
+The [frozen qualification record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/evidence-657/target)
+retains the exact source/binary identities, stage clocks, every object and all
+outliers. Those timings compare `bc1b4861` with `086c24b1`; they do not measure
+this later integration's whole-compile throughput.
