@@ -768,13 +768,12 @@ is retained.
 The top level, the merge's replay and layouts, and the phases after it are
 sequential, so the lanes shorten only the bodies' walks and the merge's pass,
 which on `sqlite3.c` are about a quarter of one lane's reading. On eight lanes
-the pass is bound by the memory's bandwidth: it reads each of its columns at
-every token, mostly zeros, and the lanes' scans of their shares run at about a
-third of one lane's speed per token, about 50 GB/s in all (on `sqlite3.c`, 0.8
-ms a lane for 88,000 tokens, against 2.1 ms for all 706,237 on one lane). A
-record of where the walk writes each column's entries, such as a bitmap of
-64-token blocks for the sparser columns, would let the pass read those blocks
-alone.
+the pass shares the memory's bandwidth: it reads each of its columns at every
+token, mostly zeros, and the lanes' scans of their shares run at about a third
+of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000
+tokens, against 2.1 ms for all 706,237 on one lane). A record of where the
+walk writes each column's entries, such as a bitmap of 64-token blocks for the
+sparser columns, would let the pass read those blocks alone.
 
 Bodies that do what the merge doesn't take
 (above) send their unit to source order: on the corpora above, only bodies

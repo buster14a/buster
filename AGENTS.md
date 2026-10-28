@@ -4940,7 +4940,10 @@ lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
-opening must be selected.
+opening must be selected. The merge's scans of the token columns
+(`check_deferred_entries` and the others) must give their scalar twins'
+positions and counts on ranges ending at a protected page, and every merged
+fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
