@@ -3968,9 +3968,20 @@ static TypeId check_lower_class_type(uint8_t class)
     return class < BUSTER_ARRAY_LENGTH(types) ? types[class] : 0;
 }
 
+// An integer operand's class in an X86 row: its argument's, but 32 bits for an argument narrower than that (a mask of 8
+// or 16 bits, a char or a short), signed as it is: a row reads an operand's register through its form's field, of 32
+// bits at least (tier0_operation_role_valid), so the narrower value is converted to it first.
+static uint8_t check_lower_x86_operand_class(uint8_t class)
+{
+    return class == BUSTER_TYPED_CLASS_I8 || class == BUSTER_TYPED_CLASS_I16 ? BUSTER_TYPED_CLASS_I32 :
+           class == BUSTER_TYPED_CLASS_U8 || class == BUSTER_TYPED_CLASS_U16 ? BUSTER_TYPED_CLASS_U32 :
+                                                                               class;
+}
+
 // An x86 builtin's call (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
-// (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's.
+// (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
+// bits (check_lower_x86_operand_class).
 static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -4001,14 +4012,14 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
                          skipped != BUSTER_CHECK_X86_NO_IMMEDIATE && (constant == NULL || constant->constant_kind != CHECK_CONSTANT_INTEGER) ?
                          "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row(program->target_features, info->name, info->name_length, constant != NULL ? (uint64_t)constant->integer : 0, &row);
-    // The row's operands, the arguments but the immediate, each integer one of its argument's class.
+    // The row's operands, the arguments but the immediate, each integer one of its argument's class, widened.
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
         const uint8_t class = check_lower_value_class(writer, stream->argument_conversions[first + a].type);
         if (a != skipped && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
         {
-            row.operand_classes[operand] = class;
+            row.operand_classes[operand] = check_lower_x86_operand_class(class);
         }
         operand += a != skipped;
     }
@@ -4033,7 +4044,15 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
         {
             if (a != skipped)
             {
-                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+                // The argument at its prototype's type, then widened (the tasks run in the reverse of their pushes).
+                const TypeId type = stream->argument_conversions[first + a].type;
+                const uint8_t class = check_lower_value_class(writer, type);
+                const uint8_t widened = check_lower_x86_operand_class(class);
+                if (widened != class)
+                {
+                    check_lower_convert(writer, type, check_lower_class_type(widened));
+                }
+                check_lower_operand(writer, node, a + 3, false, type);
             }
         }
     }
