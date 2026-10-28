@@ -18,24 +18,21 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
-      - name: Integrate the reviewed main revision
+      - name: Apply reviewed source-query fix and regression coverage
         shell: bash
         run: |
           set -euo pipefail
+          printf '%s' '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' | sed 's/MWXM F/MWXMF/g; s/YMWXMFIVIVl/YMWXMFIVl/' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-659-final.patch"
+          printf '520cff46d3334c4a372cc43c9343f00c853c685990adcca34b37ee2c6f6c6545  %s\n' "$RUNNER_TEMP/issue-659-final.patch" | sha256sum -c
           git switch -c chatgpt/issue-659-kr-completion origin/chatgpt/issue-659-kr-completion
-          test "$(git rev-parse HEAD)" = 3fb233e139d96ada81febe7a215eb58765e64b8a
+          test "$(git rev-parse HEAD)" = 7ed177d484a7d93d551aae501c70aed854f43cc3
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659-final.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-659-final.patch"
+          git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git update-ref refs/remotes/origin/main abc6bf2455c6d1d78f16bc2d494276380c546a79
-          git merge --no-commit origin/main > "$RUNNER_TEMP/issue-659-merge.log" 2>&1 || test -f .git/MERGE_HEAD
-          printf '%s\n' src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c > "$RUNNER_TEMP/expected-conflicts"
-          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/actual-conflicts"
-          diff -u "$RUNNER_TEMP/expected-conflicts" "$RUNNER_TEMP/actual-conflicts"
-          sed -i '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/main$/d' src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c
-          printf '%s\n' 'a816c45201dcf58b6df81ec14b80e6e57e38ae7887883e5b2b8e981705329108  src/buster/compiler/c_check_input.c' 'ec1445e61e2361a8aecdf26cdd664dc990b84231cb96d233261622d71085ee23  src/buster/compiler/c_checker_driver.c' | sha256sum -c
-          git add src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c
-          git diff --check --cached
-          git commit -m 'Merge main pragma support into K&R completion, retaining both diagnostic families'
+          git add src/buster/compiler
+          git commit -m 'fix(checker): preserve direct K&R calls through type-query groups'
           git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
           git rev-parse HEAD > "$RUNNER_TEMP/issue-659-head.log"
           git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-source.tar.gz" HEAD
@@ -46,13 +43,14 @@ jobs:
         run: |
           set -euo pipefail
           ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-659-build.log"
-      - name: Validate checker and driver
+      - name: Validate checker, driver and deferred reader
         shell: bash
         run: |
           set -uo pipefail
           status=0
           build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue-659-checker.log" || status=1
           build/compiler test-checker-driver --executable build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-659-driver.log" || status=1
+          build/compiler test-checker-deferred 2>&1 | tee "$RUNNER_TEMP/issue-659-deferred.log" || status=1
           exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -60,6 +58,7 @@ jobs:
           name: issue-659-validation
           path: |
             ${{ runner.temp }}/issue-659-*.log
+            ${{ runner.temp }}/issue-659-final.patch
             ${{ runner.temp }}/issue-659-source.tar.gz
             build/compiler
           retention-days: 7
