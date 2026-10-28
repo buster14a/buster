@@ -189,6 +189,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             if (reader->linkage[declaration] != 0)
             {
                 reader->linked_types[name] = type;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
             }
         }
     }

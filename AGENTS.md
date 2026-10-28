@@ -4916,7 +4916,7 @@ and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
 
-`./build/compiler test-checker-deferred [--keep]` checks 65 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
@@ -4937,6 +4937,9 @@ its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+Empty, duplicate-position and nonzero-start linked histories are checked against
+a forward oracle with their ends at a protected page; the last update at the
+opening must be selected.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
