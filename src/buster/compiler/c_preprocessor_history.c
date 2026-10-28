@@ -838,7 +838,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, note, NULL, 0, format, arguments);
         }
         else
         {
@@ -848,7 +848,7 @@ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor*
     }
 }
 
-static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
+static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase, const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
     pp_history_ensure(pp);
     const uint32_t location = token < pp->output.count ? pp->output.locations[token] : 0;
@@ -867,7 +867,7 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
     {
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, requested, (uint64_t)position * 2 + 1u, token < pp->output.count ? pp->output.locations[token] : 0,
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + phase, token < pp->output.count ? pp->output.locations[token] : 0,
                                   pp_history_at(pp, token), NULL, notes, note_count, format, arguments);
         }
         else
@@ -885,11 +885,21 @@ static void pp_diagnose_output_arguments(Preprocessor* pp, PPSeverity severity, 
 // The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes
 // after its function's closing brace and the preprocessor lookahead before the next source token. A boundary
 // one past output.count is reserved for translation-unit final checks, after ordinary EOF completion groups.
+// Lexical, deferred-body, return-analysis and ordinary Sema groups can share a lookahead boundary. Their
+// explicit packed phase preserves that ordering while attached notes and publication budgets remain one group.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnose_output_arguments(pp, severity, token, position, phase, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 5, 6))) void pp_diagnose_output_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, const char* format, ...)
 {
     va_list arguments;
     va_start(arguments, format);
-    pp_diagnose_output_arguments(pp, severity, token, position, NULL, 0, format, arguments);
+    pp_diagnose_output_arguments(pp, severity, token, position, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);
     va_end(arguments);
 }
 
@@ -897,7 +907,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_
 {
     va_list arguments;
     va_start(arguments, format);
-    pp_diagnose_output_arguments(pp, severity, token, token, NULL, 0, format, arguments);
+    pp_diagnose_output_arguments(pp, severity, token, token, PP_DIAGNOSTIC_SEMANTIC, NULL, 0, format, arguments);
     va_end(arguments);
 }
 
@@ -908,6 +918,6 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_
 {
     va_list arguments;
     va_start(arguments, format);
-    pp_diagnose_output_arguments(pp, severity, token, position, notes, note_count, format, arguments);
+    pp_diagnose_output_arguments(pp, severity, token, position, PP_DIAGNOSTIC_SEMANTIC, notes, note_count, format, arguments);
     va_end(arguments);
 }

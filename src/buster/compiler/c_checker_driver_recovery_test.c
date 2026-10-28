@@ -274,6 +274,7 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
     }
     // Analysis-based return warnings distinguish genuine errors from warnings promoted to errors. A real
     // error in the immediate post-body lookahead inhibits analysis; a later error after an anchor does not.
+    // Keep this in the implemented aggregate-return domain; ordinary calls stay in a fully returning helper.
     static const struct
     {
         const char* text;
@@ -282,17 +283,19 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         const char* first;
         const char* second;
     } returns[] = {
-        { "#error before\nint f(void){}\n", NULL, "-std=gnu17", NULL, NULL },
-        { "int f(int n){\n#error inside\nif(n)return 1;}\nint g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "typedef long long V __attribute__((vector_size(32)));struct S{long a,b;};struct S first(V x,struct S s){if(__builtin_ia32_vec_ext_v4di(x,4))return s;}struct S second(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-march=x86-64-v4", "-Werror=return-type" },
+        { "struct S{long a,b;};struct S first(int n,struct S s){if(n)return s;}\n#pragma GCC visibility pop\nstruct S second(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=return-type", NULL },
+        { "#error before\nstruct S{long a,b;};struct S f(void){}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){\n#error inside\nif(n)return s;}\nstruct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", NULL, NULL },
         { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n#error lookahead\n", NULL, "-std=gnu17", NULL, NULL },
         { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\nint anchor;\n#error later\n", NULL, "-std=gnu17", NULL, NULL },
         { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;\n#warning before_close\n}\n#warning after_close\n", NULL, "-std=gnu17", NULL, NULL },
-        { "int f(int n){if(n)return 1;}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", "-Werror=return-type", NULL },
-        { "int f(int n){int x=2147483647+1;if(n)return x;}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", "-Werror=integer-overflow", "-Werror=return-type" },
-        { "int f(int n){int x=1<<32;if(n)return x;}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", "-Werror=shift-count-overflow", "-Werror=return-type" },
-        { "int f(int n){if(n)return missing(1);}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", NULL, NULL },
-        { "int f(int n){if(n)return missing(1);}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu17", "-Wno-error=implicit-function-declaration", "-Werror=return-type" },
-        { "int f(int n){if(n)return missing(1);}int g(int n){if(n)return 1;}\n", NULL, "-std=gnu89", "-Werror=implicit-function-declaration", "-Werror=return-type" },
+        { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){int x=2147483647+1;if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=integer-overflow", "-Werror=return-type" },
+        { "struct S{long a,b;};struct S f(int n,struct S s){int x=1<<32;if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=shift-count-overflow", "-Werror=return-type" },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Wno-error=implicit-function-declaration", "-Werror=return-type" },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu89", "-Werror=implicit-function-declaration", "-Werror=return-type" },
         { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", NULL, NULL },
         { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", "-Wsystem-headers", NULL },
         { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", "-Wsystem-headers", "-Werror=return-type" },
@@ -367,7 +370,7 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
                 const uint64_t taken = emitted != NULL ? fread(bytes, 1, sizeof(bytes), emitted) : 0;
                 const bool unchanged = taken == sizeof(bytes) && memcmp(bytes, sentinel, sizeof(bytes)) == 0 && emitted != NULL && fgetc(emitted) == EOF;
                 const bool elf = taken >= 4 && memcmp(bytes, "\177ELF", 4) == 0;
-                check_test_expect(test, prior && (status != 0 || route < 2 ? unchanged : elf), "return diagnostic-only work never publishes a rejected object");
+                check_test_expect(test, prior && (oracle != 0 || route < 2 ? unchanged : elf), "return diagnostic-only work never publishes a rejected object");
                 if (emitted != NULL)
                 {
                     fclose(emitted);
