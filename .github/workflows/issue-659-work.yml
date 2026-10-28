@@ -3,63 +3,36 @@ on:
   push:
     branches: [chatgpt/issue-659-work]
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: issue-659-isolated-work
   cancel-in-progress: true
 jobs:
-  validate:
+  integrate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    env:
-      BUSTER_HOST_ARCH: x86-64
-      BUSTER_DEBUG_INFO: 0
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
-      - name: Prepare final implicit-call policy fix
+      - name: Inspect the exact integration
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' 'H4sIAAAAAAAAA7VT227bMAx991dwGVDYSZTETZbLsnQtggEbVmB7GLCXAoYiKY4QRzIkuV3W9t9HOdc22+qX6sHUhTwkjw+5nM+BkFQ6oG1rWHtWWCdMm+lVLjO/SdhCsGXCtLKOKtdiMKvoGEjFxS/o9ofD2WDQatFBt9vvU4g7nX6vFxBCKucMGo1G9byXl0DiwSiGRvnFI744yeBWSw5P3RPKnNQqnPrb6fbyi8oLVwfpTRNKVygdrkrnekAAl5xDuIkmFzqHyQSmnz9NvybfvifTq+trODsDIygXBp8Lh1DkYmmSnBq6EtgCllAoB28m0ImCRkXAsCIiPDycJJerPJNMumReqDLLcQXRhrVhfN7sIG/DuNs8fw3mykb9arfhx0KA1YVhAiQXykm3BppZDUshcgup0UUueJtyboS1gsOuA+CCZdi1h7RQoMwMuIWQBvSdgjtqlFQp5Bqd161Dym2uyXE4fNjzhDxab51eCmVbG3I+QmEFvN/GjncsDUuORsjVa6nrpGisYxzwivOKYuBG3qJxwr44tM+9t5M7G4n+rIeTO3g34pR1Kk/uCd6L43sS4Xnu9uKBVyPaYbN/xLTEH2MK9bdQG/pHalKG1C6oqdf94TY6qOD+sPWrpXB4kN7ahmiiVbY+CI3RLLPANSiNqJyjVSQ32mm3zsVOarbWfAa6/2u1t7mh6YoCKg41ySVNlbZlE7gxKOqbGvm5y0d2o0mOJHpTu1G1p/iH9W98YYw2JToXuRGMOsHJk/L/D+x5TEMv6uje7+VkJa3FbsM4GhvhCqNANqz8LfQ8DM+2j1F4HkX72/1lN4rGj5jtiKfHZvAHNj65I34GAAA=' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-659-policy.patch"
-          printf 'f27e648eec9a7a9146e5b7ae1d9125d29c621e79003ade9257bc89d444255fdb  %s\n' "$RUNNER_TEMP/issue-659-policy.patch" | sha256sum -c
-          git switch -c issue-659-validated origin/chatgpt/issue-659-kr-completion
-          test "$(git rev-parse HEAD)" = 23f407e019e2ddc027ecf1e32dab2ac00bf8b746
-          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659-policy.patch"
-          git apply --unidiff-zero "$RUNNER_TEMP/issue-659-policy.patch"
-          git diff --check
+          git switch --detach 66b3b87da2fed441441c7f9df2804f5b8dabc55e
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/buster/compiler
-          git commit -m 'fix(checker): retain implicit-call warning policy in source-only groups'
-          git rev-parse HEAD > "$RUNNER_TEMP/issue-659-head.log"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-source.tar.gz" HEAD
-      - name: Install official Clang 23.1.4 and test tools
-        run: bash tools/ci/setup-hosted.sh
-      - name: Build compiler
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-659-build.log"
-      - name: Validate checker, driver and deferred reader
-        shell: bash
-        run: |
-          set -uo pipefail
-          status=0
-          build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue-659-checker.log" || status=1
-          build/compiler test-checker-driver --executable build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-659-driver.log" || status=1
-          build/compiler test-checker-deferred 2>&1 | tee "$RUNNER_TEMP/issue-659-deferred.log" || status=1
-          exit "$status"
-      - name: Publish validated commit for integration
-        run: git push origin HEAD:refs/heads/chatgpt/issue-659-validated
+          git merge --no-commit 201e520d5be86720907b5019b62571d1e5507c68 > "$RUNNER_TEMP/issue-659-merge.log" 2>&1 || test -f .git/MERGE_HEAD
+          git diff --name-only --diff-filter=U >> "$RUNNER_TEMP/issue-659-merge.log"
+          git diff --cc > "$RUNNER_TEMP/issue-659-conflicts.patch"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-main.tar.gz" 201e520d5be86720907b5019b62571d1e5507c68
+          tar --exclude=.git -czf "$RUNNER_TEMP/issue-659-worktree.tar.gz" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-659-validation
+          name: issue-659-integration
           path: |
-            ${{ runner.temp }}/issue-659-*.log
-            ${{ runner.temp }}/issue-659-policy.patch
-            ${{ runner.temp }}/issue-659-source.tar.gz
-            build/compiler
+            ${{ runner.temp }}/issue-659-merge.log
+            ${{ runner.temp }}/issue-659-conflicts.patch
+            ${{ runner.temp }}/issue-659-*.tar.gz
           retention-days: 7
