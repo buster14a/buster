@@ -666,30 +666,53 @@ macro's expansion, an argument being expanded, or a directive's line):
   other macro's is painted where the expansion goes straight out. An empty
   expansion's trailing space is any of its items' but a `##`'s, which
   `pp_substitute` doesn't read.
-- **Arguments of direct objects** (#117). An argument of a simple macro's
+- **Arguments expanded in place** (#117). An argument of a simple macro's
   collected invocation whose enabled macros' names are all direct objects
   (object-like, not builtins, with a body without `##` that names no macro:
-  `pp_direct_object`, `pp_direct_argument`) has the expansion the main loop
-  would give it behind its barrier, made in place without a capture
-  (`pp_expand_direct_argument`, from `pp_finish_simple`, in the general path's
-  order). Its other tokens are copied in runs, and each direct object's body
-  takes its name's place under an expansion record of its own, its first token
-  with the name's flags, as `pp_expand_object` gives them. A disabled macro's
-  name isn't painted there, where the main loop paints it: the expansion's rescan
-  or `pp_emit_simple` paints it as surely, as for an argument that needs no
-  expansion. The tokens go at the end of `pp->arguments`, where the argument's record
-  then points, so the templates and `pp_substitute_simple` take them as they
-  take an argument written so. The statistics are the main loop's: the expanded
-  argument, its direct expansions, and a buffer run where the argument starts
-  and after each name it expands, while tokens are left. An empty object, an
-  object whose body names a macro, a function-like name, or one argument of
-  that kind leaves the invocation to the main loop. An argument without room to
-  expand in (its tokens, or its origins as the history records them) is a fatal
-  error that ends the run before anything is substituted, as the main loop stops
-  before it substitutes. Only vectorized runs take
-  this path, with the history deferred or recorded, so the scalar twins' general
-  path is its twin. On `sqlite3.c`, 2,125 of the 3,529 invocations that took the
-  invocation stack take it.
+  `pp_direct_object`) or names of invocations whose expansions are final (below)
+  has the expansion the main loop would give it behind its barrier, made in
+  place without a capture (`pp_argument_in_place`, then
+  `pp_expand_argument_in_place`, from `pp_finish_simple`, in the general path's
+  order). Its other tokens are copied in runs, each with the flags pending
+  before it on its first token, and each direct object's body takes its name's
+  place under an expansion record of its own, its first token with the name's
+  flags, as `pp_expand_object` gives them. A disabled macro's name isn't painted
+  there, where the main loop paints it: the expansion's rescan or
+  `pp_emit_simple` paints it as surely, as for an argument that needs no
+  expansion. The tokens go at the end of `pp->arguments`, where the argument's
+  record then points, so the templates and `pp_substitute_simple` take them as
+  they take an argument written so. The statistics are the main loop's: the
+  expanded argument, its direct expansions, and a buffer run where the argument
+  starts and after each name or invocation it expands, while tokens are left.
+  An argument without room to expand in (its tokens, or its origins as the
+  history records them) is a fatal error that ends the run before anything is
+  substituted, as the main loop stops before it substitutes. Only vectorized
+  runs take this path, with the history deferred or recorded, so the scalar
+  twins' general path is its twin.
+
+  An invocation in such an argument (`pp_nested_invocation`) is taken in a run
+  with templates (its history deferred) when its macro has one, simple or with
+  `##` and `#`, its `(` follows its name and its `)` is in the argument, it is
+  given as many arguments as it takes, none naming an enabled macro, and its
+  expansion has 1 to 16 tokens (none, for pastes that make nothing) and names no
+  macro its rescan would expand: its body's names and the names its pastes make
+  are the invoked macro's, a disabled macro's, or no macro's. Its arguments'
+  records point into the argument, and its plan (`pp_template_operators`) is kept
+  for the expansion (`Preprocessor.nested`, 8 for one invocation's arguments).
+  Its expansion (`pp_expand_nested`) is what the general path's substitution
+  writes into the expansions, behind the barrier where nothing goes straight out
+  (`pp_template_make`, `pp_template_write`), read back as the main loop reads it:
+  its first token with the name's flags (with what was pending before the
+  name), the names of the invoked macro and of disabled macros painted, which
+  the rescan of the outer expansion would otherwise find enabled, and its
+  trailing space pending for the next token as the buffer's pop leaves it, or
+  for an empty expansion the name's flags pending, as `pp_finish_simple` leaves
+  them. It counts the invocation, its arguments and the buffer run that reads
+  it. On `sqlite3.c`, the invocations in arguments are mostly glibc's
+  `math.h` declarations (`__MATHDECL_1 (type, __CONCAT (__, function), ...)`,
+  `__SIMD_DECL (__MATH_PRECNAME (function, suffix))`); one whose expansion names
+  a macro that expands (`__MATH_PRECNAME` as `__CONCAT (name, r)`) takes the
+  main loop.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -2656,8 +2679,8 @@ the checker's unit by 16 to 2,048 bytes changed `-fsyntax-only` of `sqlite3.c`
 by up to 2.2% on main `35f26f6`, and there the templates, rebased onto it,
 took 1.5% fewer user cycles than main at the same shift.
 
-Its third step expands arguments of direct objects in place ("Arguments of
-direct objects" in "The main loop", [the
+Its third step expands arguments of direct objects in place ("Arguments
+expanded in place" in "The main loop", [the
 record](https://github.com/buster14a/buster-performance/tree/44e42c04/docs/measurements/preprocessor-direct-arguments-117-2026-10-27)).
 Against main at `530304fc`, with the preprocessor's unit at six placements
 (#509's `build.sh shifts`) and main's executables again as the floor, the
@@ -2681,6 +2704,41 @@ The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
 argument that invokes a function-like macro (1,143 of the 3,346 arguments
 expanded first, before this step) or names an object-like macro whose body
 names a macro; the rest needs #149 or another budget.
+
+### Invocations inside arguments expanded in place (#643)
+
+The next bounded step expands an invocation inside an argument in place when
+its arguments are plain and its template produces at most 16 tokens with no
+enabled macro left to expand. The ordinary scalar/history path remains its
+semantic oracle. The retained locked 9700X campaign compares main `92c025e7`
+with implementation `0a5c5762`, at six frontend placements, two kernel rounds,
+three whole-driver rounds and fresh executable copies; main's binaries run
+again as the floor.
+
+| Deferred kernel, median of twelve observations | Main | Candidate | Main again |
+| --- | ---: | ---: | ---: |
+| SQLite main loop | 4.319 ms | 4.224 ms | 4.317 ms |
+| SQLite directive tables + loop | 4.630 ms | 4.534 ms | 4.630 ms |
+| SQLite instructions/input token | 102.68 | 101.07 | 102.68 |
+| Frozen main.c main loop | 20.605 ms | 20.603 ms | 20.497 ms |
+| Frozen main.c instructions/input token | 276.68 | 277.53 | 276.68 |
+
+SQLite's budget improves about 2.1%; the 2 ms target remains unmet. Frozen
+main.c's instruction cost increases 0.31%, with loop timings inside the
+placement/round spread. All 1,458 whole-driver processes succeed. SQLite
+`-fsyntax-only` medians are 115.904/115.935/115.938 ms for main/candidate/main
+again, with overlapping ranges, so no whole-compilation timing gain is
+claimed. Peak RSS is 483,286/483,414/483,288 KiB. The
+[immutable qualification record](https://github.com/buster14a/buster-performance/tree/e9d8ade199dce0a350668543dfe8fc8429ba1d3b/docs/measurements/preprocessor-nested-invocations-117-2026-10-27)
+retains every observation, range, placement/copy floor, source/input/binary
+identity, command and mutation result.
+
+Three completion regressions distinguish self-name painting through an
+outer rescan, pending flags consumed by a plain run before another invocation,
+and a nested body whose macro names still expand. All nine intended mutants
+are detected; the 385-fixture baseline passes ASan/UBSan and the new cases
+agree with Clang. These test/documentation additions do not create new timing
+observations for the later integration head.
 
 ## Assembly output spacing
 
