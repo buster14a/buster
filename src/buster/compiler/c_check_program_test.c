@@ -1009,6 +1009,16 @@ struct CheckTestDataPrepared
     CheckDataInputStatus status;
 };
 
+static uint32_t check_test_initializer_index_dense(const CheckInitializers* initializers, uint32_t token)
+{
+    uint32_t index = 0;
+    for (uint32_t i = 0; i < initializers->count; i += 1)
+    {
+        index = initializers->declaration_tokens[i] == token ? i + 1 : index;
+    }
+    return index;
+}
+
 static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const CheckInput* input, const CheckStream* stream,
                                           const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
 {
@@ -1018,7 +1028,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
     const uint32_t count = input->token_count;
     bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
                  stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
-                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && (initializers->count == 0 || (initializers->plans != 0 && initializers->declaration_tokens != 0));
     result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
     result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1072,7 +1082,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (token != BUSTER_CHECK_NONE)
         {
             object_capacity += 1;
-            const uint32_t plan_index = initializers->declaration_plans[token];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
             reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
@@ -1104,7 +1114,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (selected != BUSTER_CHECK_NONE)
         {
             const uint32_t latest = result->latest_declarations[object];
-            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, selected);
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
@@ -1321,9 +1331,35 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
+        memset(defined, 0xa5, (uint64_t)program->object_count + 1);
         check_program_object_access(program, access, defined, path == 0);
-        same = memcmp(defined, expected, (uint64_t)program->object_count + 1) == 0;
+        for (uint32_t s = 0; same && s < program->symbol_count; s += 1)
+        {
+            const uint32_t object = program->symbol_objects[s];
+            same = defined[object] == expected[object];
+        }
     }
+    uint8_t* needs[2] = { 0 };
+    CheckProgram reduced[2] = { *program, *program };
+    bool rooms[2] = { false, false };
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        needs[path] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+        reduced[path].object_declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+        reduced[path].object_naked = NULL;
+        same = needs[path] != NULL && reduced[path].object_declarations != NULL;
+        if (same)
+        {
+            memset(needs[path], 0, (uint64_t)count + 1);
+            memset(reduced[path].object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true) :
+                                     check_program_static_prepared(reduced + path, data, needs[path], output);
+        }
+    }
+    same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
+           memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
+           (reduced[0].object_naked == NULL) == (reduced[1].object_naked == NULL) &&
+           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return same;
@@ -1370,6 +1406,7 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
+            .prepared_data = &data,
             .identifiers = &identifiers,
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
