@@ -240,7 +240,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         }
     }
     reader->output->resource |= result.diagnostic == CHECK_DIAG_RESOURCE;
-    check_input_warning_add(reader, closing, result.warnings);
+    check_input_warning_add_at(reader, closing, result.warnings, closing + 1u);
     *value = result.value;
     return result.diagnostic == CHECK_DIAG_NONE;
 }

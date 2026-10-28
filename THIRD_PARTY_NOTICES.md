@@ -17,6 +17,21 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The diagnostic publication gate, command-line limit parsing and summary changes
+in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
+`c_checker_driver_limit_test.c` (#669), are original project material under the
+default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
+and Clang runs externally as an independent oracle. No external implementation
+or fixture is copied.
+
+The source-driver collection and independent-declaration diagnostic recovery
+(#698, #699), `c_checker_driver_recovery_test.c`, and sparse warning completion
+facts in `c_check_warning_events.c` and its model tests are original project
+material under the default terms. They reuse this project's arenas, parser
+forest, binding history, diagnostic gate and deferred type replay. Installed
+Clang 23.1.4 supplies independent behavior and diagnostic-order observations;
+no compiler implementation, external fixture or generated corpus is imported.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

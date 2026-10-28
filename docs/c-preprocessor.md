@@ -1733,6 +1733,39 @@ scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
 
+The renderer assembles one diagnostic, its include stack and all expansion or
+definition notes in a 2 KiB stack buffer, growing into temporary scratch only
+for longer text (#636). It publishes the complete bytes with one `fwrite` to
+`PPOptions.diagnostics`, or `stderr` by default. It changes no stream buffering
+mode and retains the existing diagnostic/output ordering. Scratch exhaustion
+flushes the complete prefix and resumes direct printing, preserving the full
+message rather than truncating it. Rendering follows the required note order;
+the optimization removes the per-piece system calls without changing how
+source locations and note identities are computed.
+
+The checker source command enables `PPOptions.collect_diagnostics` only after
+setup succeeds (#698). Visible diagnostic messages, locations, origin identities
+and explicit notes are retained lazily; a clean unit allocates no queue.
+Preprocessing uses expansion-output insertion boundaries, including interior
+positions for copied file runs' raw errors. Later stages use
+`pp_diagnose_output_at` when a semantic completion boundary differs from the
+located output token. A stable allocation-free merge orders these sparse
+records before `pp_diagnostic_publish` applies the ordinary gate and renders
+each complete group. Include-stack suppression therefore follows publication
+order. The immediate `pp_diagnose_output` API and standalone `-E` behavior
+remain available.
+
+Deferred-history replay groups keep their recording preprocessor alive through
+publication, including a rejected reporting replay. A silent failed replay
+still receives one replacement fatal; first-capture exhaustion cannot lose that
+fatal. Rejection state remains distinct from final published counts, so a
+hidden error or failed diagnostic allocation never permits object publication.
+
+[The frozen #636 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-636/target)
+compares `60ff4b25` with `bc1b4861` on the locked 9700X, with exact bytes,
+file/pipe write counts and diagnostic-heavy compile timings. These numbers
+describe those revisions, rather than a timing qualification of later ports.
+
 `test-preprocessor --clang` compares 36 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
@@ -1747,6 +1780,9 @@ scalar/vector history tables.
 Separate checks cover guarded input tails, maximal runs across split copies,
 batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
+The diagnostic buffer checks compare 135 combinations of buffer/message sizes
+against independent piecewise printing, including boundary lengths, repeated
+growth, unavailable scratch and bytes written before and after the diagnostic.
 
 `benchmark-preprocessor --history-cost [options] file...` interleaves the same
 vectorized preprocessor with recording enabled and with the history deferred
