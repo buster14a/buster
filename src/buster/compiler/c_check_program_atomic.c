@@ -222,7 +222,14 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
             check_lower_emit(writer, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
             check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, old);
         }
-        check_lower_atomic_buffer_value(writer, plan, plan->expected);
+        if (plan->value_type == BUSTER_TYPE_BOOL)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U8, plan->expected);
+        }
+        else
+        {
+            check_lower_atomic_buffer_value(writer, plan, plan->expected);
+        }
         check_lower_conversion(writer, plan->value_type, computed);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, plan->operand_type), plan->arguments[1]);
         check_lower_conversion(writer, plan->operand_type, computed);
@@ -232,10 +239,24 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
         check_lower_conversion(writer, plan->operand_type, computed);
         check_lower_emit(writer, BUSTER_TYPED_JUMP_VALUE, class, end);
         check_lower_place(writer, old);
-        check_lower_atomic_buffer_value(writer, plan, plan->expected);
+        if (plan->value_type == BUSTER_TYPE_BOOL)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U8, plan->expected);
+        }
+        else
+        {
+            check_lower_atomic_buffer_value(writer, plan, plan->expected);
+        }
         check_lower_conversion(writer, plan->value_type, computed);
         check_lower_place(writer, end);
-        check_lower_conversion(writer, computed, plan->value_type);
+        if (plan->value_type == BUSTER_TYPE_BOOL)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+        }
+        else
+        {
+            check_lower_conversion(writer, computed, plan->value_type);
+        }
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, plan->value_type), plan->desired);
     }
     else if (wide_division)

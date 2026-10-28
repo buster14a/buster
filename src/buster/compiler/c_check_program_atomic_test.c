@@ -182,6 +182,8 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "h=fold(h,(unsigned)(int)(__real__ q*13+__imag__ q*7));real=n;real+=rhs;h=fold(h,(unsigned)(int)real);"
             "packed.x=(short)n;h=fold(h,(unsigned)__c11_atomic_fetch_add(&packed.x,1,5));h=fold(h,(unsigned)packed.x);"
             "bit=0;for(int i=0;i<300;i++){h=fold(h,__c11_atomic_fetch_add(&bit,1,5));}h=fold(h,bit);"
+            "bit=0;__c11_atomic_fetch_add(&bit,1,5);__c11_atomic_fetch_add(&bit,1,5);__c11_atomic_fetch_max(&bit,0,5);"
+            "for(int i=0;i<254;i++){__c11_atomic_fetch_add(&bit,1,5);}h=fold(h,bit);"
             "h=fold(h,__c11_atomic_is_lock_free(0));h=fold(h,__c11_atomic_is_lock_free(4));h=fold(h,(unsigned)parameter(n));return (int)h;}",
         },
     };

@@ -1562,6 +1562,11 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
         }
         if (type_is_valid(walker->types, source))
         {
+            if (node < walker->stream->count && walker->stream->values[node].category == CHECK_LVALUE &&
+                type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                source = type_conversion_operand(walker->types, source);
+            }
             const TypeId target = type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC
                                       ? type_unqualified(type_strip_aligned(walker->types, selected->type))
                                       : type;
