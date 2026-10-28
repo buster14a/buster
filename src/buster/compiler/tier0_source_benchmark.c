@@ -87,7 +87,7 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     const bool exhausted = preprocessed && !accepted && path.resource;
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
-    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, &path.output_arena, &path.scratch);
+    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
     const CheckProgramOptions program_options = {
         .initializers = &path.initializers,
         .asms = &path.asms,

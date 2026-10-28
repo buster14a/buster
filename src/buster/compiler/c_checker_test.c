@@ -1409,12 +1409,23 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     return equal;
 }
 
+// `graph` cut to its first `count` nodes, with the leaves of the VALUE nodes among them.
+static __attribute__((unused)) void check_test_graph_cut(CheckGraph* graph, uint32_t count)
+{
+    graph->count = count;
+    graph->leaf_count = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        graph->leaf_count += graph->ops[node] == CHECK_OP_VALUE;
+    }
+}
+
 static uint32_t check_test_leaf(CheckGraph* graph, uint32_t token, CheckValue value)
 {
     const uint32_t node = check_graph_add(graph, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
     if (node != BUSTER_CHECK_NONE)
     {
-        graph->leaves[node] = value;
+        *check_graph_leaf_of(graph, node) = value;
     }
     return node;
 }
@@ -1472,7 +1483,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         const uint32_t selected = check_graph_add(&graph, CHECK_OP_LOGICAL_OR, 8, zero, divide, BUSTER_CHECK_NONE);
         graph.contexts[selected] = BUSTER_CHECK_CONTEXT_ICE;
         const uint32_t assertion = check_graph_add(&graph, CHECK_OP_VALUE, 7, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-        graph.leaves[assertion] = check_test_integer(BUSTER_TYPE_INT, 0);
+        *check_graph_leaf_of(&graph, assertion) = check_test_integer(BUSTER_TYPE_INT, 0);
         graph.contexts[assertion] = BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_ICE;
         // Both children are checked even when evaluation selects only one: invalid operand types remain errors.
         const uint32_t floating = check_test_leaf(&graph, 9, check_test_float(BUSTER_TYPE_FLOAT, 1));
@@ -1502,6 +1513,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         }
         arena_pop_to(output, output_mark);
         graph.count = 0;
+        graph.leaf_count = 0;
         // All expressions would have the same bracket depth in `a+b+c`. Edges, not parser depths, carry readiness.
         uint32_t previous = check_test_leaf(&graph, 0, check_test_integer(BUSTER_TYPE_UINT, 0));
         for (uint32_t i = 1; i <= 127; i += 1)
@@ -1514,6 +1526,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         check_test_expect(test, chain_valid && stream.values[previous].integer == 127, "same-bracket-depth dependency chain was evaluated too early");
         arena_pop_to(output, output_mark);
         graph.count = 0;
+        graph.leaf_count = 0;
         for (uint32_t i = 0; i < 257; i += 1)
         {
             const uint32_t a = check_test_leaf(&graph, i * 3, check_test_integer(BUSTER_TYPE_ULONG, i));
@@ -1546,6 +1559,7 @@ static __attribute__((noinline)) void check_test_graph_random(CheckTest* test, T
     for (uint32_t world = 0; initialized && world < 12; world += 1)
     {
         graph.count = 0;
+        graph.leaf_count = 0;
         for (uint32_t i = 0; i < graph.capacity; i += 1)
         {
             if (i < 2 || (check_test_random(test) & 7) == 0)
@@ -1583,7 +1597,7 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
         const uint32_t full_count = graph.count;
         const uint32_t over = check_graph_add(&graph, CHECK_OP_POSITIVE, graph.count, previous, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         check_test_expect(test, over == BUSTER_CHECK_NONE && graph.count == full_count, "full graph append did not fail atomically");
-        graph.count = 2;
+        check_test_graph_cut(&graph, 2);
         CheckStream stream;
         const CheckOptions options = { 0 };
         const uint64_t output_mark = output->length;
@@ -1600,6 +1614,8 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
         valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
         check_test_expect(test, !valid && stream.status == CHECK_STATUS_INVALID_GRAPH, "invalid operation was not rejected");
         graph.ops[1] = CHECK_OP_POSITIVE;
+        graph.leaf_slots[1] = BUSTER_CHECK_NONE;
+        graph.leaf_count = 1;
         graph.operand0[1] = BUSTER_CHECK_NONE;
         valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
         check_test_expect(test, !valid && stream.status == CHECK_STATUS_INVALID_GRAPH, "missing operand was not rejected");
@@ -1768,6 +1784,7 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
         sizeof(uint8_t),
         sizeof(uint32_t),
         sizeof(uint32_t),
+        sizeof(uint32_t),
     };
     uint8_t* mappings[BUSTER_ARRAY_LENGTH(widths)];
     uint64_t readable[BUSTER_ARRAY_LENGTH(widths)];
@@ -1785,10 +1802,12 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
     check_test_expect(test, ready, "guarded graph column allocation");
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
+        // The leaves are the VALUE nodes' alone: every even node's.
+        const uint32_t leaf_count = (count + 1) / 2;
         void* columns[BUSTER_ARRAY_LENGTH(widths)];
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
         {
-            columns[i] = mappings[i] + readable[i] - widths[i] * count;
+            columns[i] = mappings[i] + readable[i] - widths[i] * (i == 5 ? leaf_count : count);
         }
         CheckGraph graph = {
             .ops = columns[0],
@@ -1797,6 +1816,8 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             .operand1 = columns[3],
             .operand2 = columns[4],
             .leaves = columns[5],
+            .leaf_slots = columns[11],
+            .leaf_count = leaf_count,
             .types = columns[6],
             .members = columns[7],
             .contexts = columns[8],
@@ -1813,7 +1834,11 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             graph.operand0[node] = leaf ? BUSTER_CHECK_NONE : node - 1;
             graph.operand1[node] = leaf ? BUSTER_CHECK_NONE : 0;
             graph.operand2[node] = BUSTER_CHECK_NONE;
-            graph.leaves[node] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
+            graph.leaf_slots[node] = leaf ? node / 2 : BUSTER_CHECK_NONE;
+            if (leaf)
+            {
+                graph.leaves[node / 2] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
+            }
             graph.types[node] = 0;
             graph.members[node] = 0;
             graph.contexts[node] = 0;
@@ -4147,6 +4172,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_overload_address_test.c"
 #include "c_types_function_abi_test.c"
 #include "c_check_constant_test.c"
+#include "c_check_generic_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
@@ -4237,6 +4263,9 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     CheckTest test = {
         .random = 133
     };
@@ -4264,6 +4293,8 @@ static int run_checker_tests(int argc, char** argv)
     }
     CheckTestTypes types = { 0 };
     check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH]");
+    // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
@@ -4299,6 +4330,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_overload_addresses(&test, clang);
             check_test_function_abis(&test, clang);
             check_test_constant_sources(&test, clang);
+            check_test_generic_index(&test);
+            check_test_generic_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);
@@ -4348,6 +4381,9 @@ static int run_checker_tests(int argc, char** argv)
         }
         check_test_types_close(&types);
     }
+    oracle_cache_report(oracle, "test-checker");
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
-    return test.failures != 0;
+    const int returned = test.failures != 0;
+    oracle_epoch_end(epoch);
+    return returned;
 }

@@ -252,6 +252,7 @@ struct CheckInputSpecifierJob
     uint32_t signedness;
     uint32_t storage;
     uint32_t restrict_token;
+    uint32_t vla_begin;
     TypeId base;
     TypeId result;
     CheckInputAttributes* attributes;
@@ -343,6 +344,9 @@ struct CheckInputReader
     uint32_t* vla_ends;
     uint32_t* vla_scope_ends;
     uint32_t* vla_sizes;
+    // Appended records of the next definition's header, retained separately from the body's later records.
+    uint32_t parameter_vla_begin;
+    uint32_t parameter_vla_end;
     uint8_t* expression_commas;
     uint8_t* conditions;
     uint32_t* region_roots;
@@ -1442,6 +1446,7 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
 #include "c_check_builtin_evidence.c"
+#include "c_check_generic.c"
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
@@ -1479,7 +1484,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 uint32_t first;
                 uint32_t last;
                 int64_t value;
-                valid = check_input_attribute_argument(reader->parser, attribute, argument, &first, &last) &&
+                valid = check_input_attribute_argument(attribute, argument, &first, &last) &&
                         check_input_constant_ice(reader, first, last, &value) && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
             }
         }
@@ -2732,6 +2737,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
     }
     const bool continuation = reader->declaration_bases[first] != 0;
+    const CheckInputSpecifierJob* specifier_job = reader->specifier_jobs[first];
+    const uint32_t vla_begin = specifier_job != 0 ? specifier_job->vla_begin : reader->output->vla_count;
     const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
     const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
     uint32_t i = first + continuation;
@@ -2744,6 +2751,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_owner = BUSTER_CHECK_NONE;
     if (reader->specifier_pending)
     {
+        reader->specifier_jobs[first]->vla_begin = vla_begin;
         reader->specifier_pending = false;
         return;
     }
@@ -2811,7 +2819,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
-            valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {
@@ -2854,6 +2862,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
                 {
+                    reader->parameter_vla_begin = vla_begin;
+                    reader->parameter_vla_end = reader->output->vla_count;
                     reader->output->body_declarations[i] = name;
                     reader->function_specifiers[i] = first;
                     reader->parameters[i] = parameters;
@@ -2898,10 +2908,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     // In particular, its prototype events must not precede the preceding declarator's activation.
                     reader->ignored[i] = true;
                     reader->declaration_bases[i] = base;
-                    reader->declaration_storage[i] = storage;
-                    reader->declaration_flags[i] = is_typedef | (is_inline << 1) | (thread_local << 2);
-                    reader->declaration_abis[i] = base_abi;
-                    reader->attribute_bases[i] = common_attributes;
+                    // Written only where they change, as most declarations have no storage class, flags, calling
+                    // convention or attributes: their columns, zero where nothing is written, then take no pages (#572).
+                    const uint8_t flags = (uint8_t)(is_typedef | (is_inline << 1) | (thread_local << 2));
+                    if (reader->declaration_storage[i] != storage)
+                    {
+                        reader->declaration_storage[i] = storage;
+                    }
+                    if (reader->declaration_flags[i] != flags)
+                    {
+                        reader->declaration_flags[i] = flags;
+                    }
+                    if (reader->declaration_abis[i] != base_abi)
+                    {
+                        reader->declaration_abis[i] = base_abi;
+                    }
+                    if (reader->attribute_bases[i] != common_attributes)
+                    {
+                        reader->attribute_bases[i] = common_attributes;
+                    }
                     more = false;
                 }
             }
@@ -3639,7 +3664,7 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
             const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (proven != BUSTER_CHECK_NONE)
             {
-                graph->leaves[proven] = value;
+                *check_graph_leaf_of(graph, proven) = value;
                 argument = proven;
             }
         }
@@ -3727,7 +3752,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 region->result = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (region->result != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[region->result] = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+                    *check_graph_leaf_of(graph, region->result) = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
                 }
             }
             if (region->result != BUSTER_CHECK_NONE)
@@ -3745,7 +3770,7 @@ static void check_input_expressions(CheckInputReader* reader)
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                graph->leaves[node] = reader->cached_constants[reader->constant_present[token] - 1];
+                *check_graph_leaf_of(graph, node) = reader->cached_constants[reader->constant_present[token] - 1];
             }
         }
         else if (reader->selected_tokens[token] < parser->tokens.count)
@@ -3767,7 +3792,7 @@ static void check_input_expressions(CheckInputReader* reader)
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                graph->leaves[node] = (CheckValue)
+                *check_graph_leaf_of(graph, node) = (CheckValue)
                 {
                     .type = BUSTER_TYPE_ULONG,
                     .category = CHECK_RVALUE,
@@ -3806,7 +3831,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     const TypeId type = reader->declared_types[token];
                     const uint32_t declaration = reader->output->declarations[token];
                     const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
@@ -3832,7 +3857,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = check_literal_value(literal);
+                    *check_graph_leaf_of(graph, node) = check_literal_value(literal);
                 }
             }
         }
@@ -3852,7 +3877,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = string->type,
                         .category = CHECK_LVALUE,
@@ -3887,7 +3912,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
                     if (node != BUSTER_CHECK_NONE)
                     {
-                        graph->leaves[node] = (CheckValue)
+                        *check_graph_leaf_of(graph, node) = (CheckValue)
                         {
                             .type = pointer,
                             .category = CHECK_RVALUE,
@@ -4065,7 +4090,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = reader->declared_types[declaration],
                         .category = CHECK_LVALUE,
@@ -4322,7 +4347,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 const CheckOp actual = (CheckOp)graph->ops[node];
                 const uint32_t child = graph->operand0[node];
                 const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
-                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? graph->leaves[node].overload_head :
+                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
                     (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
             }
             if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
@@ -4337,7 +4362,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                     if (proven != BUSTER_CHECK_NONE)
                     {
-                        graph->leaves[proven] = constant;
+                        *check_graph_leaf_of(graph, proven) = constant;
                         node = proven;
                     }
                 }
@@ -4698,9 +4723,11 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
+// `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
+// deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred)
+                            CheckDeferred* deferred, bool environment)
 {
     *input = (CheckInput){ 0 };
     // Plain char's signedness, which every phase after the reader reads from the table too.
@@ -4867,60 +4894,29 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         input->graph.vector_members = arena_push_array(arena, vector_members, sizeof(CheckVectorCall), _Alignof(CheckVectorCall));
         valid = input->graph.vector_members != 0;
     }
+    // The columns that most tokens have an entry in, or that the walk writes at most of its pages, in the scratch, whose
+    // pages the parse's temporaries took first (ParseOptions.scratch) and the later stages take again.
 #define BUSTER_CHECK_INPUT_ARRAY(field, type) reader.field = valid ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0
     BUSTER_CHECK_INPUT_ARRAY(query_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(specifier_jobs, CheckInputSpecifierJob*);
-    BUSTER_CHECK_INPUT_ARRAY(specifier_finishes, CheckInputSpecifierJob*);
     BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(definition_seen, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(ignored, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializers, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(static_initializers, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_declarations, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_heads, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(initializer_finish_next, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(incomplete_array_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(string_ids, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(designator_indices, uint64_t);
-    BUSTER_CHECK_INPUT_ARRAY(designator_valid, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(designator_tokens, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(designator_ranges, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(selection_type_ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(selection_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(constant_present, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(builtins, uint16_t);
-    BUSTER_CHECK_INPUT_ARRAY(builtin_type_ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(vararg_calls, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(vararg_types, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(vla_bounds, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(vla_ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(vla_scope_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(expression_commas, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(conditions, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(constant_contexts, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(warning_suppressed, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(declaration_bases, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(declaration_storage, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(declaration_flags, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(declaration_abis, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(attribute_bases, CheckInputAttributes*);
     BUSTER_CHECK_INPUT_ARRAY(activate, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(activation_next, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_previous, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(parameter_shapes, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_declarations, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(parameter_declaration_next, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(tag_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(tag_ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(enum_values, unsigned __int128);
     BUSTER_CHECK_INPUT_ARRAY(first_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(scope_marks, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(scope_ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
     reader.warning_index_base = 1;
     while ((uint64_t)reader.warning_index_base * BUSTER_CHECK_WARNING_BLOCK < count)
@@ -4946,6 +4942,60 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.subtree_sizes = parser->sizes != 0 ? parser->sizes : sizes;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
     valid &= reader.value_next != 0;
+    // The columns few tokens have an entry in, and the binding table, which has room for four events a token and fills
+    // a few at its start, in an arena of their own that the reader unmaps when it returns (#572). Its pages are new and
+    // zero, so a column that is zero where nothing is written needs no clearing, and takes memory only where the walk
+    // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
+    // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
+    // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
+    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
+    // base pages at the arena's start.
+#define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
+    X(scope_marks, uint32_t) \
+    X(scope_ends, uint32_t) \
+    X(scope_openings, uint32_t) \
+    X(enum_values, unsigned __int128)
+#define BUSTER_CHECK_SPARSE_COLUMNS(X) \
+    X(specifier_jobs, CheckInputSpecifierJob*) \
+    X(specifier_finishes, CheckInputSpecifierJob*) \
+    X(attribute_bases, CheckInputAttributes*) \
+    X(declaration_bases, TypeId) \
+    X(declaration_storage, uint32_t) \
+    X(declaration_flags, uint8_t) \
+    X(declaration_abis, uint8_t) \
+    X(static_initializers, uint8_t) \
+    X(initializer_finish_next, uint32_t) \
+    X(incomplete_array_types, TypeId) \
+    X(designator_indices, uint64_t) \
+    X(designator_valid, uint8_t) \
+    X(designator_tokens, uint32_t) \
+    X(designator_ranges, uint32_t) \
+    X(selection_type_ends, uint32_t) \
+    X(selection_types, TypeId) \
+    X(constant_present, uint32_t) \
+    X(builtins, uint16_t) \
+    X(builtin_type_ends, uint32_t) \
+    X(vararg_calls, uint32_t) \
+    X(vararg_types, uint32_t) \
+    X(vla_bounds, uint32_t) \
+    X(vla_ends, uint32_t) \
+    X(vla_scope_ends, uint32_t) \
+    X(warning_suppressed, uint8_t) \
+    X(parameter_shapes, uint8_t) \
+    X(parameter_declaration_next, uint32_t) \
+    X(tag_types, TypeId) \
+    X(tag_ends, uint32_t)
+#define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
+    const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
+#undef BUSTER_CHECK_SPARSE_BYTES
+    Arena sparse = valid ? arena_reserve_small(sparse_bytes, sparse_small > BUSTER_ARENA_SMALL_BYTES ? sparse_small : BUSTER_ARENA_SMALL_BYTES) : (Arena){ 0 };
+#define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+    BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+    BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+#undef BUSTER_CHECK_SPARSE_ARRAY
+#undef BUSTER_CHECK_SPARSE_COLUMNS
+#undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
     if (valid && input->vla_capacity != 0)
     {
@@ -4995,7 +5045,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             memset(reader.transparent_unions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         }
     }
-    valid &= c_bindings_initialize(&reader.bindings, scratch, pp->table->count, count * 4 + 1);
+    valid &= c_bindings_initialize(&reader.bindings, &sparse, pp->table->count, count * 4 + 1);
     // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
     // their pages.
     const uint64_t traversal_mark = scratch->length;
@@ -5007,18 +5057,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     {
         memset(reader.declared_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.query_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.specifier_jobs, 0, ((uint64_t)count + 1) * sizeof(CheckInputSpecifierJob*));
-        memset(reader.specifier_finishes, 0, ((uint64_t)count + 1) * sizeof(CheckInputSpecifierJob*));
         memset(reader.function_specifiers, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.return_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.declaration_kinds, 0, (uint64_t)count + 1);
-        memset(reader.declaration_bases, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.declaration_storage, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.declaration_flags, 0, (uint64_t)count + 1);
-        memset(reader.declaration_abis, 0, (uint64_t)count + 1);
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
-        memset(reader.warning_suppressed, 0, (uint64_t)count + 1);
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
@@ -5043,33 +5086,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
-        memset(reader.attribute_bases, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
         memset(reader.linkage, 0, (uint64_t)count + 1);
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.parameter_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
-        memset(reader.parameter_shapes, 0, (uint64_t)count + 1);
         memset(reader.member_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_types, 0, (uint64_t)pp->table->count * sizeof(TypeId));
-        memset(reader.tag_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
         memset(reader.tag_completions, 0xff, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
-        memset(reader.static_initializers, 0, (uint64_t)count + 1);
-        memset(reader.designator_valid, 0, (uint64_t)count + 1);
-        memset(reader.designator_tokens, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.designator_ranges, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.incomplete_array_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.selection_type_ends, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.selection_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
-        memset(reader.constant_present, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.builtins, 0, ((uint64_t)count + 1) * sizeof(uint16_t));
-        memset(reader.builtin_type_ends, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.vararg_calls, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.vararg_types, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.vla_bounds, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.vla_ends, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(reader.vla_scope_ends, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
         for (uint32_t i = 0; i <= count; i += 1)
         {
@@ -5087,7 +5112,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             reader.string_ids[i] = BUSTER_CHECK_NONE;
             reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
             reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-            reader.initializer_finish_next[i] = BUSTER_CHECK_NONE;
             reader.selected_tokens[i] = BUSTER_CHECK_NONE;
             reader.activate[i] = BUSTER_CHECK_NONE;
             reader.parameters[i] = BUSTER_CHECK_NONE;
@@ -5319,7 +5343,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
         }
         valid = !input->resource && input->report_count == 0 && reader.bindings.valid;
-        if (valid)
+        if (valid && environment)
         {
             valid = check_environment_publish(&input->environment, parser, &reader.bindings, input->declared_types, types, reader.tag_completions, arena, scratch);
             input->resource |= !valid;
@@ -5330,12 +5354,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         input->resource = true;
     }
     arena_pop_to(scratch, mark);
+    arena_release(&sparse);
     return valid;
 }
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -5343,7 +5368,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -5352,14 +5377,24 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+}
+
+// The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
+// by its arguments, without #113's environment, which nothing in a compile reads: publishing it copied the unit's
+// binding events and built their index for nothing (#572).
+static bool check_input_compile(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                                bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
+                           false);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -5367,5 +5402,5 @@ static bool check_input_prefix(CheckInput* input, const Parser* parser, Preproce
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
 }
