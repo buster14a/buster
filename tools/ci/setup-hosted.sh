@@ -9,7 +9,7 @@ test "$(uname -m)" = x86_64
 test "$VERSION_ID" = 26.04
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends gcc g++ binutils libc6-dev \
-    gdb mold tcc zstd linux-perf qemu-user libzstd-dev libxml2-dev zlib1g-dev
+    gdb tcc zstd linux-perf qemu-user libzstd-dev libxml2-dev zlib1g-dev
 # Use the matching official stable release for the compiler, Clang API oracle,
 # linker, and LLVM object/DWARF consumers. llvm-config's static library list
 # needs the LLVM archives and the Ubuntu development libraries above.
@@ -50,6 +50,19 @@ printf 'BUSTER_CLANG_RESOURCE_DIR=%s\n' "$llvm/lib/clang/23" >> "$GITHUB_ENV"
 # that same release at execution time rather than any runner-provided library.
 printf 'LD_LIBRARY_PATH=%s%s\n' "$llvm/lib" "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 perf --version
+# Keep the external mold oracle at the qualified release rather than the
+# runner distribution's older package. Its archive retains its MIT license.
+curl --fail --location --retry 3 \
+    https://github.com/rui314/mold/releases/download/v3.0.0/mold-3.0.0-x86_64-linux.tar.gz \
+    --output "$RUNNER_TEMP/mold.tar.gz"
+printf '%s  %s\n' 6c90d4a474c7c0409dfb575be03a5345878ac14fdba18de8b40fa58c60121189 \
+    "$RUNNER_TEMP/mold.tar.gz" | sha256sum --check
+tar -xzf "$RUNNER_TEMP/mold.tar.gz" -C "$RUNNER_TEMP" --no-same-owner
+mold="$RUNNER_TEMP/mold-3.0.0-x86_64-linux"
+test -f "$mold/share/doc/mold/LICENSE"
+test "$("$mold/bin/mold" --version)" = 'mold 3.0.0 (8de38c35a2df16a25f7ff87ac3ad07156a925beb; compatible with GNU ld)'
+ln -s "$mold/bin/mold" "$toolbin/mold"
+ln -s "$mold/bin/mold" "$toolbin/ld.mold"
 # Match the existing external-linker oracle rather than silently omitting it.
 curl --fail --location --retry 3 \
     https://github.com/wild-linker/wild/releases/download/0.10.0/wild-linker-0.10.0-x86_64-unknown-linux-gnu.tar.gz \
