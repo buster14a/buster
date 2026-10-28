@@ -2697,6 +2697,51 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+// The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
+// cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
+static void check_test_driver_reuse(CheckTest* test, const char* directory)
+{
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/reused-driver.c", directory);
+    const char text[] = "int reused(int value) { return value + 1; }\n";
+    const bool written = parse_test_write(source, text, sizeof(text) - 1);
+    check_test_expect(test, written, "reusable driver fixture is available");
+    char* check_arguments[] = { "-fsyntax-only", source };
+    char* pp_arguments[] = { "-E", "-P", "-o", "/dev/null", source };
+    for (uint32_t route = 0; written && route < 2; route += 1)
+    {
+        const int warm = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
+                                     run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+        const uint64_t before = parse_test_status_bytes("VmSize:");
+        const int again = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
+                                      run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+        const uint64_t after = parse_test_status_bytes("VmSize:");
+        check_test_expect(test, warm == 0 && again == 0 && before != 0 && after == before,
+                          "reusable source and preprocessor commands release their mappings before returning");
+        char* invalid_arguments[] = { "--buster-invalid-option" };
+        const int saved = dup(STDERR_FILENO);
+        const int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        int rejected = -1;
+        if (saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO)
+        {
+            rejected = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments, true) :
+                                    run_preprocessor_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments);
+        }
+        if (saved >= 0)
+        {
+            dup2(saved, STDERR_FILENO);
+            close(saved);
+        }
+        if (quiet >= 0)
+        {
+            close(quiet);
+        }
+        check_test_expect(test, rejected == 1 && parse_test_status_bytes("VmSize:") == before,
+                          "a reusable command's rejected options release mappings after an earlier successful compile");
+    }
+    unlink(source);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -3096,6 +3141,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);
