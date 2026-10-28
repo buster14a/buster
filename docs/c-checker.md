@@ -1409,9 +1409,22 @@ What the lowering covers past scalars (#145's programs):
   the elements' top bits and vectors of a mask's, truncating conversions of a
   low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
   VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
-  VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
-  scatters, VPBLENDVB and VPSHUFBITQMB, and the masked truncating stores
-  (`pmov*512mem_mask`: VPMOV into memory under the mask). A function with an X86
+  VPTERNLOG, VPERMT2 and VNNI's dot products (VPDPBUSD, VPDPBUSDS, VPDPWSSD and
+  VPDPWSSDS), gathers and scatters, VPBLENDVB and VPSHUFBITQMB. And #129's
+  intrinsics:
+  - the floating selects, which are the integer selects of their elements'
+    bytes, and the scalar ones (`selectss_128`, `selectsd_128`: VMOVSS and
+    VMOVSD under the mask, over a copy of w);
+  - VPMOV's, VPMOVS's and VPMOVUS's truncations under a mask at every width,
+    into a register and into memory;
+  - the masked moves of their own forms: VMOVUPS, VMOVUPD, VMOVAPS, VMOVAPD,
+    VMOVDQA32 and VMOVDQA64 (the aligned ones fault on an unaligned address,
+    as clang's code does), the scalar ones (`loadss128_mask` and the others,
+    which clang lowers as the vector's masked load or store under the mask's
+    low bits) and the expanding loads;
+  - the floating compresses and expands, into a vector and into memory.
+
+  A function with an X86
   entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
   opmask's are integers. A builtin the table doesn't name is refused by name
   ("this x86 builtin"), and so are one whose instructions the target hasn't and
