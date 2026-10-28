@@ -80,6 +80,12 @@ protocol tests nor a one-file gain establishes full-build throughput.
 
 ### Qualification and bounds
 
+The [frozen qualification record](https://github.com/buster14a/buster-performance/blob/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-673-spawn/REPORT.md)
+retains the source/binary identities, independent ownership checks, balanced
+workload controls and negative fork/mixed-order experiments. Its measurements
+describe the revisions named there; refreshing this change onto later main
+establishes compatibility rather than a new timing result.
+
 The clean-launch source `1d076d6736df9b7350610ec646dc1fe1ef39f7dc` was qualified
 on the 9700X with frozen SQLite inputs, GNU make 4.4.1 and the same physical
 CPU mask 0–7 for all shared-affinity controls. The separate pinned-process
