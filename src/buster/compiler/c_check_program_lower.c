@@ -6185,8 +6185,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
-        const bool falls = writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
-                                           writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN;
+        const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
+                                                                            writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN);
         check_lower_place(writer, body.count);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.

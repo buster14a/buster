@@ -169,6 +169,26 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+static void check_driver_return_reports(const Parser* parser, Preprocessor* pp, const CheckProgram* program, CheckWarningSeverity baseline, bool quiet)
+{
+    for (uint32_t b = 0; !quiet && !pp->fatal && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        const uint32_t token = parser->tree.parents[body->opening];
+        if (body->return_warning != 0 && token < parser->tokens.count && !check_graph_system_token(&program->input->graph, token))
+        {
+            const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
+            if (severity != CHECK_WARNING_IGNORE)
+            {
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "non-void function does not return a value%s [-Wreturn-type]",
+                                   body->return_warning == 2 ? " in all control paths" : "");
+            }
+        }
+    }
+}
+
 static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                       const TypeTable* types, bool quiet)
 {
@@ -1139,6 +1159,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     bool emit_object = false;
     bool syntax_only = false;
     bool quiet = false;
+    bool return_warning = true;
+    bool warning_errors = false;
+    int32_t return_error = 0;
     bool lazy_system_headers = false;
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
@@ -1165,6 +1188,26 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         // An option that takes the next argument as its value (pp_option_takes_value: pp_parse_options' and
         // c_predefines.c's) passes on with it, unread: `-o -lresult` writes -lresult, as clang's driver takes it.
         const bool valued = i + 1 < count && pp_option_takes_value(arguments[i]);
+        if (!valued)
+        {
+            const char* argument = arguments[i];
+            if (strcmp(argument, "-Wreturn-type") == 0 || strcmp(argument, "-Werror=return-type") == 0)
+            {
+                return_warning = true;
+            }
+            else if (strcmp(argument, "-Wno-return-type") == 0)
+            {
+                return_warning = false;
+            }
+            if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+            {
+                warning_errors = strcmp(argument, "-Werror") == 0;
+            }
+            else if (strcmp(argument, "-Werror=return-type") == 0 || strcmp(argument, "-Wno-error=return-type") == 0)
+            {
+                return_error = strcmp(argument, "-Werror=return-type") == 0 ? 1 : -1;
+            }
+        }
         const bool library = !valued && arguments[i][0] == '-' && arguments[i][1] == 'l';
         const bool directory = !valued && arguments[i][0] == '-' && arguments[i][1] == 'L';
         if (valued)
@@ -1528,6 +1571,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                                                   program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
                             check_driver_diagnose(checking, &pp, program.token, message);
                             result = 1;
+                        }
+                        if (result == 0)
+                        {
+                            const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
+                                return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+                            check_driver_return_reports(checking, &pp, &program, baseline, quiet);
                         }
                         check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
                         result = pp.errors != 0 ? 1 : result;
