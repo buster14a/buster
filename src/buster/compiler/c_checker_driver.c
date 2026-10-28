@@ -127,12 +127,14 @@ struct CheckDriverDiagnostic
     uint32_t position;
 };
 
-typedef struct CheckDriverWarning CheckDriverWarning;
-struct CheckDriverWarning
+// The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
+// flags of its warnings and of those the source doesn't ignore, 16 bits each (the per-token warnings' flags are below
+// bit 16, and the dense column this replaced (#592) kept 16 bits of each), so that the keys sort by token and the OR of
+// two keys of one token is the token's combined warnings.
+static uint64_t check_driver_warning_key(uint32_t token, uint32_t flags, uint32_t enabled)
 {
-    uint16_t flags;
-    uint16_t enabled;
-};
+    return (uint64_t)token << 32 | (uint64_t)(uint16_t)flags << 16 | (uint16_t)enabled;
+}
 
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
@@ -209,89 +211,167 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+// The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
+// of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
+// tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
+// the next report's, the next pragma's (unless the walk has passed it: then, as a walk of every token would, it never
+// reports it) and the next packed member's address. Packed records behind that address are consumed in the same
+// iteration without a report, as a walk of every token would. The warnings are gathered as keys
+// (check_driver_warning_key) from the tokens' attributes 8 at a time, their constants' warnings 64 at a time and the
+// expressions' nodes 16 at a time, where they have any (the scalar path, parser->options.scalar's, takes every token
+// and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
+// reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
+// first of its keys.
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
+    const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
-    const bool reports = input->report_count != 0 || (stream != 0 && stream->report_count != 0) || extra_count != 0;
-    uint64_t* first = reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : NULL;
+    // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
+    const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
+    const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
+    const uint32_t scanned = count < input->token_count ? count : input->token_count;
+    const uint32_t nodes = stream != NULL ? stream->count : 0;
     const bool show_warnings = !quiet;
-    CheckDriverWarning* warnings = show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDriverWarning, (uint64_t)count + 1) : NULL;
-    const bool ready = (!reports || first != NULL) && (!show_warnings || warnings != NULL);
+    // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
+    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
+    const uint64_t warning_room = show_warnings ? 2 * (uint64_t)scanned + nodes + excess_count + 1 : 0;
+    const bool reports = report_room > 1;
+    const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
+    uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
+    uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
+    uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
+    uint64_t* warning_sorting = warning_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
+    const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL);
     if (ready)
     {
-        for (uint32_t token = 0; reports && token <= count; token += 1)
-        {
-            first[token] = UINT64_MAX;
-        }
-        if (show_warnings)
-        {
-            memset(warnings, 0, ((uint64_t)count + 1) * sizeof(*warnings));
-            for (uint32_t token = 0; token < count && token < input->token_count; token += 1)
-            {
-                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
-                warnings[token].flags = flags;
-                warnings[token].enabled = flags;
-            }
-            for (uint32_t token = 0; input->constant_warnings != NULL && token < count && token < input->token_count; token += 1)
-            {
-                const uint8_t flags = input->constant_warnings[token];
-                const uint8_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
-                warnings[token].flags |= flags;
-                warnings[token].enabled |= flags & ~ignored;
-            }
-            for (uint32_t node = 0; stream != NULL && node < stream->count; node += 1)
-            {
-                const uint32_t token = input->graph.tokens[node];
-                if (token < count)
-                {
-                    const uint32_t flags = stream->warnings[node];
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
-                    warnings[token].flags |= flags;
-                    warnings[token].enabled |= flags & ~ignored;
-                }
-            }
-            for (uint32_t i = 0; i < excess_count; i += 1)
-            {
-                if (excess_tokens[i] < count)
-                {
-                    warnings[excess_tokens[i]].flags |= CHECK_WARNING_EXCESS_INITIALIZERS;
-                    warnings[excess_tokens[i]].enabled |= CHECK_WARNING_EXCESS_INITIALIZERS;
-                }
-            }
-        }
+        uint32_t report_total = 0;
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
-            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
+            if (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i))
             {
-                first[token] = i;
+                report_keys[report_total++] = (uint64_t)token << 32 | i;
             }
         }
-        for (uint32_t i = 0; stream != 0 && i < stream->report_count; i += 1)
+        for (uint32_t i = 0; i < stream_reports; i += 1)
         {
             const uint32_t token = stream->reports[i].token < count ? stream->reports[i].token : count;
-            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_graph_report(repair, &input->graph, stream->reports + i)))
+            if (repair == NULL || check_repair_graph_report(repair, &input->graph, stream->reports + i))
             {
-                first[token] = (UINT64_C(1) << 32) | i;
+                report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + i);
             }
         }
         for (uint32_t i = 0; i < extra_count; i += 1)
         {
             const uint32_t token = extra[i].position < count ? extra[i].position : count;
-            if (first[token] == UINT64_MAX)
+            report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
+        }
+        uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
+        uint32_t first_count = 0;
+        for (uint32_t i = 0; i < report_total; i += 1)
+        {
+            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32))
             {
-                first[token] = (UINT64_C(2) << 32) | i;
+                firsts[first_count++] = firsts[i];
             }
+        }
+        if (reports)
+        {
+            firsts[first_count] = UINT64_MAX;
+        }
+        uint32_t warning_total = 0;
+        for (uint32_t first = 0; show_warnings && input->attributes != NULL && first < scanned; first += 8)
+        {
+            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, scanned) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, scanned);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t flags = check_diagnostic_attribute_warnings(input, token);
+                if (flags != 0)
+                {
+                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags);
+                }
+            }
+        }
+        for (uint32_t first = 0; show_warnings && input->constant_warnings != NULL && first < scanned; first += 64)
+        {
+            const uint64_t lanes = scalar ? check_input_scan_all(first, scanned) : check_input_scan_nonzero(input->constant_warnings, first, scanned);
+            for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+                const uint32_t flags = input->constant_warnings[token];
+                const uint32_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
+                if (flags != 0)
+                {
+                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
+                }
+            }
+        }
+        for (uint32_t first = 0; show_warnings && first < nodes; first += 16)
+        {
+            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t token = input->graph.tokens[node];
+                const uint32_t flags = stream->warnings[node];
+                if (token < count && flags != 0)
+                {
+                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
+                }
+            }
+        }
+        for (uint32_t i = 0; show_warnings && i < excess_count; i += 1)
+        {
+            if (excess_tokens[i] < count)
+            {
+                warning_keys[warning_total++] = check_driver_warning_key(excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS, CHECK_WARNING_EXCESS_INITIALIZERS);
+            }
+        }
+        uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
+        uint32_t warning_count = 0;
+        for (uint32_t i = 0; i < warning_total; i += 1)
+        {
+            if (warning_count != 0 && (warnings[warning_count - 1] >> 32) == (warnings[i] >> 32))
+            {
+                warnings[warning_count - 1] |= warnings[i];
+            }
+            else
+            {
+                warnings[warning_count++] = warnings[i];
+            }
+        }
+        if (show_warnings)
+        {
+            warnings[warning_count] = UINT64_MAX;
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         uint32_t pragma = 0;
         uint32_t packed = 0;
-        for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
+        uint32_t warning = 0;
+        uint32_t report = 0;
+        uint64_t position = 0;
+        bool walking = true;
+        while (walking && !pp->fatal)
         {
-            while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
+            uint64_t next = show_warnings ? warnings[warning] >> 32 : UINT64_MAX;
+            next = reports && (firsts[report] >> 32) < next ? firsts[report] >> 32 : next;
+            if (pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token >= position && pragma_input->fp_pragmas[pragma].token < next)
+            {
+                next = pragma_input->fp_pragmas[pragma].token;
+            }
+            if (packed < input->packed_member_count)
+            {
+                const uint64_t address = input->packed_members[packed].address;
+                next = address < next ? address : next;
+            }
+            walking = next <= count;
+            const uint32_t token = walking ? (uint32_t)next : 0;
+            while (walking && !pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
             {
                 const CheckInputFpPragma* record = pragma_input->fp_pragmas + pragma;
                 const bool retained = original_pragmas != NULL || repair == NULL || token < check_repair_pragma_end(repair);
@@ -301,25 +381,27 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
                 pragma += 1;
             }
-            uint32_t flags = show_warnings && (repair == NULL || check_repair_warning_token(repair, token)) ?
-                             warnings[token].flags : 0;
+            const bool warned = walking && show_warnings && (warnings[warning] >> 32) == token;
+            uint32_t flags = warned && (repair == NULL || check_repair_warning_token(repair, token)) ? (uint32_t)(warnings[warning] >> 16) & 0xffff : 0;
+            const uint32_t enabled = warned ? (uint32_t)warnings[warning] & 0xffff : 0;
+            warning += warned;
             while (!pp->fatal && flags != 0)
             {
-                const uint32_t warning = flags & (0u - flags);
-                const bool ignored = (warnings[token].enabled & warning) == 0;
-                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning, ignored);
+                const uint32_t warning_flag = flags & (0u - flags);
+                const bool ignored = (enabled & warning_flag) == 0;
+                const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning_flag, ignored);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning));
+                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;
             }
             // Addresses are sparse and ordered by the '&' event. A generic selection can put the diagnosed
             // member after another address in its control expression, so its location is not the iteration key.
-            // Keep these records out of the dense 16-bit warning columns.
-            while (!pp->fatal && packed < input->packed_member_count && input->packed_members[packed].address <= token)
+            // Keep these records out of the warnings' keys.
+            while (walking && !pp->fatal && packed < input->packed_member_count && input->packed_members[packed].address <= token)
             {
                 const CheckInputPackedMember* member = input->packed_members + packed;
                 if (show_warnings && !member->suppressed && member->address == token &&
@@ -329,10 +411,11 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
                 packed += 1;
             }
-            if (!pp->fatal && reports && first[token] != UINT64_MAX)
+            if (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
             {
-                const uint32_t index = (uint32_t)first[token];
-                const uint32_t phase = (uint32_t)(first[token] >> 32);
+                const uint32_t sequence = (uint32_t)firsts[report];
+                const uint32_t phase = sequence < input->report_count ? 0 : sequence - input->report_count < stream_reports ? 1 : 2;
+                const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                      check_driver_input_report_message(input, input->reports + index);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
@@ -344,7 +427,9 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
                 }
+                report += 1;
             }
+            position = next + 1;
         }
         // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
         // source spelling and warning policy are independent of that expression and precede the parser failure.
@@ -1396,7 +1481,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                         CheckProgram program;
                         CheckDataPrepared data = { 0 };
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
-                        if (result == 0 && (emit_object || link) && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, &output_arena, &scratch))
+                        if (result == 0 && (emit_object || link) && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, scalar, &output_arena, &scratch))
                         {
                             check_driver_diagnose(checking, &pp, data.token, "static-data preparation failed");
                             result = 1;

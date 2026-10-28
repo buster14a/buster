@@ -1128,7 +1128,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, &path->output_arena, &path->scratch);
+                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, parser->options.scalar, &path->output_arena, &path->scratch);
     CheckProgramOptions options = {
         .initializers = &path->initializers,
         .asms = &path->asms,
