@@ -1003,12 +1003,26 @@ static void check_lower_instruction(CheckLowerWriter* writer, uint8_t kind, uint
 // complex, both have one class on the stack, a value's or both an aggregate's address, and `to` isn't _Bool, whose
 // conversion normalizes even a _Bool's value. An array's decay to a pointer, a pointer's to another and a change of
 // qualifiers are such conversions, which need no task.
-static bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
+static inline __attribute__((always_inline)) bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
 {
-    const uint8_t from_facts = check_lower_facts(writer, from);
-    const uint8_t to_facts = check_lower_facts(writer, to);
-    const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, from);
-    const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, to);
+    uint32_t from_info = 0;
+    uint32_t to_info = 0;
+    if (writer->type_templates != NULL)
+    {
+        const uint32_t a = type_index(from);
+        const uint32_t b = type_index(to);
+        from_info = a < writer->type_count ? writer->type_templates[a] : UINT8_MAX;
+        to_info = b < writer->type_count ? writer->type_templates[b] : UINT8_MAX;
+    }
+    else
+    {
+        from_info = check_lower_class(writer, from) | (uint32_t)check_lower_facts(writer, from) << 8;
+        to_info = check_lower_class(writer, to) | (uint32_t)check_lower_facts(writer, to) << 8;
+    }
+    const uint8_t from_facts = (uint8_t)(from_info >> 8);
+    const uint8_t to_facts = (uint8_t)(to_info >> 8);
+    const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_info;
+    const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_info;
     return source == target && source < BUSTER_TYPED_CLASSES && ((from_facts ^ to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 &&
            ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 && (to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0;
 }
@@ -3990,6 +4004,7 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // before it runs (check_lower_task_source). A constant in each, so that the plain loop does none of it.
 static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources)
 {
+    uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTaskPacked packed = writer->tasks[--writer->depth];
@@ -4003,14 +4018,33 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
-        if (kind == CHECK_LOWER_INSTRUCTION)
+        if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
         {
-            const bool batched = !sources && !writer->scalar && !writer->track && writer->depth >= 2 &&
-                                 ((writer->tasks[writer->depth - 1].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION &&
-                                 ((writer->tasks[writer->depth - 2].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION && check_lower_instruction_batch(writer);
-            if (!batched)
+            if (kind == CHECK_LOWER_EXPRESSION)
             {
-                check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
+                const bool simple = !sources && !writer->scalar && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
+                                    check_lower_value(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0);
+                const bool plain = !simple && !sources && !writer->scalar && check_lower_plain(writer, node, ((packed.control >> 40) & 1) != 0);
+                const bool batched = !plain && !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
+                                     check_lower_batch_expression(writer, node);
+                if (!batched)
+                {
+                    if (!simple && !plain)
+                    {
+                        check_lower_expand(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0, ((packed.control >> 42) & 1) != 0);
+                    }
+                    expression_nodes += 1;
+                }
+            }
+            else
+            {
+                const bool batched = !sources && !writer->scalar && !writer->track && writer->depth >= 2 &&
+                                     ((writer->tasks[writer->depth - 1].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION &&
+                                     ((writer->tasks[writer->depth - 2].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION && check_lower_instruction_batch(writer);
+                if (!batched)
+                {
+                    check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
+                }
             }
         }
         else if (kind == CHECK_LOWER_CONVERSION)
@@ -4087,22 +4121,8 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             // The complex values' tasks, the kinds' last, behind one compare: few functions have them.
             check_lower_complex_task(writer, check_lower_task_unpack(packed));
         }
-        else
-        {
-            const bool simple = !sources && !writer->scalar && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
-                                check_lower_value(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0);
-            const bool batched = !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
-                                 check_lower_batch_expression(writer, node, ((packed.control >> 40) & 1) != 0);
-            if (!batched)
-            {
-                if (!simple)
-                {
-                    check_lower_expand(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0, ((packed.control >> 42) & 1) != 0);
-                }
-                writer->expression_nodes += 1;
-            }
-        }
     }
+    writer->expression_nodes += expression_nodes;
 }
 
 static void check_lower_drain(CheckLowerWriter* writer)

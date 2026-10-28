@@ -138,6 +138,27 @@ static void check_test_program_batch(CheckTest* test)
         {
             type_templates[i] = type_classes[i] | (uint32_t)type_facts[i] << 8;
         }
+        const CheckLowerWriter columns = {
+            .type_classes = type_classes,
+            .type_facts = type_facts,
+            .type_count = types.table.types.count,
+        };
+        CheckLowerWriter packed = columns;
+        packed.type_templates = type_templates;
+        bool same = true;
+        for (uint32_t a = 0; a <= types.table.types.count; a += 1)
+        {
+            for (uint32_t b = 0; b <= types.table.types.count; b += 1)
+            {
+                for (uint32_t qualifiers = 0; qualifiers < 8; qualifiers += 1)
+                {
+                    const TypeId from = a << BUSTER_TYPE_INDEX_SHIFT | qualifiers;
+                    const TypeId to = b << BUSTER_TYPE_INDEX_SHIFT | (7 - qualifiers);
+                    same = same && check_lower_conversion_empty(&columns, from, to) == check_lower_conversion_empty(&packed, from, to);
+                }
+            }
+        }
+        check_test_expect(test, same, "packed conversion lookup matches separate class/fact columns for every type pair, qualifier and out-of-range row");
     }
     check_test_expect(test, ready, "expression templates have guarded graph, value and conversion columns");
     uint32_t locals[2] = {
@@ -311,7 +332,7 @@ static void check_test_program_batch(CheckTest* test)
                                       writers[0].token == writers[2].token && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
                                       memcmp(classes[0], classes[2], writers[0].count) == 0 &&
                                       memcmp(values[0], values[2], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && local_flags[0][0] == local_flags[2][0] && writers[2].classified_nodes == 0;
-                check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact task loop and failures");
+                check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact entries and failures");
                 if (limit == 0)
                 {
                     check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes <= writers[1].expression_nodes,
