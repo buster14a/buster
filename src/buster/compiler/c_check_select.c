@@ -123,10 +123,8 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
     const TypeId control_type = check_constant_control_type(reader, control);
-    TypeId* seen = arena_push_array(reader->scratch, close - separator, sizeof(TypeId), 4);
-    reader->output->resource |= seen == 0;
-    bool valid = seen != 0 && control_type != 0;
-    uint32_t seen_count = 0;
+    CheckGenericSet seen;
+    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, close - separator, control_type, close + 1);
     uint32_t chosen = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t association = separator + 1;
@@ -146,19 +144,11 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
         {
             const TypeId type = reader->selection_types[colon];
             valid = type != 0;
-            for (uint32_t prior = 0; valid && prior < seen_count; prior += 1)
-            {
-                const TypeAnswer answer = type_compatible_at(reader->types, type, seen[prior], reader->transparent_unions, reader->types->tags.count, close + 1);
-                reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                valid = answer == TYPE_ANSWER_NO;
-            }
+            bool matches = false;
+            valid = valid && check_generic_association(reader, &seen, type, &matches);
             if (valid)
             {
-                seen[seen_count++] = type;
-                const TypeAnswer answer = type_compatible_at(reader->types, type, control_type, reader->transparent_unions, reader->types->tags.count, close + 1);
-                reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                valid = answer != TYPE_ANSWER_FULL;
-                if (answer == TYPE_ANSWER_YES)
+                if (matches)
                 {
                     valid &= chosen == BUSTER_CHECK_NONE;
                     chosen = root;

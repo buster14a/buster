@@ -1823,6 +1823,12 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                                 stages[CHECK_STAGE_LANES] == 0,
                       "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
+    uint64_t expression_nodes = 0;
+    uint64_t batch_nodes = 0;
+    const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
+    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
+    check_test_expect(test, counted && expression_nodes >= batch_nodes && batch_nodes != 0,
+                      "--time-stages reports the templates' nonzero share of evaluated expression occurrences");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));
@@ -2122,6 +2128,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 
 #include "c_check_packed_test.c"
 #include "c_check_x86_diagnostic_test.c"
+#include "c_check_capacity_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -2212,6 +2219,9 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     CheckTest test = { 0 };
     const char* clang = "clang";
     const char* executable = NULL;
@@ -2237,7 +2247,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     check_test_expect(&test, options, "driver test options are recognized");
+    // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     check_test_driver_diagnostic_capacity(&test);
+    check_test_lower_capacity(&test);
     const CheckDriverFixture fixtures[] =
     {
         {
@@ -2601,6 +2614,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
@@ -2623,6 +2637,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         rmdir(directory);
     }
+    oracle_cache_report(oracle, "test-checker-driver");
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
-    return test.failures != 0;
+    const int returned = test.failures != 0;
+    oracle_epoch_end(epoch);
+    return returned;
 }

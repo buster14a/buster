@@ -42,12 +42,14 @@ extern char** environ;
 #define BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS 256
 #define BUSTER_PREDEFINES_TEST_PARALLEL 16
 
-// One clang run: its arguments (after "clang"), and its standard output and exit status once run.
+// One clang run: its arguments (after "clang"), the file its standard input reads (null for none), and its standard
+// output and exit status once run.
 typedef struct PredefinesTestJob PredefinesTestJob;
 struct PredefinesTestJob
 {
     const char* arguments[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS];
     uint32_t argument_count;
+    const char* input;
     char* output;
     size_t length;
     int status;
@@ -110,6 +112,21 @@ static bool predefines_test_argument(PredefinesTestJobs* jobs, PredefinesTestJob
     return result;
 }
 
+// The run's input: `path`, which its standard input reads, and `-` as its last argument, so that its command and result
+// don't name the test's directory and the oracle cache can keep them (oracle_cache.c).
+static bool predefines_test_input(PredefinesTestJobs* jobs, PredefinesTestJob* job, const char* path)
+{
+    const size_t length = strlen(path);
+    char* copy = arena_push(&jobs->text, length + 1, 1);
+    const bool result = copy != 0 && predefines_test_argument(jobs, job, "-");
+    if (result)
+    {
+        memcpy(copy, path, length + 1);
+        job->input = copy;
+    }
+    return result;
+}
+
 // Appends the space-separated words of `text` as arguments.
 static bool predefines_test_words(PredefinesTestJobs* jobs, PredefinesTestJob* job, const char* text)
 {
@@ -138,7 +155,7 @@ static bool predefines_test_words(PredefinesTestJobs* jobs, PredefinesTestJob* j
     return result;
 }
 
-// The first job in [first, job) with `job`'s arguments, or `job` if none has them.
+// The first job in [first, job) with `job`'s arguments and input, or `job` if none has them.
 static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_t first, uint32_t job)
 {
     const PredefinesTestJob* wanted = &jobs->jobs[job];
@@ -146,7 +163,8 @@ static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_
     for (uint32_t i = first; result == job && i < job; i += 1)
     {
         const PredefinesTestJob* other = &jobs->jobs[i];
-        bool same = other->argument_count == wanted->argument_count;
+        bool same = other->argument_count == wanted->argument_count && (other->input == 0) == (wanted->input == 0) &&
+                    (other->input == 0 || strcmp(other->input, wanted->input) == 0);
         for (uint32_t a = 0; same && a < wanted->argument_count; a += 1)
         {
             same = strcmp(other->arguments[a], wanted->arguments[a]) == 0;
@@ -156,12 +174,13 @@ static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_
     return result;
 }
 
-// Runs jobs [first, count) as `clang ARGUMENTS`, BUSTER_PREDEFINES_TEST_PARALLEL at a time, each one's standard output
-// into a file of `directory` and then into memory, and its standard error to /dev/null. CPATH and C_INCLUDE_PATH are
-// left out of their environment. A job with the arguments of an earlier one in the range takes its status and output
-// rather than run clang again (#465): the files the jobs read don't change while they run. Returns false if a process
-// can't start.
-static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, const char* directory)
+// Runs jobs [first, count) as `clang ARGUMENTS` through the oracle cache (oracle_cache.c, #542), at most
+// test_process_cpus() (and BUSTER_PREDEFINES_TEST_PARALLEL) at a time, each one's standard input from its input
+// (/dev/null without one) and its standard output into memory. CPATH and C_INCLUDE_PATH are left out of their
+// environment. A job with the arguments and input of an earlier one in the range takes its status and output rather
+// than run clang again (#465): the files the jobs read don't change while they run. Returns false if a process can't
+// start or be waited for, or an entry is stale.
+static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first)
 {
     // The environment without CPATH and C_INCLUDE_PATH.
     uint32_t variables = 0;
@@ -169,10 +188,16 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     {
         variables += 1;
     }
+    const uint32_t cpus = test_process_cpus();
+    const uint32_t parallel = cpus < BUSTER_PREDEFINES_TEST_PARALLEL ? cpus : BUSTER_PREDEFINES_TEST_PARALLEL;
     char** environment = calloc((size_t)variables + 1, sizeof(char*));
-    pid_t* pids = calloc(jobs->count + 1, sizeof(pid_t));
     uint32_t* sources = calloc(jobs->count + 1, sizeof(uint32_t));
-    bool result = environment != 0 && pids != 0 && sources != 0;
+    // The runs going at once, a ring of `parallel` started in the jobs' order and finished oldest first, with each one's
+    // job and arguments.
+    OracleRun* runs = calloc(parallel, sizeof(OracleRun));
+    uint32_t* running = calloc(parallel, sizeof(uint32_t));
+    char** arguments = calloc((size_t)parallel * (BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2), sizeof(char*));
+    bool result = environment != 0 && sources != 0 && runs != 0 && running != 0 && arguments != 0;
     uint32_t kept = 0;
     for (uint32_t i = 0; result && i < variables; i += 1)
     {
@@ -182,52 +207,50 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
             kept += 1;
         }
     }
-    uint32_t next = first;
-    uint32_t running = 0;
-    while (result && (next < jobs->count || running > 0))
+    uint32_t started = 0;
+    uint32_t finished = 0;
+    for (uint32_t next = first; next <= jobs->count && environment != 0 && sources != 0 && runs != 0 && running != 0 && arguments != 0; next += 1)
     {
-        while (result && next < jobs->count && running < BUSTER_PREDEFINES_TEST_PARALLEL)
+        // A job with an earlier one's arguments and input runs no clang: it takes that one's output below.
+        if (next < jobs->count)
         {
-            // A job with an earlier one's arguments runs no clang: it takes that one's output below.
             sources[next] = predefines_test_same_job(jobs, first, next);
-            if (sources[next] == next)
-            {
-                PredefinesTestJob* job = &jobs->jobs[next];
-                char path[4200];
-                snprintf(path, sizeof(path), "%s/clang-%u.out", directory, next);
-                const char* argv[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2];
-                argv[0] = "clang";
-                for (uint32_t a = 0; a < job->argument_count; a += 1)
-                {
-                    argv[a + 1] = job->arguments[a];
-                }
-                argv[job->argument_count + 1] = 0;
-                posix_spawn_file_actions_t actions;
-                posix_spawn_file_actions_init(&actions);
-                posix_spawn_file_actions_addopen(&actions, 1, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
-                pid_t pid;
-                result = posix_spawnp(&pid, "clang", &actions, 0, (char* const*)argv, environment) == 0;
-                posix_spawn_file_actions_destroy(&actions);
-                pids[next] = result ? pid : 0;
-                running += result;
-            }
-            next += 1;
         }
-        if (running > 0)
+        const bool starts = next < jobs->count && sources[next] == next;
+        // The oldest run, finished when the ring is full or the jobs have all started.
+        while (finished < started && (started - finished == parallel || next == jobs->count))
         {
-            int status;
-            const pid_t done = wait(&status);
-            for (uint32_t i = first; i < next; i += 1)
+            OracleRun* run = &runs[finished % parallel];
+            PredefinesTestJob* job = &jobs->jobs[running[finished % parallel]];
+            result = oracle_run_finish(run) && result;
+            job->output = run->output;
+            job->length = run->output_length;
+            job->status = WIFEXITED(run->status) ? WEXITSTATUS(run->status) : 128;
+            run->output = 0;
+            oracle_run_release(run);
+            result = result && job->output != 0;
+            finished += 1;
+        }
+        if (starts)
+        {
+            const PredefinesTestJob* job = &jobs->jobs[next];
+            char** argv = arguments + (size_t)(started % parallel) * (BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2);
+            argv[0] = "clang";
+            for (uint32_t a = 0; a < job->argument_count; a += 1)
             {
-                if (pids[i] == done && done > 0)
-                {
-                    jobs->jobs[i].status = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
-                    pids[i] = 0;
-                }
+                argv[a + 1] = (char*)job->arguments[a];
             }
-            running -= done > 0;
-            result &= done > 0;
+            argv[job->argument_count + 1] = 0;
+            runs[started % parallel] = (OracleRun){
+                .purpose = "predefines: clang",
+                .arguments = argv,
+                .environment = environment,
+                .input = job->input,
+                .dependencies = true,
+            };
+            running[started % parallel] = next;
+            result = oracle_run_start(&runs[started % parallel]) && result;
+            started += 1;
         }
     }
     for (uint32_t i = first; result && i < jobs->count; i += 1)
@@ -245,37 +268,12 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
                 jobs->jobs[i].status = source->status;
             }
         }
-        else
-        {
-            char path[4200];
-            snprintf(path, sizeof(path), "%s/clang-%u.out", directory, i);
-            FILE* file = fopen(path, "r");
-            char* text = 0;
-            size_t length = 0;
-            FILE* collected = open_memstream(&text, &length);
-            char chunk[1 << 16];
-            size_t n;
-            while (file != 0 && collected != 0 && (n = fread(chunk, 1, sizeof(chunk), file)) > 0)
-            {
-                fwrite(chunk, 1, n, collected);
-            }
-            if (file != 0)
-            {
-                fclose(file);
-            }
-            if (collected != 0)
-            {
-                fclose(collected);
-            }
-            jobs->jobs[i].output = text;
-            jobs->jobs[i].length = length;
-            result = text != 0;
-            unlink(path);
-        }
     }
     free(environment);
-    free(pids);
     free(sources);
+    free(runs);
+    free(running);
+    free(arguments);
     return result;
 }
 
@@ -558,7 +556,7 @@ static bool predefines_test_configuration(PredefinesTestJobs* jobs, const Predef
             result = predefines_test_argument(jobs, job, on);
         }
     }
-    result = result && predefines_test_words(jobs, job, "-x c") && predefines_test_argument(jobs, job, empty);
+    result = result && predefines_test_words(jobs, job, "-x c") && predefines_test_input(jobs, job, empty);
     return result;
 }
 
@@ -600,9 +598,9 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
         char flag[64];
         snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
         result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o -") && predefines_test_argument(&jobs, job, flag) &&
-                 predefines_test_argument(&jobs, job, source);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
     }
-    result = result && predefines_test_run_jobs(&jobs, 0, directory);
+    result = result && predefines_test_run_jobs(&jobs, 0);
     for (uint32_t c = 0; result && c < tables->cpu_count; c += 1)
     {
         PredefinesFeatures on;
@@ -644,7 +642,7 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
             snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
             snprintf(trigger, sizeof(trigger), "-mno-%s", soft[s][0]);
             result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o -") && predefines_test_argument(&jobs, job, flag) &&
-                     predefines_test_argument(&jobs, job, trigger) && predefines_test_argument(&jobs, job, source);
+                     predefines_test_argument(&jobs, job, trigger) && predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
         }
     }
     const uint32_t round2_features = jobs.count;
@@ -666,13 +664,14 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
                 result = predefines_test_argument(&jobs, job, flag);
             }
         }
-        result = result && (on[0] == 0 || predefines_test_argument(&jobs, job, on)) && predefines_test_argument(&jobs, job, source);
+        result = result && (on[0] == 0 || predefines_test_argument(&jobs, job, on)) && predefines_test_words(&jobs, job, "-x c") &&
+                 predefines_test_input(&jobs, job, source);
         // The down closure: -march=x86-64 and f's -mno- flag.
         job = result ? predefines_test_job(&jobs) : 0;
         result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o - -march=x86-64") && (off[0] == 0 || predefines_test_argument(&jobs, job, off)) &&
-                 predefines_test_argument(&jobs, job, source);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
     }
-    result = result && predefines_test_run_jobs(&jobs, round2, directory);
+    result = result && predefines_test_run_jobs(&jobs, round2);
     for (uint32_t c = 0; result && c < tables->cpu_count; c += 1)
     {
         PredefinesFeatures off;
@@ -768,9 +767,9 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
         char flag[64];
         snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
         result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_argument(&jobs, job, flag) && predefines_test_words(&jobs, job, "-x c") &&
-                 predefines_test_argument(&jobs, job, empty);
+                 predefines_test_input(&jobs, job, empty);
     }
-    result = result && predefines_test_run_jobs(&jobs, round3, directory);
+    result = result && predefines_test_run_jobs(&jobs, round3);
     Arena arena = arena_reserve(1ull << 30);
     char** owned = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, 1 << 16);
     uint32_t owned_count = 0;
@@ -1427,9 +1426,9 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     {
         PredefinesTestJob* job = predefines_test_job(&jobs);
         result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_words(&jobs, job, sets[s]) && predefines_test_words(&jobs, job, "-x c") &&
-                 predefines_test_argument(&jobs, job, empty);
+                 predefines_test_input(&jobs, job, empty);
     }
-    result = result && predefines_test_run_jobs(&jobs, 0, directory);
+    result = result && predefines_test_run_jobs(&jobs, 0);
     uint32_t failures = 0;
     for (uint32_t s = 0; result && s < set_count; s += 1)
     {
@@ -1472,14 +1471,14 @@ static bool predefines_test_dump(const char* directory)
         fclose(file);
     }
     PredefinesTestJob* job = result ? predefines_test_job(&jobs) : 0;
-    result = job != 0 && predefines_test_words(&jobs, job, "-dM -E -x c") && predefines_test_argument(&jobs, job, path);
+    result = job != 0 && predefines_test_words(&jobs, job, "-dM -E -x c") && predefines_test_input(&jobs, job, path);
     for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(evaluation); i += 1)
     {
         job = predefines_test_job(&jobs);
         result = job != 0 && predefines_test_words(&jobs, job, "-E -P") && predefines_test_words(&jobs, job, evaluation[i]) &&
-                 predefines_test_words(&jobs, job, "-x c") && predefines_test_argument(&jobs, job, value_path);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, value_path);
     }
-    result = result && predefines_test_run_jobs(&jobs, 0, directory);
+    result = result && predefines_test_run_jobs(&jobs, 0);
     // Ours: the -E command's own -dM printer, into a memory stream.
     uint32_t failures = 0;
     for (uint32_t run = 0; result && run < 1 + BUSTER_ARRAY_LENGTH(evaluation); run += 1)
