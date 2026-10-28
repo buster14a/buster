@@ -20,6 +20,7 @@ static void check_test_lower_capacity(CheckTest* test)
             .capacity = limit ? BUSTER_TIER0_MAX_ENTRIES + 1 : count,
             .local_count = entries ? 0 : locals,
             .local_capacity = limit ? BUSTER_TIER0_MAX_LOCALS + 1 : locals,
+            .class_limit = BUSTER_TYPED_CLASSES,
         };
         if (entries)
         {

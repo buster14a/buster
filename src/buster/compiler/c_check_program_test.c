@@ -773,12 +773,18 @@ struct CheckTestProgramBuild
 
 static CheckTestProgramBuild check_test_program_build;
 
+// The -march of the oracle's and the harness's compiles and of the link: x86-64's, or a section's own while it runs
+// (check_test_program_vectors, which releases the build around it).
+static const char* check_test_program_march = "-march=x86-64";
+
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
-// oracle and the harness alike.
+// oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
+// clang's default (-ffp-contract=on) does even at -O0 where the target has FMA (x86-64-v4's vector programs).
 #define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned) \
     "-std=gnu17", \
     "-O0", \
-    "-march=x86-64", \
+    (char*)check_test_program_march, \
+    "-ffp-contract=off", \
     "-fno-common", \
     (char_unsigned) ? "-funsigned-char" : "-fsigned-char", \
     "-Wno-unused-value", \
@@ -1365,10 +1371,10 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     return same;
 }
 
-// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
-// it with the same.
+// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
+// x86-64's), against clang's build of it with the same; its executable runs where `run_native` says the host can run it.
 static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native, uint32_t local_limit)
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1377,6 +1383,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = true,
         .predefines.char_unsigned = char_unsigned,
+        .target = target != NULL ? *target : (X86Target){ 0 },
     };
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
@@ -1413,6 +1420,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
             .return_flow_work = &return_flow_work,
+            .target_features = pp_options.target.features,
         };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch);
         if (ready && strcmp(name, "many-aggregate-return-bodies") == 0)
@@ -1538,26 +1546,26 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
 }
 
 static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, run_native, 0);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0);
 }
 
 static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                             int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true, local_limit);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit);
 }
 
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                              int32_t expected_pools, uint32_t entry_limit)
 {
-    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true);
+    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true);
 }
 
 static void check_test_program_source_native(CheckTest* test, const char* source, const char* name, const char* clang, bool run_native)
 {
-    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, run_native);
+    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, NULL, run_native);
 }
 
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
@@ -1720,16 +1728,17 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
-// A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
-// initializations it keeps; and, for a refusal with `reason`, the feature the refusal names
-// (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
-static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
-                                               uint32_t initializations, const char* reason)
+// A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
+// refused, with the references and initializations it keeps; and, for a refusal with `reason`, the feature the refusal
+// names (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
+static void check_test_program_boundary_target(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason, const X86Target* target)
 {
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
-    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true,
+                                   .target = target != NULL ? *target : (X86Target){ 0 } };
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
                         pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "program boundary source preprocessing");
@@ -1760,7 +1769,8 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
         }
         if (ready)
         {
-            const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
+            const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0,
+                                                  .target_features = pp_options.target.features };
             CheckProgram program = { 0 };
             const bool built = check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch);
             snprintf(description, sizeof(description), "%s: checked control acceptance matches the independent C constraint", name);
@@ -1838,6 +1848,13 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// A program fixture, checked and lowered by both paths for x86-64 (check_test_program_boundary_target).
+static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason)
+{
+    check_test_program_boundary_target(test, source, name, accepted, machine, references, initializations, reason, NULL);
 }
 
 static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
@@ -1922,6 +1939,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
+#include "c_check_program_vector_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2424,6 +2442,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_helpers(test);
     check_test_program_atomics(test, clang);
     check_test_program_diagnostics(test, clang);
+    check_test_program_vectors(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);

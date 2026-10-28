@@ -5637,8 +5637,15 @@ reports the medians of the whole, the compiling, the Link's building (the
 direct path) and what follows the last function compiled, which for the
 schedules it splits into `.text`'s last chunks, unwind pairs and DWARF units,
 the tail built, the tail written, the headers, and the close. Run it under the
-9700X's lock with `taskset -c 2`, or `taskset -c 2,3` with `--cpus 2,3` for the
-writer lane. The outputs are overwritten in place, as `executable_write`
+9700X's lock with `taskset -c 2` for serial rows, or `taskset -c 2,3` with
+`--lanes 2 --cpus 2,3` for parallel rows. The benchmark clamps lanes to its
+inherited CPU affinity and reports the requested and selected counts. A writer
+pair must name two distinct allowed CPUs; an unavailable writer or parallel
+direct row prints `not run` and is excluded from validation and timing. Default
+writer CPUs are the first two allowed CPUs. CI selects one allowed CPU per
+physical core (up to eight), avoiding SMT siblings, and passes that placement
+to the benchmark. Manual placements should do the same. The outputs are
+overwritten in place, as `executable_write`
 overwrites an executable: a file truncated on open and written again is flushed
 when it is closed on btrfs and ext4.
 
