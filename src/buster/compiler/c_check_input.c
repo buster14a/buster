@@ -398,6 +398,7 @@ struct CheckInputSpecifierJob
     uint32_t signedness;
     uint32_t storage;
     uint32_t restrict_token;
+    uint32_t vla_begin;
     TypeId base;
     TypeId result;
     CheckInputAttributes* attributes;
@@ -489,6 +490,9 @@ struct CheckInputReader
     uint32_t* vla_ends;
     uint32_t* vla_scope_ends;
     uint32_t* vla_sizes;
+    // Appended records of the next definition's header, retained separately from the body's later records.
+    uint32_t parameter_vla_begin;
+    uint32_t parameter_vla_end;
     uint8_t* expression_commas;
     uint8_t* conditions;
     uint32_t* region_roots;
@@ -1571,6 +1575,7 @@ static CheckOp check_input_binary(uint8_t kind);
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
 #include "c_check_builtin_evidence.c"
+#include "c_check_generic.c"
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
@@ -1608,7 +1613,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 uint32_t first;
                 uint32_t last;
                 int64_t value;
-                valid = check_input_attribute_argument(reader->parser, attribute, argument, &first, &last) &&
+                valid = check_input_attribute_argument(attribute, argument, &first, &last) &&
                         check_input_constant_ice(reader, first, last, &value) && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
             }
         }
@@ -2862,6 +2867,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
     }
     const bool continuation = reader->declaration_bases[first] != 0;
+    const CheckInputSpecifierJob* specifier_job = reader->specifier_jobs[first];
+    const uint32_t vla_begin = specifier_job != 0 ? specifier_job->vla_begin : reader->output->vla_count;
     const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
     const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
     uint32_t i = first + continuation;
@@ -2874,6 +2881,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_owner = BUSTER_CHECK_NONE;
     if (reader->specifier_pending)
     {
+        reader->specifier_jobs[first]->vla_begin = vla_begin;
         reader->specifier_pending = false;
         return;
     }
@@ -2941,7 +2949,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
-            valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {
@@ -2984,6 +2992,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
                 {
+                    reader->parameter_vla_begin = vla_begin;
+                    reader->parameter_vla_end = reader->output->vla_count;
                     reader->output->body_declarations[i] = name;
                     reader->function_specifiers[i] = first;
                     reader->parameters[i] = parameters;

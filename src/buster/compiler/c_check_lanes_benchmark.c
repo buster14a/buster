@@ -100,7 +100,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     CheckProgramSelection selected = { 0 };
-    valid = valid && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, &path.output_arena, &path.scratch);
+    valid = valid && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
     const CheckProgramOptions program_options = {
         .initializers = &path.initializers,
         .asms = &path.asms,

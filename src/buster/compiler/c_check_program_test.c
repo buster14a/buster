@@ -468,7 +468,8 @@ static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, 
 
 // #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
 // PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
-// ones, and the needed objects' count and numbering (object 0 never a symbol), at every density.
+// ones, the declarations with initializers (#592's check_init_declarations), and the needed objects' count and
+// numbering (object 0 never a symbol), at every density.
 static void check_test_program_declaring(CheckTest* test)
 {
     static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
@@ -480,8 +481,8 @@ static void check_test_program_declaring(CheckTest* test)
         const uint32_t count = c <= 200 ? c : larger[c - 201];
         for (uint32_t density = 0; density < 4; density += 1)
         {
-            uint8_t* maps[7] = { 0 };
-            uint64_t sizes[7] = { 0 };
+            uint8_t* maps[9] = { 0 };
+            uint64_t sizes[9] = { 0 };
             uint32_t* declarations = (uint32_t*)check_test_program_guarded(&maps[0], &sizes[0], (uint64_t)count * sizeof(uint32_t));
             uint32_t* nodes = (uint32_t*)check_test_program_guarded(&maps[1], &sizes[1], (uint64_t)count * sizeof(uint32_t));
             // The tokens' room: count + 16, as the kernel's contract asks, and not one more.
@@ -528,6 +529,32 @@ static void check_test_program_declaring(CheckTest* test)
                     }
                 }
             }
+            // The declarations with initializers (check_init_declarations, #592): room for exactly `count`.
+            uint32_t* begins = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)count * sizeof(uint32_t));
+            uint32_t* initialized = (uint32_t*)check_test_program_guarded(&maps[8], &sizes[8], (uint64_t)count * sizeof(uint32_t));
+            ready &= begins != 0 && initialized != 0;
+            uint32_t begun = 0;
+            for (uint32_t t = 0; ready && t < count; t += 1)
+            {
+                state = state * 6364136223846793005u + 1442695040888963407u;
+                const uint32_t random = (uint32_t)(state >> 33);
+                const bool has = density == 3 || (density != 0 && random % (density == 1 ? 16 : 2) == 0);
+                begins[t] = has ? (random >> 4) % (count + 2) : BUSTER_CHECK_NONE;
+                expected[begun] = t;
+                begun += has;
+            }
+            for (uint32_t path = 0; ready && path < 2; path += 1)
+            {
+                const CheckInput input = { .initializer_begins = begins, .token_count = count };
+                const uint32_t got = check_init_declarations(&input, count, initialized, path == 0);
+                const bool same = got == begun && memcmp(initialized, expected, (uint64_t)begun * sizeof(uint32_t)) == 0;
+                all &= same;
+                checked += 1;
+                if (!same)
+                {
+                    printf("  initialized declarations: count %u density %u %s path: %u tokens, expected %u\n", count, density, path == 0 ? "scalar" : "vector", got, begun);
+                }
+            }
             const uint32_t objects = count + 1;
             uint32_t want = 0;
             for (uint32_t object = 1; ready && object < objects; object += 1)
@@ -564,7 +591,7 @@ static void check_test_program_declaring(CheckTest* test)
                 }
             }
             all &= ready;
-            for (uint32_t m = 0; m < 7; m += 1)
+            for (uint32_t m = 0; m < 9; m += 1)
             {
                 if (maps[m] != 0)
                 {
@@ -927,6 +954,344 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     return valid;
 }
 
+// check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
+// check_test_program_sparse compares check_data_prepare's records and check_data_latest with.
+typedef struct CheckTestDataPrepared CheckTestDataPrepared;
+struct CheckTestDataPrepared
+{
+    CheckDataObject* objects;
+    uint32_t count;
+    uint32_t* references;
+    uint32_t reference_count;
+    uint32_t* reference_offsets;
+    uint32_t* reference_counts;
+    uint32_t* latest_declarations;
+    uint32_t object_count;
+    LinkCapacity capacity;
+    uint32_t token;
+    CheckDataInputStatus status;
+};
+
+static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const CheckInput* input, const CheckStream* stream,
+                                          const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
+{
+    *result = (CheckTestDataPrepared){ .token = BUSTER_CHECK_NONE };
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t count = input->token_count;
+    bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
+                 stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+    result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
+    result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    if (valid && (result->latest_declarations == 0 || definition == 0 || alignments == 0))
+    {
+        valid = false;
+        result->status = CHECK_DATA_INPUT_RESOURCE;
+    }
+    for (uint32_t object = 0; valid && object <= count; object += 1)
+    {
+        result->latest_declarations[object] = BUSTER_CHECK_NONE;
+        definition[object] = BUSTER_CHECK_NONE;
+        alignments[object] = 0;
+    }
+    for (uint32_t token = 0; valid && token < count; token += 1)
+    {
+        if (input->declarations[token] == token && input->static_objects[token])
+        {
+            const uint32_t object = input->objects[token];
+            valid = object != 0 && object <= count;
+            if (valid)
+            {
+                result->latest_declarations[object] = token;
+                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+                if (attributes != 0 && attributes->alignment_log2 > alignments[object])
+                {
+                    alignments[object] = attributes->alignment_log2;
+                }
+                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+                {
+                    const uint32_t previous = definition[object];
+                    if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+                    {
+                        definition[object] = token;
+                    }
+                }
+            }
+            else
+            {
+                result->status = CHECK_DATA_INPUT_INVALID;
+                result->token = token;
+            }
+        }
+    }
+    uint64_t object_capacity = input->string_count;
+    uint64_t reference_capacity = 0;
+    for (uint32_t object = 1; valid && object <= count; object += 1)
+    {
+        const uint32_t token = definition[object];
+        if (token != BUSTER_CHECK_NONE)
+        {
+            object_capacity += 1;
+            const uint32_t plan_index = initializers->declaration_plans[token];
+            valid = plan_index <= initializers->count &&
+                    (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
+            reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
+            if (!valid)
+            {
+                result->status = CHECK_DATA_INPUT_INVALID;
+                result->token = token;
+            }
+        }
+    }
+    if (valid && (object_capacity > UINT32_MAX || reference_capacity > UINT32_MAX))
+    {
+        valid = false;
+        result->status = CHECK_DATA_INPUT_RESOURCE;
+    }
+    if (valid)
+    {
+        result->objects = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, object_capacity) : 0;
+        result->reference_offsets = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
+        result->reference_counts = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
+        result->references = reference_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, reference_capacity) : 0;
+        valid = (object_capacity == 0 || (result->objects != 0 && result->reference_offsets != 0 && result->reference_counts != 0)) &&
+                (reference_capacity == 0 || result->references != 0);
+        result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_RESOURCE;
+    }
+    for (uint32_t object = 1; valid && object <= count; object += 1)
+    {
+        const uint32_t selected = definition[object];
+        if (selected != BUSTER_CHECK_NONE)
+        {
+            const uint32_t latest = result->latest_declarations[object];
+            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
+            TypeId type = input->declared_types[latest];
+            const TypeId stripped = type_strip_aligned(types, type);
+            if (plan == 0 && input->tentative[selected] && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            {
+                // Tentative arrays acquire one element at translation-unit end; earlier uses retain their
+                // historical incomplete TypeIds and cannot gain a retroactive sizeof result.
+                type = type_array(types, types->types.base[type_index(stripped)], 1);
+                if (type != 0)
+                {
+                    type |= type_qualifiers(stripped);
+                    if (type_kind(types, input->declared_types[latest]) == BUSTER_TYPE_KIND_ALIGNED)
+                    {
+                        type = type_aligned(types, type, type_alignment_log2(types, input->declared_types[latest]));
+                    }
+                }
+                valid = type != 0;
+                if (!valid)
+                {
+                    result->status = types->last_error == TYPE_ERROR_FULL ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
+                    result->token = selected;
+                }
+            }
+            if (valid)
+            {
+                const uint32_t at = result->count;
+                result->objects[at] = (CheckDataObject){
+                    .type = type,
+                    .object = object,
+                    .initializer = input->initializer_nodes[selected],
+                    .token = selected,
+                    .initializer_plan = plan,
+                    .alignment_log2 = alignments[object] != 0 ? (uint8_t)(alignments[object] - 1) : 0,
+                };
+                result->reference_offsets[at] = result->reference_count;
+                const uint64_t reference_mark = scratch->length;
+                uint32_t* references = 0;
+                uint32_t reference_count = 0;
+                if (plan != 0)
+                {
+                    // Use the opposite arena roles for this temporary result. The helper restores its scratch
+                    // suffix in output, and we copy the surviving references before releasing its result suffix.
+                    const CheckInitStatus status = check_initializer_references(types, plan, scratch, output, &references, &reference_count);
+                    valid = status == CHECK_INIT_OK;
+                    if (!valid)
+                    {
+                        result->status = status == CHECK_INIT_RESOURCE ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
+                        result->token = selected;
+                    }
+                }
+                valid = valid && reference_count <= reference_capacity - result->reference_count;
+                for (uint32_t reference = 0; valid && reference < reference_count; reference += 1)
+                {
+                    valid = references[reference] != 0 && references[reference] <= count;
+                    if (valid)
+                    {
+                        result->references[result->reference_count++] = references[reference];
+                    }
+                }
+                if (!valid && result->status == CHECK_DATA_INPUT_OK)
+                {
+                    result->status = CHECK_DATA_INPUT_INVALID;
+                    result->token = selected;
+                }
+                arena_pop_to(scratch, reference_mark);
+                result->reference_counts[at] = result->reference_count - result->reference_offsets[at];
+                result->count += 1;
+            }
+        }
+    }
+    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
+    {
+        const CheckInitString* string = input->strings + i;
+        valid = string->object != 0 && string->object <= count && result->latest_declarations[string->object] == BUSTER_CHECK_NONE;
+        if (valid)
+        {
+            const uint32_t at = result->count++;
+            result->objects[at] = (CheckDataObject){
+                .type = string->type,
+                .object = string->object,
+                .initializer = BUSTER_CHECK_NONE,
+                .token = string->token,
+                .literal_bytes = string->bytes,
+                .literal_size = string->byte_count,
+                .string_pool = true,
+            };
+            result->reference_offsets[at] = result->reference_count;
+            result->reference_counts[at] = 0;
+        }
+        else
+        {
+            result->status = CHECK_DATA_INPUT_INVALID;
+            result->token = string->token;
+        }
+    }
+    if (valid)
+    {
+        result->object_count = count + 1;
+        result->capacity = (LinkCapacity){
+            .atoms = result->count,
+            .fixups = result->reference_count,
+            .wide_addends = result->reference_count,
+        };
+    }
+    else
+    {
+        const CheckDataInputStatus status = result->status;
+        const uint32_t token = result->token;
+        arena_pop_to(output, output_mark);
+        *result = (CheckTestDataPrepared){ .status = status, .token = token };
+    }
+    arena_pop_to(scratch, scratch_mark);
+    return valid;
+}
+
+
+static int check_test_program_key_order(const void* a, const void* b)
+{
+    const uint64_t left = *(const uint64_t*)a;
+    const uint64_t right = *(const uint64_t*)b;
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// The passes #592 made sparse, on a checked program, against what they did before: check_data_prepare (`data`, of
+// this program's unit) against the dense oracle above, record for record, with check_data_latest of every object, on
+// both paths, check_program_token_body of every token against the column of every body's tokens the selection filled,
+// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token.
+static bool check_test_program_sparse(const CheckProgram* program, const CheckDataPrepared* data, const CheckInput* input, const CheckStream* stream,
+                                      const CheckInitializers* initializers, TypeTable* types, bool scalar, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t count = input->token_count;
+    CheckTestDataPrepared dense = { 0 };
+    CheckDataPrepared other = { 0 };
+    bool same = check_test_data_prepare_dense(&dense, input, stream, initializers, types, output, scratch) &&
+                check_data_prepare(&other, input, stream, initializers, types, !scalar, output, scratch);
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        const CheckDataPrepared* prepared = path == 0 ? data : &other;
+        same = prepared->status == dense.status && prepared->count == dense.count && prepared->reference_count == dense.reference_count &&
+               prepared->object_count == dense.object_count && memcmp(&prepared->capacity, &dense.capacity, sizeof(dense.capacity)) == 0 &&
+               (dense.count == 0 || (memcmp(prepared->reference_offsets, dense.reference_offsets, (uint64_t)dense.count * sizeof(uint32_t)) == 0 &&
+                                     memcmp(prepared->reference_counts, dense.reference_counts, (uint64_t)dense.count * sizeof(uint32_t)) == 0)) &&
+               (dense.reference_count == 0 || memcmp(prepared->references, dense.references, (uint64_t)dense.reference_count * sizeof(uint32_t)) == 0);
+        for (uint32_t i = 0; same && i < dense.count; i += 1)
+        {
+            const CheckDataObject* a = prepared->objects + i;
+            const CheckDataObject* b = dense.objects + i;
+            same = a->type == b->type && a->object == b->object && a->initializer == b->initializer && a->token == b->token &&
+                   a->initializer_plan == b->initializer_plan && a->literal_bytes == b->literal_bytes && a->literal_size == b->literal_size &&
+                   a->string_pool == b->string_pool && a->alignment_log2 == b->alignment_log2;
+        }
+        for (uint32_t object = 0; same && object <= count + 1; object += 1)
+        {
+            same = check_data_latest(prepared, object) == (object <= count ? dense.latest_declarations[object] : BUSTER_CHECK_NONE);
+        }
+        // The static declarations' keys: each static declaration's object and token, in object and then token order.
+        uint64_t* keys = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+        uint32_t key_count = 0;
+        for (uint32_t token = 0; keys != 0 && token < count; token += 1)
+        {
+            if (input->declarations[token] == token && input->static_objects[token])
+            {
+                keys[key_count++] = (uint64_t)input->objects[token] << 32 | token;
+            }
+        }
+        if (keys != 0)
+        {
+            qsort(keys, key_count, sizeof(uint64_t), check_test_program_key_order);
+        }
+        same = keys != 0 && key_count == prepared->declaration_count &&
+               (key_count == 0 || memcmp(keys, prepared->declaration_keys, (uint64_t)key_count * sizeof(uint64_t)) == 0);
+    }
+    uint32_t* token_bodies = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : 0;
+    same = same && token_bodies != 0 && check_program_bodies_ordered(program);
+    if (same)
+    {
+        memset(token_bodies, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
+        for (uint32_t body = 0; body < program->body_count; body += 1)
+        {
+            const uint32_t close = program->parser->tree.parents[program->bodies[body].opening];
+            for (uint32_t token = program->bodies[body].opening; token <= close && token < count; token += 1)
+            {
+                token_bodies[token] = body + 1;
+            }
+        }
+    }
+    for (uint32_t token = 0; same && token <= count + 1; token += 1)
+    {
+        same = check_program_token_body(program, token) == token_bodies[token];
+    }
+    // The objects the unit defines, by both paths, against the walk of every declaring token that found them before.
+    uint8_t* defined = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
+    uint8_t* expected = defined != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
+    uint8_t* access = expected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    same = same && access != 0;
+    if (same)
+    {
+        memset(expected, 0, (uint64_t)program->object_count + 1);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            expected[program->bodies[b].object] = 1;
+        }
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t object = input->objects[token];
+            if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (input->defined[token] || input->tentative[token]))
+            {
+                expected[object] = 1;
+            }
+        }
+    }
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        check_program_object_access(program, access, defined, path == 0);
+        same = memcmp(defined, expected, (uint64_t)program->object_count + 1) == 0;
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    return same;
+}
+
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
@@ -963,7 +1328,7 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
                 check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &options, &stream) && stream.report_count == 0 &&
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
-                check_data_prepare(&data, &input, &stream, &initializers, &types.table, &input_arena, &scratch);
+                check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -976,6 +1341,11 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
+        if (ready)
+        {
+            snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
+            check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
+        }
         if (!ready)
         {
             fprintf(stderr, "test-checker: program source input=%u stream=%u init=%u data=%u program=%u token=%u\n",
@@ -1098,6 +1468,18 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
                 }
                 check_test_expect(test, program.reference_count == references && writes == initializations,
                                   "checked body preserves exact live reference and ordered initializer counts");
+                if (program.body_count == 0)
+                {
+                    const uint64_t output_mark = output.length;
+                    const uint64_t scratch_mark = scratch.length;
+                    CheckLowerShared shared = { 0 };
+                    CheckProgramLowered prepared = { 0 };
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
+                                      "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    arena_pop_to(&output, output_mark);
+                    arena_pop_to(&scratch, scratch_mark);
+                }
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
@@ -1392,8 +1774,25 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+#include "c_check_program_batch_test.c"
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_batch(test);
+    check_test_program_source(test,
+        "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
+        "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
+        "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
+        "v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}",
+        "batch-ordinary-and-ordered-fallback", clang);
+    check_test_program_source(test,
+        "struct part{char tag;int value;double real;struct part*next;};"
+        "static volatile int side;static int touch(int n){side+=n&3;return side;}"
+        "int tested(int n){struct part b={2,n+7,(double)n*0.5,0},a={1,n-3,0.25,&b};"
+        "struct part*p=&a;p->value=(short)(unsigned char)(n+9);"
+        "int v=(short)(unsigned char)p->value+(int)p->next->real+(int)(double)p->next->value;"
+        "v+=(_Bool)p->next->value;v+=n?touch(p->value):touch(p->next->value);return v+side;}",
+        "batch-member-address-load-conversion-chains", clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
@@ -1682,6 +2081,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
         "vla-typedef-captures-bound-once", clang);
     check_test_program_source(test,
+        "int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;"
+        "x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];"
+        "return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}", "vla-declaration-span-scopes-and-commas", clang);
+    check_test_program_source(test,
         "int tested(int n){n+=10;int(*p)[++n],x=(n*=2),(*q)[++n];return (int)sizeof(*p)+(int)sizeof(*q)+n+x;}",
         "vla-declarator-and-initializer-order", clang);
     check_test_program_source(test,
@@ -1795,6 +2198,32 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
         "return (int)__builtin_strlen(b)+(__builtin_memcmp(a,b,k)>0)-(__builtin_memcmp(a,b,k)<0)+b[2];}",
         "memory-builtin-runtime-loops", clang);
+    check_test_program_source(test,
+        "unsigned char a[512],b[512];int tested(int n){unsigned k=(unsigned)n%300;"
+        "for(unsigned i=0;i<512;i++)a[i]=(unsigned char)(1+i%255);"
+        "__builtin_memset(b,0x180,512);__builtin_memcpy(b+3,a+1,k);__builtin_memmove(b+4,b+3,k);"
+        "__builtin_memmove(b+2,b+4,k);b[k+2]=0;"
+        "return (int)__builtin_strlen((char*)b+2)+__builtin_memcmp(a+1,b+2,k)+b[400];}",
+        "memory-builtin-wide-runtime", clang);
+    check_test_program_source(test,
+        "unsigned char a[128],b[128];int effects[3];int tested(int n){effects[0]=effects[1]=effects[2]=0;"
+        "for(unsigned i=0;i<128;i++)a[i]=(unsigned char)(i+n);"
+        "__builtin_memset(b,0x1a5,33);__builtin_memcpy(b,a,32);"
+        "__builtin_memmove(b+1,b,15);__builtin_memmove(b,b+1,16);"
+        "__builtin_memcpy((effects[0]++,b+40),(effects[1]++,a+40),(effects[2]++,8));"
+        "int r=__builtin_memcmp(a+40,b+40,8);__builtin_memset((effects[0]++,b),7,(0));"
+        "return r+effects[0]+effects[1]*10+effects[2]*100+b[7]+b[15]+b[32]+__builtin_memcmp(a,b,1)+__builtin_memcmp(a,b,0);}",
+        "memory-builtin-small-constants-and-effects", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int change_rounding(int);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;change_rounding(n);"
+        "__builtin_memcpy(b,a,(unsigned long)(1.0+0x1.fffffffffffffp-1));change_rounding(0);return b[0]+b[1]*256;}",
+        "memory-builtin-runtime-size-under-fenv", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;clear_fp();"
+        "__builtin_memcpy(b,a,__builtin_constant_p(1.0/3.0));return b[0]+b[1]*256+fp_state()*65536;}",
+        "memory-builtin-size-query-runtime-answer", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
@@ -2346,6 +2775,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test, source, name, clang);
     }
     check_test_program_boundary(test, "", "empty-program", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S0{int x;};struct S1{struct S0 x;};", "types-only-no-abi", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S{int x;};struct S value={42};int values[3]={1,2,3};", "objects-only-no-abi", true, true, 0, 0);
     check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
     check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);

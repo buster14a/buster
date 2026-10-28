@@ -122,7 +122,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             ready = ready && check_graph_run(&types.table, &input.graph, &retained, &scratch, &checking, &stream) && stream.report_count == 0 &&
                     check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &retained, &scratch) &&
                     check_asms_run(&asms, &input, &stream, &types.table, &retained, &scratch) &&
-                    check_data_prepare(&data, &input, &stream, &initializers, &types.table, &retained, &scratch);
+                    check_data_prepare(&data, &input, &stream, &initializers, &types.table, path == 0, &retained, &scratch);
             const CheckProgramOptions options = { .initializers = &initializers, .asms = &asms, .identifiers = &identifiers,
                                                  .initializer_references = data.references, .initializer_reference_count = data.reference_count, .scalar = path == 0,
                                                  .unselected_operands = folded, .folded_ifs = folded };

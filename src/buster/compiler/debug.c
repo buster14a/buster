@@ -18,6 +18,8 @@
 // The caller owns every slice and keeps input and output disjoint. No padding is read or written. Empty units are
 // valid. debug_write checks inputs and measures all sections before writing; on DEBUG_ERROR_CAPACITY it sets the
 // required section sizes but changes no output bytes or address-offset entries. Other errors change nothing.
+// A producer that allocates from those sizes uses debug_prepare once, then debug_emit: its small plan borrows the
+// unchanged input slices and retains their descriptor, bases, sizes and encoder choice. It owns no per-row storage.
 // line_addresses has one uint32_t per function and records the operand offsets in .debug_line. Its capacity is
 // explicit. debug_finalize takes a successful, unmodified output and checks every address before patching any.
 // A unit written after others gives DebugOutput.bases, its contributions' places in the file's sections: its header's
@@ -95,6 +97,18 @@ struct DebugOutput
     // offsets in the unit's .debug_info, the header's abbreviation offset (fields[DEBUG_SECTION_ABBREV]) and the DIE's
     // line program, address base and range lists. No field points into .debug_info: fields[DEBUG_SECTION_INFO] is 0.
     uint32_t fields[BUSTER_DEBUG_SECTIONS];
+};
+
+// Only debug_prepare constructs a plan. Keep it and every referenced input byte unchanged through debug_emit; changing
+// names, functions or row columns requires preparing again. The unit descriptor and bases are copied, and emission
+// refuses different output bases before publishing sizes or bytes. Output buffers and capacities may change freely.
+typedef struct DebugPlan DebugPlan;
+struct DebugPlan
+{
+    DebugUnit unit;
+    uint64_t bases[BUSTER_DEBUG_SECTIONS];
+    uint64_t sizes[BUSTER_DEBUG_SECTIONS];
+    bool exact;
 };
 
 typedef struct DebugWriter DebugWriter;
@@ -387,7 +401,8 @@ static DebugError debug_validate(const DebugUnit* unit)
     return valid ? DEBUG_OK : DEBUG_ERROR_INPUT;
 }
 
-static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool exact)
+// Validate and size once, without changing the plan on failure. No output storage is needed yet.
+static DebugError debug_prepare(const DebugUnit* unit, const uint64_t* bases, DebugPlan* plan, bool exact)
 {
     // Even the smallest encodings exceed DWARF32 at these counts. Check before traversing any supplied slices;
     // these bounds also keep the sizing pass's sums below uint64, including the largest permitted strings.
@@ -396,11 +411,11 @@ static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool e
     DebugWriter measured[BUSTER_DEBUG_SECTIONS] = { 0 };
     if (result == DEBUG_OK)
     {
-        debug_sections(unit, output->bases, measured, 0, 0, exact);
+        debug_sections(unit, bases, measured, 0, 0, exact);
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             // The contribution ends within DWARF32's offsets, from its base.
-            if (measured[section].size >= BUSTER_DEBUG_DWARF32_LIMIT || output->bases[section] >= BUSTER_DEBUG_DWARF32_LIMIT - measured[section].size)
+            if (measured[section].size >= BUSTER_DEBUG_DWARF32_LIMIT || bases[section] >= BUSTER_DEBUG_DWARF32_LIMIT - measured[section].size)
             {
                 result = DEBUG_ERROR_LIMIT;
             }
@@ -408,15 +423,35 @@ static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool e
     }
     if (result == DEBUG_OK)
     {
+        *plan = (DebugPlan){
+            .unit = *unit,
+            .exact = exact,
+        };
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
-            output->sections[section].size = measured[section].size;
-            if (measured[section].size > output->sections[section].capacity || output->sections[section].bytes == 0)
+            plan->bases[section] = bases[section];
+            plan->sizes[section] = measured[section].size;
+        }
+    }
+    return result;
+}
+
+// The plan is a successful preparation of still-immutable input. Check all capacities before the single write pass;
+// capacity failure publishes only the required sizes, as debug_write does. No validation or sizing traversal here.
+static DebugError debug_emit(const DebugPlan* plan, DebugOutput* output)
+{
+    DebugError result = memcmp(plan->bases, output->bases, sizeof(plan->bases)) == 0 ? DEBUG_OK : DEBUG_ERROR_INPUT;
+    if (result == DEBUG_OK)
+    {
+        for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            output->sections[section].size = plan->sizes[section];
+            if (plan->sizes[section] > output->sections[section].capacity || output->sections[section].bytes == 0)
             {
                 result = DEBUG_ERROR_CAPACITY;
             }
         }
-        if (unit->function_count > output->address_capacity || (unit->function_count != 0 && output->line_addresses == 0))
+        if (plan->unit.function_count > output->address_capacity || (plan->unit.function_count != 0 && output->line_addresses == 0))
         {
             result = DEBUG_ERROR_CAPACITY;
         }
@@ -428,7 +463,19 @@ static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool e
         {
             writers[section].bytes = output->sections[section].bytes;
         }
-        debug_sections(unit, output->bases, writers, output->line_addresses, output->fields, exact);
+        debug_sections(&plan->unit, plan->bases, writers, output->line_addresses, output->fields, plan->exact);
+    }
+    return result;
+}
+
+// Defensive entry point for callers without an immutable preparation/emission handoff.
+static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool exact)
+{
+    DebugPlan plan;
+    DebugError result = debug_prepare(unit, output->bases, &plan, exact);
+    if (result == DEBUG_OK)
+    {
+        result = debug_emit(&plan, output);
     }
     return result;
 }

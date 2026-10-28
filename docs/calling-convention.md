@@ -510,30 +510,43 @@ result.
 
 ### Levels
 
-`abi_classify_all` (and its twin `abi_classify_all_scalar`) lists every type
-that is classifiable (a complete object type, or `void`) and not classified
-yet, then takes them in levels: the types whose base (an aligned typedef's),
-element (an array's), value (an `_Atomic` type's, whose storage and layout it
-takes) or members (a record's, but a flexible array member, which is no
-complete type: its element) are classified, and for an array of none of a
-record larger than 16 bytes (a zero-length array, or a flexible array member
-of a record of no size) every type whose storage `abi_wide_alignment` reads,
-classified together by `abi_classify`, then the next level, until none is
-left. Each of these is complete when the type is, so no type waits forever.
-(When an `_Atomic` type didn't wait for its value, its storage and layout
-depended on whether the value happened to be finished before it, and the two
-paths could differ.) A record whose row doesn't depend on its members (larger
-than 64 bytes, or with a flexible array member) waits for them only where a
-member can make its copy `LARGER`: when the table has a `LARGER` type
-already, or the call classifies an `_Atomic` of a type of no size, the root
-every `LARGER` type holds. Waiting would add a level for every nesting of
-such records: about 140 more instructions per type in the benchmark's
-classification. A flexible record of no size always waits, since an `_Atomic`
-of it in a later call takes its alignment as its size. `abi_classify` takes a
-level whose types' bases, elements, values and members are classified, as a
-caller's own levels would have them, and needs no such rule. Without scratch
-memory for the lists `abi_classify_all` classifies a type at a time with the
-twin, in passes over the table, until a pass classifies nothing.
+`abi_classify_all` (and its twin `abi_classify_all_scalar`) schedules complete
+object types and `void` in vector frontiers. Shallow graphs retain the measured
+scan path for at most 16 levels, including the early-classification shortcut
+for wide records whose rows need no member data when no `LARGER` root exists.
+Forcing every wide record to wait lost that batching and regressed the general
+ABI benchmark; the rejected all-member experiment is retained in the evidence.
+
+After 16 scans, `abi_classify_pending` computes topological levels with an
+explicit stack and per-type member cursors, then counting-sorts the remaining
+types into frontiers. It walks every by-value dependency, including descendants
+of already-classified wide records, but emits and counts only pending types.
+A flexible array member uses its element because the incomplete array itself
+is never classified. This also orders transitive `abi_wide_alignment` reads.
+Potential wide-storage reads by zero-length arrays or empty flexible records
+select the topological path immediately, avoiding repeated readiness walks.
+The wrapper probe that selects that path is itself bounded at 16 steps; an
+unresolved longer chain conservatively selects the graph walk.
+
+Scheduling therefore has O(types + members) work: at most 16 scans plus one
+memoized graph traversal and counting sort. Forward and reverse type-ID chains
+have the same bound. The ordinary path uses two u32 columns, 8 bytes per table
+entry. The topological path adds levels, cursors and an explicit stack, another
+12 bytes per entry plus one cursor slot. These are private arena allocations
+sized to the smaller of the current type count and ABI capacity, without tail
+padding reads or an edge array. No graph state survives the call; incremental
+completion observes the next snapshot and retains existing ABI rows. Types
+beyond an `abi_initialize_types` table's capacity remain untouched. Scratch
+exhaustion retains the original scalar scan fallback, whose work can still
+take multiple table passes and has no linear-time guarantee.
+
+The source lowering's `check_lower_prepare` omits the ABI table altogether
+when the selected program has no function bodies. Static object initializers
+and generated helpers do not consume it; semantic checking and object emission
+still run.
+
+The source snapshots, qualification receipts and before/after scaling campaign
+for #613 are tracked in [buster-performance#30](https://github.com/buster14a/buster-performance/pull/30).
 
 ### Finishing a type
 
@@ -1690,12 +1703,10 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   forwarded). Pass bits and results without those branches, from a table
   indexed by the classes and the type's kind or from the fold's vectors four
   types at a time, are the next try.
-- **The levels.** Their scans (`abi_classify_levels` asking
-  `abi_dependencies_classified` about every pending type, a pass per level)
-  take 18% of the vector classification's cycles and branch on what each type
-  waits for. Each type's level is the longest path below it in the graph of
-  what it waits for, which pointer jumping or a pass in a topological order
-  could give for every type at once.
+- **The levels.** The historical scans took 18% of this profile's vector
+  classification cycles. #613 bounds the scan prefix and uses a topological
+  schedule for deep graphs, retaining the shallow path and wide-record shortcut.
+  The all-member wait-list experiment was rejected after a measured regression.
 - **Bit-fields' access units.** `abi_layout` and the parts take a run of
   bit-fields within an eightbyte as its first bit-field's type, at its type's
   offset, where clang's `accumulateBitFields` makes access units of the run's
@@ -1759,8 +1770,9 @@ only full independent call ranges may be repartitioned.
 A future frontend can collect signatures across a unit, avoiding a one-call API
 that underfills vector work. It must expose real completion/ready frontiers,
 not sort types through dependencies or give later tag completion to earlier
-source contexts. The current classification scans for readiness; a producer
-completion list is a candidate, not a demonstrated saving. `abi_finish`'s
+source contexts. Classification bounds readiness scans and constructs private
+topological frontiers for deep graphs; a producer completion list could remove
+that construction. `abi_finish`'s
 storage/LLVM-shape work is retained for correctness and must be charged, even
 when the two-byte class result looks cheap.
 
