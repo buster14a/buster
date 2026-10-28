@@ -632,7 +632,7 @@ static bool check_const_load(const TypeTable* types, const CheckConstValues* vie
         value.type = plain;
         value.category = CHECK_RVALUE;
         const uint32_t pointer_flags = value.constant_kind == CHECK_CONSTANT_ADDRESS ?
-                                       value.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST) : 0;
+                                       value.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED) : 0;
         value.flags = (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) | pointer_flags |
                       BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_GNU_CONSTANT;
         value.bit_width = bit_width;

@@ -227,6 +227,19 @@ static const CheckSourceFixture check_const_alias_fixtures[] =
         .name = "a discarded inactive-member address cannot taint the selected array path",
         .source = "union U{int x,y;};const union U u={.x=1};const int a[2]={3,4};\nenum{E=a[(&u.y,1)]};\n_Static_assert(E==4,\"discarded index address\");\n",
     },
+    {
+        .name = "a flexible member's symbolic address remains a static initializer",
+        .source = "struct I{int x;int a[];};struct P{struct I i;int tail;};\nconst struct P p={{0},0};\nconst int* const q=&p.i.a[0];\nconst int* r=q;\n",
+    },
+    {
+        .name = "pointer storage cannot erase a flexible member's missing declared bound",
+        .source = "struct I{int x;int a[];};struct P{struct I i;int tail;};\nconst struct P p={{0},0};\nconst int* const q=p.i.a;\nenum{E=*q};\n",
+        .rejected = true,
+    },
+    {
+        .name = "a discarded flexible decay cannot taint the selected pointer path",
+        .source = "struct I{int x;int a[];};struct P{struct I i;int tail;};\nconst struct P p={{0},0};const int k=3;\nconst int* const q=(p.i.a,&k);\nenum{E=*q};\n_Static_assert(E==3,\"discarded flexible decay\");\n",
+    },
 };
 
 static void check_test_const_alias_sources(CheckTest* test, const char* clang)

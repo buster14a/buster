@@ -1349,7 +1349,7 @@ static CheckValue check_graph_context_value(const TypeTable* types, const CheckG
                                    (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
         CheckValue loaded = { 0 };
         const bool known = !volatile_read && value.fault == CHECK_FAULT_NONE &&
-                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_CAST)) == 0 &&
+                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
                            (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
                            check_const_load(types, graph->const_values, value.object, value.offset, value.object_bit_offset, value.bit_width,
                                             value.type, graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE, &loaded);

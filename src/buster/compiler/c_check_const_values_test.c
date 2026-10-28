@@ -80,7 +80,7 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
     const CheckValue address = {
         .type = pointer,
         .category = CHECK_RVALUE,
-        .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST,
+        .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED,
         .constant_kind = CHECK_CONSTANT_ADDRESS,
         .object = 900,
         .offset = 12,
@@ -89,8 +89,8 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
     view = check_const_view(buffer);
     check_test_expect(test, ready && check_const_load(types, &view, 2, 0, 0, 0, cp, 20, &loaded) &&
                            loaded.type == pointer && loaded.constant_kind == CHECK_CONSTANT_ADDRESS && loaded.object == 900 && loaded.offset == 12 &&
-                           (loaded.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST)) ==
-                           (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST) && check_const_test_flags(&loaded),
+                           (loaded.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED)) ==
+                           (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED) && check_const_test_flags(&loaded),
                       "typed pointer receipt preserves its symbolic target, addend and later-read provenance");
     const TypeId cd = type_qualify(types, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_CONST);
     const CheckValue floating = {
