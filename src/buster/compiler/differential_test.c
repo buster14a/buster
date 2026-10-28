@@ -31,7 +31,10 @@ static DifferentialOptions differential_test_options(const char* output, const c
     options.csmith = tool;
     options.yarpgen = tool;
     options.fixture = true;
-    options.timeout_ms = 200;
+    // Only the deliberate hangs test the short deadline. Other failure classes retain a bounded watchdog without
+    // turning a delayed exit or signal into a different failure class under concurrent test load.
+    const bool timeout = strcmp(scenario, "compile-timeout") == 0 || strcmp(scenario, "run-timeout") == 0 || strcmp(scenario, "generator-timeout") == 0;
+    options.timeout_ms = timeout ? 200 : 1000;
     options.output_limit = 4096;
     options.source_limit = 4096;
     options.generator_mask = 1u << generator;
@@ -146,6 +149,32 @@ static void differential_test_processes(DifferentialTests* tests, const char* di
     differential_test_check(tests, reaped && received_all && checked.kind == 0 && checked.output_bytes[0] == 3 && checked.cleanup_complete, "closed stdio restored and other descriptors closed");
 }
 
+static void differential_test_process_record(const DifferentialSummary* summary)
+{
+    const char* separator = strchr(summary->signature, ':');
+    const size_t length = separator ? (size_t)(separator - summary->signature) : 0;
+    if (length && length < 64)
+    {
+        char name[80];
+        char path[PATH_MAX];
+        const char* suffix = strcmp(separator + 1, "mismatch") == 0 ? "-run" : "";
+        snprintf(name, sizeof(name), "%.*s%s.json", (int)length, summary->signature, suffix);
+        FILE* file = differential_path(path, sizeof(path), summary->last_case, name) ? fopen(path, "r") : NULL;
+        if (file)
+        {
+            char bytes[8192];
+            const size_t count = fread(bytes, 1, sizeof(bytes), file);
+            fprintf(stderr, "differential harness: process record %s:\n", name);
+            fwrite(bytes, 1, count, stderr);
+            if (count == sizeof(bytes) && fgetc(file) != EOF)
+            {
+                fputs("\ndifferential harness: process record truncated after 8192 bytes\n", stderr);
+            }
+            fclose(file);
+        }
+    }
+}
+
 static void differential_test_campaigns(DifferentialTests* tests, const char* directory, const char* fixture)
 {
     const char* const scenarios[] =
@@ -200,6 +229,7 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
         {
             fprintf(stderr, "differential harness: scenario=%s expected signature=%s actual signature=%s; artifacts=%s\n",
                     scenarios[i], signatures[i], summary.signature, summary.last_case);
+            differential_test_process_record(&summary);
         }
         differential_test_check(tests, signature_matches, "failure class retained");
         differential_test_check(tests, differential_contains(summary.directory, "summary.json", "\"campaign_passed\":0"), "fixtures cannot become compiler evidence");
