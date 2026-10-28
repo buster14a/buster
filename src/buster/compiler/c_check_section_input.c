@@ -103,38 +103,6 @@ struct CheckInputSections
 static const char check_section_kind_message[] = "expected one of [bss|data|rodata|text|relro] section kind in '#pragma clang section'";
 static const char check_section_string_message[] = "expected string literal in pragma clang section";
 
-// The name of an identifier or a keyword at output token `source`, or 0 for another token.
-static IdentId check_input_section_name(const CheckInputReader* reader, uint32_t source)
-{
-    const PPTokens* output = &reader->pp->output;
-    const uint8_t kind = output->kinds[source];
-    const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
-    return named ? output->values[source] : 0;
-}
-
-// Whether `name` was a macro's anywhere in the unit (its record stays after an #undef), from a bitset of the unit's
-// macros' names made the first time a line asks (`*names`, in scratch).
-static bool check_input_section_macro(CheckInputReader* reader, uint64_t** names, IdentId name)
-{
-    const Preprocessor* pp = reader->pp;
-    const uint32_t words = (pp->table->count + 63) / 64;
-    if (*names == 0)
-    {
-        *names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)words + 1);
-        reader->output->resource |= *names == 0;
-        if (*names != 0)
-        {
-            memset(*names, 0, ((uint64_t)words + 1) * sizeof(uint64_t));
-            for (uint32_t macro = 1; macro < pp->macro_count; macro += 1)
-            {
-                const IdentId macro_name = pp->macros[macro].name;
-                (*names)[macro_name / 64] |= macro_name / 64 < words ? UINT64_C(1) << (macro_name % 64) : 0;
-            }
-        }
-    }
-    return *names == 0 || (name / 64 < words && (((*names)[name / 64] >> (name % 64)) & 1) != 0);
-}
-
 // The name the ordinary string literals from output token `source` to `end` (exclusive) spell, joined, into the arena.
 // Returns false if one doesn't decode, as clang's StringLiteralParser's errors leave the line.
 static bool check_input_section_string(CheckInputReader* reader, uint32_t source, uint32_t end, String8* name)
@@ -229,13 +197,13 @@ static uint8_t check_input_section_line(CheckInputReader* reader, uint32_t pragm
     while (result == 1 && t < end)
     {
         // The kind, an identifier (not a keyword: clang's tok::identifier), the first one read expanded.
-        const IdentId kind_name = check_input_section_name(reader, t);
+        const IdentId kind_name = check_input_pragma_name(reader, t);
         uint8_t kind = 0;
         for (uint8_t k = 1; output->kinds[t] == C_TOKEN_RAW_IDENTIFIER && k < CHECK_SECTION_KINDS; k += 1)
         {
             kind = pp_token_is_name(reader->pp, output, t, end, check_section_kind_names[k]) ? k : kind;
         }
-        if (expanded && kind_name != 0 && check_input_section_macro(reader, macros, kind_name))
+        if (expanded && kind_name != 0 && check_input_pragma_macro(reader, macros, kind_name))
         {
             result = 0;
         }
@@ -249,8 +217,8 @@ static uint8_t check_input_section_line(CheckInputReader* reader, uint32_t pragm
         const uint32_t equal = t + 1;
         if (result == 1)
         {
-            const IdentId equal_name = equal < end ? check_input_section_name(reader, equal) : 0;
-            if (equal == end || (equal_name != 0 && check_input_section_macro(reader, macros, equal_name)))
+            const IdentId equal_name = equal < end ? check_input_pragma_name(reader, equal) : 0;
+            if (equal == end || (equal_name != 0 && check_input_pragma_macro(reader, macros, equal_name)))
             {
                 result = 0;
             }

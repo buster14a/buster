@@ -32,6 +32,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_NAKED_PARAMETER,
     // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
     CHECK_INPUT_SECTION,
+    // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
+    CHECK_INPUT_OPTIMIZE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -54,6 +56,7 @@ static const char* const check_input_messages[] =
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
     "invalid '#pragma clang section' or section type conflict",
+    "invalid '#pragma clang optimize'",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -117,6 +120,7 @@ typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
 typedef struct CheckInputSections CheckInputSections;
 typedef struct CheckInputSectionSetting CheckInputSectionSetting;
 typedef struct CheckInputSectionEvent CheckInputSectionEvent;
+typedef struct CheckInputOptimizePragmas CheckInputOptimizePragmas;
 struct CheckInputNakedDiagnostic
 {
     uint32_t position;
@@ -162,6 +166,8 @@ struct CheckInput
     // #619: the unit's #pragma clang section settings, its section diagnostics and the definitions the settings place
     // (c_check_section_input.c); NULL in a unit without a section pragma or attribute.
     CheckInputSections* sections;
+    // #619: the unit's erroneous #pragma clang optimize lines' diagnostics (c_check_optimize_input.c), or NULL.
+    CheckInputOptimizePragmas* optimize_pragmas;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -1488,6 +1494,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
+#include "c_check_optimize_input.c"
 
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
@@ -5653,6 +5660,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
+                prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;

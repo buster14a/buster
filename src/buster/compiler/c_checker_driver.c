@@ -69,6 +69,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
+        case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
     }
     return result;
 }
@@ -77,8 +78,9 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
     const CheckInputSectionDiagnostic* section = check_input_section_report(input, report);
+    const CheckInputOptimizeDiagnostic* optimize = check_input_optimize_report(input, report);
     return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text :
-           section != NULL ? section->text.pointer : check_driver_input_message(report->message);
+           section != NULL ? section->text.pointer : optimize != NULL ? optimize->text.pointer : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)

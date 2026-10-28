@@ -2909,6 +2909,91 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     }
 }
 
+// #619's #pragma clang optimize (main.c's checker tests compile between `optimize off` and `on`, #681) against clang: the
+// lines clang takes, anywhere in a unit, and its two errors at clang's places with its messages, by -fsyntax-only. What
+// the checker refuses by name instead: an argument or an extra token that was a macro's name in the unit (clang reads
+// both expanded), and a missing argument, an error at the line's end. Then -c of the units clang takes writes the object:
+// the pragma's optnone changes nothing a Tier 0 compile emits.
+static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
+{
+    static const char refused[] = "construct is not yet supported by the type checker";
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        // Where -fsyntax-only refuses the line instead of clang's outcome (`refused`), or 0.
+        uint32_t refused_line;
+        // Compare the first error's place alone: the checker's message for another error is its own.
+        bool line_only;
+    } fixtures[] =
+    {
+        { "off and on around a definition", "#pragma clang optimize off\nint f(void) { return 1; }\n#pragma clang optimize on\nint main(void) { return f() - 1; }\n" },
+        { "off to the unit's end", "int g(void) { return 2; }\n#pragma clang optimize off\nstatic int f(void) { return 1; }\nint main(void) { return f() + g() - 3; }\n" },
+        { "in a body", "int f(void)\n{\n#pragma clang optimize off\n    return 1;\n}\n" },
+        { "in a declaration", "int f(void)\n#pragma clang optimize off\n{ return 1; }\n" },
+        { "a _Pragma", "_Pragma(\"clang optimize off\")\nint f(void) { return 1; }\n" },
+        { "an always_inline function", "#pragma clang optimize off\nstatic inline __attribute__((always_inline)) int f(void) { return 1; }\nint g(void) { return f(); }\n" },
+        { "an unknown argument", "#pragma clang optimize maybe\nint f(void) { return 1; }\n" },
+        { "an argument in capitals", "#pragma clang optimize OFF\nint f(void) { return 1; }\n" },
+        { "a number", "#pragma clang optimize 1\nint f(void) { return 1; }\n" },
+        { "a string", "#pragma clang optimize \"off\"\nint f(void) { return 1; }\n" },
+        { "a keyword", "#pragma clang optimize int\nint f(void) { return 1; }\n" },
+        { "an extra name", "#pragma clang optimize off extra\nint f(void) { return 1; }\n" },
+        { "an extra punctuator", "#pragma clang optimize off ;\nint f(void) { return 1; }\n" },
+        { "on then off", "#pragma clang optimize on off\nint f(void) { return 1; }\n" },
+        { "a _Pragma's error", "_Pragma(\"clang optimize maybe\")\nint f(void) { return 1; }\n" },
+        { "an error after a body's", "int f(void) { return missing; }\n#pragma clang optimize maybe\n", 0, true },
+        { "a body's error after an off", "#pragma clang optimize off\nint f(void) { return missing; }\n", 0, true },
+        { "the second line's error", "#pragma clang optimize off\nint f(void) { return 1; }\n#pragma clang optimize of\n" },
+        { "a macro for the argument", "#define OFF off\n#pragma clang optimize OFF\nint f(void) { return 1; }\n", 2 },
+        { "an argument that was a macro's", "#define off 1\n#undef off\n#pragma clang optimize off\nint f(void) { return 1; }\n", 3 },
+        { "an extra token of a macro", "#define NOTHING\n#pragma clang optimize off NOTHING\nint f(void) { return 1; }\n", 2 },
+        { "a missing argument", "#pragma clang optimize\nint f(void) { return 1; }\n", 1 },
+    };
+    const char* arguments[] = { "-std=gnu17" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[512];
+        snprintf(source, sizeof(source), "%s/optimize-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/optimize-%u.o", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        snprintf(description, sizeof(description), "%s: clang's outcome", fixtures[i].name);
+        check_test_expect(test, ready, description);
+        const uint32_t routes = executable != NULL ? 4 : 2;
+        for (uint32_t route = 0; ready && route < routes; route += 1)
+        {
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, NULL, (route & 1) != 0, false, true, lazy, &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, route %u: first error %u:%u '%s', clang %u:%u '%s'", fixtures[i].name, route, checked.line,
+                     checked.column, checked.message, oracle.rejected ? oracle.line : 0, oracle.rejected ? oracle.column : 0, oracle.message);
+            if (fixtures[i].refused_line != 0)
+            {
+                check_test_expect(test, ran && checked.rejected && checked.line == fixtures[i].refused_line && strcmp(checked.message, refused) == 0, description);
+            }
+            else
+            {
+                check_test_expect(test, ran && checked.rejected == oracle.rejected &&
+                                  (!oracle.rejected || (checked.line == oracle.line && checked.column == oracle.column &&
+                                                        (fixtures[i].line_only || strcmp(checked.message, oracle.message) == 0))), description);
+            }
+            if (ran && !oracle.rejected && fixtures[i].refused_line == 0)
+            {
+                unlink(object);
+                const bool compiled = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
+                snprintf(description, sizeof(description), "%s, route %u: -c's first error %u '%s'", fixtures[i].name, route, checked.line, checked.message);
+                check_test_expect(test, compiled && !checked.rejected && access(object, F_OK) == 0, description);
+            }
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -3314,6 +3399,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);
