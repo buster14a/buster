@@ -827,15 +827,28 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
    entry is looked for only when there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
-   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The scalar path then sorts
-   the locals by references and gives them registers in that order, greedily. The greedy loop gives the k-th local of
+   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The greedy loop gives the k-th local of
    a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
    kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
    (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
    each such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from
-   the free registers' list (`vpermd`), and its home is a masked store. The frame's slots go to a mask of the locals
+   the free registers' list (`vpermd`), and its home is a masked store. Past 64 locals, and for the scalar twin, only
+   each kind's first 16 eligible locals can take a register. `tier0_register_locals_vector` filters 16 locals at a
+   time by eligibility and the current smallest retained count, then inserts a candidate into 16 register lanes by
+   comparisons and permutations. Equal counts keep the earlier local, as the old stable full sort did. Its scalar
+   twin maintains the same bounded prefixes with at most 16 moves per insertion. Both take linear time in the locals,
+   including increasing counts and builtin recipes' alternating counts (#664), and hand the unchanged greedy register
+   assignment at most 32 identities in fixed scratch storage. No local-sized order array is allocated.
+   `test-tier0` checks both prefixes and the complete homes/save masks against the full stable order and original
+   greedy policy, with guarded columns through 100,000 locals, arbitrary unsigned counts, ties and unavailable
+   registers. Small cases also compare that order with the former insertion sort. The frame's slots go to a mask of the locals
    that need one, from the homes, the references and the flags, 16 at a time, and the prologue's records are counted
    rather than emitted twice.
+   [The frozen #664 qualification](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-664/target/README.md)
+   compares `bc1b4861` with `be441ff8`: doubling the generated popcount input from 4k to 8k calls grows Tier 0 time
+   3.74 times before and 1.99 times after the change, with byte-identical objects and independent runtime checks.
+   Ordinary SQLite and vector-backend controls are near-neutral; the scalar twin's measured cost is retained in
+   the record. These timings apply to those frozen revisions, rather than later rebased source.
 3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
    mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
@@ -856,7 +869,7 @@ form (its immediate's size, and whether it takes no operands or its destination 
 halves, without a branch.
 
 **The scalar path** (`tier0_compile_scalar`) does the same an entry at a time, with each rule in plain code. Selection
-looks each entry's slot up, homes sort the locals, measuring counts a deferred entry's records by running its emitter,
+looks each entry's slot up, homes select the bounded register candidates, measuring counts a deferred entry's records by running its emitter,
 and emission builds each record field by field from the templates' specifications, not from their compiled bytes. It
 chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_instruction`.
 

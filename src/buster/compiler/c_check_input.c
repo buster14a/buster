@@ -92,6 +92,14 @@ static __attribute__((unused)) uint32_t check_input_report_source(const Parser* 
 }
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputLiteralTable CheckInputLiteralTable;
+struct CheckInputLiteralTable
+{
+    CheckInputLiteralTable* next;
+    uint32_t declaration;
+    CheckInitPart part;
+    CheckInitializer plan;
+};
 typedef struct CheckInputAttributes CheckInputAttributes;
 typedef struct CheckInputRegion CheckInputRegion;
 typedef struct CheckInputVla CheckInputVla;
@@ -239,6 +247,10 @@ struct CheckInput
     uint32_t* string_ids;
     uint32_t string_count;
     uint32_t token_count;
+    // Large, proven file-scope integer literal lists, in declaration order: one immutable bytes part per table.
+    CheckInputLiteralTable* literal_tables;
+    CheckInputLiteralTable* literal_tables_last;
+    uint32_t literal_table_count;
     CBindingStatistics binding_statistics;
     uint32_t binding_event_count;
     CBindingStatistics parser_binding_statistics;
@@ -460,6 +472,7 @@ struct CheckInputReader
     TypeTable* types;
     Arena* arena;
     Arena* scratch;
+    bool literal_tables_disabled;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -3309,6 +3322,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+#include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
@@ -3618,6 +3632,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 break;
             }
             check_input_initializer_prepare(reader, i);
+            const CheckInputLiteralTable* table = reader->output->literal_tables_last;
+            if (table != NULL && table->declaration == declaration)
+            {
+                i = reader->output->initializer_ends[declaration] - 1;
+                continue;
+            }
         }
         if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
@@ -5220,11 +5240,35 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
+// Retained uint32 output columns all use UINT32_MAX as their empty value. Fill one bounded column at a time so
+// libc's vector stores replace the aliasing token-wise stores (#628). Dirty and borrowed output storage is cleared
+// explicitly; the scalar reader below retains its original interleaved initialization as the independent twin.
+// The caller has proved all these mandatory reservations. Even count zero owns one sentinel; optional zero-default
+// columns (notably asm_ids) are excluded and keep their existing guarded initialization.
+static void check_input_output_none(CheckInput* input, uint32_t count)
+{
+    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE output columns use all-one bytes");
+    const uint64_t bytes = ((uint64_t)count + 1) * sizeof(uint32_t);
+    memset(input->declarations, 0xff, bytes);
+    memset(input->initializer_nodes, 0xff, bytes);
+    memset(input->initializer_begins, 0xff, bytes);
+    memset(input->initializer_ends, 0xff, bytes);
+    memset(input->token_nodes, 0xff, bytes);
+    memset(input->body_declarations, 0xff, bytes);
+    memset(input->declaration_bodies, 0xff, bytes);
+    memset(input->parameter_next, 0xff, bytes);
+    memset(input->control_owners, 0xff, bytes);
+    memset(input->label_targets, 0xff, bytes);
+    memset(input->case_ranges, 0xff, bytes);
+    memset(input->string_ids, 0xff, bytes);
+    memset(input->parameters, 0xff, bytes);
+}
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred, bool environment)
+                            CheckDeferred* deferred, bool environment, bool literal_tables)
 {
     *input = (CheckInput){ 0 };
     // Plain char's signedness, which every phase after the reader reads from the table too.
@@ -5282,6 +5326,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .types = types,
         .arena = arena,
         .scratch = scratch,
+        .literal_tables_disabled = !literal_tables,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
@@ -5608,27 +5653,45 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
-        for (uint32_t i = 0; i <= count; i += 1)
+        if (parser->options.scalar)
         {
-            input->declarations[i] = BUSTER_CHECK_NONE;
-            input->initializer_nodes[i] = BUSTER_CHECK_NONE;
-            input->initializer_begins[i] = BUSTER_CHECK_NONE;
-            input->initializer_ends[i] = BUSTER_CHECK_NONE;
-            input->token_nodes[i] = BUSTER_CHECK_NONE;
-            input->body_declarations[i] = BUSTER_CHECK_NONE;
-            input->declaration_bodies[i] = BUSTER_CHECK_NONE;
-            input->parameter_next[i] = BUSTER_CHECK_NONE;
-            input->control_owners[i] = BUSTER_CHECK_NONE;
-            input->label_targets[i] = BUSTER_CHECK_NONE;
-            input->case_ranges[i] = BUSTER_CHECK_NONE;
-            reader.string_ids[i] = BUSTER_CHECK_NONE;
-            reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-            reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-            reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-            reader.activate[i] = BUSTER_CHECK_NONE;
-            reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.first_value[i] = BUSTER_CHECK_NONE;
-            reader.last_value[i] = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                input->declarations[i] = BUSTER_CHECK_NONE;
+                input->initializer_nodes[i] = BUSTER_CHECK_NONE;
+                input->initializer_begins[i] = BUSTER_CHECK_NONE;
+                input->initializer_ends[i] = BUSTER_CHECK_NONE;
+                input->token_nodes[i] = BUSTER_CHECK_NONE;
+                input->body_declarations[i] = BUSTER_CHECK_NONE;
+                input->declaration_bodies[i] = BUSTER_CHECK_NONE;
+                input->parameter_next[i] = BUSTER_CHECK_NONE;
+                input->control_owners[i] = BUSTER_CHECK_NONE;
+                input->label_targets[i] = BUSTER_CHECK_NONE;
+                input->case_ranges[i] = BUSTER_CHECK_NONE;
+                reader.string_ids[i] = BUSTER_CHECK_NONE;
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.parameters[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
+        }
+        else
+        {
+            check_input_output_none(input, count);
+            // Reader-internal columns keep their token-wise initialization and ownership. Only retained output
+            // columns change their fill order; no reader arena format or walk is changed.
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
         }
         if (traversal != 0)
         {
@@ -5878,7 +5941,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+}
+
+// Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
+static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -5886,7 +5955,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -5895,14 +5964,14 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
@@ -5912,7 +5981,7 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
-                           false);
+                           false, true);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -5920,5 +5989,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }

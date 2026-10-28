@@ -3569,7 +3569,9 @@ they compile or once they have, and the same code as a Link through
 - **gdb, perf and llvm-dwarfdump read the data-first file**
   (`test-streaming --cross-check`): gdb stops in the program's functions and
   unwinds through them to `_start` by their FDEs, each frame at its function's
-  line; perf's DWARF call graphs reach `_start` and give the lines;
+  line; at least four separate perf DWARF call graphs reach the streamed `_start` and give the lines. The
+  profiled fixture repeats its entry's existing callee/fold block 128 times, with the same function set and
+  normal DWARF/unwind generation, instead of relying on one sample of a short execution. No retry accepts a failed collection;
   `llvm-dwarfdump --verify` passes the units together, and `readelf` warns about
   nothing.
 
