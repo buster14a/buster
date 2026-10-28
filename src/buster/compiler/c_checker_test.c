@@ -4535,6 +4535,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
 #include "c_check_input_scan_test.c"
@@ -4612,6 +4613,7 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool embed_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -4627,6 +4629,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_initializers = true;
         }
+        else if (strcmp(argv[i], "--embed-initializers") == 0)
+        {
+            embed_initializers = true;
+        }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
@@ -4638,14 +4644,18 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && program_initializers)
+        if (initialized && embed_initializers)
+        {
+            check_test_embed_initializers(&test, clang);
+        }
+        else if (initialized && program_initializers)
         {
             check_test_program_initializers(&test, clang);
         }
@@ -4721,6 +4731,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_intrinsic_inputs(&test, clang);
             check_test_x86_diagnostics(&test, clang);
             check_test_initializers(&test, clang);
+            check_test_embed_initializers(&test, clang);
             check_test_data_sources(&test);
             check_test_attributes(&test, clang);
             check_test_attribute_sources(&test, clang);
