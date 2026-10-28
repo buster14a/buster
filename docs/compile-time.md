@@ -605,3 +605,14 @@ reference showed no slowdown:
 
 On the small file, the backend's tables (`backend-setup`) take more than half
 of the compile.
+
+### Avoiding backend startup when no function is emitted (#590)
+
+For an empty or data-only translation unit, and one whose static functions are
+all dropped by selection, `backend-setup` now contains only the stage-clock
+boundary. Encoder, operand-semantics, Tier 0 and unwind table initialization is
+conditional on a selected body. Data/symbol emission and normal diagnostics
+still execute, and object bytes are unchanged. The first selected function in
+a reusable caller initializes the tables as before. This removes table work
+independently of whether the process's pages use huge pages or base pages;
+small files with a selected function still pay the existing setup cost.

@@ -6,7 +6,8 @@
 // lowering appends helper and explicit target-runtime symbols before any atom/fixup publication.
 // data_capacity reserves the data consumer's atoms/fixups; that consumer defines its already-created symbols.
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
-// from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers.
+// from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers, only
+// when the selected program has a body: its helpers also come only from those bodies. Data-only links need no tables.
 // With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame), at
 // its records' ends after branch sizing, written after the last function (unwind_write) as one EH_FRAME atom, a CIE
 // and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
@@ -864,14 +865,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t mark = output->length;
     const uint64_t byte_mark = bytes->length;
     const uint64_t temporary = scratch->length;
+    const uint32_t count = program->body_count;
     bool valid = output != bytes && output != scratch && bytes != scratch && program->status == CHECK_PROGRAM_OK;
     result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
-    if (valid && !tier0_initialized)
+    if (valid && count != 0 && !tier0_initialized)
     {
         valid = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
     }
-    if (valid && unwind && !unwind_ready)
+    if (valid && count != 0 && unwind && !unwind_ready)
     {
         valid = unwind_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
@@ -884,7 +886,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = check_lower_prepare(&shared, &result->lowered, program, scalar, rows != NULL, output, scratch);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
-    const uint32_t count = program->body_count;
     // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
     // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
     // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
