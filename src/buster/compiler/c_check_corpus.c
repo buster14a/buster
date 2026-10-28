@@ -1244,7 +1244,8 @@ static bool check_corpus_check(CheckCorpusPath* path, Parser* parser, Preprocess
 static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
 {
     bool equal = x->types.count == y->types.count && x->parameters.count == y->parameters.count && x->tags.count == y->tags.count &&
-                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->last_error == y->last_error;
+                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->lookup.count == y->lookup.count &&
+                 x->last_error == y->last_error;
     for (uint32_t i = 1; equal && i < x->types.count; i += 1)
     {
         equal = x->types.kind[i] == y->types.kind[i] && x->types.code[i] == y->types.code[i] && x->types.flags[i] == y->types.flags[i] &&
@@ -1259,7 +1260,8 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->tags.type[i] == y->tags.type[i] && x->tags.name[i] == y->tags.name[i] && x->tags.member_begin[i] == y->tags.member_begin[i] &&
                 x->tags.member_count[i] == y->tags.member_count[i] && x->tags.completion[i] == y->tags.completion[i] &&
-                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i];
+                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
+                x->tags.lookup[i] == y->tags.lookup[i] && x->tags.lookup_log2[i] == y->tags.lookup_log2[i];
     }
     for (uint32_t i = 1; equal && i < x->members.count; i += 1)
     {
@@ -1267,6 +1269,7 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
                 x->members.bit_width[i] == y->members.bit_width[i] && x->members.alignment_log2[i] == y->members.alignment_log2[i] &&
                 x->members.flags[i] == y->members.flags[i] && x->members.offset[i] == y->members.offset[i];
     }
+    equal = equal && (x->lookup.count <= 1 || memcmp(x->lookup.buckets + 1, y->lookup.buckets + 1, (uint64_t)(x->lookup.count - 1) * sizeof(TypeLookupBucket)) == 0);
     return equal;
 }
 
@@ -1579,7 +1582,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     const CheckInput* left = &a->input;
     const CheckInput* right = &b->input;
-    equal = equal && left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
+    // The scalar path's walks act at no token the vector path's would skip (#529).
+    equal = equal && left->visit_misses == 0 && right->visit_misses == 0 &&
+            left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
@@ -1956,6 +1961,10 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     {
         snprintf(text, capacity, "types: tags, members, parameters or last_error (tags %u against %u, completions %u against %u, last_error %u against %u)",
                  s->tags.count, t->tags.count, s->tags.completions, t->tags.completions, s->last_error, t->last_error);
+    }
+    else if (x->visit_misses != 0 || y->visit_misses != 0)
+    {
+        snprintf(text, capacity, "the walks act at %u and %u tokens the vector path's would skip", x->visit_misses, y->visit_misses);
     }
     else if (x->binding_event_count != y->binding_event_count || x->string_count != y->string_count || x->vla_count != y->vla_count || x->asm_count != y->asm_count ||
              x->region_count != y->region_count || x->report_count != y->report_count || x->diagnostic_graph != y->diagnostic_graph ||

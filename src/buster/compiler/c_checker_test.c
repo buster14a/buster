@@ -32,6 +32,13 @@ struct CheckTestTypes
     Arena index;
 };
 
+static bool check_test_types_open_with(CheckTestTypes* types, TypeCapacity capacity)
+{
+    types->arena = arena_reserve(type_capacity_bytes(capacity));
+    types->index = arena_reserve(type_index_capacity_bytes(capacity));
+    return type_initialize(&types->table, &types->arena, &types->index, capacity);
+}
+
 static bool check_test_types_open(CheckTestTypes* types)
 {
     const TypeCapacity capacity = {
@@ -40,9 +47,7 @@ static bool check_test_types_open(CheckTestTypes* types)
         .tags = 512,
         .members = 4096,
     };
-    types->arena = arena_reserve(type_capacity_bytes(capacity));
-    types->index = arena_reserve(type_index_capacity_bytes(capacity));
-    return type_initialize(&types->table, &types->arena, &types->index, capacity);
+    return check_test_types_open_with(types, capacity);
 }
 
 static __attribute__((noinline)) void check_test_types_close(CheckTestTypes* types)
@@ -482,6 +487,28 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
         },
     };
     check_test_expect(test, type_complete_record(table, record, members, 1, (TypeRecordAttributes){ 0 }), "plain record fixture construction");
+    // A direct small-record access needs no scratch, independently of how many unrelated types the unit has.
+    // The previous per-access frame/visited allocation fails this structural check even when its timing test passes.
+    TypeId pointer_chain = record;
+    for (uint32_t depth = 0; depth < 512 && pointer_chain != 0; depth += 1)
+    {
+        pointer_chain = type_pointer(table, pointer_chain);
+    }
+    Scratch member_scratch = scratch_begin(NULL);
+    const uint64_t member_capacity = member_scratch.arena->capacity;
+    member_scratch.arena->capacity = member_scratch.arena->length;
+    bool allocation_free = pointer_chain != 0;
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        CheckActionResult lookup_result = { 0 };
+        uint64_t offset = UINT64_MAX;
+        uint32_t qualifiers = UINT32_MAX;
+        const uint32_t member = check_action_find_member(table, record, 82, &offset, &qualifiers, scalar != 0, &lookup_result);
+        allocation_free &= member != 0 && lookup_result.diagnostic == CHECK_DIAG_NONE && offset == 0 && qualifiers == 0;
+    }
+    member_scratch.arena->capacity = member_capacity;
+    scratch_end(member_scratch);
+    check_test_expect(test, allocation_free, "small-record action lookup needs no scratch after 512 unrelated pointer types on either path");
     action = (CheckAction){
         .op = CHECK_OP_ASSIGN,
         .operands = {
@@ -1376,6 +1403,7 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     {
         equal = check_test_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] && a->warnings[i] == b->warnings[i] &&
                 (a->diagnostic_operands != NULL ? a->diagnostic_operands[i] : 0) == (b->diagnostic_operands != NULL ? b->diagnostic_operands[i] : 0) &&
+                (a->member_offsets != NULL ? a->member_offsets[i] : 0) == (b->member_offsets != NULL ? b->member_offsets[i] : 0) &&
                 (a->warning_ignored != NULL ? a->warning_ignored[i] : 0) == (b->warning_ignored != NULL ? b->warning_ignored[i] : 0) &&
                 a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t operand = 0; equal && operand < 3; operand += 1)
@@ -1878,6 +1906,8 @@ struct CheckSourceFixture
     // An unsupported fixture that clang rejects, as what this can't decide: an error, or valid code whose own error comes
     // later. Its refusal is no later than clang's first error.
     bool undecided;
+    // The type table's room, for a fixture larger than check_test_types_open's; null for that.
+    const TypeCapacity* capacity;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1922,7 +1952,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     for (uint32_t p = 0; p < 2; p += 1)
     {
-        ready = ready && parse_initialize(&parsers[p], &parser_options[p], pp_options.language) && check_test_types_open(&types[p]);
+        ready = ready && parse_initialize(&parsers[p], &parser_options[p], pp_options.language) &&
+                (fixture->capacity != NULL ? check_test_types_open_with(&types[p], *fixture->capacity) : check_test_types_open(&types[p]));
         // Room for check_test_initializer_nesting's 300,000 levels; only what a fixture uses is touched.
         input_storage[p] = arena_reserve(UINT64_C(1) << 28);
         output_storage[p] = arena_reserve(UINT64_C(1) << 28);
@@ -1958,6 +1989,16 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             char resource_message[256];
             snprintf(resource_message, sizeof(resource_message), "%s: %s source adapter exhausted fixture resources", fixture->name, p == 0 ? "scalar" : "vector");
             check_test_expect(test, !input[p].resource, resource_message);
+            snprintf(resource_message, sizeof(resource_message), "%s: the %s path acts at %u tokens the vector path's walks would skip", fixture->name,
+                     p == 0 ? "scalar" : "vector", input[p].visit_misses);
+            check_test_expect(test, input[p].visit_misses == 0, resource_message);
+            if (p == 1 && adapted && !rejected[0] && input[0].token_count >= 16)
+            {
+                // The vector path's walks skip tokens (#529): fewer visits than the scalar path's, which visit them all.
+                snprintf(resource_message, sizeof(resource_message), "%s: the vector path's walks visit %u and %u of %u tokens, the scalar path's %u and %u",
+                         fixture->name, input[1].resolve_visits, input[1].expression_visits, input[1].token_count, input[0].resolve_visits, input[0].expression_visits);
+                check_test_expect(test, input[1].resolve_visits < input[0].resolve_visits && input[1].expression_visits < input[0].expression_visits, resource_message);
+            }
             rejected[p] = !adapted;
             uint32_t first = BUSTER_CHECK_NONE;
             for (uint32_t i = 0; i < input[p].report_count; i += 1)
@@ -4048,6 +4089,148 @@ static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* 
     }
 }
 
+// #591: member accesses checked in time linear in the unit, whatever the type table's size and the records'. The lookup
+// cleared a byte per type at every access, and compared the record's names one at a time. Two units, each against clang
+// at a small size, then timed at a tenth of a size and at the size, both paths (check_test_source, whose typed streams,
+// the members' offsets among them, must agree): the larger must check within 20 times what the tenth takes, plus 0.2 s,
+// as linear work does.
+//   - `size` structs of 3 to 26 members, every 7th with an anonymous union too, each with a pointer to it of 50 levels,
+//     whose types fill the table, and a function that reads 16 of its members;
+//   - one struct of `size` members, an anonymous struct of two every 50th, and a function that reads every name.
+// Before #591, on the laptop, the second took 52 times its tenth's time (1.209 s), and failed; the first, 11.5 times: its
+// bytes cleared grew as the square of its size, but stayed cheap beside the rest of its work at a size a test can
+// afford (#591's measurements have larger units).
+static bool check_test_member_source(Arena* text, uint32_t form, uint32_t size, const char* path)
+{
+    const uint64_t capacity = (uint64_t)size * 640 + 4096;
+    char* source = BUSTER_ARENA_PUSH_ARRAY(text, char, capacity);
+    uint64_t length = 0;
+    for (uint32_t i = 0; source != 0 && form == 0 && i < size && length + 640 < capacity; i += 1)
+    {
+        // a, b, c, then d0 to d22, and u and v.
+        const uint32_t extra = i % 24;
+        const bool anonymous = i % 7 == 0;
+        length += (uint64_t)snprintf(source + length, capacity - length, "struct s%u { int a; int b; long c;", i);
+        for (uint32_t d = 0; d < extra; d += 1)
+        {
+            length += (uint64_t)snprintf(source + length, capacity - length, " int d%u;", d);
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, "%s };\nstruct s%u ", anonymous ? " union { int u; short v; };" : "", i);
+        memset(source + length, '*', 50);
+        length += 50;
+        length += (uint64_t)snprintf(source + length, capacity - length, " q%u;\nlong f%u(struct s%u* p) { return 0", i, i, i);
+        const uint32_t names = 3 + extra + (anonymous ? 2 : 0);
+        for (uint32_t read = 0; read < 16; read += 1)
+        {
+            const uint32_t name = (read * 5 + i) % names;
+            if (name < 3)
+            {
+                length += (uint64_t)snprintf(source + length, capacity - length, " + p->%c", 'a' + name);
+            }
+            else if (name < 3 + extra)
+            {
+                length += (uint64_t)snprintf(source + length, capacity - length, " + p->d%u", name - 3);
+            }
+            else
+            {
+                length += (uint64_t)snprintf(source + length, capacity - length, " + p->%c", name == 3 + extra ? 'u' : 'v');
+            }
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, "; }\n");
+    }
+    if (source != 0 && form == 1)
+    {
+        length += (uint64_t)snprintf(source + length, capacity - length, "struct big {\n");
+        for (uint32_t i = 0; i < size && length + 640 < capacity; i += 1)
+        {
+            length += (uint64_t)(i % 50 == 49 ? snprintf(source + length, capacity - length, "    struct { int x%u; short y%u; };\n", i, i) :
+                                               snprintf(source + length, capacity - length, "    int m%u;\n", i));
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, "};\nlong f(struct big* p)\n{\n    long s = 0;\n");
+        for (uint32_t i = 0; i < size && length + 640 < capacity; i += 1)
+        {
+            length += (uint64_t)(i % 50 == 49 ? snprintf(source + length, capacity - length, "    s += p->x%u + p->y%u;\n", i, i) :
+                                               snprintf(source + length, capacity - length, "    s += p->m%u;\n", i));
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, "    return s;\n}\n");
+    }
+    const bool valid = source != 0 && length + 640 < capacity && parse_test_write(path, source, length);
+    if (valid)
+    {
+        source[length] = 0;
+    }
+    return valid;
+}
+
+static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test, const char* clang)
+{
+    static const uint32_t timed[] = {
+        2000,
+        30000,
+    };
+    char directory[] = "/tmp/buster-checker-members-XXXXXX";
+    const bool created = mkdtemp(directory) != 0;
+    check_test_expect(test, created, "member scaling fixtures' directory");
+    for (uint32_t form = 0; created && form < 2; form += 1)
+    {
+        const char* name = form == 0 ? "many records' members after a large type table" : "a record of many members";
+        // 100 against clang, then a tenth of the timed size and the timed size itself.
+        double seconds[2] = { 0 };
+        for (uint32_t c = 0; c < 3; c += 1)
+        {
+            const bool timing = c != 0;
+            const uint32_t size = c == 0 ? 100 : c == 1 ? timed[form] / 10 : timed[form];
+            char path[96];
+            snprintf(path, sizeof(path), "%s/%u.c", directory, form * 8 + c);
+            char* paths[] = {
+                path,
+            };
+            const char* arguments[] = {
+                "-std=gnu17",
+            };
+            Arena text = arena_reserve((uint64_t)size * 640 + 4096);
+            ParseTestClang outcome = { 0 };
+            bool ready = check_test_member_source(&text, form, size, path);
+            ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
+            char description[200];
+            snprintf(description, sizeof(description), "%s, %u of them: %s", name, size, timing ? "the fixture is written" : "clang accepts it");
+            check_test_expect(test, ready && !outcome.rejected, description);
+            if (ready)
+            {
+                // Room for the unit's types: the records', their pointers' 50 levels and their functions'.
+                const TypeCapacity capacity = {
+                    .types = size * 64 + 4096,
+                    .parameters = size * 2 + 4096,
+                    .tags = size * 2 + 512,
+                    .members = size * 32 + 4096,
+                };
+                const CheckSourceFixture fixture = {
+                    .name = name,
+                    .source = (const char*)text.base,
+                    .capacity = &capacity,
+                };
+                struct timespec start;
+                struct timespec stop;
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                check_test_source(test, &fixture, path, &outcome);
+                clock_gettime(CLOCK_MONOTONIC, &stop);
+                seconds[timing ? c - 1 : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : seconds[0];
+            }
+            unlink(path);
+            arena_release(&text);
+        }
+        char description[200];
+        snprintf(description, sizeof(description), "%s: %u checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
+                 timed[form] / 10, seconds[0]);
+        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+        printf("test-checker: %s\n", description);
+    }
+    if (created)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
 {
     static InternTable identifiers;
@@ -4199,6 +4382,8 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
 #include "c_check_input_scan_test.c"
+#include "c_check_warning_input_test.c"
+#include "c_check_selection_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -4332,6 +4517,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&storage);
             check_test_sources(&test, clang);
             check_test_initializer_nesting(&test, clang);
+            check_test_member_scaling(&test, clang);
             check_test_source_extensions(&test, clang);
             check_test_record_names(&test);
             check_test_overloads(&test, clang);
@@ -4349,6 +4535,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_warning_ranges(&test);
+            check_test_selection_roots(&test);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_builtin_vector_graph(&test, &types.table, clang);

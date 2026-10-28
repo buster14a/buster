@@ -996,6 +996,125 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     unlink(direct_path);
 }
 
+// #591: member accesses whose lookups take every kind of record's: a struct of 2,000 members, with an anonymous union
+// every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
+// structs each read by a function of its own. Both paths must write the same object, which clang links into a program
+// that prints what clang's own build prints, and so must the direct path's executable: the lowering's offsets, which it
+// takes from the checker's stream, are clang's. And a vector's element through a pointer, `(*p).y`, a MEMBER node that
+// is no record's member, which the lowering must still refuse rather than read at the stream's offset 0.
+#define BUSTER_CHECK_TEST_DRIVER_MEMBERS 2000
+#define BUSTER_CHECK_TEST_DRIVER_RECORDS 300
+
+static void check_test_driver_members(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    const uint64_t capacity = UINT64_C(1) << 20;
+    char* program = malloc(capacity);
+    uint64_t length = 0;
+    if (program != NULL)
+    {
+        length += (uint64_t)snprintf(program + length, capacity - length, "#include <stdio.h>\nstruct big {\n");
+        for (uint32_t i = 0; i < BUSTER_CHECK_TEST_DRIVER_MEMBERS; i += 1)
+        {
+            length += (uint64_t)(i % 40 == 39 ? snprintf(program + length, capacity - length, "    union { int u%u; short v%u; };\n", i, i) :
+                                 i % 60 == 59 ? snprintf(program + length, capacity - length, "    struct { unsigned b%u : 5; unsigned c%u : 7; };\n", i, i) :
+                                                snprintf(program + length, capacity - length, "    int m%u;\n", i));
+        }
+        length += (uint64_t)snprintf(program + length, capacity - length, "};\n");
+        for (uint32_t i = 0; i < BUSTER_CHECK_TEST_DRIVER_RECORDS; i += 1)
+        {
+            length += (uint64_t)snprintf(program + length, capacity - length,
+                                         "struct s%u { char a; int b; short c; };\n"
+                                         "static int f%u(struct s%u* p) { return p->a * 3 + p->b * 5 + p->c * 7 + p->b; }\n",
+                                         i, i, i);
+        }
+        length += (uint64_t)snprintf(program + length, capacity - length, "static struct big g;\nint main(void)\n{\n    struct big* p = &g;\n    unsigned long sum = 0;\n");
+        for (uint32_t i = 0; i < BUSTER_CHECK_TEST_DRIVER_MEMBERS; i += 1)
+        {
+            length += (uint64_t)(i % 40 == 39 ? snprintf(program + length, capacity - length, "    p->u%u = %u;\n", i, i * 7919u) :
+                                 i % 60 == 59 ? snprintf(program + length, capacity - length, "    p->b%u = %u;\n    g.c%u = %u;\n", i, i % 32, i, i % 128) :
+                                                snprintf(program + length, capacity - length, "    p->m%u = %u;\n", i, i * 7 + 1));
+        }
+        for (uint32_t i = 0; i < BUSTER_CHECK_TEST_DRIVER_MEMBERS; i += 1)
+        {
+            length += (uint64_t)(i % 40 == 39 ? snprintf(program + length, capacity - length, "    sum = sum * 31 + (unsigned)p->v%u + (unsigned long)((char*)&g.u%u - (char*)p);\n", i, i) :
+                                 i % 60 == 59 ? snprintf(program + length, capacity - length, "    sum = sum * 31 + p->b%u + g.c%u;\n", i, i) :
+                                 i % 37 == 0 ? snprintf(program + length, capacity - length, "    sum = sum * 31 + (unsigned)g.m%u + (unsigned long)((char*)&p->m%u - (char*)&g);\n", i, i) :
+                                               snprintf(program + length, capacity - length, "    sum = sum * 31 + (unsigned)p->m%u;\n", i));
+        }
+        for (uint32_t i = 0; i < BUSTER_CHECK_TEST_DRIVER_RECORDS; i += 1)
+        {
+            length += (uint64_t)snprintf(program + length, capacity - length, "    { struct s%u v; v.a = %u; v.b = %u; v.c = %u; sum = sum * 7 + (unsigned)f%u(&v); }\n",
+                                         i, i % 100, i * 3, i * 5, i);
+        }
+        length += (uint64_t)snprintf(program + length, capacity - length, "    printf(\"%%lu\\n\", sum);\n    return 0;\n}\n");
+    }
+    char source[256];
+    char objects[2][256];
+    char paths[3][256];
+    snprintf(source, sizeof(source), "%s/members.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/members.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/members-scalar.o", directory);
+    snprintf(paths[0], sizeof(paths[0]), "%s/members-clang", directory);
+    snprintf(paths[1], sizeof(paths[1]), "%s/members-linked", directory);
+    snprintf(paths[2], sizeof(paths[2]), "%s/members-direct", directory);
+    const bool written = program != NULL && length < capacity && parse_test_write(source, program, length);
+    check_test_expect(test, written, "the members' program is written");
+    char* text = NULL;
+    bool compiled = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "the members' program compiles with -c" : "the members' program compiles with -c, scalar");
+        compiled = compiled && status == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of the members' program");
+    char* const reference[] = { (char*)clang, "-std=gnu17", "-w", "-o", paths[0], source, NULL };
+    char* const link[] = { (char*)clang, "-o", paths[1], objects[0], NULL };
+    char* const direct[] = { (char*)executable, "-o", paths[2], source, NULL };
+    char* const* commands[3] = {
+        reference,
+        link,
+        direct,
+    };
+    char captured[3][64] = { { 0 } };
+    bool ran[3] = { false };
+    for (uint32_t command = 0; written && command < 3; command += 1)
+    {
+        const int status = command != 1 || compiled ? check_test_driver_spawn(commands[command], &text) : -1;
+        free(text);
+        text = NULL;
+        ran[command] = status == 0 && check_test_driver_capture(paths[command], captured[command], sizeof(captured[command])) && captured[command][0] != 0;
+    }
+    check_test_expect(test, ran[0], "clang's build of the members' program runs");
+    check_test_expect(test, ran[0] && ran[1] && strcmp(captured[1], captured[0]) == 0, "clang's link of the members' object prints what clang's build prints");
+    check_test_expect(test, ran[0] && ran[2] && strcmp(captured[2], captured[0]) == 0, "the direct path's members' program prints what clang's build prints");
+    static const char swizzle[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return (*p).y; }\n";
+    const bool swizzle_written = parse_test_write(source, swizzle, sizeof(swizzle) - 1);
+    for (uint32_t path = 0; swizzle_written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL,
+                          path == 0 ? "a vector's element through a pointer is refused as a member access" :
+                                      "a vector's element through a pointer is refused as a member access, scalar");
+        free(text);
+        text = NULL;
+    }
+    unlink(source);
+    unlink(objects[0]);
+    unlink(objects[1]);
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        unlink(paths[i]);
+    }
+    free(program);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -3076,6 +3195,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
+            check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);

@@ -496,6 +496,30 @@ the merge (55.2 to 40.2 ns in the first measurement).
 - **The program pass.** Most of what remains of it is the bodies' builds and
   their reference walks, one statement at a time.
 
+## The reader's sparse walks (#529)
+
+The completed 9700X comparison of main `92c025e7` with `60732582`, pinned to
+CPU 2 under the shared host lock, is retained in the [measurement record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/check-input-529-walks-2026-10-27).
+Eight alternating `perf stat -r 3` rounds give these medians for the frozen
+SQLite `-c` configuration:
+
+| measure | main | sparse walks |
+| --- | ---: | ---: |
+| task clock | 146.340 ms | 141.725 ms |
+| user cycles | 690.795 M | 664.729 M |
+| user instructions | 1,552.457 M | 1,471.594 M |
+| check-input, 11 stage runs | 63.682 ms | 58.927 ms |
+| direct reader, pinned corpus, 11 passes | 53.912 ms | 49.375 ms |
+| peak RSS, main-first process comparison | 512,872 KB | 510,820 KB |
+
+The whole-process wall medians are 146.462 → 142.098 ms in one order and
+147.174 → 142.364 ms in reverse. Every object is unchanged on the scalar
+path and on one/eight lanes; the record also retains all 16 passing target
+checker suites. The visits column adds 706,240 bytes to the reader's
+scratch-written extent, while its retained output extent is unchanged.
+These measurements precede integration of #572's storage and #186's
+traversal; they are not a measured sum of those independent improvements.
+
 ## The passes after checking (#592)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved

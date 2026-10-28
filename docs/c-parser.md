@@ -46,10 +46,11 @@ The output, in `Parser`:
   position in the postorder, its subtree's end, its first child and its next
   sibling, what the checker's reader reads besides the parents and roles; with
   `ParseOptions.sizes`, also each position's subtree size (the subtree is the
-  `sizes[k]` positions ending at `k`), which nothing in the compile reads.
+  `sizes[k]` positions ending at `k`). Complete-subtree queries in the checker
+  borrow this optional column or derive their own reader-owned sizes.
   `ParseOptions.tree_only` leaves these pointers null; the zero-initialized
   default produces all but the sizes. The C driver parses `tree_only`, and the
-  checker's reader derives the same columns into its own scratch ("The postorder
+  checker's reader derives the same columns and required sizes into its own scratch ("The postorder
   and the tree's columns").
 - **Diagnostics**: clang's message at clang's place for the first error of
   each top-level declaration, and `fatal` for what stopped the parse where no

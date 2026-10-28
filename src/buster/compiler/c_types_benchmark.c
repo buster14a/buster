@@ -3,7 +3,7 @@
 //
 // The type table's benchmark: each vector path against its scalar twin (docs/c-types.md has the numbers).
 //
-// Usage: build/compiler benchmark-types [--seed N] [--requests N] [--records N] [--pairs N] [--only NAME]
+// Usage: build/compiler benchmark-types [--seed N] [--requests N] [--records N] [--pairs N] [--lookups N] [--only NAME]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). The cases:
 //   - construction: --requests derivation requests (65,536) over a working set of derived types, as a checker asks
@@ -19,6 +19,9 @@
 //     the unsigned and long types, double, char and short, a few enums, complex and _BitInt types), through the scalar
 //     twin and both kernels (vpermb's 64-entry integer table, vpermi2b's 128-entry one); the promotions; and the same
 //     pairs as TypeIds through type_usual_arithmetic_types against a loop of type_usual_arithmetic.
+//   - lookups (#591): --lookups member accesses (65,536) of --records records as a unit has them (most of up to 16
+//     members, some of up to 300, one in 10 with an anonymous member), skewed toward a few records: by the lookup, its
+//     scalar twin and the walk, per access; and every record's lookup built again, per member.
 // Each case first checks that its paths agree, then reports the median of BUSTER_TYPE_BENCHMARK_PASSES passes that
 // alternate which path runs first, each run repeated until it lasts BUSTER_TYPE_BENCHMARK_SAMPLE_NS: nanoseconds, and
 // cycles and instructions from the hardware counters (zero when unavailable), per item. The exit status is 1 if the
@@ -962,6 +965,203 @@ static bool type_benchmark_conversions(uint64_t seed, uint32_t count, TypeBenchm
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Member lookups
+
+// Records as a unit's headers and source have them: most of up to 16 members, which the lookup scans; a fifth of 17 to
+// 64 and a twentieth of 65 to 300, which it indexes; and one in 10 with an anonymous member of an earlier record. Each
+// member a name of its own record's (1 up), but the anonymous ones and unnamed bit-fields.
+static uint32_t type_benchmark_lookup_records(TypeTable* table, uint64_t seed, uint32_t count, TypeId* records, uint64_t* member_count)
+{
+    uint64_t random = seed ^ 0x591;
+    TypeMember* list = calloc(300, sizeof(TypeMember));
+    uint32_t made = 0;
+    for (uint32_t r = 0; list != 0 && r < count; r += 1)
+    {
+        const uint64_t shape = type_benchmark_below(&random, 20);
+        const uint32_t n = (uint32_t)(shape < 15 ? type_benchmark_below(&random, 17) : shape < 19 ? 17 + type_benchmark_below(&random, 48) : 65 + type_benchmark_below(&random, 236));
+        const uint32_t anonymous = made != 0 && n != 0 && type_benchmark_below(&random, 10) == 0 ? (uint32_t)type_benchmark_below(&random, n) : UINT32_MAX;
+        for (uint32_t m = 0; m < n; m += 1)
+        {
+            const bool unnamed_bit_field = type_benchmark_below(&random, 32) == 0;
+            list[m] = (TypeMember){
+                .name = m == anonymous || unnamed_bit_field ? 0 : m + 1,
+                .type = m == anonymous ? records[type_benchmark_skewed(&random, made)] : BUSTER_TYPE_INT,
+                .bit_width = unnamed_bit_field && m != anonymous ? 3 : BUSTER_TYPE_NOT_BIT_FIELD,
+            };
+        }
+        const TypeId record = type_tag(table, type_benchmark_below(&random, 6) == 0 ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, r + 1);
+        if (record != 0 && type_complete_record(table, record, list, n, (TypeRecordAttributes){ 0 }))
+        {
+            records[made] = record;
+            made += 1;
+            *member_count += n;
+        }
+    }
+    free(list);
+    return made;
+}
+
+// The accesses: a record skewed toward a few, as a unit's accesses are, and a name it finds, from the walk's answers.
+static uint32_t type_benchmark_lookup_accesses(const TypeTable* table, uint64_t seed, const TypeId* records, uint32_t made, uint32_t count, TypeId* access_records,
+                                               uint32_t* names, uint32_t* expected)
+{
+    uint64_t random = seed ^ 0x5910;
+    uint32_t written = 0;
+    for (uint32_t attempt = 0; made != 0 && written < count && attempt < count * 8; attempt += 1)
+    {
+        const TypeId record = records[type_benchmark_skewed(&random, made)];
+        const uint32_t tag = table->types.index[type_index(record)];
+        const uint32_t name = 1 + (uint32_t)type_benchmark_below(&random, table->tags.member_count[tag] + 4);
+        uint64_t offset = 0;
+        uint32_t qualifiers = 0;
+        const uint32_t member = type_lookup_walk(table, record, name, &offset, &qualifiers);
+        if (member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN)
+        {
+            access_records[written] = record;
+            names[written] = name;
+            expected[written] = member;
+            written += 1;
+        }
+    }
+    return written;
+}
+
+// One way's lookups of every access: 0 the lookup, 1 its scalar twin, 2 the walk. The members found, summed, keep the
+// lookups from being dropped.
+static __attribute__((noinline)) uint64_t type_benchmark_lookup_run(const TypeTable* table, const TypeId* records, const uint32_t* names, uint32_t count, uint32_t variant)
+{
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        uint64_t offset = 0;
+        uint32_t qualifiers = 0;
+        const uint32_t member = variant == 0 ? type_lookup_member(table, records[i], names[i], &offset, &qualifiers) :
+                                variant == 1 ? type_lookup_member_scalar(table, records[i], names[i], &offset, &qualifiers) :
+                                               type_lookup_walk(table, records[i], names[i], &offset, &qualifiers);
+        sum += member + offset;
+    }
+    return sum;
+}
+
+// Every record's lookup built again, in the order they were defined: the indices' buckets from the first one's on.
+static __attribute__((noinline)) void type_benchmark_lookup_build(TypeTable* table, const TypeId* records, uint32_t made, uint32_t first_bucket)
+{
+    table->lookup.count = first_bucket;
+    for (uint32_t r = 0; r < made; r += 1)
+    {
+        type_lookup_build(table, table->types.index[type_index(records[r])]);
+    }
+}
+
+static bool type_benchmark_lookups(uint64_t seed, uint32_t records_count, uint32_t count, TypeBenchmarkCounters counters)
+{
+    TypeBenchmarkTable table;
+    Arena arena = arena_reserve(1ull << 30);
+    TypeId* records = BUSTER_ARENA_PUSH_ARRAY(&arena, TypeId, records_count);
+    TypeId* access_records = BUSTER_ARENA_PUSH_ARRAY(&arena, TypeId, count);
+    uint32_t* names = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count);
+    uint32_t* expected = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count);
+    // The records' members past BUSTER_TYPE_BENCHMARK_MEMBERS a type: up to 300 each.
+    const TypeCapacity capacity = {
+        .types = records_count * 4 + 64,
+        .parameters = 64,
+        .tags = records_count + 64,
+        .members = records_count * 64 + 1024,
+    };
+    table.arena = arena_reserve(type_capacity_bytes(capacity));
+    table.index_arena = arena_reserve(type_index_capacity_bytes(capacity));
+    bool valid = records != 0 && access_records != 0 && names != 0 && expected != 0 && type_initialize(&table.table, &table.arena, &table.index_arena, capacity);
+    static TypeBenchmarkSamples samples;
+    static TypeBenchmarkSamples build;
+    const char* names_of_ways[3] = {
+        "vector",
+        "scalar",
+        "walk",
+    };
+    const char* build_names[1] = {
+        "build",
+    };
+    if (valid)
+    {
+        TypeTable* types = &table.table;
+        const uint32_t first_bucket = types->lookup.count;
+        uint64_t member_count = 0;
+        const uint32_t made = type_benchmark_lookup_records(types, seed, records_count, records, &member_count);
+        const uint32_t accesses = type_benchmark_lookup_accesses(types, seed, records, made, count, access_records, names, expected);
+        const uint32_t used_buckets = types->lookup.count;
+        uint32_t scanned = 0;
+        uint32_t indexed = 0;
+        for (uint32_t r = 0; r < made; r += 1)
+        {
+            const uint32_t lookup = types->tags.lookup[types->types.index[type_index(records[r])]];
+            scanned += lookup == 0;
+            indexed += lookup != 0 && lookup != BUSTER_TYPE_LOOKUP_WALK;
+        }
+        // Every way must find the walk's members, and the build give the same buckets again.
+        for (uint32_t i = 0; valid && i < accesses; i += 1)
+        {
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            valid = type_lookup_member(types, access_records[i], names[i], &offset, &qualifiers) == expected[i] &&
+                    type_lookup_member_scalar(types, access_records[i], names[i], &offset, &qualifiers) == expected[i];
+        }
+        type_benchmark_lookup_build(types, records, made, first_bucket);
+        valid = valid && accesses == count && types->lookup.count == used_buckets;
+        for (uint32_t pass = 0; valid && pass < BUSTER_TYPE_BENCHMARK_PASSES; pass += 1)
+        {
+            for (uint32_t turn = 0; turn < 4; turn += 1)
+            {
+                const uint32_t variant = (pass + turn) % 4;
+                uint64_t elapsed = 0;
+                uint64_t cycles = 0;
+                uint64_t instructions = 0;
+                uint64_t runs = 0;
+                uint64_t sum = 0;
+                while (elapsed < BUSTER_TYPE_BENCHMARK_SAMPLE_NS && runs < BUSTER_TYPE_BENCHMARK_MAX_REPEATS)
+                {
+                    const uint64_t cycles_before = type_benchmark_count(counters.cycles);
+                    const uint64_t instructions_before = type_benchmark_count(counters.instructions);
+                    const uint64_t begin = type_benchmark_now();
+                    if (variant == 3)
+                    {
+                        type_benchmark_lookup_build(types, records, made, first_bucket);
+                    }
+                    else
+                    {
+                        sum += type_benchmark_lookup_run(types, access_records, names, accesses, variant);
+                    }
+                    elapsed += type_benchmark_now() - begin;
+                    cycles += type_benchmark_count(counters.cycles) - cycles_before;
+                    instructions += type_benchmark_count(counters.instructions) - instructions_before;
+                    runs += 1;
+                }
+                valid = valid && (variant == 3 || sum != 0);
+                const double items = (double)runs * (variant == 3 ? (double)member_count : (double)accesses);
+                TypeBenchmarkSamples* into = variant == 3 ? &build : &samples;
+                const uint32_t slot = variant == 3 ? 0 : variant;
+                into->nanoseconds[slot][pass] = (double)elapsed / items;
+                into->cycles[slot][pass] = (double)cycles / items;
+                into->instructions[slot][pass] = (double)instructions / items;
+            }
+        }
+        if (valid)
+        {
+            printf("lookups: %u accesses of %u records (%u scanned, %u indexed in %u buckets), %" PRIu64 " members\n", accesses, made, scanned, indexed,
+                   used_buckets - first_bucket, member_count);
+            type_benchmark_print("lookups", names_of_ways, 3, &samples, "access");
+            type_benchmark_print("lookups", build_names, 1, &build, "member");
+        }
+        type_benchmark_close(&table);
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "benchmark-types: lookups failed or the ways disagree\n");
+    }
+    arena_release(&arena);
+    return valid;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 static bool type_benchmark_parse(const char* text, uint64_t* value)
@@ -983,6 +1183,7 @@ int run_type_benchmark(int argc, char** argv)
     uint64_t requests = 65536;
     uint64_t records = 4096;
     uint64_t pairs = 65536;
+    uint64_t lookups = 65536;
     const char* only = 0;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
@@ -1004,6 +1205,10 @@ int run_type_benchmark(int argc, char** argv)
         {
             value = &pairs;
         }
+        else if (strcmp(argv[i], "--lookups") == 0)
+        {
+            value = &lookups;
+        }
         if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             only = argv[i + 1];
@@ -1019,11 +1224,12 @@ int run_type_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    valid = valid && requests >= 1 && requests <= (1u << 24) && records >= 1 && records <= (1u << 20) && pairs >= 1 && pairs <= (1u << 26);
-    valid = valid && (only == 0 || strcmp(only, "construction") == 0 || strcmp(only, "layout") == 0 || strcmp(only, "conversions") == 0);
+    valid = valid && requests >= 1 && requests <= (1u << 24) && records >= 1 && records <= (1u << 20) && pairs >= 1 && pairs <= (1u << 26) && lookups >= 1 &&
+            lookups <= (1u << 24);
+    valid = valid && (only == 0 || strcmp(only, "construction") == 0 || strcmp(only, "layout") == 0 || strcmp(only, "conversions") == 0 || strcmp(only, "lookups") == 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--seed N] [--requests N] [--records N] [--pairs N] [--only construction|layout|conversions]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--seed N] [--requests N] [--records N] [--pairs N] [--lookups N] [--only construction|layout|conversions|lookups]\n", argv[0]);
     }
     else
     {
@@ -1044,6 +1250,10 @@ int run_type_benchmark(int argc, char** argv)
         if (only == 0 || strcmp(only, "conversions") == 0)
         {
             valid = type_benchmark_conversions(seed, (uint32_t)pairs, counters) && valid;
+        }
+        if (only == 0 || strcmp(only, "lookups") == 0)
+        {
+            valid = type_benchmark_lookups(seed, (uint32_t)records, (uint32_t)lookups, counters) && valid;
         }
         if (counters.cycles >= 0)
         {

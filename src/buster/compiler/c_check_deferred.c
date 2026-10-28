@@ -298,6 +298,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->scratch = &lane->scratch;
     reader->deferred = 0;
     reader->lane = true;
+    // Token columns are shared over disjoint bodies; interval summaries have shared ancestors and must be private.
+    reader->warning_index_ready = false;
+    reader->warning_index = valid ? check_deferred_copy(&lane->output, 0, 0, (uint64_t)reader->warning_index_base * 2, sizeof(uint16_t)) : 0;
+    valid &= reader->warning_index != 0;
     input->deferred_tokens = 0;
     Arena* arena = &lane->output;
     // The top level's events, the lane's own after them.
@@ -1423,6 +1427,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .parameters = types->parameters.capacity,
         .tags = types->tags.capacity - 1,
         .members = types->members.capacity - 1,
+        .lookups = types->lookup.capacity - 1,
     };
     valid = valid && type_initialize(&deferred->top, &deferred->top_arena, &deferred->top_index_arena, capacity) &&
             type_changes_initialize(&deferred->top_changes, &deferred->top_arena, types->types.capacity + types->tags.capacity * 4, types->parameters.capacity,

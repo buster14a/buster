@@ -55,6 +55,7 @@ static bool check_input_selection_prepare(CheckInputReader* reader, uint32_t key
                 const bool fallback = parser->tokens.kinds[association] == PARSE_KIND_DEFAULT;
                 valid = !fallback || association + 1 == colon;
                 reader->selection_type_ends[association] = fallback ? 0 : colon;
+                check_input_visit(reader, association, BUSTER_CHECK_RESOLVE_QUERY);
                 for (uint32_t token = association; token < colon; token += 1)
                 {
                     reader->ignored[token] = true;
@@ -102,22 +103,6 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
     return valid;
 }
 
-static uint32_t check_input_selection_root(const Parser* parser, uint32_t first, uint32_t end)
-{
-    uint32_t root = BUSTER_CHECK_NONE;
-    uint32_t count = 0;
-    for (uint32_t token = first; token < end; token += 1)
-    {
-        const uint32_t parent = parser->tree.parents[token];
-        if (parent < first || parent >= end)
-        {
-            root = token;
-            count += 1;
-        }
-    }
-    return count == 1 ? root : BUSTER_CHECK_NONE;
-}
-
 static bool check_input_selection_generic(CheckInputReader* reader, uint32_t separator, uint32_t close, const CheckValue* control)
 {
     const Parser* parser = reader->parser;
@@ -133,7 +118,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
         const uint32_t colon = check_constant_punctuation(parser, association, close, PARSE_KIND_COLON);
         const uint32_t after = colon < close ? check_constant_punctuation(parser, colon + 1, close, PARSE_KIND_COMMA) : close;
         valid = association < colon && colon < close && colon + 1 < after;
-        const uint32_t root = valid ? check_input_selection_root(parser, colon + 1, after) : BUSTER_CHECK_NONE;
+        const uint32_t root = valid ? check_input_range_root(reader, colon + 1, after) : BUSTER_CHECK_NONE;
         valid &= root != BUSTER_CHECK_NONE;
         if (valid && parser->tokens.kinds[association] == PARSE_KIND_DEFAULT)
         {
@@ -204,7 +189,7 @@ static bool check_input_selections(CheckInputReader* reader)
                 const uint32_t next = check_constant_punctuation(parser, separator + 1, close, PARSE_KIND_COMMA);
                 bool condition = false;
                 selected = next < close && check_input_integer_ice(reader, &control) && check_action_truth(reader->types, &control, &condition);
-                const uint32_t root = selected ? check_input_selection_root(parser, condition ? separator + 1 : next + 1, condition ? next : close) : BUSTER_CHECK_NONE;
+                const uint32_t root = selected ? check_input_range_root(reader, condition ? separator + 1 : next + 1, condition ? next : close) : BUSTER_CHECK_NONE;
                 selected &= root != BUSTER_CHECK_NONE;
                 if (selected)
                 {
