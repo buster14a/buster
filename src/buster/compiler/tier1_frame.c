@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <limits.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_FRAME_NONE UINT32_MAX
 #define BUSTER_TIER1_FRAME_MAX_OBJECTS (INT32_MAX / 2u)
@@ -274,9 +274,11 @@ static Tier1FrameError tier1_frame_header(const Tier1FrameRequest* request)
 // Indexed inputs use scalar loads into a bounded staging block instead of Zen 5's expensive gathers.
 static Tier1FrameError tier1_frame_rows(const Tier1FrameSlots* slots, bool scalar, uint64_t* keys, uint32_t* maximum_alignment)
 {
+    (void)scalar;
+
     Tier1FrameError error = TIER1_FRAME_OK;
     uint32_t largest = 1;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 1)
         {
@@ -437,6 +439,8 @@ static Tier1FrameError tier1_frame_requirements(const Tier1FrameRequest* request
 
 static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Arena* scratch, bool scalar, Tier1FrameWork* result)
 {
+    (void)scalar;
+
     const uint64_t mark = scratch->length;
     Tier1FrameError error = tier1_frame_header(request);
     Tier1FrameWork candidate = {
@@ -491,7 +495,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     uint32_t alignment = 1;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_rows(&request->slots, scalar, candidate.key, &alignment);
+        error = tier1_frame_rows(&request->slots, BUSTER_SCALAR_PATH(scalar), candidate.key, &alignment);
     }
     if (error == TIER1_FRAME_OK)
     {
@@ -753,6 +757,8 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
 
 static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier1FrameWork* work, Arena* output, bool scalar, Tier1Frame* result)
 {
+    (void)scalar;
+
     const uint64_t mark = output->length;
     const Tier1FrameRequirements requirements = work->requirements;
     Tier1Frame candidate = {
@@ -774,7 +780,7 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     const uint64_t object_begin = work->count == 0 ? outgoing : tier1_frame_align(outgoing, requirements.object_alignment);
     uint64_t object_bytes = 0;
     uint32_t slots = 0;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t group = 0; group < work->class_count; group += 1)
         {
@@ -874,17 +880,19 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
 
 static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool scalar, Tier1Frame* result)
 {
+    (void)scalar;
+
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1FrameError error = output == scratch ? TIER1_FRAME_INVALID : TIER1_FRAME_OK;
     Tier1FrameWork work;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_prepare(request, scratch, scalar, &work);
+        error = tier1_frame_prepare(request, scratch, BUSTER_SCALAR_PATH(scalar), &work);
     }
     if (error == TIER1_FRAME_OK)
     {
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             tier1_frame_color_scalar(request, &work);
         }
@@ -892,7 +900,7 @@ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, A
         {
             tier1_frame_color_vector(&work);
         }
-        error = tier1_frame_layout(request, &work, output, scalar, result);
+        error = tier1_frame_layout(request, &work, output, BUSTER_SCALAR_PATH(scalar), result);
     }
     arena_pop_to(scratch, scratch_mark);
     if (error != TIER1_FRAME_OK)
@@ -902,9 +910,15 @@ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, A
     return error;
 }
 
+static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result);
+
 static Tier1FrameError tier1_frame_plan(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return tier1_frame_plan_scalar(request, output, scratch, result);
+#else
     return tier1_frame_plan_path(request, output, scratch, false, result);
+#endif
 }
 
 static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)

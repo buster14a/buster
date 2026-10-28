@@ -52,7 +52,7 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
             {
                 const uint32_t width = count - first < 16 ? count - first : 16;
                 uint32_t present = 0;
-                if (reader->parser->options.scalar)
+                if (BUSTER_SCALAR_PATH(reader->parser->options.scalar))
                 {
                     for (uint32_t i = 0; i < width; i += 1)
                     {
@@ -96,7 +96,7 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
             {
                 const uint32_t width = bindings->count - first < 64 ? bindings->count - first : 64;
                 uint64_t selected = 0;
-                if (reader->parser->options.scalar)
+                if (BUSTER_SCALAR_PATH(reader->parser->options.scalar))
                 {
                     for (uint32_t i = 0; i < width; i += 1)
                     {
@@ -452,10 +452,12 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
 
 static bool check_input_packed_any(const uint8_t* bytes, uint32_t first, uint32_t count, uint8_t bits, bool scalar)
 {
+    (void)scalar;
+
     bool found = false;
     for (uint32_t i = first; !found && i < count;)
     {
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             found = (bytes[i] & bits) != 0;
             i += 1;
@@ -475,7 +477,7 @@ static bool check_input_packed_any(const uint8_t* bytes, uint32_t first, uint32_
 static uint64_t check_input_packed_candidates(const Parser* parser, uint32_t first, uint32_t width)
 {
     uint64_t result = 0;
-    if (parser->options.scalar)
+    if (BUSTER_SCALAR_PATH(parser->options.scalar))
     {
         for (uint32_t i = 0; i < width; i += 1)
         {
@@ -506,11 +508,13 @@ static void check_input_packed_exclude(uint32_t* events, uint32_t count, uint32_
 // Inclusive unsigned difference scan, bounded to count entries for both input and output.
 static void check_input_packed_analyzed(const uint32_t* events, uint8_t* analyzed, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     uint32_t running = 0;
     for (uint32_t first = 0; first < count; first += 16)
     {
         const uint32_t width = count - first < 16 ? count - first : 16;
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             for (uint32_t i = 0; i < width; i += 1)
             {
@@ -569,7 +573,7 @@ static CheckInputPackedContexts check_input_packed_contexts(CheckInputReader* re
                 check_input_packed_exclude(events, count, reader->ends[selected] + 1, token);
             }
         }
-        check_input_packed_analyzed(events, analyzed, count, parser->options.scalar);
+        check_input_packed_analyzed(events, analyzed, count, BUSTER_SCALAR_PATH(parser->options.scalar));
         // The prefix scan has consumed the difference counts. Reuse them for the inverse selection map:
         // association separators are not expression parents, so a parent walk cannot transparently cross them.
         memset(events, 0xff, (uint64_t)count * sizeof(uint32_t));
@@ -600,7 +604,7 @@ static void check_input_packed_members(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count < reader->expression_limit ? parser->tokens.count : reader->expression_limit;
     const TypeTable* types = reader->types;
-    const bool scalar = parser->options.scalar;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const bool packed = check_input_packed_any(types->tags.packed, 1, types->tags.count, UINT8_MAX, scalar) ||
                         check_input_packed_any(types->members.flags, 1, types->members.count, BUSTER_TYPE_MEMBER_PACKED, scalar);
     const uint64_t mark = reader->scratch->length;

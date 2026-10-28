@@ -1243,7 +1243,10 @@ static ChangesResult changes_decide(const ChangesInput* input)
             }
             result.changed_steps.items[j] = step;
         }
-        result.all = list_contains(files, text_c("build.sh"));
+        // Global compilation inputs affect every plain benchmark. The scalar intrinsic headers are not global
+        // inputs here: the full-vector 9700X build does not include them.
+        result.all = list_contains(files, text_c("build.sh")) ||
+                     list_contains(files, text_c("src/buster/compiler/host_isa.h"));
         for (uint32_t i = 0; i < BUSTER_CHANGES_BENCHMARK_COUNT && !result.all; i += 1)
         {
             const ChangesBenchmark* benchmark = &changes_benchmarks[i];
@@ -1820,6 +1823,16 @@ static void changes_test_events(ChangesTest* test, Text workflow, const char* ro
     };
     result = changes_decide(&build);
     changes_expect(test, result.code && result.all && !changes_any_gate(&result), "build.sh runs every plain benchmark", (Text){ 0 });
+
+    ChangesInput host = {
+        .files = changes_words("src/buster/compiler/host_isa.h"),
+        .base_workflow = workflow,
+        .head_workflow = workflow,
+        .root = root,
+    };
+    result = changes_decide(&host);
+    changes_expect(test, result.code && result.all && !changes_any_gate(&result), "the host ISA header runs every plain benchmark", (Text){ 0 });
+    changes_expect(test, strcmp(changes_measure(&result), "all") == 0, "the host ISA header measures all", (Text){ 0 });
 
     ChangesInput added = {
         .files = changes_words(BUSTER_CHANGES_WORKFLOW),
