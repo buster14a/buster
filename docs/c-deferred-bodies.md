@@ -442,6 +442,12 @@ lane in the same process, by rule (lane counts between 4 and 8 interpolated):
 | the same, 6,144 tokens | +0.9% | 35 | 29.0 |
 | 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 42 | 9.2 |
 
+Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
+that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
+eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
+rule puts 39 units within 1% of their best and forgoes 10.8 points, where
+#448's rule puts 19 and forgoes 107.5.
+
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
 of 525 after thirty headers 0.8 to 3.4% slower on any more lanes than one. The
