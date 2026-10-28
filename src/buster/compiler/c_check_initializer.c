@@ -1147,11 +1147,13 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // expressions are checked) reads from the tree, at the expression's root, the one token whose parent is outside it: an
 // identifier's declared type, a compound literal's (at its opening parenthesis), a ?:'s from its second and third
 // operands' (check_init_conditional_type: `n ? v : 0` is a vector, #555's third review) and its condition's
-// (check_init_condition_type: `mask ? 1 : 2` of an extension vector is one), a parenthesized expression's, a call's result where it calls a function by its name, and a cast's (the reader's, at its
-// `)`); an int, for which one stands for every scalar (the callers ask only whether the value is a record, a vector or
-// neither), for a constant, a `sizeof` or `_Alignof`; a `!`'s, a `&&`'s and a `||`'s from their operands', an int or,
-// of an extension vector, a vector (#555's sixth review); a subscript's, a member's (`.` and `->`, an extension vector's
-// swizzle among them) and an indirection's of such an expression (`x[1]`, `p->a.b`, `v.x`, `*p`), from its base's type;
+// (check_init_condition_type: `mask ? 1 : 2` of an extension vector is one), a parenthesized expression's, a call's
+// result where it calls a function or an intrinsic by its name (an intrinsic's prototype the reader's, at the call's
+// `)`), and a cast's (the reader's, at its `)`); an int, for which one stands for every scalar (the callers ask only
+// whether the value is a record, a vector or neither), for a constant, a `sizeof` or `_Alignof`; a `!`'s, a `&&`'s and
+// a `||`'s from their operands', an int or, of an extension vector, a vector (#555's sixth review); a subscript's, a
+// member's (`.` and `->`, an extension vector's swizzle among them) and an indirection's of such an expression (`x[1]`,
+// `p->a.b`, `v.x`, `*p`), from its base's type;
 // a `-`, `+` or `~`'s, its
 // operand's; and a binary operator's (multiplicative to bitwise or), from both operands' as check_init_binary_type
 // combines them: a vector where either is one, a pointer for pointer arithmetic, and a scalar for the rest (`ha +
@@ -1406,7 +1408,9 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                      first[slot] + 1 == open && parser->tree.roles[first[slot]] == PARSE_ROLE_OPERAND && parser->tokens.kinds[first[slot]] == PARSE_KIND_IDENTIFIER)
             {
                 const uint32_t name = first[slot];
-                TypeId callee = types[name] != 0 ? type_strip_aligned(walker->types, types[name]) : 0;
+                // An intrinsic has no declaration: the reader keeps its prototype at the call's `)` (its query type).
+                const TypeId declared = types[name] != 0 ? types[name] : walker->cast_types != 0 ? walker->cast_types[root] : 0;
+                TypeId callee = declared != 0 ? type_strip_aligned(walker->types, declared) : 0;
                 callee = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(walker->types, type_element(walker->types, callee)) : callee;
                 result = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_FUNCTION ? type_return(walker->types, callee) : 0;
             }

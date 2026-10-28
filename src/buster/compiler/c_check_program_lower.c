@@ -429,7 +429,8 @@ struct CheckLowerWriter
     uint32_t x87_constant_capacity;
     bool x87;
     // Whether the function has 128-bit integer values (Tier0Function.int128's): an entry of class I128 or U128; and vector
-    // values (Tier0Function.vectors's): an entry of class VECTOR, which every function with X86 entries has.
+    // values or X86 entries (Tier0Function.vectors's): an entry of class VECTOR, or an x86 builtin's X86 entry, whose
+    // values may all be integers (an opmask's).
     bool int128;
     bool vectors;
     // The function's machine operations (Tier0Function.operations), each X86 entry's row by its index: the vector
@@ -547,6 +548,7 @@ static uint32_t check_lower_vector_register_bytes(uint64_t features)
 #define BUSTER_CHECK_LOWER_OPERATIONS 4096u
 
 #include "c_check_program_vectors.c"
+#include "c_check_program_x86.c"
 
 // A type's class, BUSTER_TYPED_CLASS_* or UINT8_MAX for a type no class holds: the rule that the table of every type's
 // holds (check_lower_classify_types), which the bodies read (check_lower_class).
@@ -4171,6 +4173,128 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     }
 }
 
+// A TypeId of an integer class, for a row's result's conversion to its builtin's type.
+static TypeId check_lower_class_type(uint8_t class)
+{
+    static const TypeId types[] = {
+        [BUSTER_TYPED_CLASS_I8] = BUSTER_TYPE_SCHAR,
+        [BUSTER_TYPED_CLASS_U8] = BUSTER_TYPE_UCHAR,
+        [BUSTER_TYPED_CLASS_I16] = BUSTER_TYPE_SHORT,
+        [BUSTER_TYPED_CLASS_U16] = BUSTER_TYPE_USHORT,
+        [BUSTER_TYPED_CLASS_I32] = BUSTER_TYPE_INT,
+        [BUSTER_TYPED_CLASS_U32] = BUSTER_TYPE_UINT,
+        [BUSTER_TYPED_CLASS_I64] = BUSTER_TYPE_LONG,
+        [BUSTER_TYPED_CLASS_U64] = BUSTER_TYPE_ULONG,
+    };
+    return class < BUSTER_ARRAY_LENGTH(types) ? types[class] : 0;
+}
+
+// An integer operand's class in an X86 row: its argument's, but 32 bits for an argument narrower than that (a mask of 8
+// or 16 bits, a char or a short), signed as it is: a row reads an operand's register through its form's field, of 32
+// bits at least (tier0_operation_role_valid), so the narrower value is converted to it first.
+static uint8_t check_lower_x86_operand_class(uint8_t class)
+{
+    return class == BUSTER_TYPED_CLASS_I8 || class == BUSTER_TYPED_CLASS_I16 ? BUSTER_TYPED_CLASS_I32 :
+           class == BUSTER_TYPED_CLASS_U8 || class == BUSTER_TYPED_CLASS_U16 ? BUSTER_TYPED_CLASS_U32 :
+                                                                               class;
+}
+
+// An x86 builtin's call (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
+// which the row's records take, and the row's result converted to the call's type. Its record in the stream
+// (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
+// bits (check_lower_x86_operand_class).
+static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    uint32_t low = 0;
+    uint32_t high = stream->x86_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (stream->x86[middle].node < node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const CheckBuiltinX86Effect* effect = low < stream->x86_count && stream->x86[low].node == node ? stream->x86 + low : NULL;
+    const uint32_t first = graph->argument_offsets[node];
+    const uint32_t count = graph->argument_counts[node];
+    const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
+    const uint32_t skipped = info != NULL ? check_x86_lower_immediate(info->name, info->name_length) : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    CheckValue immediate = { 0 };
+    if (skipped < count)
+    {
+        // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
+        // integer converted to the scale's int may be 1, 2, 4 or 8 even when its original payload is not.
+        immediate = stream->values[graph->argument_nodes[first + skipped]];
+        check_action_convert_value(program->types, &immediate, stream->argument_conversions[first + skipped].type, node);
+    }
+    const CheckValue* constant = skipped < count ? &immediate : NULL;
+    Tier0Operation row;
+    const char* reason = info == NULL ? "this x86 builtin" :
+                         skipped != BUSTER_CHECK_X86_NO_IMMEDIATE && (constant == NULL || constant->constant_kind != CHECK_CONSTANT_INTEGER) ?
+                         "x86 builtins of an immediate that isn't a constant" :
+                         check_x86_lower_row(program->target_features, info->name, info->name_length, constant != NULL ? (uint64_t)constant->integer : 0, &row);
+    // The row's operands, the arguments but the immediate, each integer one of its argument's class, widened.
+    uint32_t operand = 0;
+    for (uint32_t a = 0; reason == NULL && a < count; a += 1)
+    {
+        const uint8_t class = check_lower_value_class(writer, stream->argument_conversions[first + a].type);
+        if (a != skipped && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
+        {
+            row.operand_classes[operand] = check_lower_x86_operand_class(class);
+        }
+        operand += a != skipped;
+    }
+    if (reason == NULL && operand != row.operand_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (reason != NULL)
+    {
+        check_lower_unsupported(writer, reason);
+    }
+    else
+    {
+        const uint32_t index = check_lower_operation_index(writer, &row);
+        const TypeId result = stream->values[node].type;
+        // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
+        const bool zero_test = check_x86_lower_zero_test(info->name, info->name_length);
+        if (row.result_class != BUSTER_TYPED_CLASS_VOID && row.result_class != BUSTER_TYPED_CLASS_VECTOR)
+        {
+            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(row.result_class), result);
+        }
+        if (zero_test)
+        {
+            check_lower_truth(writer, check_lower_class_type(row.result_class), true);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, index);
+        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
+        writer->vectors = true;
+        for (uint32_t a = count; a-- > 0;)
+        {
+            if (a != skipped)
+            {
+                // The argument at its prototype's type, then widened (the tasks run in the reverse of their pushes).
+                const TypeId type = stream->argument_conversions[first + a].type;
+                const uint8_t class = check_lower_value_class(writer, type);
+                const uint8_t widened = check_lower_x86_operand_class(class);
+                if (widened != class)
+                {
+                    check_lower_convert(writer, type, check_lower_class_type(widened));
+                }
+                check_lower_operand(writer, node, a + 3, false, type);
+            }
+        }
+    }
+}
+
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard)
 {
@@ -4355,9 +4479,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             check_lower_helper(writer, node);
         }
     }
-    else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST)
+    else if (op == CHECK_OP_BUILTIN_X86)
     {
-        check_lower_unsupported(writer, "vector, x86 and bit-cast builtins");
+        check_lower_x86_builtin(writer, node);
+    }
+    else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST)
+    {
+        check_lower_unsupported(writer, "vector and bit-cast builtins");
     }
     else if (op == CHECK_OP_BUILTIN_FLOAT)
     {
@@ -6743,11 +6871,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         // The function has long double values (Tier0Function.x87) where its result is one or an entry is of class F80,
         // 128-bit integer ones (Tier0Function.int128) where an entry is of class I128 or U128, and vectors
-        // (Tier0Function.vectors) where one is of class VECTOR.
+        // (Tier0Function.vectors) where one is of class VECTOR or an x86 builtin made an X86 entry.
         const uint32_t memory = BUSTER_SCALAR_PATH(writer->scalar) ? check_lower_entry_classes_scalar(writer->classes, writer->count) : check_lower_entry_classes(writer->classes, writer->count);
         writer->x87 = writer->x87 || (memory & BUSTER_CHECK_LOWER_ENTRIES_X87) != 0;
         writer->int128 = (memory & BUSTER_CHECK_LOWER_ENTRIES_WIDE) != 0;
-        writer->vectors = (memory & BUSTER_CHECK_LOWER_ENTRIES_VECTOR) != 0;
+        writer->vectors = writer->vectors || (memory & BUSTER_CHECK_LOWER_ENTRIES_VECTOR) != 0;
 #define BUSTER_CHECK_LOWER_COPY(field, source, type, length) \
         if (status->status == CHECK_PROGRAM_OK && (length) != 0) \
         { \
