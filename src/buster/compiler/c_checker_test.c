@@ -4530,6 +4530,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_pragma_test.c"
 #include "c_check_diagnostic_test.c"
 #include "c_check_warning_events_test.c"
+#include "c_check_warning_deferred_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
@@ -4660,6 +4661,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_action_oracles(&test, clang);
             check_test_actions_batch(&test, &types.table);
             check_test_warning_events(&test);
+            check_test_warning_deferred(&test);
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
