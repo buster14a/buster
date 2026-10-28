@@ -8,9 +8,134 @@ made from it, are byte for byte what one lane makes, whatever the lane count
 and whichever lane finishes first ([#153](https://github.com/buster14a/buster/issues/153)).
 
 The driver runs it for `-c` and for the direct path's executables:
-`./build/compiler [--lanes N] ...`. By default it may run one lane per CPU the
-process may run on, and runs as many as the bodies' tokens pay for (below);
-`--lanes N` runs N, as long as the unit has bodies for them.
+`./build/compiler [--lanes N] [--worker-budget N] ...`. By default it may run
+one lane per CPU the process may run on, and runs as many as the bodies'
+tokens pay for (below). External worker ownership further bounds this count
+(#673). `--lanes N` forces that many profitable-work candidates, up to the
+body count, within the explicit worker cap and GNU make's available slots.
+
+## Build-system worker ownership (#673)
+
+The calling thread is one worker. `--worker-budget N` caps this process's
+total workers, including that thread; values are 1 through 64, also accepted
+as `--worker-budget=N`. A build system running eight files under a total
+eight-worker budget can pass `--worker-budget=1` to each process. The cap
+does not enlarge affinity or change the existing work-based lane rule.
+An explicit `--lanes N` still overrides that work rule, within the external
+cap. Without an external budget, the previous affinity/forced-lane behavior
+is retained; system-wide idle sampling is not used as an ownership claim.
+
+Under GNU make, the compiler also participates in the shared jobserver.
+Make has already reserved the caller's implicit slot; each additional lane
+requires one available token byte. Authentication is captured at source-command
+entry, before compiler descriptors could reuse numbers which make closed.
+The final `--jobserver-auth=` or legacy `--jobserver-fds=` MAKEFLAGS option
+wins. FIFO paths (with escaped spaces) and inherited `R,W` pipe descriptors
+are supported. An unavailable, disabled or unrecognized advertised server
+permits only the calling thread. With pipe-style make jobservers, mark the
+recipe with `+` so make passes the descriptors. A `+` recipe also runs under
+`make -n`; the compiler recognizes that short flag and performs no source work.
+See [GNU make's job-slot rules](https://www.gnu.org/software/make/manual/html_node/Job-Slots.html)
+and [POSIX protocol](https://www.gnu.org/software/make/manual/html_node/POSIX-Jobserver.html).
+
+Tokens are taken without waiting, after the existing lane rule chooses useful
+work and before active-lane allocation. Pipe descriptors are reopened through
+`/proc/self/fd` into private nonblocking open descriptions. The inherited
+blocking mode is never changed. Regular files, mismatched endpoints, wrong
+access directions and packet-mode pipes are refused as jobservers. No spare
+bytes means one lane, without starting another process.
+
+When bytes are available, a small guardian starts in its own session before
+reading any. It inherits blocked catchable signals and owns the exact bytes
+until the compiler closes its private control pipe. The guardian returns them
+and acknowledges completion after workers join, before a serial retry or merge.
+Compiler exit, including whole-process-group termination, closes that pipe too.
+It starts through `posix_spawn` and an immediate internal command, so its address
+space retains no front-end mappings during emission. The nonempty-token check
+still precedes process creation, and no credit is held during front-end work.
+The guardian closes unrelated inherited handles; the caller's signal handlers
+and masks are preserved. The implicit slot is never returned. Failed guardian
+setup, descriptor or process limits leave the
+compiler on one lane; failure to return owned slots refuses output.
+
+A full Linux pipe can lack append space even after a partial read frees logical
+bytes. The guardian reserves recovery storage before borrowing. If a return
+hits that page-buffer limit, it drains available opaque bytes into this storage
+and restores every pending byte, retaining any unwritten suffix. This compacts
+the pipe without requiring another recipe to read it; an I/O error never
+discards held slots. GNU make fills the initial pipe before starting jobs, so
+its capacity bounds the total available and borrowed explicit tokens. The
+recovery storage is private to the clean guardian and is released before its
+acknowledgement completes.
+
+The lease and team size stay fixed for the emission phase. Tokens which another
+file returns after dispatch cannot enlarge an already running team. In an uneven
+build, two large files can receive seven lanes and one lane; when the first team
+finishes, the one-lane team can leave capacity idle at the tail. Active-team
+resizing and changes to the existing profitability rule remain separate work.
+This ownership policy uses no machine-wide idle sampling or racy retuning.
+
+With `--time-stages`, `worker-budget` reports the external mode, explicit cap,
+requested and granted workers, attempted active team and serial-fallback reason.
+This also identifies pipe-style recipes whose descriptors were unavailable;
+ordinary source diagnostics retain their previous bytes and ordering.
+
+The original approximately 3% all-core loss compared different affinities.
+It does not isolate an oversubscription or waiting-state cause. Qualification
+must compare forced one lane, the default, and forced lanes under the same
+physical-CPU mask, with a separate pinned-process control, and compare actual
+make file jobs times internal teams at 1/2/4/8 jobs. Preserve statuses, objects,
+diagnostics, team size, RSS, switches, migrations and physical traffic; neither
+protocol tests nor a one-file gain establishes full-build throughput.
+
+### Qualification and bounds
+
+The [frozen qualification record](https://github.com/buster14a/buster-performance/blob/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-673-spawn/REPORT.md)
+retains the source/binary identities, independent ownership checks, balanced
+workload controls and negative fork/mixed-order experiments. Its measurements
+describe the revisions named there; refreshing this change onto later main
+establishes compatibility rather than a new timing result.
+
+The clean-launch source `1d076d6736df9b7350610ec646dc1fe1ef39f7dc` was qualified
+on the 9700X with frozen SQLite inputs, GNU make 4.4.1 and the same physical
+CPU mask 0–7 for all shared-affinity controls. The separate pinned-process
+controls keep their own label. A three-repeat matrix covers external jobs
+1/2/4/8 and forced one lane, default lanes, forced eight lanes, explicit cap one
+and the real make jobserver. All 120 cohorts produce the same object bytes;
+their resource variation makes this matrix a characterization screen.
+
+The policy comparison uses one locked group per workload, a full-size primer
+and a cyclic nine-edge role sequence repeated four times. Each of the nine
+predecessor/current policy pairs occurs four times, for twelve measured cohorts
+per policy. The independent reader checks the actual schedule, zero exit status,
+output comparisons and full counter coverage. An earlier mixed-workload list
+rotation is retained as rejected evidence because preceding workloads were
+confounded with the policy.
+
+All three policies request eight emission lanes. The jobserver policy has a
+worker cap of eight; cap one has a worker cap of one; the unrestricted control
+clears `MAKEFLAGS` for each compiler. Every policy uses the same real make
+recipes and resource wrappers. Median whole-cohort wall times were:
+
+| Eight-file workload | Jobserver (ms) | Cap one (ms) | Unrestricted (ms) |
+| --- | ---: | ---: | ---: |
+| Eight SQLite units | 408.827 | 408.011 | 428.449 |
+| Eight tiny units | 8.766 | 9.101 | 9.323 |
+| Two SQLite and six tiny | 180.681 | 177.824 | 172.410 |
+
+The saturated large cohort uses 4.58% less wall time than unrestricted teams.
+The uneven cohort costs 4.80% more wall time, alongside fewer cycles, switches
+and migrations; its fixed leases expose the tail limitation above. Tiny-file
+ranges overlap. These are one-placement workload results with retained major
+faults, not a universal throughput or neutrality guarantee.
+
+A same-head one-file control with spare tokens uses eight lanes in both cases:
+134.221 ms with the jobserver and 134.277 ms without it, with overlapping ranges
+and 4,912 versus 4,910 minor faults. The superseded post-front-end fork guardian
+had added 1,549 faults and 1.28% wall time in its matched control. Clean spawning
+removes that measured copy-on-write amplification without reserving credits
+during the front end. Exact method, counters, identities and rejected controls
+are retained with #673's performance evidence.
 
 ## The phase
 
@@ -136,6 +261,15 @@ as long as it. #113's deferred reader sizes its lanes the same way
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
 [--programs N] [--keep]` (`c_check_lanes_test.c`):
+
+- the external ownership protocol, against independent pipe/FIFO byte contents:
+  empty and partial supplies, exact exceptional bytes, caps, malformed and
+  overridden flags, escaped paths, stale/reused descriptor numbers, resource
+  limits, unchanged inherited flags, caller signal state, ignored SIGCHLD,
+  and whole compiler-process-group SIGTERM/SIGKILL;
+- budgeted real emissions and their failed-start/resource retries, by both
+  paths with and without rows/unwind: one lane's objects or failures, with
+  every owned byte returned once;
 
 - generated programs of up to 600 functions of many kinds, among them
   libgcc's functions in random first-use orders, computed gotos through static
