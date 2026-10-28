@@ -17,6 +17,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_COMPARE,
     // (mask m, vector w, vector a): w's elements where m's bits are set, a's elsewhere.
     CHECK_X86_LOWER_SELECT,
+    // (mask m, vector a, vector w): w with its first element a's where m's first bit is set, and a's others (clang's
+    // scalar select: the form, VMOVSS's or VMOVSD's of three registers, merges a's first element into w's under m).
+    CHECK_X86_LOWER_SELECT_SCALAR,
     // (mask m): m, through an opmask register.
     CHECK_X86_LOWER_KMOV,
     // (const element* p, vector w, mask m): p's elements where m's bits are set, w's elsewhere; p needs no alignment.
@@ -146,6 +149,13 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_cmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, true, 2)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_ucmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, false, 2)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_select", "b_", "w_", "d_", "q_", "", CHECK_X86_LOWER_SELECT, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    // The floating selects are the integer ones of their elements' bytes: a select moves bits.
+    BUSTER_CHECK_X86_WIDTHS("__builtin_ia32_selectps_", "", CHECK_X86_LOWER_SELECT, 4, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    BUSTER_CHECK_X86_WIDTHS("__builtin_ia32_selectpd_", "", CHECK_X86_LOWER_SELECT, 8, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    BUSTER_CHECK_X86_WIDTHS("__builtin_ia32_selectph_", "", CHECK_X86_LOWER_SELECT, 2, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    BUSTER_CHECK_X86_WIDTHS("__builtin_ia32_selectpbf_", "", CHECK_X86_LOWER_SELECT, 2, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_selectss_128", CHECK_X86_LOWER_SELECT_SCALAR, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVSS_X_X_X_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_selectsd_128", CHECK_X86_LOWER_SELECT_SCALAR, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVSD_X_X_X_EVEX, 0)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_loaddqu", "qi", "hi", "si", "di", "_mask", CHECK_X86_LOWER_LOAD, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_storedqu", "qi", "hi", "si", "di", "_mask", CHECK_X86_LOWER_STORE, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
     BUSTER_CHECK_X86_RULE("__builtin_ia32_kmovb", CHECK_X86_LOWER_KMOV, 1, 1, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, 0, 0)
@@ -431,6 +441,7 @@ static bool check_x86_lower_family_masks(uint8_t family)
     {
     case CHECK_X86_LOWER_COMPARE:
     case CHECK_X86_LOWER_SELECT:
+    case CHECK_X86_LOWER_SELECT_SCALAR:
     case CHECK_X86_LOWER_KMOV:
     case CHECK_X86_LOWER_LOAD:
     case CHECK_X86_LOWER_STORE:
@@ -524,6 +535,21 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(0));
             row->records[1] = check_x86_lower_record(check_x86_lower_move(8, width, false), v0, 0, v2);
             row->records[2] = check_x86_lower_record(check_x86_lower_move(rule->element, width, false), v0, 0, v1);
+            row->records[2].decorations = 1;
+            row->record_count = 3;
+            row->operand_count = 3;
+            row->operand_classes[0] = mask_class;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = rule->bytes;
+            row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[2] = rule->bytes;
+        }
+        else if (rule->family == CHECK_X86_LOWER_SELECT_SCALAR)
+        {
+            // W's elements, then A's first merged in where the mask's first bit is set and A's others over W's.
+            row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+            row->records[1] = check_x86_lower_record(check_x86_lower_move(8, width, false), v0, 0, v2);
+            row->records[2] = check_x86_lower_record(rule->form, v0, v1, v1);
             row->records[2].decorations = 1;
             row->record_count = 3;
             row->operand_count = 3;

@@ -16,7 +16,9 @@ static const char check_test_x86_types[] =
     "typedef long long v2di __attribute__((vector_size(16)));typedef long long v4di __attribute__((vector_size(32)));"
     "typedef long long v8di __attribute__((vector_size(64)));typedef float v4sf __attribute__((vector_size(16)));"
     "typedef float v8sf __attribute__((vector_size(32)));typedef double v2df __attribute__((vector_size(16)));"
-    "typedef double v4df __attribute__((vector_size(32)));\n"
+    "typedef double v4df __attribute__((vector_size(32)));typedef float v16sf __attribute__((vector_size(64)));"
+    "typedef double v8df __attribute__((vector_size(64)));typedef __bf16 v8bf __attribute__((vector_size(16)));typedef __bf16 v16bf __attribute__((vector_size(32)));"
+    "typedef __bf16 v32bf __attribute__((vector_size(64)));\n"
     "static unsigned fold(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}\n"
     "#define FOLD(v) h=fold(h,&(v),sizeof(v))\n"
     "static void fill(void*p,unsigned long n,unsigned s){unsigned char*b=p;for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;b[i]=(unsigned char)(s>>16);}}\n"
@@ -25,6 +27,28 @@ static const char check_test_x86_types[] =
 static void check_test_program_x86_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
     static const char* const programs[][2] = {
+        {
+            // The floating selects, which move bits: each width of ps, pd and pbf, and the scalar ones, whose first element
+            // is a's or w's by the mask's first bit and whose others are a's. (ph's rows are pbf's; their builtins need
+            // AVX512-FP16, which znver5 hasn't.)
+            "x86-float-selects",
+            "int tested(int n){unsigned h=2166136261u;v4sf a4,w4;v8sf a8,w8;v16sf a16,w16;v2df b2,x2;v4df b4,x4;v8df b8,x8;"
+            "v8bf d8,z8;v16bf d16,z16;v32bf d32,z32;"
+            "fill(&a4,16,n);fill(&w4,16,n+1);fill(&a8,32,n+2);fill(&w8,32,n+3);fill(&a16,64,n+4);fill(&w16,64,n+5);fill(&b2,16,n+6);"
+            "fill(&x2,16,n+7);fill(&b4,32,n+8);fill(&x4,32,n+9);fill(&b8,64,n+10);fill(&x8,64,n+11);"
+            "fill(&d8,16,n+18);fill(&z8,16,n+19);"
+            "fill(&d16,32,n+20);fill(&z16,32,n+21);fill(&d32,64,n+22);fill(&z32,64,n+23);unsigned long long m=mask(n);"
+            "v4sf s1=__builtin_ia32_selectps_128((unsigned char)m,a4,w4);v8sf s2=__builtin_ia32_selectps_256((unsigned char)(m>>8),a8,w8);"
+            "v16sf s3=__builtin_ia32_selectps_512((unsigned short)(m>>16),a16,w16);FOLD(s1);FOLD(s2);FOLD(s3);"
+            "v2df s4=__builtin_ia32_selectpd_128((unsigned char)(m>>5),b2,x2);v4df s5=__builtin_ia32_selectpd_256((unsigned char)(m>>9),b4,x4);"
+            "v8df s6=__builtin_ia32_selectpd_512((unsigned char)(m>>13),b8,x8);FOLD(s4);FOLD(s5);FOLD(s6);"
+            "v8bf s10=__builtin_ia32_selectpbf_128((unsigned char)(m>>2),d8,z8);v16bf s11=__builtin_ia32_selectpbf_256((unsigned short)(m>>6),d16,z16);"
+            "v32bf s12=__builtin_ia32_selectpbf_512((unsigned)(m>>10),d32,z32);FOLD(s10);FOLD(s11);FOLD(s12);"
+            "v4sf s13=__builtin_ia32_selectss_128((unsigned char)m,a4,w4),s14=__builtin_ia32_selectss_128((unsigned char)(m^1),a4,w4);"
+            "v2df s15=__builtin_ia32_selectsd_128((unsigned char)(m>>1),b2,x2),s16=__builtin_ia32_selectsd_128((unsigned char)((m>>1)^1),b2,x2);"
+            "FOLD(s13);FOLD(s14);FOLD(s15);FOLD(s16);"
+            "return (int)h;}",
+        },
         {
             "x86-opmasks",
             "int tested(int n){unsigned h=2166136261u;unsigned short a=(unsigned short)(n*40503u+7),b=(unsigned short)(n*7919u+3);"
