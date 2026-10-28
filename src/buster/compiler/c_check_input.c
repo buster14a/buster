@@ -3319,7 +3319,7 @@ static void check_input_attribute_items(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count < 2 ? 0 : parser->tokens.count - 2;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_attribute_item(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -4051,7 +4051,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !parser->options.scalar && token < count; token += 64)
+    for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -4110,6 +4110,8 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
+    // The requested walk controls filtering and value-list accounting. Host ISA
+    // only selects how the classification above is computed.
     const bool scalar = parser->options.scalar;
     // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
     const uint32_t acts = check_input_expression_classes(reader);
@@ -4832,7 +4834,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) : check_input_scan_nonzero(reader->output->tentative, first, count);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_nonzero(reader->output->tentative, first, count);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_complete_use(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -4870,7 +4872,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     reader->output->resource |= system && pp->output.locations != NULL && levels == NULL;
     if (levels != NULL)
     {
-        if (parser->options.scalar || pp->system_runs_inexact)
+        if (BUSTER_SCALAR_PATH(parser->options.scalar) || pp->system_runs_inexact)
         {
             pp_history_ensure(pp);
             pp_system_levels_history(pp, levels);
@@ -4906,9 +4908,11 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
 // its twin, reads every token's.
 static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !scalar && token < count; token += 32)
+    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
     {
         const __mmask32 lanes = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
         const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
@@ -4973,7 +4977,7 @@ static void check_input_constant_contexts(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) :
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) :
                             check_input_scan_nonzero(reader->output->static_objects, first, count) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_STATIC_ASSERT) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_CASE);
@@ -5046,6 +5050,8 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits, bool scalar)
 {
+    (void)scalar;
+
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
     static const uint32_t syntax_names[] =
     {
@@ -5075,7 +5081,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
     uint32_t token = 0;
-    for (; !scalar && token < count; token += 64)
+    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -5274,7 +5280,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const uint64_t mark = scratch->length;
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
     uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64) : 0;
-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, parser->options.scalar);
+    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, BUSTER_SCALAR_PATH(parser->options.scalar));
     input->vla_capacity = counts.subscripts;
     input->asm_capacity = counts.asms;
     const uint32_t vector_members = counts.vector_members;
@@ -5809,7 +5815,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 // Without a _Generic or __builtin_choose_expr token there is nothing to select: the scalar reader
                 // walks every token for them, the twin of this count.
-                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || parser->options.scalar)
+                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || BUSTER_SCALAR_PATH(parser->options.scalar))
                 {
                     check_input_selections(&reader);
                 }
@@ -5841,7 +5847,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         input->graph.transparent_unions = activations;
                     }
                 }
-                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, parser->options.scalar);
+                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
                 if (input->graph.builtin_capacity != 0)
                 {
                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));

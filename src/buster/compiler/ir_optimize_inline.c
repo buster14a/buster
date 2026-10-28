@@ -24,7 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_IR_INLINE_INTERNAL 1u
 #define BUSTER_IR_INLINE_NOINLINE 2u
@@ -259,7 +259,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
-            check = ir_optimize_prepare(&work, function, output, scratch, options.scalar);
+            check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
             const uint64_t bytes = scratch->length - mark;
             result->scratch_bytes = bytes > result->scratch_bytes ? bytes : result->scratch_bytes;
             arena_pop_to(scratch, mark);
@@ -442,7 +442,9 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
 
 static void ir_inline_threshold(const uint32_t* costs, uint32_t count, uint32_t maximum, bool scalar, uint8_t* selected)
 {
-    if (scalar)
+    (void)scalar;
+
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -517,7 +519,7 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
     {
         if (first != end)
         {
-            ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, options.scalar, fits);
+            ir_inline_threshold(result->costs + first, end - first, options.maximum_cost, BUSTER_SCALAR_PATH(options.scalar), fits);
         }
         // Appended constant and address rows are bounded like instructions: a call that would carry the caller's
         // side tables past the representation limit stays a call, rather than failing the whole unit.
@@ -796,7 +798,7 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
             IrOptimizeWork verification = { 0 };
             // The caller CFG is unchanged, including valid unreachable regions; check the same reachable SSA
             // contract as the input, rather than deleting regions or inventing dominance for dead blocks.
-            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, options.scalar);
+            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, BUSTER_SCALAR_PATH(options.scalar));
             const uint64_t bytes = scratch->length - scratch_mark;
             inlined.scratch_bytes = bytes > inlined.scratch_bytes ? bytes : inlined.scratch_bytes;
             arena_pop_to(scratch, verification_mark);

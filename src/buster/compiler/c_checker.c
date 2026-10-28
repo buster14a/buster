@@ -1926,6 +1926,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
 
 static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
@@ -1956,7 +1958,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
         }
         else
         {
-            const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, scalar, &result);
+            const CheckOverloadResult selected = check_graph_overload_call(types, graph, stream, &action, head, scratch, BUSTER_SCALAR_PATH(scalar), &result);
             if (overload)
             {
                 stream->overloads[stream->overload_count++] = (CheckOverloadEffect){ .node = node, .selected = selected };
@@ -2198,11 +2200,12 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
 {
     stream->warning_count = 0;
     stream->warnings_prepared = true;
+    (void)scalar;
     bool needed = false;
     uint32_t node = 0;
     // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
     // may need them (#530); the scalar path tests every node.
-    for (; !scalar && !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         __mmask16 candidates = _mm512_test_epi32_mask(_mm512_loadu_si512(stream->warnings + node), _mm512_set1_epi32(-1));
         if (graph->contexts != NULL)
@@ -2336,10 +2339,12 @@ static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream
 
 static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
 {
+    (void)scalar;
+
     // Only a node with a diagnostic or a context reports: the vector path finds those 16 at a time and reads no other
     // node's value (a sixth of the graph's bytes, #530); the scalar path takes every node.
     uint32_t node = 0;
-    for (; !scalar && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         __mmask16 reported = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
         if (graph->contexts != 0)
@@ -2392,9 +2397,11 @@ _Static_assert(sizeof(CheckDiagnostic) == sizeof(uint32_t), "the vector scans lo
 // the scalar path one at a time.
 static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     uint32_t found = BUSTER_CHECK_NONE;
     uint32_t node = 0;
-    for (; !scalar && found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         const __mmask16 exhausted = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
         found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
@@ -2408,6 +2415,11 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
+#if !BUSTER_HOST_VECTOR
+    CheckOptions host_options = *options;
+    host_options.scalar = true;
+    options = &host_options;
+#endif
     const uint64_t output_start = output->length;
     const uint64_t scratch_start = scratch->length;
     *stream = (CheckStream){
@@ -2431,7 +2443,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     CheckGraphValidation validation = { 0 };
     if (result)
     {
-        result = options->scalar ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
+        result = BUSTER_SCALAR_PATH(options->scalar) ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
                                    check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
     }
@@ -2499,14 +2511,14 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         uint32_t node = 0;
         while (node < count)
         {
-            if (!options->scalar && pure[node] == 0 && check_graph_is_leaf(graph, node))
+            if (!BUSTER_SCALAR_PATH(options->scalar) && pure[node] == 0 && check_graph_is_leaf(graph, node))
             {
                 check_graph_leaf(types, graph, stream, node);
                 node += 1;
             }
-            else if (options->scalar || pure[node] == 0)
+            else if (BUSTER_SCALAR_PATH(options->scalar) || pure[node] == 0)
             {
-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch, options->scalar);
+                check_graph_scalar_node(types, graph, stream, node, arguments, scratch, BUSTER_SCALAR_PATH(options->scalar));
                 node += 1;
             }
             else
@@ -2521,7 +2533,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            const uint32_t exhausted = check_graph_resource_node(stream, count, options->scalar);
+            const uint32_t exhausted = check_graph_resource_node(stream, count, BUSTER_SCALAR_PATH(options->scalar));
             if (exhausted != BUSTER_CHECK_NONE)
             {
                 result = false;
@@ -2530,7 +2542,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             }
             if (result && pass == 0)
             {
-                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, options->scalar);
+                result = check_graph_query_runtime(types, graph, stream, scratch, pure, levels, arguments, maximum_arguments, BUSTER_SCALAR_PATH(options->scalar));
             }
         }
         if (stream->statistics.scratch_bytes < scratch->length)
@@ -2542,9 +2554,9 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             if (count != 0)
             {
-                check_graph_warning_contexts(types, graph, stream, pure, options->scalar);
+                check_graph_warning_contexts(types, graph, stream, pure, BUSTER_SCALAR_PATH(options->scalar));
             }
-            check_graph_reports(graph, stream, reports, options->scalar);
+            check_graph_reports(graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
         }
     }
     if (!result)

@@ -340,6 +340,8 @@ static void cbuiltin_float_lower_x87_absolute(CBuiltinLowerRecipe* recipe, const
 
 static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buffer, const CBuiltinFloatLowerCall* call, bool vector)
 {
+    (void)vector;
+
     CBuiltinLowerResult result = { 0 };
     CBuiltinLowerRecipe recipe = { 0 };
     const bool classification = call != 0 && call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
@@ -415,7 +417,7 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
             result.result_class = classification ? BUSTER_TYPED_CLASS_I32 : absolute ? call->argument_class : constant_class;
             result.temporary_first = buffer->local_count;
             result.temporary_count = recipe.temporary_count;
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 for (uint32_t i = 0; i < recipe.count; i += 64)
                 {
@@ -455,10 +457,16 @@ static CBuiltinLowerResult cbuiltin_float_lower_append(CBuiltinLowerBuffer* buff
     return result;
 }
 
+static CBuiltinLowerResult cbuiltin_float_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinFloatLowerCall* call);
+
 static CBuiltinLowerResult cbuiltin_float_lower(CBuiltinLowerBuffer* buffer, const CBuiltinFloatLowerCall* call)
 {
+#if !BUSTER_HOST_VECTOR
+    return cbuiltin_float_lower_scalar(buffer, call);
+#else
     const CBuiltinLowerResult result = cbuiltin_float_lower_append(buffer, call, true);
     return result;
+#endif
 }
 
 static CBuiltinLowerResult cbuiltin_float_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinFloatLowerCall* call)

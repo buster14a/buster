@@ -2141,6 +2141,9 @@ static bool import_object_vector(Link* link, String8 bytes, uint32_t unit, uint8
 
 BUSTER_LINKER_ENTRY ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object)
 {
+#if !BUSTER_HOST_VECTOR
+    return import_object_scalar(link, bytes, unit, source, arena, object);
+#else
     const ImportMark mark = import_mark(link, arena);
     ImportResult result = { 0 };
     if (!import_object_vector(link, bytes, unit, source, arena, object))
@@ -2149,6 +2152,7 @@ BUSTER_LINKER_ENTRY ImportResult import_object(Link* link, String8 bytes, uint32
         result = import_object_scalar(link, bytes, unit, source, arena, object);
     }
     return result;
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2675,6 +2679,9 @@ static bool import_archive_vector(ImportArchive* archive, String8 bytes, Arena* 
 
 static ImportResult import_archive(ImportArchive* archive, String8 bytes, Arena* arena)
 {
+#if !BUSTER_HOST_VECTOR
+    return import_archive_scalar(archive, bytes, arena);
+#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_archive_vector(archive, bytes, arena))
@@ -2683,6 +2690,7 @@ static ImportResult import_archive(ImportArchive* archive, String8 bytes, Arena*
         result = import_archive_scalar(archive, bytes, arena);
     }
     return result;
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2849,6 +2857,9 @@ static ImportResult import_archive_lazy_scalar(ImportArchiveIndex* index, String
 
 static ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes, Arena* arena)
 {
+#if !BUSTER_HOST_VECTOR
+    return import_archive_lazy_scalar(index, bytes, arena);
+#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_archive_lazy_vector(index, bytes, arena))
@@ -2857,6 +2868,7 @@ static ImportResult import_archive_lazy(ImportArchiveIndex* index, String8 bytes
         result = import_archive_lazy_scalar(index, bytes, arena);
     }
     return result;
+#endif
 }
 
 static ImportResult import_archive_member(ImportMember* member, String8 bytes, const ImportArchiveIndex* index, uint32_t rank)
@@ -3494,6 +3506,9 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
 
 static ImportResult import_library(ImportLibrary* library, String8 bytes, Arena* arena)
 {
+#if !BUSTER_HOST_VECTOR
+    return import_library_scalar(library, bytes, arena);
+#else
     const uint64_t length = arena->length;
     ImportResult result = { 0 };
     if (!import_library_vector(library, bytes, arena))
@@ -3502,6 +3517,7 @@ static ImportResult import_library(ImportLibrary* library, String8 bytes, Arena*
         result = import_library_scalar(library, bytes, arena);
     }
     return result;
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
