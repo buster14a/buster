@@ -2234,14 +2234,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",
         "floating-builtin-runtime-classification", clang);
+    // Clang's build compiler can reverse only the final NORMAL/SUBNORMAL pair. Keep exact call counts and the
+    // value/ZERO/NAN/INF prefix, permitting either order only for that pair.
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen[6],prefix,bad;int mark(int n){seen[n]++;if(n==3||n==4)bad|=prefix!=512;else prefix=prefix*10+n;return n;}"
+        "int tested(int n){for(int i=0;i<6;i++)seen[i]=0;prefix=bad=0;"
         "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
-        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}",
+        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen[0]++,x));"
+        "int ok=!bad&&seen[0]==1&&seen[5]==1&&seen[1]==(n!=0)&&seen[2]==(n>0)&&seen[3]==(n>1)&&seen[4]==(n>1)&&"
+        "prefix==(n<0?51:n==0?5:512);return ok*100+r;}",
         "fpclassify-conditional-selector-effects", clang);
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
-        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
+        "int seen[6],prefix,bad;int mark(int n){seen[n]++;if(n==3||n==4)bad|=prefix!=1512;else prefix=prefix*10+n;return n;}"
+        "int tested(int n){for(int i=0;i<6;i++)seen[i]=0;prefix=bad=0;"
+        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen[0]++,prefix++,1.0));"
+        "int ok=!bad&&prefix==1512;for(int i=0;i<6;i++)ok=ok&&seen[i]==1;return ok*100+r+n;}",
         "fpclassify-known-category-effects", clang);
     check_test_program_source(test,
         "int calls;double make(int n){calls++;return n<0?-__builtin_inf():n==0?-0.0:(double)(-n)-0.25;}int tested(int n){calls=0;"
