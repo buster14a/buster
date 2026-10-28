@@ -79,6 +79,9 @@ exact rules):
 Each function may have up to 16,777,216 entries and 16,777,216 locals, including parameters and lowering temporaries
 (`BUSTER_TIER0_MAX_ENTRIES`, `BUSTER_TIER0_MAX_LOCALS`). Local identities and homes use 32-bit indices; #622 removed
 the former 65,536-local cap. Available arena memory and representable frame displacements still bound compilation.
+Per-entry instruction counts use 32 bits, including a call's complete aggregate copies. Both paths accumulate the
+prologue/body/epilogue total in 64 bits and refuse output before allocation when its record identities, including
+emission padding, cannot fit 32 bits. Available arena memory remains a separate bound.
 Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), within the 240-depth storage bound. An indirect
 call also holds its callee, so 238 simple arguments fit that bound; expressions inside arguments can need additional
 live values. Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
@@ -554,6 +557,8 @@ copies each argument on the stack from its slot through rax into the outgoing ar
 from its slot (after the stack ones), its callee into r11, makes the call as `tier0_emit_call` does (al, the hidden
 pointer, the result object), stores the result into its slot and loads back the stacks within the tables. Nothing below
 its arguments needs saving: it is in the slots.
+The compact stack effects are byte deltas modulo 256, so deep exit depths use the same byte arithmetic as the
+depth columns. In particular a call with more than 128 arguments still reloads a live prefix and its result.
 
 For an aggregate argument, its saved value is the address of its bytes. Before populating ABI registers, the deep
 call copies whole stack arguments, SPLIT stack parts and odd-size temporary parts through RAX with R10/XMM0 scratch.

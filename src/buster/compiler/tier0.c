@@ -322,6 +322,7 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
+// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
 #define BUSTER_TIER0_MAX_DEPTH 240
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
@@ -2995,13 +2996,16 @@ struct Tier0Entries
     uint8_t* key_classes;
     uint8_t* variants;
     uint8_t* absorbed;
+    // Modulo-byte deltas: a wide CALL can pop more than a signed byte represents.
     int8_t* integer_effects;
     int8_t* floating_effects;
     uint8_t* depths;
     uint8_t* floating_depths;
     uint16_t* templates;
-    uint16_t* lengths;
+    uint32_t* lengths;
     uint32_t* positions;
+    // Full measured count before narrowing positions; output allocation refuses an unrepresentable total.
+    uint64_t record_count;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and a
@@ -3022,7 +3026,6 @@ struct Tier0Entries
 #define BUSTER_TIER0_DEEP_SPILL_FLOATING 0x10
 #define BUSTER_TIER0_DEEP_FILL_INTEGER 0x20
 #define BUSTER_TIER0_DEEP_FILL_FLOATING 0x40
-// The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
 
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
 {
@@ -6424,8 +6427,8 @@ static Tier0DeepEntry tier0_deep_entry(const Tier0Function* function, const Tier
     Tier0DeepEntry deep;
     deep.before[0] = entries->deep_depths[i];
     deep.before[1] = entries->deep_floating_depths[i];
-    deep.exit[0] = (uint32_t)((int32_t)deep.before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u);
-    deep.exit[1] = (uint32_t)((int32_t)deep.before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u);
+    deep.exit[0] = (uint8_t)((int32_t)deep.before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0));
+    deep.exit[1] = (uint8_t)((int32_t)deep.before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0));
     deep.window[0] = entries->depths[i];
     deep.window[1] = entries->floating_depths[i];
     deep.result[0] = leaves == 1;
@@ -7566,8 +7569,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             const uint8_t kind = function->kinds[i];
             const uint32_t stack = tier0_stack(function->classes[i]);
             const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
-            const uint32_t exit[2] = { (uint32_t)((int32_t)before[0] + entries->integer_effects[i]) + (jump_value && stack == 1 ? 1u : 0u),
-                                       (uint32_t)((int32_t)before[1] + entries->floating_effects[i]) + (jump_value && stack == 2 ? 1u : 0u) };
+            const uint32_t exit[2] = { (uint8_t)((int32_t)before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0)),
+                                       (uint8_t)((int32_t)before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0)) };
             if (kind == BUSTER_TYPED_CALL)
             {
                 const uint32_t call = (uint32_t)function->values[i];
@@ -7699,7 +7702,7 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(c
             counts.references += info->fixup != 0xff ? 1 : 0;
             counts.choices += info->choice != 0xff ? 1 : 0;
         }
-        entries->lengths[i] = (uint16_t)length;
+        entries->lengths[i] = length;
     }
     return counts;
 }
@@ -7808,31 +7811,38 @@ static void tier0_sort_branches(uint32_t* branches, uint32_t* targets, uint32_t 
 // Each entry's first record, after the prologue (the entry past the last is the epilogue's first record).
 static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue)
 {
-    uint32_t position = prologue;
+    uint64_t position = prologue;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
-        entries->positions[i] = position;
+        entries->positions[i] = (uint32_t)position;
         position += entries->lengths[i];
     }
-    entries->positions[function->count] = position;
+    entries->record_count = position;
+    entries->positions[function->count] = (uint32_t)position;
 }
 
 // The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store;
 // and the entries' first records (`entries` of them and the epilogue's) when asked for (`positions` not null).
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
 {
-    code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
-    code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
-    code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
-    code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
-    // The entries' positions are final once measured: emission writes each entry's records from its position.
-    code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
-    code->count = records;
-    code->entry_count = positions != 0 ? entries : 0;
-    const bool room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
-    if (room && positions != 0)
+    // Both position passes accumulate in 64 bits. Refuse before allocation or publication when the record IDs,
+    // including the vector emitter's padding, would wrap; narrowed scratch positions are never consumed then.
+    bool room = records <= UINT32_MAX - BUSTER_TIER0_TEMPLATE_RECORDS;
+    if (room)
     {
-        memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+        code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records + BUSTER_TIER0_TEMPLATE_RECORDS);
+        code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+        code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
+        code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+        // The entries' positions are final once measured: emission writes each entry's records from its position.
+        code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
+        code->count = (uint32_t)records;
+        code->entry_count = positions != 0 ? entries : 0;
+        room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
+        if (room && positions != 0)
+        {
+            memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+        }
     }
     return room;
 }
@@ -7983,7 +7993,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
     entries->floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
     entries->templates = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
-    entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
+    entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
     entries->deep = 0;
@@ -8119,7 +8129,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts, function->entry_records ? entries->positions : 0,
+        if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
                                         function->count))
         {
             error = TIER0_ERROR_MEMORY;
@@ -10151,7 +10161,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
         previous = current;
     }
-    positions[count] = (uint32_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
+    entries->record_count = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
+    positions[count] = (uint32_t)entries->record_count;
     return counts;
 }
 
