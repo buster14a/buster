@@ -19,6 +19,8 @@ struct Tier1SelectTest
     uint64_t failures;
     uint8_t* executable;
     uint8_t* allowed;
+    const uint8_t* native_allowed;
+    uint64_t native_skipped;
     uint64_t emitted_records[3];
     uint64_t unknown_costs[3];
     uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
@@ -173,6 +175,11 @@ static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruct
         ready = ready && mprotect(test->executable, 4096, PROT_READ | PROT_EXEC) == 0;
     }
     tier1_select_test_expect(test, ready, "encode and protect native function");
+    if (ready && test->native_allowed != 0 && x86_target_validate(test->native_allowed, records, count) != count)
+    {
+        test->native_skipped += 1;
+        ready = false;
+    }
     return ready;
 }
 
@@ -601,7 +608,7 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
             Tier1SelectCode code;
             const Tier1SelectError error = tier1_select_emit(plans[path], registers, test->allowed, output, &code, &node);
             tier1_select_test_expect(test, error == TIER1_SELECT_OK, "real plan emits allocated records");
-            if (error == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+            if (error == TIER1_SELECT_OK)
             {
                 uint32_t unknown = 0;
                 for (uint32_t r = 0; r < code.count; r += 1)
@@ -610,7 +617,8 @@ static void tier1_select_test_plan_execute(Tier1SelectTest* test, const IrFuncti
                     unknown += code.cost_ids[r] == 0;
                 }
                 tier1_select_test_expect(test, unknown == code.unknown_costs, "unknown costs stay explicit");
-                for (uint32_t sample = 0; sample < 32; sample += 1)
+                const bool executable = tier1_select_test_load_code(test, code.records, code.count, code.count, true);
+                for (uint32_t sample = 0; executable && sample < 32; sample += 1)
                 {
                     const uint64_t a = tier1_select_test_random(&random);
                     const uint64_t b = tier1_select_test_random(&random);

@@ -60,7 +60,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 // Tokens per block: pass A's dense identifier arrays for a block (about 20 KB) stay in the L1 cache, and pass B's
 // pipeline, which starts and drains with each block, does so once per 1,600 identifiers or so. On the 9700X, sqlite3.c's
@@ -1115,7 +1115,11 @@ static bool refine_tokens_variant(RefineVariant variant, InternTable* table, con
 static __attribute__((unused)) bool refine_tokens(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends,
                           uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags)
 {
+#if !BUSTER_HOST_VECTOR
+    return refine_tokens_scalar(table, source, length, kinds, starts, ends, count, values, space, flags);
+#else
     return refine_tokens_variant(REFINE_VARIANT_BATCH_64, table, source, length, kinds, starts, ends, count, values, space, flags);
+#endif
 }
 
 // refine_tokens with its source's backslash chunks (refine_scan_chunks) left for the caller in `progress`
