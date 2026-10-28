@@ -96,7 +96,8 @@ static void check_test_sizeof_warning_rows(CheckTest* test)
             char description[192];
             snprintf(description, sizeof(description), "sizeof warning rows fixture %u path %u: %u/%u rows, %u/%u visible", fixture, path,
                      rows, fixtures[fixture].rows, visible, fixtures[fixture].visible);
-            check_test_expect(test, ready && input.report_count == 0 && rows == fixtures[fixture].rows && visible == fixtures[fixture].visible, description);
+            check_test_expect(test, ready && input.report_count == 0 && input.constant_warnings_prepared && input.constant_warning_count == rows &&
+                                   rows == fixtures[fixture].rows && visible == fixtures[fixture].visible, description);
             check_test_types_close(&types);
             parse_release(&parser);
             pp_release(&pp);
