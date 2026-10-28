@@ -67,6 +67,12 @@ matching source/tool build recorded by the manifest; the script does not verify
 an executable's identity itself. Its `--expect-kind`, `--expect-pass` and
 `--expect-detail` arguments require the recorded failure class before publishing
 a replay. Each replay creates a new `replayed` directory.
+Replay selects the scalar parser used by the independent publication check,
+regardless of the original input parser. Exit status 1 means invalid input,
+a different failure class or an existing destination; status 2 means a resource,
+I/O or unavailable-observation boundary, including during publication and replay.
+Neither outcome publishes a partial bundle. Unsigned numeric limits require
+a digit first and reject signs, leading whitespace and overflow.
 
 This additive test tool does not change IR, verifier, optimizer or interpreter
 implementations. Its first structural subset is scalar IR; unfamiliar opcodes,

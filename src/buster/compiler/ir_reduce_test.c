@@ -453,6 +453,8 @@ static void ir_reduce_test_generated(IrReduceTest* test, uint64_t count)
 
 #include "ir_reduce_ownership_test.c"
 
+static void ir_reduce_test_driver(IrReduceTest* test);
+
 static int run_ir_reduce_tests(int argc, char** argv)
 {
     uint64_t seed = 733;
@@ -494,6 +496,7 @@ static int run_ir_reduce_tests(int argc, char** argv)
         ir_reduce_test_fixture(&test, ir_reduce_test_phi, IR_REDUCE_INJECT_RESULT_PHI, false);
         ir_reduce_test_fixture(&test, ir_reduce_test_memory, IR_REDUCE_INJECT_MEMORY_STORE, false);
         ir_reduce_test_generated(&test, count);
+        ir_reduce_test_driver(&test);
         printf("ir-reduce: %" PRIu64 " checks, %" PRIu64 " failures, seed=%" PRIu64 " generated=%" PRIu64 "\n", test.checks, test.failures, seed, count);
         result = test.failures != 0;
     }

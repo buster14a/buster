@@ -4,12 +4,19 @@
 // is written only after reduced text independently parses, verifies and reproduces the classified failure.
 #include <fcntl.h>
 
+typedef enum IrReducePublication
+{
+    IR_REDUCE_PUBLISHED,
+    IR_REDUCE_PUBLICATION_REFUSED,
+    IR_REDUCE_PUBLICATION_UNAVAILABLE,
+} IrReducePublication;
+
 static bool ir_reduce_driver_number(const char* text, uint64_t* result)
 {
     char* end = NULL;
     errno = 0;
     const uint64_t number = strtoull(text, &end, 0);
-    const bool valid = text[0] != 0 && text[0] != '-' && end != text && *end == 0 && errno == 0;
+    const bool valid = text[0] >= '0' && text[0] <= '9' && end != text && *end == 0 && errno == 0;
     if (valid)
     {
         *result = number;
@@ -73,15 +80,21 @@ static bool ir_reduce_driver_read(const char* path, Arena* arena, String8* resul
     return valid;
 }
 
-static bool ir_reduce_driver_print(const char* path, const IrFunction* function, Arena* scratch)
+static IrReducePublication ir_reduce_driver_print(const char* path, const IrFunction* function, Arena* scratch)
 {
     FILE* file = fopen(path, "wx");
-    bool valid = file != NULL && ir_print(function, scratch, file) == IR_OK;
+    const IrError printed = file != NULL ? ir_print(function, scratch, file) : IR_ERROR_MEMORY;
+    IrReducePublication result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
     if (file != NULL)
     {
-        valid = fclose(file) == 0 && valid;
+        const bool written = !ferror(file);
+        const bool closed = fclose(file) == 0;
+        if (written && closed && !ir_reduce_resource(printed))
+        {
+            result = printed == IR_OK ? IR_REDUCE_PUBLISHED : IR_REDUCE_PUBLICATION_REFUSED;
+        }
     }
-    return valid;
+    return result;
 }
 
 static void ir_reduce_driver_quote(FILE* file, const char* text)
@@ -123,7 +136,9 @@ static bool ir_reduce_driver_binary(uint64_t* hash, uint64_t* bytes, char* path,
     }
     if (file != NULL)
     {
-        valid = !ferror(file) && fclose(file) == 0;
+        const bool read = !ferror(file);
+        const bool closed = fclose(file) == 0;
+        valid = read && closed;
     }
     if (valid)
     {
@@ -133,37 +148,49 @@ static bool ir_reduce_driver_binary(uint64_t* hash, uint64_t* bytes, char* path,
     return valid;
 }
 
-static bool ir_reduce_driver_replay(const char* path, IrReduceOracle* oracle, const IrReduceLimits* limits,
+static IrReducePublication ir_reduce_driver_replay(const char* path, IrReduceOracle* oracle, const IrReduceLimits* limits,
                                      IrReduceFailure failure, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint64_t bytes = (scratch->capacity - mark) / 4 & ~UINT64_C(63);
     uint8_t* base = arena_push(scratch, bytes * 4, 64);
-    bool valid = base != NULL && bytes >= 4096;
-    if (valid)
+    IrReducePublication result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
+    if (base != NULL && bytes >= 4096)
     {
         Arena text = { .base = base, .capacity = bytes };
         Arena output = { .base = base + bytes, .capacity = bytes };
         Arena checks = { .base = base + bytes * 2, .capacity = bytes * 2 };
         String8 source = { 0 };
         IrFunction function = { 0 };
-        valid = ir_reduce_driver_read(path, &text, &source);
-        const IrParseResult parsed = valid ? ir_parse_scalar(source, &output, &checks, &function) : (IrParseResult){ .error = IR_PARSE_MEMORY };
-        valid = valid && parsed.error == IR_PARSE_OK && parsed.consumed == source.length &&
-                ir_verify_complete(&function, &checks, true).error == IR_OK && ir_verify_complete(&function, &checks, false).error == IR_OK;
-        if (valid)
+        const bool read = ir_reduce_driver_read(path, &text, &source);
+        const IrParseResult parsed = read ? ir_parse_scalar(source, &output, &checks, &function) : (IrParseResult){ .error = IR_PARSE_MEMORY };
+        if (parsed.error != IR_PARSE_MEMORY && parsed.error != IR_PARSE_LIMIT)
         {
-            IrReduceWork replay = { .limits = *limits, .predicate = ir_reduce_oracle, .context = oracle,
-                                     .scratch = checks, .started = ir_reduce_milliseconds() };
-            const IrReduceObservation observed = ir_reduce_predicate(&function, &replay);
-            valid = observed.status == IR_REDUCE_OBSERVED && ir_reduce_same_failure(observed.failure, failure);
+            result = IR_REDUCE_PUBLICATION_REFUSED;
+            if (parsed.error == IR_PARSE_OK && parsed.consumed == source.length)
+            {
+                const IrCheck vector = ir_verify_complete(&function, &checks, true);
+                const IrCheck scalar = ir_verify_complete(&function, &checks, false);
+                if (ir_reduce_resource(vector.error) || ir_reduce_resource(scalar.error))
+                {
+                    result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
+                }
+                else if (vector.error == IR_OK && scalar.error == IR_OK)
+                {
+                    IrReduceWork replay = { .limits = *limits, .predicate = ir_reduce_oracle, .context = oracle,
+                                             .scratch = checks, .started = ir_reduce_milliseconds() };
+                    const IrReduceObservation observed = ir_reduce_predicate(&function, &replay);
+                    result = observed.status != IR_REDUCE_OBSERVED ? IR_REDUCE_PUBLICATION_UNAVAILABLE :
+                             ir_reduce_same_failure(observed.failure, failure) ? IR_REDUCE_PUBLISHED : IR_REDUCE_PUBLICATION_REFUSED;
+                }
+            }
         }
     }
     arena_pop_to(scratch, mark);
-    return valid;
+    return result;
 }
 
-static bool ir_reduce_driver_bundle(const char* directory, const char* revision, uint64_t seed, uint64_t memory,
+static IrReducePublication ir_reduce_driver_bundle(const char* directory, const char* revision, uint64_t seed, uint64_t memory,
                                      const IrFunction* original, const IrReduceResult* reduced, IrReduceOracle* oracle,
                                      const IrReduceLimits* limits, Arena* scratch)
 {
@@ -172,6 +199,7 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
     char binary[PATH_MAX];
     uint64_t binary_hash = 0;
     uint64_t binary_bytes = 0;
+    IrReducePublication result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
     bool valid = ir_reduce_driver_binary(&binary_hash, &binary_bytes, binary, sizeof(binary));
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(paths); i += 1)
     {
@@ -179,9 +207,24 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
         valid = length > 0 && (uint64_t)length < sizeof(paths[i]);
     }
     const bool made = valid && mkdir(directory, 0700) == 0;
-    valid = valid && made && ir_reduce_driver_print(paths[0], original, scratch) &&
-            ir_reduce_driver_print(paths[1], &reduced->function, scratch) &&
-            ir_reduce_driver_replay(paths[1], oracle, limits, reduced->failure, scratch);
+    if (valid && !made && errno == EEXIST)
+    {
+        result = IR_REDUCE_PUBLICATION_REFUSED;
+    }
+    valid = valid && made;
+    if (valid)
+    {
+        result = ir_reduce_driver_print(paths[0], original, scratch);
+        if (result == IR_REDUCE_PUBLISHED)
+        {
+            result = ir_reduce_driver_print(paths[1], &reduced->function, scratch);
+        }
+        if (result == IR_REDUCE_PUBLISHED)
+        {
+            result = ir_reduce_driver_replay(paths[1], oracle, limits, reduced->failure, scratch);
+        }
+        valid = result == IR_REDUCE_PUBLISHED;
+    }
     FILE* replay = valid ? fopen(paths[2], "wx") : NULL;
     valid = valid && replay != NULL;
     if (replay != NULL)
@@ -194,6 +237,8 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
                 limits->execution_steps, limits->call_frames, oracle->passes, seed);
         fprintf(replay, " --expect-kind %u --expect-pass %u --expect-detail %u", reduced->failure.kind,
                 reduced->failure.pass, reduced->failure.detail);
+        // The independent publication check reparses with the scalar parser; replay that validated path.
+        fputs(" --scalar", replay);
         if (oracle->verifier)
         {
             fputs(" --verify", replay);
@@ -211,7 +256,9 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
         fputc(' ', replay);
         ir_reduce_driver_quote(replay, "./reduced.ir");
         fputc('\n', replay);
-        valid = !ferror(replay) && fclose(replay) == 0 && valid;
+        const bool written = !ferror(replay);
+        const bool closed = fclose(replay) == 0;
+        valid = written && closed && valid;
     }
     FILE* manifest = valid ? fopen(paths[3], "wx") : NULL;
     valid = valid && manifest != NULL;
@@ -234,7 +281,9 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
                 limits->execution_steps, limits->call_frames, reduced->original.blocks, reduced->original.instructions, reduced->original.metadata,
                 reduced->reduced.blocks, reduced->reduced.instructions, reduced->reduced.metadata, reduced->candidates, reduced->predicates,
                 reduced->accepted, reduced->cache_hits, reduced->invalid, reduced->different, reduced->faults, reduced->limits);
-        valid = !ferror(manifest) && fclose(manifest) == 0;
+        const bool written = !ferror(manifest);
+        const bool closed = fclose(manifest) == 0;
+        valid = written && closed;
     }
     if (made && !valid)
     {
@@ -244,7 +293,11 @@ static bool ir_reduce_driver_bundle(const char* directory, const char* revision,
         }
         rmdir(directory);
     }
-    return valid;
+    if (!valid && result == IR_REDUCE_PUBLISHED)
+    {
+        result = IR_REDUCE_PUBLICATION_UNAVAILABLE;
+    }
+    return result;
 }
 
 static int run_ir_reduce(int argc, char** argv)
@@ -375,8 +428,12 @@ static int run_ir_reduce(int argc, char** argv)
         IrReduceResult reduced = { 0 };
         const IrReduceStatus status = ready ? ir_reduce(&function, ir_reduce_oracle, &oracle, &limits, &output, &scratch, &reduced) :
                                       parsed.error == IR_PARSE_MEMORY || parsed.error == IR_PARSE_LIMIT ? IR_REDUCE_RESOURCE : IR_REDUCE_INVALID;
-        if (ready && status <= IR_REDUCE_CACHE_LIMIT && (expected_fields == 0 || ir_reduce_same_failure(expected, reduced.failure)) &&
-            ir_reduce_driver_bundle(directory, revision, seed, memory, &function, &reduced, &oracle, &limits, &scratch))
+        const bool reproduces = ready && status <= IR_REDUCE_CACHE_LIMIT &&
+                                (expected_fields == 0 || ir_reduce_same_failure(expected, reduced.failure));
+        const IrReducePublication publication = reproduces ?
+            ir_reduce_driver_bundle(directory, revision, seed, memory, &function, &reduced, &oracle, &limits, &scratch) :
+            IR_REDUCE_PUBLICATION_REFUSED;
+        if (reproduces && publication == IR_REDUCE_PUBLISHED)
         {
             printf("ir-reduce: status=%u blocks=%" PRIu64 "->%" PRIu64 " instructions=%" PRIu64 "->%" PRIu64
                    " candidates=%" PRIu64 " predicate=%" PRIu64 " failure=%u/%u/%u\n",
@@ -386,8 +443,11 @@ static int run_ir_reduce(int argc, char** argv)
         }
         else
         {
-            fprintf(stderr, "ir-reduce: no bundle published (parse=%u, reduction=%u); input must reproduce the selected classified failure\n", parsed.error, status);
-            result = status == IR_REDUCE_RESOURCE || status == IR_REDUCE_ORACLE_UNAVAILABLE ? 2 : 1;
+            fprintf(stderr, "ir-reduce: no bundle published (parse=%u, reduction=%u, publication=%u); "
+                            "input must reproduce the selected classified failure and publication/replay must be available\n",
+                    parsed.error, status, publication);
+            result = status == IR_REDUCE_RESOURCE || status == IR_REDUCE_ORACLE_UNAVAILABLE ||
+                     publication == IR_REDUCE_PUBLICATION_UNAVAILABLE ? 2 : 1;
         }
         arena_release(&scratch);
         arena_release(&output);

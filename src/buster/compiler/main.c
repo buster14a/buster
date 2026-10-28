@@ -530,6 +530,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_reduce_oracle.c"
 #include "buster/compiler/ir_reduce_test.c"
 #include "buster/compiler/ir_reduce_driver.c"
+#include "buster/compiler/ir_reduce_driver_test.c"
 #include "buster/compiler/ir_optimize_inline.c"
 #include "buster/compiler/ir_optimize_inline_test.c"
 #include "buster/compiler/ir_optimize_test.c"
