@@ -543,6 +543,53 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
     return compared;
 }
 
+// A failed setup of the priming preprocessor must fail the requested property check. SOURCE_DATE_EPOCH is validated
+// during that setup; a child supplies an invalid value without changing this process's environment.
+static bool check_lanes_test_order_setup(void)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        InternTable identifiers = { 0 };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const bool initialized = setenv("SOURCE_DATE_EPOCH", "invalid", 1) == 0 && intern_initialize(&identifiers);
+        const bool refused = initialized && !check_driver_id_order(&identifiers, &options, "unused.c", 153);
+        intern_release(&identifiers);
+        _exit(refused ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// The private preparation must not borrow a caller's table-bound cache, and a source error in that preparation stays
+// for the real compile to report: the names preceding it still prime the requested order.
+static bool check_lanes_test_order_cache(const char* directory)
+{
+    static const char source[] = "int id_order_cached_name;\n#error expected\n";
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/id-order.c", directory);
+    FILE* file = length > 0 && length < (int)sizeof(path) ? fopen(path, "wb") : NULL;
+    bool written = file != NULL;
+    if (file != NULL)
+    {
+        written = fwrite(source, 1, sizeof(source) - 1, file) == sizeof(source) - 1;
+        written = fclose(file) == 0 && written;
+    }
+    InternTable identifiers = { 0 };
+    FileCache cache = { 0 };
+    PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const bool initialized = written && intern_initialize(&identifiers) && file_cache_initialize(&cache, &identifiers, pp_prepare_options(&options));
+    const FileCache before = cache;
+    options.files = &cache;
+    const bool result = initialized && check_driver_id_order(&identifiers, &options, path, 153) &&
+                        intern_find(&identifiers, (const uint8_t*)"id_order_cached_name", sizeof("id_order_cached_name") - 1) != 0 &&
+                        memcmp(&cache, &before, sizeof(cache)) == 0;
+    file_cache_release(&cache);
+    intern_release(&identifiers);
+    return result;
+}
+
 // `unit`, compiled from `path` with `identifiers`, emitted on one lane, then compiled again with its identifiers' ids in
 // another order (check_lanes_test_compile_order with `id_order`) and emitted on one lane and on 8, every lane forced,
 // with -g's rows and unwind tables and without: each emission the first one's object or failure (#153). The second
@@ -1626,6 +1673,8 @@ static int run_check_lanes_tests(int argc, char** argv)
         check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
         check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
+        check_lanes_test_expect(&tally, check_lanes_test_order_setup(), "refuse an id-order priming setup that fails", NULL);
+        check_lanes_test_expect(&tally, check_lanes_test_order_cache(directory), "prime from a private cache while retaining source-error names", NULL);
         check_lanes_test_programs(&tally, directory, programs, id_order);
         check_lanes_test_failing(&tally, directory, id_order);
         check_lanes_test_squeezes(&tally, directory);

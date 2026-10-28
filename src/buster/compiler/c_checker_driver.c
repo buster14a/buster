@@ -1285,11 +1285,13 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
     silent.timing = false;
     silent.defer_history = false;
     silent.no_history = true;
+    // The preparatory table owns its IDs; a caller's cache belongs to the table the real compile uses.
+    silent.files = NULL;
     InternTable names = { 0 };
     Arena arena = arena_reserve(sizeof(Preprocessor) + 64);
     Preprocessor* pp = arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&arena, Preprocessor, 1) : NULL;
-    bool result = pp != NULL && intern_initialize(&names);
-    if (result && pp_initialize(pp, &silent, &names))
+    bool result = pp != NULL && intern_initialize(&names) && pp_initialize(pp, &silent, &names);
+    if (result)
     {
         // The names it found, whether or not the unit preprocesses without errors: the command's own run reports them.
         pp_run(pp, path);
