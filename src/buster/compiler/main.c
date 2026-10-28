@@ -64,6 +64,14 @@
 #define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
+// The ISA requirement tables are immutable and need no initialization. Share their frontend copy without sharing
+// encoder storage or adding calls/loads to the local table-building kernels. Standalone inclusions stay static.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+#define BUSTER_X86_TARGET_DATA __attribute__((visibility("hidden")))
+#else
+#define BUSTER_X86_TARGET_DATA_ELSEWHERE
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -181,7 +189,6 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor_fuzz.c"
 #include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
-#include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The per-file jobs on lanes and the run-ahead that fill the preprocessor's file cache (c_files.c), and their tests, for
@@ -295,6 +302,7 @@ int run_floors_benchmark(int argc, char** argv);
 int run_branch_sizing_benchmark(int argc, char** argv);
 
 #include "buster/compiler/x86_match.c"
+#include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
 #include "buster/compiler/assembler_driver.c"
 #include "buster/compiler/assembler_test.c"
@@ -535,6 +543,10 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+bool run_x86_target_selection_tests(void);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/x86_target_selection_test.c"
+#endif
 #include "buster/compiler/ir_stack_test.c"
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
@@ -729,6 +741,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-x86-target-selection") == 0)
+    {
+        result = run_x86_target_selection_tests() ? 0 : 1;
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
     {
