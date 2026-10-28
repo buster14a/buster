@@ -685,12 +685,14 @@ static char** pp_test_clang_environment(void)
     return result;
 }
 
-// `executable ARGUMENTS -E [-dM -x c] PATH`, through the oracle cache (oracle_cache.c, #542): its output and
-// diagnostics in memory, bounded, and whether clang accepted the input, rejected it, or couldn't run reliably.
+// `executable --target=x86_64-pc-linux-gnu ARGUMENTS -E [-dM -x c] PATH`, through the oracle cache (oracle_cache.c,
+// #542): its output and diagnostics in memory, bounded, and whether clang accepted the input, rejected it, or couldn't
+// run reliably. Match Buster's default target regardless of the Clang distribution's configured vendor; a caller's
+// later -target or --target= still overrides it.
 static PPClangOutput pp_test_clang_process(const char* executable, char** arguments, int argument_count, const char* path, bool macros)
 {
     PPClangOutput result = { 0 };
-    char** argv = calloc((size_t)argument_count + 9, sizeof(char*));
+    char** argv = calloc((size_t)argument_count + 10, sizeof(char*));
     char** environment = pp_test_clang_environment();
     bool ready = argv != 0 && environment != 0;
     int status = 0;
@@ -698,6 +700,7 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
     {
         int n = 0;
         argv[n++] = (char*)executable;
+        argv[n++] = "--target=x86_64-pc-linux-gnu";
         for (int i = 0; i < argument_count; i += 1)
         {
             argv[n++] = arguments[i];
