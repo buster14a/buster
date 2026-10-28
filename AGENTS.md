@@ -5664,6 +5664,16 @@ when it is closed on btrfs and ext4.
 
 ## IR tests and benchmarks
 
+`./build/compiler test-ir-metamorphic [--seed N] [--first N] [--count N]`
+checks bounded scalar IR programs against an independent arithmetic/memory
+model after ID renaming, pure-value reordering/insertion, CFG edge splitting,
+unreachable-block insertion and commutative operand exchange. Both complete
+verifiers, both text parsers and every admitted scalar/vector optimizer must
+preserve checked execution. The default six-case seed is in shared correctness
+CI; longer runs accept explicit time/step budgets and failure-artifact/replay
+options. `docs/ir-tools.md` records the precise subset, categories and source
+revision requirement. This command performs correctness work, not a timing claim.
+
 `./build/compiler test-ir [--seed N] [--count N]` checks the arena-backed
 representation, both verifier paths, compact CFG/use arrays and stable printer.
 Independent fixtures cover operand roles, conversions, phi edges and dominance;
