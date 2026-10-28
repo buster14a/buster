@@ -178,6 +178,7 @@ struct CheckInput
     uint32_t implicit_function_count;
     uint8_t implicit_function_diagnostic;
     bool implicit_function_c99;
+    bool implicit_function_system;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
@@ -5269,7 +5270,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 {
     *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
-                         .implicit_function_c99 = pp->options.language.standard >= 1999 };
+                         .implicit_function_c99 = pp->options.language.standard >= 1999,
+                         .implicit_function_system = pp->options.implicit_function_system };
     // Plain char's signedness, which every phase after the reader reads from the table too.
     types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;

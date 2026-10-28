@@ -128,7 +128,9 @@ static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput*
 {
     const CheckWarningSeverity baseline = input->implicit_function_diagnostic == 1 ? CHECK_WARNING_IGNORE :
                                           input->implicit_function_diagnostic == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
-    return check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline);
+    const CheckWarningSeverity severity = input->implicit_function_system || !check_graph_system_token(&input->graph, token) ?
+        check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline) : CHECK_WARNING_IGNORE;
+    return severity;
 }
 
 static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)

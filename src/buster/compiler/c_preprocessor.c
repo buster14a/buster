@@ -249,6 +249,7 @@ struct PPOptions
 {
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
+    bool implicit_function_system;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
     FileCache* files;
@@ -19811,6 +19812,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-Weverything") == 0)
         {
             implicit_everything = true;
+        }
+        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        {
+            options->implicit_function_system = strcmp(argument, "-Wsystem-headers") == 0;
         }
         else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
         {
