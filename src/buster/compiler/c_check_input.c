@@ -1447,7 +1447,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 uint32_t first;
                 uint32_t last;
                 int64_t value;
-                valid = check_input_attribute_argument(reader->parser, attribute, argument, &first, &last) &&
+                valid = check_input_attribute_argument(attribute, argument, &first, &last) &&
                         check_input_constant_ice(reader, first, last, &value) && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
             }
         }
