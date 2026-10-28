@@ -34,17 +34,14 @@ static bool check_input_overload_initialize(CheckInputReader* reader, bool prese
         reader->overload_capacity = capacity;
         reader->overload_candidates = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCandidate, (uint64_t)capacity + 1);
         input->overload_heads = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)parser->tokens.count + 1);
-        reader->overload_linked_heads = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, reader->pp->table->count);
-        reader->overload_linked_next = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)capacity + 1);
+        valid = check_overload_index_initialize(&reader->overload_index, reader->scratch, capacity, reader->pp->table->count);
         input->graph.overload_calls = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCall, (uint64_t)calls + 1);
         input->graph.overload_capacity = calls;
         input->graph.overload_candidates = reader->overload_candidates;
-        valid = reader->overload_candidates != 0 && input->overload_heads != 0 && reader->overload_linked_heads != 0 &&
-                reader->overload_linked_next != 0 && input->graph.overload_calls != 0;
+        valid = valid && reader->overload_candidates != 0 && input->overload_heads != 0 && input->graph.overload_calls != 0;
         if (valid)
         {
             memset(input->overload_heads, 0, ((uint64_t)parser->tokens.count + 1) * sizeof(uint32_t));
-            memset(reader->overload_linked_heads, 0, (uint64_t)reader->pp->table->count * sizeof(uint32_t));
         }
     }
     reader->output->resource |= !valid;
@@ -56,12 +53,8 @@ static bool check_input_overload_active(const CheckInputReader* reader, uint32_t
     bool active = false;
     if (reader->overload_candidates != 0 && reader->declaration_kinds[token] == C_BINDING_FUNCTION)
     {
-        active = (check_input_overload_flags(reader->output->attributes[token]) & BUSTER_CHECK_OVERLOADABLE) != 0;
         const uint32_t name = reader->parser->tokens.names[token];
-        for (uint32_t linked = reader->overload_linked_heads[name]; !active && linked != 0; linked = reader->overload_linked_next[linked - 1])
-        {
-            active = (reader->overload_candidates[linked - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0;
-        }
+        active = reader->overload_index.active[name] || (check_input_overload_flags(reader->output->attributes[token]) & BUSTER_CHECK_OVERLOADABLE) != 0;
     }
     return active;
 }
@@ -92,8 +85,19 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             .source_position = point,
             .extensions = check_input_expression_extensions(reader->parser),
         };
+        CheckOverloadIndex* index = &reader->overload_index;
+        uint64_t signature_hash = 0;
+        const bool hashed = check_overload_signature_hash(index, reader->types, candidate.type, reader->scratch, &signature_hash);
+        const uint64_t lexical_key = check_overload_index_key(signature_hash, name, scope);
+        const uint64_t linked_key = check_overload_index_key(signature_hash, name, UINT32_MAX);
+        const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
+        const uint32_t linked_slot = hashed ? check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+        const uint32_t lexical_head = check_overload_index_head(index, lexical_slot);
+        const uint32_t linked_head = check_overload_index_head(index, linked_slot);
+        const uint32_t unmarked = head != BUSTER_CHECK_NONE ? index->unmarked[head] : BUSTER_CHECK_NONE;
+        input->resource |= !hashed || lexical_slot == UINT32_MAX || linked_slot == UINT32_MAX;
         CheckOverloadResult declared = { .status = CHECK_OVERLOAD_OK };
-        if (active)
+        if (active && !input->resource)
         {
             const uint32_t linked = reader->linked_declarations[name];
             const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
@@ -105,14 +109,16 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             }
             else
             {
-                declared = check_overload_declare(reader->types, reader->overload_candidates, input->graph.overload_candidate_count, head, &candidate, &context);
+                declared = check_overload_declare_chain(reader->types, reader->overload_candidates, input->graph.overload_candidate_count,
+                                                       lexical_head, &candidate, &context, index->lexical_next, index->checked, unmarked);
                 candidate.canonical = declared.canonical;
                 candidate.object = declared.object;
                 candidate.flags = declared.flags;
             }
-            for (uint32_t linked = reader->overload_linked_heads[name]; declared.status == CHECK_OVERLOAD_OK && linked != 0; linked = reader->overload_linked_next[linked - 1])
+            bool complete = false;
+            for (uint32_t linked = linked_head; !complete && declared.status == CHECK_OVERLOAD_OK && linked != UINT32_MAX; linked = index->linked_next[linked])
             {
-                const CheckOverloadCandidate* prior = reader->overload_candidates + linked - 1;
+                const CheckOverloadCandidate* prior = reader->overload_candidates + linked;
                 const TypeAnswer signature = check_overload_signature(reader->types, prior->type, candidate.type);
                 if (signature == TYPE_ANSWER_FULL)
                 {
@@ -135,6 +141,9 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
                         candidate.canonical = prior->canonical;
                         candidate.object = prior->object;
                         candidate.flags |= prior->flags;
+                        const TypeAnswer same = index->checked[linked] ? type_same_canonical(reader->types, prior->type, candidate.type) : TYPE_ANSWER_NO;
+                        declared.status = same == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_OK;
+                        complete = same == TYPE_ANSWER_YES;
                     }
                 }
             }
@@ -151,13 +160,21 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         }
         else
         {
-            const uint32_t index = input->graph.overload_candidate_count++;
-            reader->overload_candidates[index] = candidate;
-            input->overload_heads[token] = index + 1;
+            const uint32_t current = input->graph.overload_candidate_count++;
+            reader->overload_candidates[current] = candidate;
+            input->overload_heads[token] = current + 1;
             reader->objects[token] = candidate.object;
             reader->definition_seen[token] |= (candidate.flags & BUSTER_CHECK_OVERLOAD_DEFINED) != 0;
-            reader->overload_linked_next[index] = reader->overload_linked_heads[name];
-            reader->overload_linked_heads[name] = index + 1;
+            index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, lexical_head, index->lexical_next) : lexical_head;
+            index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, linked_head, index->linked_next) : linked_head;
+            index->checked[current] = active;
+            index->unmarked[current] = unmarked != BUSTER_CHECK_NONE ? unmarked :
+                                       (candidate.flags & BUSTER_CHECK_OVERLOADABLE) == 0 ? candidate.canonical : BUSTER_CHECK_NONE;
+            index->active[name] |= (candidate.flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+            check_overload_index_publish(index, lexical_slot, lexical_key, name, scope, current);
+            // Both lookups can choose the same empty slot before either key is published.
+            const uint32_t publish_linked = check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar);
+            check_overload_index_publish(index, publish_linked, linked_key, name, UINT32_MAX, current);
             if (active)
             {
                 reader->linked_declarations[name] = token + 1;

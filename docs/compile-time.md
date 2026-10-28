@@ -305,7 +305,7 @@ These are the 9700X's medians, pinned to CPU 2 under the host's lock, of
 `main` at `d8805cb7` and #572's head `f74414b9`: `measure-compile` in both
 orders, each compiler the other's reference (21 rotated rounds each), and
 `perf stat -r 11` of each, twice.
-[The measurement record](https://github.com/buster14a/buster-performance/tree/32fdc4db4da6807cca13904a9022f1fc0147e992/docs/measurements/memory-572-2026-10-27) holds the logs, the scripts and the trees'
+[The measurement record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/memory-572-2026-10-27) holds the logs, the scripts and the trees'
 identities.
 
 | | `main` | #572 | change |
@@ -320,6 +320,16 @@ identities.
 
 - **Reverse order:** `main` against #572 measured 146.83 ms against 140.33 ms.
 - **Second `perf stat` pair:** 146.7 ms against 139.5 ms, kernel cycles −9.9%.
+- **Integrated base, round 3.** Main `92c025e7` against the merged head
+  `da352e29`, 21 rotated rounds in each order: 147.074 → 140.812 ms
+  (−4.26%) and 146.980 → 141.056 ms in reverse order. Peak RSS is
+  512,868 → 392,000 KB (−23.57%), with 512,864 → 392,024 KB in reverse.
+  The first `perf stat -r 11` pair gives 692.359 → 671.525 M user cycles,
+  120.167 → 108.781 M kernel cycles and 1,552.457 → 1,554.177 M user
+  instructions (+0.11%). The second pair confirms lower user/kernel cycles.
+  Objects are byte-identical. `round3.log`, its script and both source
+  manifests are retained in the record. These are the named integrated
+  snapshots; their gains are not added to other checker PRs' measurements.
 - **Instructions.** The memsets the reader no longer makes took 6.8 M off the
   user instructions (round 1). The leaves' slots added 8.5 M, nearly all where
   clang's code around the graph's accesses moved, by an instruction-sampled
