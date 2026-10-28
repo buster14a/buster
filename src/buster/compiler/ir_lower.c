@@ -68,7 +68,7 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after X86 must be lowered (or refused, as JUMP_INDIRECT and X86 are) here before tier0_validate accepts it.
+// after X86 must be lowered (or refused, as X86 is) here before tier0_validate accepts it.
 _Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
@@ -100,15 +100,20 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint8_t kind = input->kinds[i];
-            if (ir_typed_control(kind))
+            if (ir_typed_control(kind) || kind == BUSTER_TYPED_JUMP_INDIRECT)
             {
                 leaders[i + 1] = 1;
-                if (kind != BUSTER_TYPED_RETURN)
+                if (kind != BUSTER_TYPED_RETURN && kind != BUSTER_TYPED_JUMP_INDIRECT)
                 {
                     // tier0_validate already established values[i] <= count.
                     leaders[input->values[i]] = 1;
                 }
             }
+        }
+        // Every label starts a block, which an indirect jump may reach (tier0_validate: each entry at most count).
+        for (uint32_t k = 0; k < input->label_count; k += 1)
+        {
+            leaders[input->label_entries[k]] = 1;
         }
         for (uint32_t i = 0; i <= count; i += 1)
         {
@@ -209,6 +214,15 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     break;
                 case BUSTER_TYPED_RETURN:
                     depth -= class != BUSTER_TYPED_CLASS_VOID;
+                    reachable = false;
+                    break;
+                case BUSTER_TYPED_JUMP_INDIRECT:
+                    // At statement level: the address popped, every label arrived at with the stacks empty.
+                    depth -= 1;
+                    for (uint32_t k = 0; ok && k < input->label_count; k += 1)
+                    {
+                        ok = ir_typed_plan_arrive(&plan, scratch, plan.entry_blocks[input->label_entries[k]], stack, depth, i);
+                    }
                     reachable = false;
                     break;
                 default:
@@ -637,10 +651,10 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86)
+        else if (kind == BUSTER_TYPED_X86)
         {
-            // An indirect jump to a label (#133) and a machine operation (#136), which this adapter doesn't lower yet and
-            // the plan and the emitter would take for a binary operation.
+            // A machine operation (#136), which this adapter doesn't lower and the plan and the emitter would take for a
+            // binary operation: no function of the corpora has one (docs/ir.md).
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }

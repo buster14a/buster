@@ -372,13 +372,29 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
                 value = frame->slots[a];
                 break;
             case IR_SYMBOL_ADDR:
-                // A global's bytes, or a function's address: its IrFunction's, which only an indirect call reads.
-                ok = a != 0 && a - 1 < (uint64_t)global_count + function_count;
+            {
+                // A global's bytes, a function's address (its IrFunction's, which only an indirect call reads), or past them
+                // label k of the executing function, the symbol global_count + function_count + 1 + k (its labels entry's
+                // address, which only an indirect branch reads).
+                const uint64_t label = (uint64_t)a - global_count - function_count - 1;
+                ok = a != 0 && (a - 1 < (uint64_t)global_count + function_count || label < function->label_count);
                 if (ok)
                 {
-                    value = a <= global_count ? (uintptr_t)(globals + data->offsets[a - 1]) : (uintptr_t)&functions[a - global_count - 1];
+                    value = a <= global_count ? (uintptr_t)(globals + data->offsets[a - 1]) : a - 1 < (uint64_t)global_count + function_count ? (uintptr_t)&functions[a - global_count - 1]
+                                                                                                                               : (uintptr_t)&function->labels[label];
                 }
                 break;
+            }
+            case IR_BR_INDIRECT:
+            {
+                const uint64_t offset = av - (uintptr_t)function->labels;
+                ok = offset % sizeof(uint32_t) == 0 && offset / sizeof(uint32_t) < function->label_count;
+                if (ok)
+                {
+                    frame->instruction = function->block_offsets[function->labels[offset / sizeof(uint32_t)]];
+                }
+                break;
+            }
             case IR_ADDRESS:
                 value = av + (b == BUSTER_IR_NONE ? 0 : bv * function->addresses[c].scale) + (uint64_t)function->addresses[c].offset;
                 break;
@@ -470,7 +486,10 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
 {
     bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->slot_count == b->slot_count && a->constant_count == b->constant_count &&
                  a->address_count == b->address_count && a->call_count == b->call_count && a->extra_count == b->extra_count && a->call_type_count == b->call_type_count &&
-                 a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count;
+                 a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count &&
+                 a->label_count == b->label_count && a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count &&
+                 a->parameter_passed == b->parameter_passed && a->result_size == b->result_size && memcmp(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) == 0 &&
+                 a->variadic == b->variadic && memcmp(&a->incoming, &b->incoming, sizeof(AbiCall)) == 0;
     if (equal)
     {
         const size_t count = a->instruction_count;
@@ -494,7 +513,20 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
             const IrCall ac = a->calls[c];
             const IrCall bc = b->calls[c];
             equal = ac.argument_first == bc.argument_first && ac.argument_count == bc.argument_count && ac.type_first == bc.type_first && ac.parameter_count == bc.parameter_count &&
-                    ac.result_type == bc.result_type && ac.variadic == bc.variadic;
+                    ac.result_type == bc.result_type && ac.variadic == bc.variadic && ac.abi == bc.abi;
+        }
+        for (uint32_t l = 0; l < a->label_count && equal; l += 1)
+        {
+            equal = a->labels[l] == b->labels[l];
+        }
+        for (uint32_t c = 0; c < a->abi_call_count && equal; c += 1)
+        {
+            equal = memcmp(&a->abi_calls[c].call, &b->abi_calls[c].call, sizeof(AbiCall)) == 0 && a->abi_calls[c].passed == b->abi_calls[c].passed &&
+                    a->abi_calls[c].result_size == b->abi_calls[c].result_size;
+        }
+        for (uint32_t p = 0; p < a->passed_count && equal; p += 1)
+        {
+            equal = memcmp(&a->passed[p].location, &b->passed[p].location, sizeof(AbiLocation)) == 0 && a->passed[p].size == b->passed[p].size;
         }
         for (uint32_t e = 0; e < a->extra_count && equal; e += 1)
         {
@@ -1646,8 +1678,10 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
     arena_release(&execution);
 }
 
-// #133's indirect jump to a label, which the adapter doesn't lower yet: both paths refuse the stream at the jump, after
-// validation and before anything is allocated, leaving the caller's result and both arenas as they were.
+// #133's labels and indirect jumps: GNU C's labels as values and the switches' jump tables. Each label is a block, and
+// JUMP_INDIRECT a br_indirect whose successors are the labels: a stream whose jump goes to an address the labels don't
+// have still lowers (its jump has no meaning), and a computed goto through a ?: of two labels' addresses executes as it
+// should, by both paths and promoted.
 static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
 {
     static const uint8_t kinds[3] =
@@ -1673,15 +1707,75 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     {
         2
     };
-    const IrFunction preserved =
+    // void* t = p ? &&a : &&b; goto *t; a: return 10; b: return 20; with label a's symbol 2 and b's 3, as the executor
+    // numbers them for its one function.
+    static const uint8_t goto_kinds[] =
     {
-        .instruction_count = 123,
-        .block_count = 17,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t goto_classes[] =
+    {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32
+    };
+    static const uint64_t goto_values[] =
+    {
+        0,
+        4,
+        2,
+        5,
+        3,
+        0,
+        10,
+        0,
+        20,
+        0
+    };
+    static const uint32_t goto_labels[2] =
+    {
+        6,
+        8
+    };
+    static const uint8_t local_classes[1] =
+    {
+        BUSTER_TYPED_CLASS_I32
+    };
+    static const uint8_t local_flags[1] =
+    {
+        0
+    };
+    const AbiLocation parameter =
+    {
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+        .registers =
+        {
+            X86_REGISTER_RDI
+        },
     };
     Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena promoted = arena_reserve(1ull << 20);
+    Arena twin_promoted = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    // Nonzero marks, so that a rollback to zero would show.
-    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    Arena execution = arena_reserve(1ull << 20);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "indirect jump arenas", 0, 0);
     const Tier0Function source =
     {
@@ -1692,19 +1786,74 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         .label_entries = labels,
         .label_count = 1,
     };
-    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    const Tier0Function computed =
     {
-        const uint64_t output_mark = output.length;
-        const uint64_t scratch_mark = scratch.length;
-        IrFunction result = preserved;
-        const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, tier0_validate(&source).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 1 &&
-                                        output.length == output_mark && scratch.length == scratch_mark &&
-                                        result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                             "the indirect jump refused at its entry without allocation", 0, vector);
+        .kinds = goto_kinds,
+        .classes = goto_classes,
+        .values = goto_values,
+        .count = BUSTER_ARRAY_LENGTH(goto_kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 1,
+        .parameter_count = 1,
+        .parameters = &parameter,
+        .label_entries = goto_labels,
+        .label_count = 2,
+    };
+    IrFunction function =
+    {
+        0
+    };
+    if (ready && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    {
+        uint32_t jumps = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            jumps += function.op[i] == IR_BR_INDIRECT;
+        }
+        ir_lower_test_expect(tally, jumps == 1 && function.label_count == 1 && function.labels[0] < function.block_count &&
+                                        function.block_offsets[function.labels[0]] < function.instruction_count && function.op[function.block_offsets[function.labels[0]]] == IR_RET,
+                             "an indirect jump lowers to a br_indirect, its label to the block of its entry", 0, 0);
+    }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    if (ready && ir_lower_test_lower(tally, &computed, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 1))
+    {
+        const Tier0TestData data =
+        {
+            0
+        };
+        uint8_t globals[1] =
+        {
+            0
+        };
+        for (uint64_t p = 0; p < 2; p += 1)
+        {
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "a computed goto goes to the label whose address it takes", 0, (uint32_t)p);
+        }
+        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 1);
+        IrFunction promoted_function =
+        {
+            0
+        };
+        const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
+        ir_lower_test_expect(tally, check.error == IR_OK && promoted_function.label_count == 2 && promoted_function.labels[0] != BUSTER_IR_NONE && promoted_function.labels[1] != BUSTER_IR_NONE,
+                             "promotion keeps both labels' blocks", 0, 1);
+        for (uint64_t p = 0; check.error == IR_OK && p < 2; p += 1)
+        {
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&promoted_function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "the promoted computed goto goes to the same labels", 0, (uint32_t)p);
+        }
     }
     arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
     arena_release(&scratch);
+    arena_release(&execution);
 }
 
 // Defined after the production interpreter, optimizers and selector in ir_stack_test.c: exercise their real contracts.

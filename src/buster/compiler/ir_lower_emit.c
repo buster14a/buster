@@ -22,6 +22,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             .block_count = (uint64_t)plan->block_count + 1,
             .slot_count = (uint64_t)input->local_count + plan->maximum_spill_depth,
             .parameter_count = input->parameter_count,
+            .label_count = input->label_count,
         },
     };
     const uint32_t slots = input->local_count + plan->maximum_spill_depth;
@@ -31,6 +32,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     {
         output->block_offsets[0] = 0;
         output->result_type = (uint8_t)result_type;
+        // Label k's block: its entry's source block, after the preheader.
+        for (uint32_t k = 0; k < input->label_count; k += 1)
+        {
+            output->labels[k] = plan->entry_blocks[input->label_entries[k]] + 1;
+        }
     }
     for (uint32_t s = 0; s < slots; s += 1)
     {
@@ -230,6 +236,16 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 const uint32_t returned = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_IR_NONE : stack[--depth];
                 ir_typed_emit(&sink, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                terminated = true;
+                break;
+            }
+            case BUSTER_TYPED_JUMP_INDIRECT:
+            {
+                // A label's address (U64), at statement level: nothing else on the stack to spill.
+                depth -= 1;
+                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
+                ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 terminated = true;
                 break;
             }
