@@ -4927,6 +4927,9 @@ its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+Empty, duplicate-position and nonzero-start linked histories are checked against
+a forward oracle with their ends at a protected page; the last update at the
+opening must be selected.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units

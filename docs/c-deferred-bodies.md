@@ -86,7 +86,9 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      (`check_deferred_name_state`): its linked declaration and type, the last
      of the top level's updates before the opening (`check_deferred_linked`
      logs them by position, and `check_deferred_bodies` indexes the log by
-     name), and its intrinsic's cache entry, a hit not yet decoded where the
+     name). An upper-bound binary search selects the last equal-position update
+     at or before the opening, so many later redeclarations do not make each
+     body scan the name's suffix again. It also gets its intrinsic's cache entry, a hit not yet decoded where the
      top level decoded it after the opening, as source order's is there;
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
