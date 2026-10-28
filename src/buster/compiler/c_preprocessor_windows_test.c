@@ -1064,7 +1064,11 @@ static uint64_t pp_window_test_line_facts(uint64_t* checks)
             }
         }
     }
+#if !defined(BUSTER_HOST_VECTOR) || BUSTER_HOST_VECTOR
     failures += ready && known_blocks == 0;
+#else
+    failures += known_blocks != 0;
+#endif
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, 6 * page);

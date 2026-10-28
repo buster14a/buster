@@ -3871,8 +3871,13 @@ BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_lines_counted(const uint
     else
     {
         memset(line_counts + begin / 64, 255, (length + 63) / 64 - begin / 64);
+#if defined(BUSTER_HOST_VECTOR) && !BUSTER_HOST_VECTOR
+        // The separately developed scalar-host route (#678) owns tokenization on that host. No facts are published.
+        result = c_tokenize_lines(source, length, begin, kinds, starts, ends, flags);
+#else
         const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
         result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags, line_counts);
+#endif
     }
     return result;
 }

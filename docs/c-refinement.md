@@ -569,6 +569,8 @@ Complete blocks without CR publish counts 0–64; CR blocks, partial blocks,
 skipped regions, unsupported modes and unaligned sources remain unknown.
 Reclassification overwrites these facts rather than accumulating them.
 The ordinary lexer entry points keep their original loop specializations.
+With #678's scalar-host route, the counted entry leaves facts unknown and
+delegates tokenization to that host's existing scalar entry point.
 
 `pp_count_page_lines_facts` consumes only complete blocks in the kept window
 range, summing up to a page of count bytes with SIMD. Unknown blocks and blocks
