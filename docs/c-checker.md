@@ -597,20 +597,26 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder. The vector schedule
-finds contiguous regions whose type behavior is known to stay within builtin
-arithmetic types, computes their relative dependency heights, and stably groups
-ready nodes at each height. Operations that can create a pointer, decay an
-array or function, or otherwise intern a derived type are postorder barriers.
-This conservative rule preserves newly allocated `TypeId` numbers across fresh
+The scalar schedule processes graph nodes in postorder, one at a time. The
+vector schedule finds contiguous regions whose type behavior is known to stay
+within builtin arithmetic types, and checks each region in postorder batches
+(`check_graph_region_postorder`). From the first node not yet done, a batch
+takes consecutive nodes that read none of each other, up to the batch size.
+The alternative, the region's level order (`check_graph_region`,
+`CheckOptions.level_order`), computes the nodes' relative dependency heights
+and stably groups the ready nodes at each height. The benchmark measured both
+on the same actions, and the postorder batches won ("Level order or
+postorder" below). Operations that can create a pointer, decay an array or
+function, or otherwise intern a derived type are postorder barriers. This
+conservative rule preserves newly allocated `TypeId` numbers across fresh
 scalar and vector type tables. Comparing both schedules in a table already
 populated by one schedule would miss that requirement.
 
 `CheckOptions.batch_size` is a logical batching limit: zero selects 16 and
-values 1 through 16 are valid. Every dependency level and region end flushes
-its partial batch. The vector arithmetic kernel uses eight 64-bit lanes, with
-per-lane 32-bit or 64-bit C arithmetic semantics; the logical batch size is
-independent of that lane count. Eligible addition/subtraction, unary integer
+values 1 through 16 are valid. A batch ends at a node that reads a member (in
+level order, at every level) and at its region's end. The vector arithmetic
+kernel uses eight 64-bit lanes, with per-lane 32-bit or 64-bit C arithmetic
+semantics; the logical batch size is independent of that lane count. Eligible addition/subtraction, unary integer
 operations, shifts, comparisons and bitwise operations use that kernel.
 Irregular types and operations, integer multiplication/division/remainder,
 128-bit arithmetic, pointer semantics, member lookup, calls and floating
@@ -649,6 +655,70 @@ work, separate from the initial scalar/vector scheduling counts. Scratch bytes
 are the peak live allocation above the caller's initial arena position,
 including temporary overload, region and query allocations that are released
 before return.
+
+### Level order or postorder
+
+#133 left open which schedule the vector path's regions should take, decided
+by a benchmark on the same tables: their level order, or a vectorized walk in
+postorder. `benchmark-checker-source` times both in one build, with the same
+actions, type table and graph: its paths `vector` (the postorder batches, the
+default) and `levels` (`CheckOptions.level_order`), beside `scalar`. Before it
+times them, it checks that each gives the scalar path's typed stream, and
+`test-checker` compares both orders at every batch size with the scalar path.
+
+Level order computes each region node's height from its operands, counts the
+heights, places the nodes by height, then checks each level in batches. The
+postorder batches skip those passes. From the first node not yet done, a batch
+takes the nodes after it until one reads a member, which in a tree's postorder
+is most often the next node, since a parent follows its last child. So its
+batches are smaller: 32,446 of them in `sqlite3.c`'s bodies, against level
+order's 27,749 in 27,701 levels. A few more nodes take the scalar action alone
+(54.17% of the vector path's nodes, against 53.95%), but the walk reads the
+region's nodes once, in order.
+
+On the 9700X, pinned to CPU 2 under the lock for each run: the frozen
+`sqlite3.c`'s 2,608 bodies, 311,601 body nodes, as nanoseconds and cycles a
+node, each a median of 21 passes, over three processes per build (main's over
+both rounds' six):
+
+| Build | Scalar | Level order | Postorder batches |
+| --- | --- | --- | --- |
+| main, `321f5976` | 45.35–46.23 ns, 249.5–255.3 | 34.27–35.00 ns, 189.8–194.0 | |
+| level order the default, `0f26899e` | 44.60–44.89 ns, 243.8–246.5 | 33.56–33.91 ns, 184.9–187.0 | 31.60–31.84 ns, 173.4–175.3 |
+| postorder the default, `fe35a8b5` | 44.08–45.30 ns, 242.9–247.8 | 33.29–33.98 ns, 184.1–186.8 | 31.47–32.15 ns, 174.0–176.5 |
+
+Each path alone (`--only`, one process), and after 100 ms of scalar work
+before each sample (`--after-scalar 100`), the state after lighter code in
+which Zen 5's power cap slows heavy AVX-512 loops (#199):
+
+| Build | Path | Alone | After scalar work |
+| --- | --- | --- | --- |
+| `0f26899e` | level order | 33.11 ns, 183.1 | 33.65 ns, 185.7 |
+| `0f26899e` | postorder batches | 32.00 ns, 177.2 | 32.70 ns, 180.2 |
+| `fe35a8b5` | level order | 35.13 ns, 194.6 | 33.57 ns, 185.4 |
+| `fe35a8b5` | postorder batches | 32.97 ns, 182.6 | 32.58 ns, 180.2 |
+
+The postorder batches took 5.3 to 6.2% less time a node than level order in
+each process's interleaved passes, 3.4 and 6.1% alone and 2.8 and 2.9% after
+scalar work. The second build makes them the default. Its other paths ran as
+fast as the first build's. Both builds' scalar and level-order paths ran 1.6
+to 2.8% faster than main's (by the processes' medians), from their other
+changes or their code's placement. The comparison that decides is between the
+two orders in one build, on one table.
+
+Whole compiles of `sqlite3.c` (with `-DSQLITE_OMIT_LOAD_EXTENSION
+-DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`), by
+`time-runs`, 21 runs of each build in a rotating order:
+
+| Command | main, `321f5976` | `0f26899e` | `fe35a8b5` |
+| --- | --- | --- | --- |
+| `-c` | 127.95 ms, 599.5M cycles, 1,274.5M instructions | 127.39 ms (−0.44%), 595.8M (−0.61%), 1,275.3M | 126.46 ms (−1.16%), 591.3M (−1.37%), 1,269.2M |
+| `-fsyntax-only` | 102.41 ms, 464.1M cycles, 988.9M instructions | 102.38 ms (−0.03%), 464.3M (+0.03%), 989.6M | 101.25 ms (−1.13%), 458.1M (−1.29%), 983.5M |
+
+The switch to the postorder batches saved 6.08M instructions a compile, about
+18 for each of the unit's 336,460 nodes. The catalogue's fixes cost 0.78M on
+`-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
+the commands, the trees and the logs.
 
 ## Constant evaluation
 
@@ -1565,16 +1635,32 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-differences left are in bases, and mutants aren't made of a unit whose base
-differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
-one: since the checker takes them (#133), Lua's 34 files agree with clang (the
-corpus comparison, without mutants, on a laptop's clang 23). Two are left:
+differences were in bases, and mutants aren't made of a unit whose base
+differs. Both are gone. Lua's `lvm.c` uses GNU's labels as values
+(`&&L_OP_MOVE`, `goto *`), which the checker takes now (#133). The libc
+corpus's `mingw/math/fmaxl.c` and `fminl.c` use `__builtin_isgreaterequal` and
+`__builtin_islessequal` on `long double`, which the floating comparison
+builtins check now (#148, [the builtin integration
+guide](c-builtins-integration.md)).
 
-- the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
-  `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
-  which the floating comparison builtins check now (#148,
-  [the builtin integration guide](c-builtins-integration.md)): with them the
-  libc corpus agrees with clang (below).
+The corpus comparison without mutants then finds no difference, on a laptop
+with clang 23.1.4 and its system's headers:
+
+| Corpus | Options | Files | Both accept | Both reject, at the same first error's line | Neither preprocesses |
+| --- | --- | --- | --- | --- | --- |
+| SQLite 3.53.4's `sqlite3.c` | `-std=gnu17` | 1 | 1 | | |
+| Lua 5.4.8's 34 files in `src` | `-std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX` | 34 | 34 | | |
+| The libc corpus's C files | `-std=gnu17` | 2,315 | 733 | 612 | 970 |
+| The libc corpus's headers | `-std=gnu17` | 6,668 | 3,110 | 675 | 2,883 |
+
+A unit that neither side preprocesses lacks a header, stops at an `#error` or
+has an `#if` line that doesn't evaluate. The comparison gives no line for a
+preprocessing failure, so it doesn't compare their first errors. Clang parses
+as it preprocesses, so it reports some of them after an earlier error. On
+seven headers' `#if` lines, clang 23 says that a function-like macro isn't
+defined (`IS_IN`, `__GLIBC_USE`), and the preprocessor gives the older "token
+is not a valid binary operator in a preprocessor subexpression", on the same
+line.
 
 What the mutants and the bases found, each fixed with its fixture:
 

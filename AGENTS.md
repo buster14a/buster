@@ -928,8 +928,10 @@ designs and the compilers already built this way.
   measurements.
 - `src/buster/compiler/c_check_actions.c` supplies the reader-independent
   expression rules and constant folding for #133. `c_checker.c` checks an
-  explicit postorder operand graph either in source order or in stable
-  dependency levels, with scalar barriers for actions that intern types.
+  explicit postorder operand graph either a node at a time or in batches of
+  consecutive nodes that read none of each other (or, with
+  `CheckOptions.level_order`, in stable dependency levels), with scalar
+  barriers for actions that intern types.
   `c_check_input.c` and `c_check_literals.c` are the bounded source adapter;
   `c_check_binding.c` publishes each use's retained answer from those events
   directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
@@ -944,8 +946,9 @@ designs and the compilers already built this way.
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
-  source bodies by the scalar schedule, the vector path's level order and its postorder batches
-  (`CheckOptions.postorder`, #133's question of which order wins).
+  source bodies by the scalar schedule, the vector path's postorder batches and its level order
+  (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
+  batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
   `test-checker [--seed N] [--clang PATH] [--program-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
