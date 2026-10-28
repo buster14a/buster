@@ -172,7 +172,7 @@ static void check_input_indirect_gotos(CheckInputReader* reader)
                         high = region->closing < high ? region->closing : high;
                     }
                 }
-                first = first == BUSTER_CHECK_NONE && check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 ? token : first;
+                first = first == BUSTER_CHECK_NONE && check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 ? token : first;
             }
             if (first != BUSTER_CHECK_NONE && !addressed)
             {
@@ -180,7 +180,7 @@ static void check_input_indirect_gotos(CheckInputReader* reader)
             }
             for (uint32_t token = first; addressed && token < closing; token += 1)
             {
-                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token <= low || token >= high))
+                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token <= low || token >= high))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
@@ -326,7 +326,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                     labels[slot] = token + 1;
                 }
             }
-            else if ((kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
+            else if ((kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
                 reader->output->declaration_bodies[token] = body;
             }
@@ -371,7 +371,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 continue;
             }
             const uint8_t kind = parser->tokens.kinds[token];
-            const bool jump = kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0;
+            const bool jump = kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0;
             const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
             if (jump && check_input_indirect_goto(parser, token))
             {

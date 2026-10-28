@@ -1240,12 +1240,17 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             }
         }
     }
+    // Lanes share disjoint token columns but own their reader counters. Fold the final count into the remap pass
+    // already visiting every merged token; later declaration-time warning mutations keep it through the same helper.
+    input->constant_warning_count = 0;
+    input->constant_warnings_prepared = false;
     for (uint32_t token = 0; valid && token <= count; token += 1)
     {
         const bool inside = owners[token] != 0;
         const uint32_t b = inside ? owners[token] - 1 : 0;
         const TypeReplayPart* part = inside ? &parts[1 + b] : &parts[0];
         input->declared_types[token] = check_deferred_type(part, input->declared_types[token]);
+        input->constant_warning_count += token < count && input->constant_warnings[token] != 0;
         reader->query_types[token] = check_deferred_type(part, reader->query_types[token]);
         reader->return_types[token] = check_deferred_type(part, reader->return_types[token]);
         check_deferred_map_type(reader->incomplete_array_types, token, part);
@@ -1263,7 +1268,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         input->expression_regions[token] = check_deferred_id1(region_map, top_regions, region_base, input->expression_regions[token]);
         check_deferred_map_id1(reader->vla_bounds, token, vla_map, top_vlas, vla_base);
         check_deferred_map_id1(reader->vla_ends, token, vla_map, top_vlas, vla_base);
-        input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
+        if (input->asm_ids != NULL)
+        {
+            input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
+        }
         check_deferred_map_id1(reader->vararg_calls, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->vararg_types, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->constant_present, token, constant_map, top_constants, constant_base);
@@ -1310,6 +1318,16 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     if (valid)
     {
         (void)top_input;
+        input->constant_warnings_prepared = true;
+        // Literal tables belong to the top-level reader; their retained array type must follow the same replay as
+        // declared_types, particularly for tables after bodies that insert new types into the merged table.
+        for (CheckInputLiteralTable* table = input->literal_tables; table != NULL && valid; table = table->next)
+        {
+            const TypeId type = check_deferred_type(&parts[0], table->plan.type);
+            valid = type != 0;
+            table->plan.type = type;
+            table->part.type = type;
+        }
         input->strings = strings;
         input->string_count = string_total;
         input->regions = regions;
@@ -1617,7 +1635,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->reason = !valid ? "the deferred reader's own memory" : 0;
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = timing ? check_deferred_now() : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true, true);
     deferred->top.changes = 0;
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;
