@@ -21,6 +21,8 @@ struct StreamTestTally
     uint64_t failures;
 };
 
+static void stream_benchmark_test_cpus(StreamTestTally* tally);
+
 static bool stream_test_expect(StreamTestTally* tally, bool condition, const char* what, const char* detail)
 {
     tally->checks += 1;
@@ -411,6 +413,7 @@ static int run_streaming_tests(int argc, char** argv)
         fprintf(stderr, "usage: test-streaming [--seed N] [--units N] [--cross-check] [--keep]\n");
     }
     StreamTestTally tally = { 0 };
+    stream_benchmark_test_cpus(&tally);
     char directory[PATH_MAX];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-streaming-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
