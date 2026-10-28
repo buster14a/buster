@@ -1481,6 +1481,12 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
     const uint32_t source = reader->parser->tokens.sources[token];
     PPTokens* output = &reader->pp->output;
     const uint8_t kind = output->kinds[source];
+    // A compact resource has no single-token spelling. A speculative literal-table proof must fall back to the
+    // resource initializer path before interpreting its embed index as a spelling-end location.
+    if (kind == BUSTER_PP_KIND_EMBED)
+    {
+        return false;
+    }
     const uint64_t capacity = kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)output->values[source] - output->locations[source] + 1;
     uint8_t* buffer = arena_push(reader->scratch, capacity, 1);
     if (buffer != 0)

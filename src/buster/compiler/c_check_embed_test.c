@@ -133,6 +133,96 @@ static void check_embed_test_compact(CheckTest* test, const char* resource, cons
     }
 }
 
+// Enough ordinary values to admit the literal-table shortcut must not make a resource look like one scalar token.
+static void check_embed_test_mixed(CheckTest* test, const char* resource, const uint8_t* expected)
+{
+    char source[2048];
+    size_t length = (size_t)snprintf(source, sizeof(source), "unsigned char mixed[]={");
+    for (uint32_t i = 0; i < 127; i += 1)
+    {
+        length += (size_t)snprintf(source + length, sizeof(source) - length, "0,");
+    }
+    snprintf(source + length, sizeof(source) - length, "\n#embed \"%s\"\n};\n", resource);
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        CheckTestTypes types = { 0 };
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const PPOptions pp_options = { .language = { .standard = 2023 }, .no_standard_includes = true, .scalar = path == 0 };
+        const ParseOptions parse_options = { .scalar = path == 0 };
+        const CheckOptions options = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                     pp_run_source(&pp, "mixed-embed.c", (const uint8_t*)source, (uint32_t)strlen(source)) &&
+                     check_test_types_open(&types) && parse_initialize(&parser, &parse_options, pp_options.language) &&
+                     parse_translation_unit(&parser, &pp) && check_input(&input, &parser, &pp, &types.table, &output, &scratch) &&
+                     input.report_count == 0 && check_graph_run(&types.table, &input.graph, &output, &scratch, &options, &stream) &&
+                     stream.report_count == 0 && check_initializers_run(&plans, &input, &stream, &parser, &types.table, &output, &scratch);
+        uint8_t bytes[134] = { 0 };
+        ready = ready && plans.count == 1 && plans.plans[0].object_size == sizeof(bytes) &&
+                check_init_object_bytes(&types.table, plans.plans, bytes, sizeof(bytes)) && memcmp(bytes + 127, expected, 7) == 0;
+        for (uint32_t i = 0; ready && i < 127; i += 1)
+        {
+            ready = bytes[i] == 0;
+        }
+        check_test_expect(test, ready && !input.resource, "literal-table fallback retains 127 ordinary values and all seven resource bytes");
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+    }
+}
+
+static void check_embed_test_recovery(CheckTest* test, const char* resource)
+{
+    static const char* const endings[] = { "int bad = ;\n", "int bad(void){return 1;\n" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(endings); i += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "unsigned char good[]={\n#embed \"%s\"\n};\n%s", resource, endings[i]);
+        static InternTable identifiers;
+        static Preprocessor pp;
+        static Parser parser;
+        Arena output = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        const PPOptions pp_options = { .language = { .standard = 2023 }, .no_standard_includes = true };
+        const ParseOptions parse_options = { 0 };
+        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                     pp_run_source(&pp, "recovery-embed.c", (const uint8_t*)source, (uint32_t)strlen(source)) &&
+                     parse_initialize(&parser, &parse_options, pp_options.language);
+        if (ready)
+        {
+            (void)parse_translation_unit(&parser, &pp);
+        }
+        CheckPrefix prefix = { 0 };
+        CheckRepair repair = { 0 };
+        ready = ready && parser.errors != 0 &&
+                (i == 0 ? check_prefix_make(&prefix, &parser, &output, &scratch) == CHECK_PREFIX_READY :
+                          check_repair_make(&repair, &parser, &pp, &output, &scratch) == CHECK_REPAIR_READY);
+        const Parser* view = i == 0 ? &prefix.parser : &repair.parser;
+        uint32_t found = 0;
+        for (uint32_t token = 0; ready && token < view->tokens.count; token += 1)
+        {
+            uint32_t length = 0;
+            const uint8_t* bytes = parse_embed_bytes(view, token, &length);
+            found += bytes != NULL && length == 7;
+        }
+        check_test_expect(test, ready && found == 1, "diagnostic prefix and repair views retain the original borrowed resource operand");
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+        arena_release(&scratch);
+        arena_release(&output);
+    }
+}
+
 static void check_test_embed_initializers(CheckTest* test, const char* clang)
 {
     char directory[] = "/tmp/buster-check-embed-XXXXXX";
@@ -146,6 +236,8 @@ static void check_test_embed_initializers(CheckTest* test, const char* clang)
     check_test_expect(test, written, "embed fixture resource files");
     if (written)
     {
+        check_embed_test_mixed(test, resource, bytes);
+        check_embed_test_recovery(test, resource);
         char source[4096];
         snprintf(source, sizeof(source),
             "unsigned char embedded[]={\n#embed \"%s\"\n};\n"
