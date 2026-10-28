@@ -1,4 +1,4 @@
-# Correctness tests and Zen 5 benchmarks
+# Hosted correctness, native vector correctness and Zen 5 benchmarks
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
@@ -11,20 +11,18 @@ The baseline build runs on x86-64 without AVX-512. Native builds select the
 existing scalar twins when the compiler's host target lacks the full SIMD
 feature set. Intrinsic-only shared helpers have scalar definitions for that
 build. Generated-code ISA and ABI remain controlled by the existing target
-options. Benchmark commands require a vector host build. Both hosted variants
-have a required path: the baseline leg must report `scalar`, and the native leg
-must report `vector` (`BUSTER_HOST_VECTOR=1`, the full native feature predicate
-in `host_isa.h`). Each run logs its CPU, target features and selected path before
-checking this requirement. A native runner that selects the scalar fallback
-fails eligibility before building or running the suites, so two scalar-only
-passes cannot satisfy the required correctness gate. Product native builds
-still select the scalar fallback on CPUs without the complete feature set.
+options. Both hosted variants log their CPU, target features and selected path.
+The baseline leg must report `scalar`; the native leg uses vector kernels when
+the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
+CPU without AVX-512 therefore still runs the complete correctness suite.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
-feature set. A future unsuitable VM can therefore block correctness qualification
-until an eligible hosted runner or a separately qualified vector-algorithm
-correctness variant is provided. The capability check establishes eligibility;
-the current revision must still pass the full native correctness suites.
+feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
+both hosted variants pass on the same triggering revision. The hardware job
+asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
+the complete suite before any benchmarks. Hosted and hardware jobs read one
+suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
+external cross-checks. There is no vector emulation or randomized runner pool.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
@@ -44,20 +42,30 @@ notices, package provenance and component license texts. Historical paths and
 the old Clang binary hash remain provenance records; the active oracle is the
 installed Clang 23 toolchain. A missing or changed input fails setup.
 
-The `benchmarks` job has `needs: [changes, test]` and explicitly requires
+The `benchmarks` job runs native correctness followed by benchmarks. It has
+`needs: [changes, test]` and explicitly requires
 `needs.test.result == 'success'`. GitHub applies that result to the entire test
 matrix. A failure, cancellation or skipped suite prevents the physical job from
 being queued, including scheduled and manual runs whose change selector is
-skipped. The benchmark job checks out the same `github.sha`, builds with
-`BUSTER_HOST_ARCH=znver5`, verifies the Ryzen 7 9700X identity and retains the
-existing host lock, CPU placements and benchmark selection. It stages the current
-official stable Clang 23.1.4 release in the runner's private cache, verifying the
-archive SHA-256 and preserving its licenses. It does not modify system packages.
+skipped. The hardware job checks out the same `github.sha`, verifies the Ryzen
+7 9700X identity and vector eligibility, and retains the existing host lock,
+CPU placements and benchmark selection. Native tests use eight CPUs under the
+lock, and benchmarks reuse that tested executable. A native test failure stops
+the job before measurements.
+
+The job stages the current official stable Clang 23.1.4 release and matching
+Clang API, linker and object/DWARF tools in the runner's private cache, verifying
+the archive SHA-256 and preserving its licenses. A new completeness marker
+upgrades older compiler-only caches. The pragma oracle links to the official
+self-contained `libclang-cpp`, avoiding the release's Ubuntu-specific static
+system-library paths on the Arch host. Frozen inputs use the same verified
+archive as hosted tests. No system packages are modified.
 
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires successful hosted tests and
-benchmarks, so a skipped benchmark after test failure cannot accidentally satisfy
-the merge gate. Documentation-only changes retain their explicit no-code path.
+the hardware job, including native correctness, so a skipped hardware job after
+hosted failure cannot accidentally satisfy the merge gate. Documentation-only
+changes retain their explicit no-code path.
 
 To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
