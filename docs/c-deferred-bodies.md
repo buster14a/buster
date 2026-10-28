@@ -236,7 +236,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 100 fixtures, 85 of the
+- `./build/compiler test-checker-deferred [--keep]`: 101 fixtures, 86 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -326,8 +326,8 @@ passes every checker test.
   later, a naked prototype's attribute it inherits) and go to source order
   where they don't (its first declaration, a size or parameters it lacked, the
   naked attribute it adds, a conflict); intrinsics in a body, in two,
-  before and after the top level's use of them and of vector types, which
-  merge;
+  before the top level's use of them (with types the top level makes between
+  them) and after it, and of vector types, which merge;
   strings and `__func__`, string initializers' indices, statement
   expressions, VLAs, varargs, a predefined type first made in a body, asm
   statements, cached constants and `_Generic`, compound literals and statics;
