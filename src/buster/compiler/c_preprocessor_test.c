@@ -1320,6 +1320,20 @@ static const PPTestCase pp_test_cases[] = {
     { "invocations in arguments past the plans kept",
       "#define F(a, b) {a | b}\n#define G(x) [x]\nF(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8)) F(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8) G(9))\n",
       0, "c17", "{[1] [2] [3] [4] | [5] [6] [7] [8]} {[1] [2] [3] [4] | [5] [6] [7] [8] [9]}\n", false },
+    // The outer body requires rescan rather than painting its arguments on direct output. An inner self name must
+    // already be painted when the later invocation supplies its parentheses.
+    { "invocations in arguments retain paint through outer rescan",
+      "#define F(x) T(x)\n#define T(x) x (2)\n#define S(x) x S\nF(S(1))\n",
+      0, "c17", "1 S (2)\n", false },
+    // An empty invocation leaves name-space pending. A plain run consumes it before another invocation, then a later
+    // stringification observes the space between 'a' and 'b', even though no source space follows the empty call.
+    { "invocations in arguments pass pending space to an intervening run",
+      "#define F(x) S(x)\n#define S(x) #x\n#define E(x,y) x ## y\n#define G(x) [x]\nF(a E(,)b G(1))\n",
+      0, "c17", "\"a b [1]\"\n", false },
+    // A plain argument does not authorize in-place expansion when the nested body's name itself still expands.
+    { "invocations in arguments leave expanding body names to rescan",
+      "#define F(x) [x]\n#define G(x) X x\n#define X 9\nF(G(2))\n",
+      0, "c17", "[9 2]\n", false },
     // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
     // name takes the main loop's path).
     { "poisoned names a template pastes",

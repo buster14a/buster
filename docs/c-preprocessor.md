@@ -2639,6 +2639,41 @@ argument that invokes a function-like macro (1,143 of the 3,346 arguments
 expanded first, before this step) or names an object-like macro whose body
 names a macro; the rest needs #149 or another budget.
 
+### Invocations inside arguments expanded in place (#643)
+
+The next bounded step expands an invocation inside an argument in place when
+its arguments are plain and its template produces at most 16 tokens with no
+enabled macro left to expand. The ordinary scalar/history path remains its
+semantic oracle. The retained locked 9700X campaign compares main `92c025e7`
+with implementation `0a5c5762`, at six frontend placements, two kernel rounds,
+three whole-driver rounds and fresh executable copies; main's binaries run
+again as the floor.
+
+| Deferred kernel, median of twelve observations | Main | Candidate | Main again |
+| --- | ---: | ---: | ---: |
+| SQLite main loop | 4.319 ms | 4.224 ms | 4.317 ms |
+| SQLite directive tables + loop | 4.630 ms | 4.534 ms | 4.630 ms |
+| SQLite instructions/input token | 102.68 | 101.07 | 102.68 |
+| Frozen main.c main loop | 20.605 ms | 20.603 ms | 20.497 ms |
+| Frozen main.c instructions/input token | 276.68 | 277.53 | 276.68 |
+
+SQLite's budget improves about 2.1%; the 2 ms target remains unmet. Frozen
+main.c's instruction cost increases 0.31%, with loop timings inside the
+placement/round spread. All 1,458 whole-driver processes succeed. SQLite
+`-fsyntax-only` medians are 115.904/115.935/115.938 ms for main/candidate/main
+again, with overlapping ranges, so no whole-compilation timing gain is
+claimed. Peak RSS is 483,286/483,414/483,288 KiB. The
+[immutable qualification record](https://github.com/buster14a/buster-performance/tree/e9d8ade199dce0a350668543dfe8fc8429ba1d3b/docs/measurements/preprocessor-nested-invocations-117-2026-10-27)
+retains every observation, range, placement/copy floor, source/input/binary
+identity, command and mutation result.
+
+Three completion regressions distinguish self-name painting through an
+outer rescan, pending flags consumed by a plain run before another invocation,
+and a nested body whose macro names still expand. All nine intended mutants
+are detected; the 385-fixture baseline passes ASan/UBSan and the new cases
+agree with Clang. These test/documentation additions do not create new timing
+observations for the later integration head.
+
 ## Assembly output spacing
 
 In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
