@@ -2377,6 +2377,103 @@ static void oracle_test_adapter(OracleTest* test)
     oracle_cache_close(&use);
 }
 
+// The measured standalone policy must execute references freshly in USE without changing CHECK or leaking its
+// temporary mode to reusable callers. The untraced counter is deliberate: a replay would omit that side effect.
+static void oracle_test_fresh_scopes(OracleTest* test)
+{
+    OracleCache use;
+    OracleCache check;
+    OracleCache off;
+    oracle_test_open(test, &use, "use", "fresh");
+    oracle_test_open(test, &check, "check", "fresh");
+    oracle_cache_open(&off, 0, 0);
+    const char* directory = test->runs[0];
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/fresh-calls", directory);
+    char* arguments[] = { "sh", "-c", "printf x >> fresh-calls; printf x", 0 };
+    OracleRun run = { .cache = &use, .purpose = "oracle test: fresh reference scope", .arguments = arguments, .directory = directory, .timeout = 10 };
+    const bool primed = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken &&
+                        oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken;
+    oracle_test_expect(test, primed, "fresh scope: a reference that would otherwise be reused");
+    static const char* const commands[] = {
+        "test-check-builtins", "test-check-builtins-misc", "test-check-builtins-query", "test-check-builtins-bit-cast",
+        "test-check-builtins-float", "test-check-builtins-x86", "test-check-builtins-vector", "test-check-builtins-math",
+        "test-check-builtins-atomic", "test-check-builtins-atomic-rmw", "test-check-builtins-typed-overflow", "test-check-builtins-rounds",
+    };
+    for (uint32_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c += 1)
+    {
+        OracleCache* scope = oracle_test_fresh_builtin(commands[c]) ? &use : 0;
+        const OracleMode mode = oracle_test_fresh_begin(scope);
+        const bool fresh = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken &&
+                           oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+        oracle_test_fresh_end(scope, mode);
+        char what[160];
+        snprintf(what, sizeof(what), "fresh scope: %s executes twice and restores USE", commands[c]);
+        oracle_test_expect(test, fresh && use.mode == ORACLE_MODE_USE, what);
+    }
+    uint64_t length = 0;
+    char* calls = oracle_test_read(counter, &length);
+    oracle_test_expect(test, calls != 0 && length == 25, "fresh scope: all selected references actually executed, without cached side effects");
+    free(calls);
+    static const char* const other[] = {
+        0, "", "test-check-builtins-extra", "test-check-builtins-math-extra", "test-check-varargs",
+        "test-builtin-intrinsic-types", "test-parser", "benchmark-checker",
+    };
+    bool unchanged = true;
+    for (uint32_t c = 0; c < sizeof(other) / sizeof(other[0]); c += 1)
+    {
+        OracleCache* scope = oracle_test_fresh_builtin(other[c]) ? &use : 0;
+        const OracleMode mode = oracle_test_fresh_begin(scope);
+        unchanged &= scope == 0 && oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken;
+        oracle_test_fresh_end(scope, mode);
+        unchanged &= use.mode == ORACLE_MODE_USE;
+    }
+    oracle_test_expect(test, unchanged, "fresh scope: exact membership leaves other commands and timed competitors unchanged");
+    const OracleMode outer = oracle_test_fresh_begin(&use);
+    const OracleMode inner = oracle_test_fresh_begin(&use);
+    oracle_test_fresh_end(&use, inner);
+    const bool nested = use.mode == ORACLE_MODE_OFF && oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+    oracle_test_fresh_end(&use, outer);
+    oracle_test_expect(test, nested && use.mode == ORACLE_MODE_USE && oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken,
+                       "fresh scope: nested scopes preserve the outer mode and restore reuse");
+    char* failure[] = { "sh", "-c", "exit 7", 0 };
+    char* rejected[] = { "sh", "-c", 0 };
+    char* missing[] = { "buster-oracle-test-fresh-tool-not-found", 0 };
+    char* const* failures[] = { failure, rejected, missing };
+    const int expected[] = { 7, 2, -1 };
+    bool restored = true;
+    for (uint32_t f = 0; f < sizeof(failures) / sizeof(failures[0]); f += 1)
+    {
+        OracleRun failed = { .cache = &use, .purpose = "oracle test: fresh failure", .arguments = failures[f], .timeout = 10 };
+        const OracleMode mode = oracle_test_fresh_begin(&use);
+        const int status = oracle_test_run(&failed, 0, 0, 0, 0);
+        oracle_test_fresh_end(&use, mode);
+        restored &= status == expected[f] && use.mode == ORACLE_MODE_USE;
+    }
+    oracle_test_expect(test, restored, "fresh scope: command failure, rejected arguments and launcher failure restore USE");
+    run.cache = &off;
+    const OracleMode disabled = oracle_test_fresh_begin(&off);
+    const bool ran_off = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+    oracle_test_fresh_end(&off, disabled);
+    oracle_test_expect(test, ran_off && off.mode == ORACLE_MODE_OFF, "fresh scope: OFF stays OFF and executes independently");
+    char* value[] = { "sh", "-c", "cat fresh-value", 0 };
+    OracleRun checked = { .cache = &use, .purpose = "oracle test: fresh scope check", .arguments = value, .directory = directory, .timeout = 10 };
+    const bool made = oracle_test_write_text(directory, "fresh-value", "first\n") && oracle_test_run(&checked, 0, 0, 0, 0) == 0 &&
+                      oracle_test_write_text(directory, "fresh-value", "second\n");
+    checked.cache = &check;
+    const OracleMode checking = oracle_test_fresh_begin(&check);
+    printf("oracle cache: fresh scope deliberately changes an untraced result; CHECK must still reject it:\n");
+    fflush(stdout);
+    const bool stale = made && oracle_test_run(&checked, 0, 0, 0, 0) == -1 && check.counts->stale == 1;
+    oracle_test_fresh_end(&check, checking);
+    oracle_test_expect(test, stale && check.mode == ORACLE_MODE_CHECK, "fresh scope: CHECK remains independent and rejects stale success");
+    oracle_test_unlink(directory, "fresh-calls");
+    oracle_test_unlink(directory, "fresh-value");
+    oracle_cache_close(&off);
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
 static void oracle_test_epoch_scopes(OracleTest* test)
 {
     const char* ambient = getenv("SOURCE_DATE_EPOCH");
@@ -2453,6 +2550,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_writers(&test);
         oracle_test_process(&test);
         oracle_test_adapter(&test);
+        oracle_test_fresh_scopes(&test);
         oracle_test_epoch_scopes(&test);
         printf("oracle cache: %u checks, %u failures\n", test.checks, test.failures);
     }
@@ -2482,7 +2580,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
-                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "" };
+                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);

@@ -1973,6 +1973,19 @@ run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
 to, and a test prints them at its end (`oracle_cache_report`).
 
+The twelve standalone `test-check-builtins` commands (the base command and
+`-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
+`-atomic-rmw`, `-typed-overflow`, `-rounds`) run their cheap references freshly
+in `use`: native qualification found validation cost more than execution.
+`main_unit_check_builtins` applies this exact-name policy before dispatch and
+restores the prior mode after success, failure or argument rejection. It does
+not affect other commands or timed competitors. `check` is unchanged, so both
+hosted variants and daily/manual native runs still execute and validate these
+oracles independently. Backend capture/status/cache plumbing is retained for
+that path. An inactive scope prints no cache counters; the independent tools
+still execute. Assembler reuse remains separate, with its cold/check costs
+retained in #542's evidence rather than inferred from hit counts.
+
 The tool runs in a process group of its own: what it leaves running there is
 killed when it ends, and the whole group at its time limit
 (`OracleRun.timeout`), on the monotonic clock, waited for on a pidfd (a
