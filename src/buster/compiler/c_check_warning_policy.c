@@ -43,7 +43,7 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
     bool errors = false;
     bool pedantic_errors = false;
     bool everything = false;
-    CheckWarningCommandLine result = { .quiet = options->suppress_warnings };
+    CheckWarningCommandLine result = { .quiet = options->suppress_warnings, .system_headers = options->system_header_warnings };
     for (uint32_t i = 0; i < options->semantic_warning_option_count; i += 1)
     {
         const char* argument = options->semantic_warning_options[i];

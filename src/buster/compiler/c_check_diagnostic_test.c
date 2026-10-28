@@ -245,6 +245,14 @@ static void check_test_warning_policy_prefix(CheckTest* test)
         check_test_expect(test, check_warning_command_line(&command, cases[i].id, false).severity == cases[i].expected,
                           "shared warning policy preserves the independently observed Clang group and promotion rules");
     }
+    const char* hidden[] = { "-Wno-system-headers" };
+    PPOptions programmatic = { .system_header_warnings = true };
+    check_test_expect(test, check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+                      "a programmatic system-header warning policy is retained without a CLI option slice");
+    programmatic.semantic_warning_options = hidden;
+    programmatic.semantic_warning_option_count = BUSTER_ARRAY_LENGTH(hidden);
+    check_test_expect(test, !check_warning_command_line(&programmatic, CHECK_WARNING_ID_KR_DEFINITION, false).system_headers,
+                      "an ordered visibility option overrides the programmatic baseline");
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     char* ordered[] = { "-Wno-everything", "-include", "-Werror=deprecated-non-prototype", "-Wdeprecated-non-prototype", "source.c", "-o", "-Werror", "-pedantic-errors" };
     const char* input = NULL;
