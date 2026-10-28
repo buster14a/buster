@@ -39,8 +39,13 @@ static void check_test_warning_ranges(CheckTest* test)
             CheckInput input =
             {
                 .constant_warnings = columns[0],
-                .constant_warning_ignored = columns[1]
+                .constant_warning_ignored = columns[1],
+                .constant_warnings_prepared = true,
             };
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                input.constant_warning_count += expected[0][token] != 0;
+            }
             CheckInputReader reader =
             {
                 .parser = &parser,
@@ -91,6 +96,12 @@ static void check_test_warning_ranges(CheckTest* test)
                 {
                     mismatches += memcmp(columns[column], expected[column], count) != 0;
                 }
+                uint32_t expected_count = 0;
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    expected_count += expected[0][token] != 0;
+                }
+                mismatches += input.constant_warning_count != expected_count;
             }
             check_input_warning_range(&reader, count, count + 1, 0xff, 0xff);
             for (uint32_t column = 0; column < 3; column += 1)
@@ -103,7 +114,8 @@ static void check_test_warning_ranges(CheckTest* test)
                 // Build an exact summary while this token is independent, then make it ordinary. Invalidating
                 // the index must restore work that the old summary deliberately excluded.
                 columns[3][token] |= BUSTER_CHECK_CONSTANT_BOUND_CONTEXT;
-                columns[0][token] = expected[0][token] = 0xff;
+                check_input_constant_warning_set(&input, token, 0xff);
+                expected[0][token] = 0xff;
                 columns[1][token] = expected[1][token] = 0xff;
                 reader.warning_index_ready = false;
                 for (uint32_t phase = 0; phase < 3; phase += 1)
@@ -117,7 +129,8 @@ static void check_test_warning_ranges(CheckTest* test)
                     {
                         // A worker join can replace columns after the parent finished a previous clear. It
                         // invalidates summaries; a later warning must still reach the immediate-byte oracle.
-                        columns[0][token] = expected[0][token] = 0x5a;
+                        check_input_constant_warning_set(&input, token, 0x5a);
+                        expected[0][token] = 0x5a;
                         columns[1][token] = expected[1][token] = 0xa5;
                         columns[2][token] = expected[2][token] = 0;
                         reader.warning_index_ready = false;
@@ -136,11 +149,17 @@ static void check_test_warning_ranges(CheckTest* test)
                     {
                         mismatches += memcmp(columns[column], expected[column], count) != 0;
                     }
+                    uint32_t expected_count = 0;
+                    for (uint32_t at = 0; at < count; at += 1)
+                    {
+                        expected_count += expected[0][at] != 0;
+                    }
+                    mismatches += input.constant_warning_count != expected_count;
                 }
             }
         }
     }
-    check_test_expect(test, mismatches == 0, "scalar/vector ordered warning ranges match independent guarded byte oracle");
+    check_test_expect(test, mismatches == 0, "scalar/vector ordered warning ranges and report counts match independent guarded byte oracle");
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
     {
         if (mappings[column] != MAP_FAILED)

@@ -1246,11 +1246,15 @@ preprocessor's predefines give as clang's do for the same options
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Non-AVX-512
-CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
-hosted variants pass on the same triggering revision. Failed, cancelled or
-skipped tests cannot start the benchmark job. The existing required check name
-is retained by a hosted aggregation job that fails when either stage fails.
+Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
+builds on CPUs without the complete vector feature set use the scalar fallback.
+After both hosted variants pass on the same triggering revision, Benchpress
+requires the complete vector feature set and runs native correctness before
+benchmarks, reusing one build and the existing shared lock. All three builds run
+the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+skipped hosted tests cannot queue the hardware job; failed native tests cannot
+start benchmarks. The existing required check name is retained by a hosted
+aggregation job that fails when either stage fails.
 See [the CI guide](docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
@@ -1654,8 +1658,8 @@ drops the rest of the report rather than wait for its reader. A report that
 can't be written (EPIPE: `parallel | head`, whether or not SIGPIPE is ignored)
 stops the run, and its commands are killed.
 
-The 9700X job's test step ("Run the tests within the host budget") runs every
-test through it, with `--timeout 180`, before the benchmarks, which run one at
+The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
+test through it, with `--timeout 600`, before the benchmarks, which run one at
 a time and pinned. Its commands share CPUs 0 to 7 (`taskset`), one per core,
 and the runner holds them to those 8 CPUs together (#522). Tests such as
 test-lanes and test-files start lanes of their own and the call-graph check
@@ -1703,7 +1707,7 @@ to about one per CPU (#468's review). To run the list as the job does (on the
 9700X, under its lock, as one run):
 
 ```sh
-sed -n "/<<'TESTS'$/,/^ *TESTS$/{//!{s/^ \{10\}//;p}}" .github/workflows/9700x.yml | taskset -c 0-7 ./build/compiler parallel --timeout 180
+taskset -c 0-7 ./build/compiler parallel --jobs 8 --timeout 600 < tools/ci/correctness.tests
 ```
 
 `./build/compiler test-parallel` (about 7 s) checks it, each report exactly
@@ -5595,8 +5599,13 @@ checks
 that each stop's backtrace goes through the program's functions to `_start`,
 two of them above `_start` at least once (the unwinder used an FDE), each frame
 at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
-and that perf's samples with DWARF call graphs name the program's functions,
-reach `_start` and give lines of `streamed.c`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
+and that at least four separate perf samples with DWARF call graphs name the program's functions,
+reach its actual `_start` and give lines of `streamed.c`. The larger cross-check fixture repeats the entry's
+callee/fold block 128 times in the generated typed stream and C, keeping the same function set and normal DWARF/unwind generation
+long enough for sampling. Other generator callers keep the ordinary single pass; zero and one repetitions produce
+identical streams and C. There is no sampling retry. Collection failures print exit statuses, data size and bounded
+stderr/profile text; negative controls reject one sample, duplicate frames and wrapper names.
+The files go in a directory under `$TMPDIR` (or `/tmp`), removed
 unless `--keep` or a failure. The 9700X job's test step runs it with
 `--cross-check`.
 
