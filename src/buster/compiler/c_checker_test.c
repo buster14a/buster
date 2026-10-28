@@ -1700,17 +1700,17 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
 
 static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* test, Arena* storage, Arena* output, Arena* scratch)
 {
-    CheckTestTypes types[2] = { 0 };
-    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]);
+    CheckTestTypes types[3] = { 0 };
+    const bool initialized = check_test_types_open(&types[0]) && check_test_types_open(&types[1]) && check_test_types_open(&types[2]);
     check_test_expect(test, initialized, "independent type tables for scheduling-order test");
     const uint64_t mark = storage->length;
     const uint64_t output_mark = output->length;
     if (initialized)
     {
-        TypeId array_int[2];
-        TypeId pointer_array_int[2];
-        TypeId array_short[2];
-        for (uint32_t path = 0; path < 2; path += 1)
+        TypeId array_int[3];
+        TypeId pointer_array_int[3];
+        TypeId array_short[3];
+        for (uint32_t path = 0; path < 3; path += 1)
         {
             array_int[path] = type_array(&types[path].table, BUSTER_TYPE_INT, 3);
             pointer_array_int[path] = type_pointer(&types[path].table, array_int[path]);
@@ -1718,6 +1718,8 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
         }
         check_test_expect(test, array_int[0] == array_int[1] && pointer_array_int[0] == pointer_array_int[1] && array_short[0] == array_short[1],
                           "type-order fixture input identities");
+        check_test_expect(test, array_int[0] == array_int[2] && pointer_array_int[0] == pointer_array_int[2] && array_short[0] == array_short[2],
+                          "level-order fixture input identities");
         CheckGraph graph;
         const bool allocated = check_graph_initialize(&graph, storage, 8, 0);
         check_test_expect(test, allocated, "type-order graph allocation");
@@ -1737,23 +1739,30 @@ static __attribute__((noinline)) void check_test_graph_type_order(CheckTest* tes
                 .category = CHECK_LVALUE
             });
             check_graph_add(&graph, CHECK_OP_ADD, 5, second_array, one, BUSTER_CHECK_NONE);
-            const CheckOptions options[2] = {
+            const CheckOptions options[3] = {
                 {
                     .scalar = true
                 },
                 {
                     .scalar = false
                 },
+                {
+                    .level_order = true
+                },
             };
-            CheckStream streams[2];
+            CheckStream streams[3];
             const bool first = check_graph_run(&types[0].table, &graph, output, scratch, &options[0], &streams[0]);
-            const bool second = check_graph_run(&types[1].table, &graph, output, scratch, &options[1], &streams[1]);
-            check_test_expect(test, first && second && check_test_stream_equal(&streams[0], &streams[1], 0), "scheduler changed newly interned TypeIds");
-            check_test_expect(test, types[0].table.types.count == types[1].table.types.count, "scheduler constructed a different number of types");
+            for (uint32_t path = 1; path < 3; path += 1)
+            {
+                const bool checked = check_graph_run(&types[path].table, &graph, output, scratch, &options[path], &streams[path]);
+                check_test_expect(test, first && checked && check_test_stream_equal(&streams[0], &streams[path], 0), "scheduler changed newly interned TypeIds");
+                check_test_expect(test, types[0].table.types.count == types[path].table.types.count, "scheduler constructed a different number of types");
+            }
         }
     }
     arena_pop_to(output, output_mark);
     arena_pop_to(storage, mark);
+    check_test_types_close(&types[2]);
     check_test_types_close(&types[1]);
     check_test_types_close(&types[0]);
 }
