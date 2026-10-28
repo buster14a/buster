@@ -12,6 +12,7 @@
 #define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
 #define CHECK_WARNING_RETURN_TYPE 0x40000u
 #define CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION 0x80000u
+#define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
 
 #include "c_check_packed_diagnostic.c"
 
@@ -53,6 +54,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wargument-outside-range", NULL, "argument value is outside the valid range" },
     { "-Wreturn-type", NULL, "non-void function does not return a value" },
     { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
+    { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -339,6 +341,15 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
     {
         memset(handled, 0, count);
         valid = check_input_diagnostic_pragmas(&reader, handled);
+        valid = valid && check_input_visibility_pragmas(&reader, handled, false);
+        if (valid && result->visibility_pragmas != NULL)
+        {
+            CheckInputVisibilityPragmas* history = result->visibility_pragmas;
+            while (history->count != 0 && history->records[history->count - 1].token >= before_token)
+            {
+                history->count -= 1;
+            }
+        }
     }
     for (uint32_t i = 0; valid && i < count; i += 1)
     {

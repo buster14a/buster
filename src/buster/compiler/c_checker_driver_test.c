@@ -2734,6 +2734,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_packed_test.c"
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
+#include "c_check_visibility_driver_test.c"
 #include "c_check_implicit_driver_test.c"
 #include "c_check_return_driver_test.c"
 
@@ -3207,6 +3208,33 @@ static int run_checker_driver_tests(int argc, char** argv)
             .name = "late assembler label respects ignored attribute policy",
             .source = "#pragma clang diagnostic ignored \"-Wignored-attributes\"\nint object=1;\nextern int object asm(\"renamed\");\n",
         },
+        {
+            .name = "visibility warning follows earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n#pragma GCC visibility push(bad)\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "visibility error cannot hide earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n#pragma GCC visibility pop\n",
+            .rejected = true,
+        },
+        {
+            .name = "promoted visibility warning cannot hide earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n"
+                      "#pragma clang diagnostic error \"-Wignored-attributes\"\n#pragma GCC visibility push(bad)\n",
+            .rejected = true,
+        },
+        {
+            .name = "visibility warning inside unfinished initializer retains parser placement",
+            .source = "int value=\n#pragma GCC visibility push(bad)\n;\n",
+            .rejected = true,
+        },
+        {
+            .name = "legal visibility directive survives an erased malformed body",
+            .source = "int f(void){\n#pragma GCC visibility push(hidden)\nreturn 1+;\n}\n",
+            .rejected = true,
+        },
     };
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
@@ -3277,6 +3305,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);
+            check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);

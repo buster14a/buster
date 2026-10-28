@@ -403,7 +403,7 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
-        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "hidden-symbol-visibility-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
         "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);

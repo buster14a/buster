@@ -17,6 +17,12 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
+associated declaration/ELF integration (#620) are original project material
+under the default terms. Clang is an external behavior and object-format oracle;
+cJSON is an external compile qualification input. No upstream implementation or
+fixtures are incorporated.
+
 The implicit function binding/diagnostic additions and
 `c_check_implicit_driver_test.c` (#623) are original project material under the
 default terms. Clang and the unconfigured zlib 1.3.1 tree are external
