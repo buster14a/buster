@@ -3300,7 +3300,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             const bool replaced = linked != 0 && reader->linked_declarations[name] != linked;
             const uint32_t flags = replaced ? reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
             check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
-            check_input_lane_refuse(reader, composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
+            check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;

@@ -923,8 +923,9 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const uint64_t undo_begin = deferred->timing ? check_deferred_now() : 0;
     check_deferred_heads_clear(lane);
     const bool reset = type_view_reset(types, view);
-    // The top level's tags the body changed, back to the top level's state (none it withdraws: a body doesn't change
-    // one where it is merged).
+    // The top level's tags the body changed, back to the top level's state: the view takes back the members a
+    // completion appended, which the tag would still name, though nothing after the body can reach a parameter-list
+    // tag (none of them is one the top level withdraws: a body doesn't change one where it is merged).
     for (uint32_t i = 0; i < changes->count; i += 1)
     {
         const TypeChange* change = changes->items + i;

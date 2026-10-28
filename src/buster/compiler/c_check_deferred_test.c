@@ -170,6 +170,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "unsigned g(unsigned y) { __builtin_ia32_pause(); return __builtin_ia32_crc32si(y, 2); }\n", true },
     { "intrinsic-before-the-top-levels", "unsigned f(unsigned x) { return __builtin_ia32_crc32si(x, 1); }\nint n = sizeof(__builtin_ia32_crc32si(1, 2));\n"
       "unsigned g(unsigned y) { return __builtin_ia32_crc32si(y, (unsigned)n); }\n", true },
+    // The body decodes the declaration the top level decodes only after it, and so makes its types first: the types the
+    // top level makes between them come after those, as in source order.
+    { "intrinsic-before-the-top-levels-types", "unsigned f(unsigned x) { return __builtin_ia32_crc32si(x, 1); }\nstruct S { int a; } *s;\n"
+      "int n = sizeof(__builtin_ia32_crc32si(1, 2));\nunsigned g(unsigned y) { return __builtin_ia32_crc32si(y, (unsigned)n); }\n", true },
     { "intrinsic-after-the-top-levels", "int n = sizeof(__builtin_ia32_crc32si(1, 2));\nunsigned f(unsigned x) { return __builtin_ia32_crc32si(x, (unsigned)n); }\n", true },
     { "intrinsic-vectors-in-bodies",
       "typedef int V __attribute__((vector_size(16)));\nV f(V x) { return __builtin_ia32_pshufd(x, 3); }\nV g(V y) { return __builtin_ia32_pshufd(y, 1); }\n"
