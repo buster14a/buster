@@ -237,19 +237,22 @@ passes every checker test.
   mapping, end to end with their capacities, writable to their last byte and
   kept with their pages when the state takes them back, and every mapping
   gone after `check_deferred_release`.
-  Mutants of the rule fail, each built at `-O1`: the largest body counted
-  twice, as #448's rule did, 27 checks; the largest body alone 24; the top
-  level's share dropped 696; a ceiling's division 59; and `every_lane` not
-  read 461. Mutants of the lanes' changes fail too, each built at
-  `-O1`: the parts' order with its first part first rather than its costliest
-  `test-lanes`; `parts_by_cost` cutting for a lane more than it is given
-  `test-lanes` and 159 checks; every lane taking from the counter, the first
-  lane too, 11 checks; the parts cut for every lane the reader is given
-  rather than the rule's 18; the lanes' arenas not reserved before the lanes
-  931; a release that doesn't unmap them 680; a state that doesn't keep the
-  lanes' memory 538; the lane's name stamps not cleared 11; and the deferral
-  mask not cleared hangs the reread of a poisoned state's memory, which the
-  9700X job's runner times out.
+  Mutants of the change, each built at `-O1` from it merged with main and run
+  on the 9700X (the record's `logs/mutants2`), fail. Of the rule: the largest
+  body counted twice, as #448's rule did, 27 checks; the largest body alone
+  24; the top level's share dropped 708; a ceiling's division 60; and
+  `every_lane` not read 473. Of the lanes' changes: the parts' order with its
+  first part first rather than its costliest, `test-lanes` (55 to 71 parts'
+  checks wrong on each lane count); `parts_by_cost` cutting for a lane more
+  than it is given, `test-lanes` (39 to 45) and 168 checks; `parts_by_cost`
+  without its bound at the most lanes a group has, `test-lanes`, whose 257
+  lanes' parts then overrun `lane_parts_order`'s stack (the stack protector
+  aborts it); every lane taking from the counter, the first lane too, 9
+  checks; the parts cut for every lane the reader is given rather than the
+  rule's 18; the lanes' arenas not reserved before the lanes 974; a release
+  that doesn't unmap them 723; a state that doesn't keep the lanes' memory
+  554; the lane's name stamps not cleared 8; and the deferral mask not cleared
+  hangs the reread of a poisoned state's memory past a 120 s timeout.
   They are: the issue's three (a later declaration, a later completion, an
   enumerator from an initializer); typedefs shadowed and redeclared after a
   body; tags completed, redeclared and shadowed around bodies, and completed
@@ -398,7 +401,7 @@ c-testsuite's programs (`00182.c`, `00200.c`, `00204.c` and `00213.c`), the
 frozen `sqlite3.c`, and 38 synthetic units of 2 to 70 bodies after `stdio.h`,
 `stdlib.h` and `string.h`, after thirty of the C library's headers or after
 none, among them one large body beside smaller ones and two large bodies of
-different sizes ([the record](RECORD_URL)):
+different sizes ([the record](https://github.com/buster14a/buster-performance/tree/2c7efa3f6dfbb67af36cc94cd7d268419a6a8948/docs/measurements/deferred-lane-costs-113-2026-10-27)):
 
 - **A lane's copy** (the median of the 42 units but `sqlite3.c`, then
   `sqlite3.c`'s): when each lane reserved its five arenas inside the lane, 101
