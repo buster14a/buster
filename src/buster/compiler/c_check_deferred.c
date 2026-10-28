@@ -196,6 +196,8 @@ struct CheckDeferredLane
     uint32_t* points;
     uint32_t* handles;
     uint32_t key_count;
+    // The top level's event that each of the body's proxies copies (check_deferred_heads), for its result's ids.
+    uint32_t* proxies;
     // The record of a body's type changes, made once with room for the largest body and taken back for each: a body
     // keeps its changes packed in `results`, so that its walk touches the same pages as the last body's.
     TypeChanges changes;
@@ -534,26 +536,30 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     valid &= reader->warning_index != 0;
     input->deferred_tokens = 0;
     Arena* arena = &arenas->output;
-    // The top level's events, the lane's own after them.
-    const uint64_t events = (uint64_t)top->bindings.count + room * 4;
+    // The lane's events, none of them the top level's: a body's stream starts with the file scope's events its heads
+    // reach (check_deferred_heads, a proxy for each, two names' keys a name at most) and the top level's last event,
+    // then the body's own.
+    const uint64_t proxies = room * 2 + 1;
+    const uint64_t events = proxies + room * 4;
     CBindings* bindings = &reader->bindings;
     bindings->capacity = valid && events < UINT32_MAX ? (uint32_t)events : 0;
     // The heads, the per-name columns and the stamps, in the lane's places for them (check_deferred_lane_names).
     valid = valid && check_deferred_lane_names(deferred, lane, names);
     bindings->active = valid ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
-    bindings->key = bindings->active != 0 ? check_deferred_copy(arena, top->bindings.key, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->declaration = bindings->key != 0 ? check_deferred_copy(arena, top->bindings.declaration, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, top->bindings.point, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->end = bindings->point != 0 ? check_deferred_copy(arena, top->bindings.end, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, top->bindings.previous, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, top->bindings.depth, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
-    bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, top->bindings.operation, top->bindings.count, events + 1, sizeof(uint8_t)) : 0;
-    bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, top->bindings.kind, top->bindings.count, events + 1, sizeof(uint8_t)) : 0;
-    valid = bindings->kind != 0;
+    bindings->key = bindings->active != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->declaration = bindings->key != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->end = bindings->point != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+    bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
+    bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
+    lane->proxies = bindings->kind != 0 ? check_deferred_copy(arena, 0, 0, proxies, sizeof(uint32_t)) : 0;
+    valid = lane->proxies != 0;
     if (valid)
     {
-        bindings->base = top->bindings.count;
-        bindings->count = top->bindings.count;
+        bindings->base = 0;
+        bindings->count = 0;
         bindings->active_count = 0;
         bindings->valid = true;
     }
@@ -686,6 +692,19 @@ static void check_deferred_name_state(const CheckDeferred* deferred, CheckDeferr
     }
 }
 
+// The lane's event `slot` a copy of the file scope's `event`: a proxy of it in the body's stream (check_deferred_heads).
+static void check_deferred_proxy(CBindings* bindings, uint32_t slot, const CBindings* file, uint32_t event)
+{
+    bindings->key[slot] = file->key[event];
+    bindings->declaration[slot] = file->declaration[event];
+    bindings->point[slot] = file->point[event];
+    bindings->end[slot] = file->end[event];
+    bindings->previous[slot] = file->previous[event];
+    bindings->depth[slot] = file->depth[event];
+    bindings->operation[slot] = file->operation[event];
+    bindings->kind[slot] = file->kind[event];
+}
+
 // Sets the lane's heads of every name the body (`cut`'s) and its parameters spell to the file scope's at the body's
 // opening: the binding state source order's reader has there, for the names the body can look up. Each name once (by
 // the lane's stamps: the body's is one past the last body's, on the lane, in this reading or an earlier one), its label
@@ -732,13 +751,37 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
         }
     }
     const CEnvironment* environment = &deferred->environment;
+    const CBindings* file = environment->bindings;
     const bool valid = c_environment_lookup_batch(environment, lane->keys, lane->points, count, lane->handles);
+    // Each head the history gives is the top level's event, which the body's stream gets a proxy of, in its order: the
+    // walk reads the file scope's events at its heads alone. Then the top level's last event before the body, whose
+    // point the walk reads as the stream's last before its first own event (check_input_vla_bound's `cached`), as in
+    // source order's stream there. A copy of the top level's whole stream gave the top level's last event, after the
+    // body where the top level goes on, so that a bound's names read before the body's first event seemed read
+    // already and the body reported an error source order doesn't: such a unit went to source order.
+    uint32_t proxy = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        const uint32_t handle = valid ? lane->handles[i] : 0;
-        const bool ended = handle != 0 && environment->bindings->end[handle - 1] != BUSTER_C_BINDING_NONE;
-        bindings->heads[lane->keys[i]] = ended ? check_deferred_visible(environment, lane->keys[i], cut->opening, handle) : handle;
+        uint32_t handle = valid ? lane->handles[i] : 0;
+        const bool ended = handle != 0 && file->end[handle - 1] != BUSTER_C_BINDING_NONE;
+        handle = ended ? check_deferred_visible(environment, lane->keys[i], cut->opening, handle) : handle;
+        if (handle != 0)
+        {
+            check_deferred_proxy(bindings, proxy, file, handle - 1);
+            lane->proxies[proxy] = handle - 1;
+            proxy += 1;
+            handle = proxy;
+        }
+        bindings->heads[lane->keys[i]] = handle;
     }
+    if (cut->events != 0)
+    {
+        check_deferred_proxy(bindings, proxy, file, cut->events - 1);
+        lane->proxies[proxy] = cut->events - 1;
+        proxy += 1;
+    }
+    bindings->base = proxy;
+    bindings->count = proxy;
     lane->key_count = count;
     lane->history_reads += count / 2;
     return valid;
@@ -858,7 +901,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         reader->predefined_types[i] = made ? top->predefined_types[i] : 0;
         reader->predefined_positions[i] = made ? top->predefined_positions[i] : BUSTER_CHECK_NONE;
     }
-    reader->bindings.count = reader->bindings.base;
+    // The body's stream starts with its proxies (check_deferred_heads), none active.
     reader->bindings.active_count = 0;
     reader->bindings.valid = true;
     const bool history = check_deferred_heads(deferred, lane, cut);
@@ -965,6 +1008,16 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         result->depth = check_deferred_keep(arena, reader->bindings.depth + base, events, sizeof(uint32_t), &kept);
         result->operation = check_deferred_keep(arena, reader->bindings.operation + base, events, sizeof(uint8_t), &kept);
         result->kind = check_deferred_keep(arena, reader->bindings.kind + base, events, sizeof(uint8_t), &kept);
+        // The ids in the body's events, as the merge reads them: an own event's the top level's count past its place
+        // after the proxies, and a proxy's (a declaration a body's one shadows) the top level's event it copies.
+        const uint32_t top_events = top->bindings.count;
+        for (uint32_t e = 0; kept && e < events; e += 1)
+        {
+            const uint32_t previous = result->previous[e];
+            result->previous[e] = previous == 0 ? 0 : previous <= base ? lane->proxies[previous - 1] + 1 : previous - base + top_events;
+            const uint32_t end = result->end[e];
+            result->end[e] = end == BUSTER_C_BINDING_NONE ? end : end - base + top_events;
+        }
         result->string_count = input->string_count - top_input->string_count;
         result->strings = check_deferred_keep(arena, input->strings + top_input->string_count, result->string_count, sizeof(CheckInitString), &kept);
         result->region_count = input->region_count - top_input->region_count;

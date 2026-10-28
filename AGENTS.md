@@ -4927,9 +4927,10 @@ on the calling thread before the lanes start, until `check_deferred_release`.
 A lane copies the top level's table but none of its per-name columns, which are
 the lane's own at places they keep from one reading to the next
 (`check_deferred_lane_names`), each set for the names a body spells before its
-walk.
+walk, nor its binding events: a body's stream starts with proxies of the file
+scope's events its heads reach (`check_deferred_proxy`).
 
-`./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 96 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or

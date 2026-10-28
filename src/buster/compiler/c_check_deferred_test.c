@@ -157,6 +157,14 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int f(int n, int a[n][n+1], int (*callback)(int m, int b[m]), int z[n+2]) { typedef int A[n]; A a0; { A a1; int b[n+2]; } return sizeof a0; }\n"
       "int g(int m, int (*p)[m+2]) { __typeof__(int[m+3]) a, b; return sizeof a + sizeof b + sizeof *p; }\n"
       "int h(int k, int a[k]) { typedef int A[k+1]; A b; return sizeof b; }\n", true },
+    // Bounds of file-scope names in bodies without parameters, whose first events are the bounds' uses: the last event
+    // before them in a lane's stream is the top level's last before the body (check_deferred_heads), as in source order's,
+    // and not its last at all, a declaration after the body, which made a lane take the bound's names as read already
+    // and report an error source order doesn't.
+    { "vla-bound-of-file-scope-name", "int n = 2;\nint f(void) { int a[n]; return (int)sizeof a; }\nint later = 3;\n", true },
+    { "vla-bounds-of-file-scope-names",
+      "int n = 2;\nint m = 3;\nint f(void) { int a[m]; int b[n]; return (int)sizeof a + (int)sizeof b; }\n"
+      "int g(void) { int c[n + 1][n]; return (int)sizeof c; }\nint later = 3;\nint after(void) { return later; }\n", true },
     { "varargs",
       "int sum(int count, ...) { __builtin_va_list list; __builtin_va_start(list, count); int total = 0;\n"
       "  for (int i = 0; i < count; i += 1) total += __builtin_va_arg(list, int); __builtin_va_end(list); return total; }\n"

@@ -50,8 +50,7 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 
    A lane copies the top level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
-   nothing (#432's review): its binding stream (the top level's events, then
-   room for the largest body), the per-tag arrays the walk writes, the scope
+   nothing (#432's review): the per-tag arrays the walk writes, the scope
    stacks and reports, the appended tables, and the table (`type_copy`, with
    room for the largest body's types), whose columns a body's withdrawals
    change (step 4). The copies are columns with room for the largest body that
@@ -62,14 +61,17 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    as any index does. Where the top level's index has that room already, its
    slots are copied as they are, rather than its types placed again.
 
-   A lane copies none of the top level's per-name columns (#697's item 2).
-   Its binding heads, parameters' and members' marks, stamps, linked
-   declarations and types, and intrinsics' and builtins' caches are its own,
-   in its sixth arena, at places they keep from one reading to the next
+   A lane copies none of the top level's per-name columns or binding events
+   (#697's item 2). Its binding heads, parameters' and members' marks, stamps,
+   linked declarations and types, and intrinsics' and builtins' caches are its
+   own, in its sixth arena, at places they keep from one reading to the next
    (`check_deferred_lane_names`). Before its walk, a body sets them for the
    names it spells (step 4). After the walk it takes the ones that start as
    none back to none, so that no reading clears them. A reading with more
-   names than the places have room for lays them out again, on zero pages.
+   names than the places have room for lays them out again, on zero pages. A
+   lane's binding stream holds proxies of the file scope's events its heads
+   reach (step 4), then the body's own events. Before, it held a copy of every
+   one of the top level's events.
 
    The state (`CheckDeferred`) keeps its memory (`CheckDeferredMemory`) from one
    reading to the next: its own arena, the top level's table and index, and
@@ -92,7 +94,15 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      (`check_deferred_visible`). Only a declarator that fails ends one, and its
      unit is source order's: a tag first named in a file-scope prototype
      (`void g(struct S *p);`) is of the prototype's scope, a level deeper than
-     the file scope the history holds (#438);
+     the file scope the history holds (#438). Each head the history gives is
+     one of the top level's events, which the body's stream gets a proxy of
+     (`check_deferred_proxy`), in the keys' order, for the walk reads the file
+     scope's events at its heads alone. After them comes a proxy of the top
+     level's last event before the body, whose point a variable-length array's
+     bound reads as the stream's last before the body's first own event
+     (`check_input_vla_bound`'s `cached`), as in source order's stream there. The kept events' ids are mapped back to the top level's numbering:
+     a proxy's to the event it copies, an own event's to its place past the
+     top level's events;
    - each of those names gets the rest of the per-name state the top level's
      walk changes as it goes, as it was at the opening
      (`check_deferred_name_state`): its linked declaration and type, the last
@@ -262,7 +272,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 101 fixtures, 86 of the
+- `./build/compiler test-checker-deferred [--keep]`: 111 fixtures, 96 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -305,7 +315,10 @@ passes every checker test.
   source order's result; on 8 lanes by a state that read it before, on one
   lane and on eight with every byte that reading pushed in the state's memory
   poisoned (`check_deferred_poison`) and on eight as it left it, whose memory
-  the reading must keep (`check_corpus_deferred_reread`); and with the
+  the reading must keep (`check_corpus_deferred_reread`), and on one with
+  every lane's stamp then at its last (`check_deferred_stamp`), which each
+  lane's next body wraps: the one lane's first body's names, stamped as the
+  wrapped stamp's first, must be taken again; and with the
   allocation of the reader's state failing
   (`check_corpus_deferred_fail_state`), which must count as a resource failure
   (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
@@ -321,10 +334,17 @@ passes every checker test.
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
   refused without a write past the room, and so are malformed lists; and the
-  state's memory (`check_deferred_test_memory`): a lane's five arenas in one
+  state's memory (`check_deferred_test_memory`): a lane's six arenas in one
   mapping, end to end with their capacities, writable to their last byte and
   kept with their pages when the state takes them back, and every mapping
-  gone after `check_deferred_release`.
+  gone after `check_deferred_release`. Then a lane's per-name columns
+  (`check_deferred_test_lane_names`): laid out from room for 4,096 names, in
+  order, each on a line of its own and clear of the next, those that start
+  as none zero; at the same places, with what the last reading left, for a
+  reading of fewer names; those that start as none cleared, with the stamp,
+  after a poisoned reading, and the others left to the bodies, which set them
+  before they read them; laid out again on zero pages for more names than the
+  room; and refused for more names than the arena holds.
   Mutants of the change, each built at `-O1` from it merged with main and run
   on the 9700X (the record's `logs/mutants2`), fail. Of the rule: the largest
   body counted twice, as #448's rule did, 27 checks; the largest body alone
@@ -340,7 +360,15 @@ passes every checker test.
   rule's 18; the lanes' arenas not reserved before the lanes 974; a release
   that doesn't unmap them 723; a state that doesn't keep the lanes' memory
   554; the lane's name stamps not cleared 8; and the deferral mask not cleared
-  hangs the reread of a poisoned state's memory past a 120 s timeout.
+  hangs the reread of a poisoned state's memory past a 120 s timeout. Item
+  2's three mutants (#697), each built with clang 18 on a host of the scalar
+  path, fail too. The stream's last proxy taken from the top level's last
+  event, rather than its last before the body, fails the two fixtures of
+  bounds of file-scope names: they aren't merged, by any resolution on any
+  lane count. The stamps not cleared where they wrap fails the reread with
+  the stamps at their last on 12 fixtures (6 results that differ, 6 not
+  merged), and the test then faults on a head that a skipped name left. The
+  poisoned columns not cleared fails the per-name columns' check.
   They are: the issue's three (a later declaration, a later completion, an
   enumerator from an initializer); typedefs shadowed and redeclared after a
   body; tags completed, redeclared and shadowed around bodies, and completed
@@ -355,7 +383,8 @@ passes every checker test.
   before the top level's use of them (with types the top level makes between
   them) and after it, and of vector types, which merge;
   strings and `__func__`, string initializers' indices, statement
-  expressions, VLAs, varargs, a predefined type first made in a body, asm
+  expressions, VLAs (bounds of file-scope names in bodies without parameters
+  among them), varargs, a predefined type first made in a body, asm
   statements, cached constants and `_Generic`, compound literals and statics;
   recursion and forward calls, labels; unions made transparent in a body
   (a file-scope one, which goes to source order, and the body's own, which
