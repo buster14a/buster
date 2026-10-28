@@ -1274,7 +1274,7 @@ static bool check_corpus_initializers_equal(const CheckInitializers* x, const Ch
     }
     for (uint32_t token = 0; equal && token < x->token_count; token += 1)
     {
-        equal = x->declaration_plans[token] == y->declaration_plans[token];
+        equal = check_initializers_plan_index(x, token) == check_initializers_plan_index(y, token);
     }
     for (uint32_t plan = 0; equal && plan < x->count; plan += 1)
     {

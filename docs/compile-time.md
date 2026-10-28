@@ -414,6 +414,27 @@ the merge (55.2 to 40.2 ns in the first measurement).
 
 ## The passes after checking (#592)
 
+#641 removes more token-domain work from the same handoffs. Initializer plans keep only their ascending
+`declaration_tokens`; `check_initializers_plan_index` returns an index plus one by a bounded lower bound, with zero
+for an absent token, including the empty unit. The plans and their tokens are immutable after successful planning.
+The source adapter, VLA/compound-literal lowering and x86 diagnostic consumers all use that lookup.
+
+The warning producers maintain counts while they write or clear warnings: declaration-time constant rows,
+the final expression-warning rows, and ignored asm labels. The diagnostic collector omits an empty column and
+sizes its ordering arrays from those counts. Prepared flags distinguish completed producer metadata from a
+hand-built input or stream, which retains the full scan. Mutating a completed warning column requires updating
+its count through the producer helper or clearing that column's prepared flag; the metadata is part of the
+immutable source snapshot. Randomized dense-oracle tests exercise both cases, including suppression and
+speculative constant-call restoration.
+
+Where static-data preparation already ran, the program consumes its declaration keys instead of selecting
+the same tokens again. Syntax-only users retain the original selection. The emission initializes `defined`
+only at symbol objects, its only readable domain, and scans static-storage declarations instead of initialized
+automatic locals. Attribute collection selects nonnull pointers before testing declaration identity; its
+retained-object bytes are initialized only at the collected objects. Parameters remain in this collection,
+so their alias/retain refusal is preserved. These are representation/work reductions; fresh 9700X timing
+and small/large corpus comparisons are required before assigning them a speedup.
+
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
 `--time-stages` runs of each build, pinned to CPU 2, the order rotating by
 round: `main` at `8ab9a208` and #592's head (`d4be6a47`), both built as the

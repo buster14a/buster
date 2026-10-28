@@ -9,6 +9,22 @@
 
 #define BUSTER_CHECK_CONSTANT_BOUND_CONTEXT 2u
 
+// Every mutation, including speculative-call restoration and unselected-range clearing, keeps the final nonzero-row
+// count. The driver can skip the token column entirely when it is empty; no extra final pass computes this metadata.
+static void check_input_constant_warning_set(CheckInput* input, uint32_t token, uint8_t warnings)
+{
+    input->constant_warning_count = input->constant_warning_count - (input->constant_warnings[token] != 0) + (warnings != 0);
+    input->constant_warnings[token] = warnings;
+}
+
+static void check_input_constant_warning_add(CheckInput* input, uint32_t token, uint8_t warnings)
+{
+    if (warnings != 0)
+    {
+        check_input_constant_warning_set(input, token, input->constant_warnings[token] | warnings);
+    }
+}
+
 // clang's Sema has GNU's extensions in every C language mode, -std=c99 as -std=gnu99, and only -pedantic warns about
 // them: folding a constant expression that isn't an ICE among them. GNU still names -std=gnu*, which the vector
 // builtins' index rule reads (c_check_builtin_constant.c's, #148).
@@ -42,7 +58,7 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
             const bool independent = reader->constant_contexts != 0 && (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) != 0;
             if (!independent)
             {
-                reader->output->constant_warnings[token] &= (uint8_t)~warnings;
+                check_input_constant_warning_set(reader->output, token, reader->output->constant_warnings[token] & (uint8_t)~warnings);
                 if (reader->output->constant_warning_ignored != 0)
                 {
                     reader->output->constant_warning_ignored[token] &= (uint8_t)~warnings;
@@ -58,7 +74,7 @@ static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
         const bool present = (reader->output->constant_warnings[first] & CHECK_WARNING_GNU_CONSTANT) != 0;
-        reader->output->constant_warnings[first] |= CHECK_WARNING_GNU_CONSTANT;
+        check_input_constant_warning_add(reader->output, first, CHECK_WARNING_GNU_CONSTANT);
         if (reader->output->constant_warning_ignored != 0)
         {
             if (ignored && !present)
@@ -1668,7 +1684,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                reader->output->constant_warnings[action.node] |= (uint8_t)checked.warnings;
+                check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -1925,7 +1941,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        input->reader->output->constant_warnings[action->node] |= (uint8_t)checked.warnings;
+        check_input_constant_warning_add(input->reader->output, action->node, (uint8_t)checked.warnings);
     }
     if (checked.diagnostic == CHECK_DIAG_NONE && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_INITIALIZE))
     {
@@ -1939,7 +1955,7 @@ static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t 
 {
     const uint8_t warnings = input->reader->output->constant_warnings[closing];
     const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
-    input->reader->output->constant_warnings[closing] = warnings;
+    check_input_constant_warning_set(input->reader->output, closing, warnings);
     return valid;
 }
 
@@ -2431,7 +2447,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, &checked);
-                reader->output->constant_warnings[action.node] |= (uint8_t)checked.warnings;
+                check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -2640,7 +2656,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            reader->output->constant_warnings[action.node] |= (uint8_t)checked.warnings;
+            check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             ranges[*value_count] = range;

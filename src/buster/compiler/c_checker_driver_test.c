@@ -2188,6 +2188,8 @@ static void check_test_driver_reports(CheckTest* test)
         "void g(char* c) { unsigned char* u = c; (void)u; }\n"
         "int b[2] = { 1, 2, 3 };\n",
         wide_source,
+        "int f(void) { return 1; }\n",
+        "int f(void) { return 1; } int f(void) __asm__(\"late_name\");\n",
     };
     uint64_t state = 0x592;
     uint32_t compared = 0;
@@ -2220,6 +2222,22 @@ static void check_test_driver_reports(CheckTest* test)
         }
         const CheckInput checked = input;
         const CheckStream streamed = stream;
+        uint32_t warning_rows = 0;
+        uint32_t attribute_rows = 0;
+        uint32_t constant_rows = 0;
+        for (uint32_t node = 0; ready && node < stream.count; node += 1)
+        {
+            warning_rows += stream.warnings[node] != 0;
+        }
+        for (uint32_t token = 0; ready && token < count; token += 1)
+        {
+            attribute_rows += check_diagnostic_attribute_warnings(&input, token) != 0;
+            constant_rows += input.constant_warnings[token] != 0;
+        }
+        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.asm_warnings_prepared &&
+                               (input.ignored_asm_count != 0) == (attribute_rows != 0) && input.constant_warnings_prepared &&
+                               input.constant_warning_count == constant_rows,
+                          "warning producers publish exact node/constant counts and ignored-asm presence for report collection");
         const uint32_t errors = pp.errors;
         const uint32_t warnings = pp.warnings;
         for (uint32_t round = 0; ready && round < 160; round += 1)
@@ -2259,8 +2277,21 @@ static void check_test_driver_reports(CheckTest* test)
                 }
                 input.constant_warnings = constants;
                 input.constant_warning_ignored = check_test_driver_random(&state) % 2 == 0 ? constants_ignored : NULL;
+                input.constant_warnings_prepared = round % 2 == 0;
+                input.constant_warning_count = 0;
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    input.constant_warning_count += constants[token] != 0;
+                }
                 stream.warnings = node_warnings;
                 stream.warning_ignored = check_test_driver_random(&state) % 2 == 0 ? node_ignored : NULL;
+                // Alternate completed producer metadata with hand-built streams, whose collector retains the dense fallback.
+                stream.warnings_prepared = round % 2 == 0;
+                stream.warning_count = 0;
+                for (uint32_t node = 0; node < stream.count; node += 1)
+                {
+                    stream.warning_count += node_warnings[node] != 0;
+                }
                 const uint32_t pragma_count = (uint32_t)check_test_driver_random(&state) % 6;
                 CheckInputFpPragma* fp = pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(&records, CheckInputFpPragma, pragma_count) : NULL;
                 for (uint32_t p = 0; fp != NULL && p < pragma_count; p += 1)

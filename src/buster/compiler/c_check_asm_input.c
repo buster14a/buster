@@ -750,6 +750,7 @@ static uint32_t check_input_asm_declared(const CheckInput* input, uint32_t first
 static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
+    input->asm_warnings_prepared = true;
     const bool scalar = reader->parser->options.scalar;
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
@@ -827,6 +828,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 else if (previous == NULL && (states[object] & 4) != 0)
                                 {
                                     attribute->ignored = true;
+                                    input->ignored_asm_count += 1;
                                 }
                                 else
                                 {

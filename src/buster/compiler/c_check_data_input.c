@@ -101,7 +101,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     const uint32_t count = input->token_count;
     bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
                  stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
-                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && (initializers->count == 0 || (initializers->plans != 0 && initializers->declaration_tokens != 0));
     result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
     uint64_t* keys = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
     uint64_t* sorting = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
@@ -190,7 +190,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         if (token != BUSTER_CHECK_NONE)
         {
             object_capacity += 1;
-            const uint32_t plan_index = initializers->declaration_plans[token];
+            const uint32_t plan_index = check_initializers_plan_index(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
             reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
@@ -223,7 +223,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         {
             const uint32_t object = result->declared_objects[at];
             const uint32_t latest = result->declared_latest[at];
-            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const uint32_t plan_index = check_initializers_plan_index(initializers, selected);
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);

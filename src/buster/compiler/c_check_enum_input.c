@@ -59,7 +59,7 @@ static bool check_input_enum_successor(CheckInputReader* reader, const CheckTagF
                 }
                 if (width == previous_width)
                 {
-                    reader->output->constant_warnings[frame->cursor] |= CHECK_WARNING_ENUM_TOO_LARGE;
+                    check_input_constant_warning_add(reader->output, frame->cursor, CHECK_WARNING_ENUM_TOO_LARGE);
                 }
             }
             value->integer = (previous + 1) & check_action_mask(width);
@@ -318,7 +318,7 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
         {
             if (frame->negative_bits > 64 || frame->positive_bits > 64 || (frame->negative_bits != 0 && frame->positive_bits == 64))
             {
-                reader->output->constant_warnings[frame->token] |= CHECK_WARNING_ENUM_TOO_LARGE;
+                check_input_constant_warning_add(reader->output, frame->token, CHECK_WARNING_ENUM_TOO_LARGE);
             }
             const TypeId type = !frame->wide_enumerators ? BUSTER_TYPE_INT : reader->parser->language.standard >= 2023 ? frame->type : underlying;
             for (uint32_t member = frame->first; member != BUSTER_CHECK_NONE; member = members[member].next)

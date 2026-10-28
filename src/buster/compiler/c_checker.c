@@ -442,6 +442,9 @@ struct CheckStream
     // The operand each diagnostic names, as CheckActionResult.diagnostic_operand has it (a CALL's argument i is 1 + i).
     uint32_t* diagnostic_operands;
     uint32_t* warnings;
+    // Final nonzero warning rows, published by check_graph_warning_contexts. Hand-built streams leave the flag off.
+    uint32_t warning_count;
+    bool warnings_prepared;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
     CheckReport* reports;
@@ -2149,6 +2152,8 @@ static bool check_graph_warning_needed(const CheckGraph* graph, const CheckStrea
 
 static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
 {
+    stream->warning_count = 0;
+    stream->warnings_prepared = true;
     bool needed = false;
     uint32_t node = 0;
     // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
@@ -2215,6 +2220,7 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
             stream->warnings[node] |= CHECK_WARNING_GNU_CONSTANT;
             stream->warning_ignored[node] |= CHECK_WARNING_GNU_CONSTANT;
         }
+        stream->warning_count += stream->warnings[node] != 0;
         const CheckOp op = graph->ops[node];
         uint32_t mask = UINT32_MAX;
         bool truth = false;
