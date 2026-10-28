@@ -3,6 +3,13 @@
 // Original declaration/statement fixtures run through both production parser/checker schedules and external Clang.
 // Include after check_test_source; no Clang implementation or external fixture is incorporated.
 
+// Keep the synthetic fixture's known regions out of the measured helper's optimizer. Otherwise it can prove that
+// every transfer succeeds and delete even the old quadratic parent walk, defeating the work-bound regression.
+static __attribute__((noinline)) bool check_test_source_region_transfer_call(const CheckInputReader* reader, uint32_t source, uint32_t target)
+{
+    return check_input_region_transfer(reader, source, target);
+}
+
 static void check_test_source_region_transfers(CheckTest* test)
 {
     static InternTable identifiers;
@@ -93,7 +100,7 @@ static void check_test_source_region_transfers(CheckTest* test)
             uint32_t accepted = 0;
             for (uint32_t target = 1; target + 2 < COUNT; target += 1)
             {
-                accepted += check_input_region_transfer(&reader, target + 1, target);
+                accepted += check_test_source_region_transfer_call(&reader, target + 1, target);
             }
             const bool finished = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end) == 0;
             const int64_t elapsed = ((int64_t)end.tv_sec - start.tv_sec) * INT64_C(1000000000) + end.tv_nsec - start.tv_nsec;
