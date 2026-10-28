@@ -2943,6 +2943,24 @@ static int run_checker_driver_tests(int argc, char** argv)
             .quiet = true,
         },
         {
+            .name = "K&R source-only sizeof call retains its arity warning",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof(f(1,2));}\n",
+            .warnings = 2,
+        },
+        {
+            .name = "K&R source-only addressed call retains known argument constraints",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((&f)((int*)0));}\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "K&R source-only call obeys warning promotion",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}\n#pragma clang diagnostic error \"-Weverything\"\n"
+                      "int g(void){return sizeof(f(1,2));}\n",
+            .rejected = true,
+        },
+        {
             "valid functions and relocatable static storage",
             "static int value=7; int *pointer=&value; int f(int x){return x+value;}\n",
             false,

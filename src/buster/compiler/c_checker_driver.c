@@ -337,7 +337,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
     const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
-    const uint64_t call_offset64 = kr_offset64 + input->kr_definition_count;
+    const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
     const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const bool reports = report_room > 1;
@@ -381,10 +381,11 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
             }
         }
-        for (uint32_t i = 0; show_warnings && i < input->kr_definition_count; i += 1)
+        for (uint32_t i = 0; show_warnings && i < input->kr_diagnostic_count; i += 1)
         {
-            const uint32_t token = input->kr_definitions[i];
-            if (token < count && check_diagnostic_kr_severity(input, token, CHECK_WARNING_KR_DEFINITION) != CHECK_WARNING_IGNORE &&
+            const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+            const uint32_t token = diagnostic.token;
+            if (token < count && check_diagnostic_kr_severity(input, token, diagnostic.warning) != CHECK_WARNING_IGNORE &&
                 (repair == NULL || check_repair_warning_token(repair, token)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
@@ -584,7 +585,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
                 else if (sequence >= (uint32_t)kr_offset64)
                 {
-                    check_driver_kr_report(parser, pp, input, token, CHECK_WARNING_KR_DEFINITION);
+                    check_driver_kr_report(parser, pp, input, token, input->kr_diagnostics[sequence - (uint32_t)kr_offset64].warning);
                 }
                 else if (sequence >= offset)
                 {

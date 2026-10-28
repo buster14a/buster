@@ -154,13 +154,22 @@ static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t known = graph->members != NULL ? graph->members[node] : 0;
-    const uint32_t callee = graph->operand0[node];
+    uint32_t callee = graph->operand0[node];
+    if (callee < graph->count && graph->ops[callee] == CHECK_OP_ADDRESS)
+    {
+        callee = graph->operand0[callee];
+    }
     return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
 }
 
 static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
 {
-    return check_graph_system_token(&input->graph, token) ? CHECK_WARNING_IGNORE : check_diagnostic_severity(input, token, warning);
+    const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    // An implicit declaration already has its own diagnostic; Clang does not add a deprecation warning to direct
+    // calls to it. An explicit pointer or a dereferenced designator still has its expression's ordinary policy.
+    const bool implicit = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && declaration < input->token_count &&
+                          (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
+    return implicit || check_graph_system_token(&input->graph, token) ? CHECK_WARNING_IGNORE : check_diagnostic_severity(input, token, warning);
 }
 
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
@@ -211,10 +220,11 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         }
     }
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
-    for (uint32_t i = 0; policies && i < input->kr_definition_count; i += 1)
+    for (uint32_t i = 0; policies && i < input->kr_diagnostic_count; i += 1)
     {
-        const uint32_t at = input->kr_definitions[i];
-        if (at < first && check_diagnostic_kr_severity(input, at, CHECK_WARNING_KR_DEFINITION) >= CHECK_WARNING_ERROR)
+        const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+        const uint32_t at = diagnostic.token;
+        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }

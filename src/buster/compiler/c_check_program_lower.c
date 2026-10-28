@@ -6436,7 +6436,18 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
                 writer->local_map[input->objects[parameter]] = local;
                 check_lower_emit(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, incoming_type), incoming);
-                check_lower_conversion(writer, incoming_type, declared_type);
+                if ((check_lower_facts(writer, declared_type) & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
+                {
+                    // Clang's K&R entry truncates the promoted int to i1, then extends it into the byte local.
+                    // This is not the truth conversion used by an ordinary assignment to _Bool.
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+                }
+                else
+                {
+                    check_lower_conversion(writer, incoming_type, declared_type);
+                }
                 check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, local);
             }
         }

@@ -1787,6 +1787,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
 {
     CheckInputReader* reader = input->reader;
     CheckAction known;
+    uint32_t source = callee;
     if (action->op == CHECK_OP_CALL && reader->output->kr_parameter_count != 0)
     {
         uint32_t use = callee;
@@ -1807,6 +1808,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             known = *action;
             known.type = reader->declared_types[declaration];
             action = &known;
+            source = use;
         }
     }
     uint32_t head = action->op == CHECK_OP_CALL ? action->operands[0].overload_head : 0;
@@ -1902,6 +1904,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         {
             *checked = (CheckActionResult){ .diagnostic = reader->output->resource ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE };
         }
+    }
+    const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
+    if (warning != 0)
+    {
+        check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning);
     }
 }
 
@@ -2608,10 +2615,21 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                     valid &= action.argument_conversions != 0;
                     reader->output->resource |= !valid;
                     CheckConstantRange name = ranges[*value_count];
-                    while (name.first < name.end && parser->tokens.kinds[name.first] == PARSE_KIND_L_PAREN && parser->tree.parents[name.first] == name.end - 1)
+                    while (name.first < name.end)
                     {
-                        name.first += 1;
-                        name.end -= 1;
+                        if (parser->tokens.kinds[name.first] == PARSE_KIND_L_PAREN && parser->tree.parents[name.first] == name.end - 1)
+                        {
+                            name.first += 1;
+                            name.end -= 1;
+                        }
+                        else if (parser->tokens.kinds[name.first] == PARSE_KIND_AMP && parser->tree.roles[name.first] == PARSE_ROLE_PREFIX)
+                        {
+                            name.first += 1;
+                        }
+                        else
+                        {
+                            break;
+                        }
                     }
                     callee = name.first + 1 == name.end ? name.first : BUSTER_CHECK_NONE;
                 }

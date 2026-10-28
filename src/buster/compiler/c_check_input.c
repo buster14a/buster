@@ -87,6 +87,14 @@ static __attribute__((unused)) uint32_t check_input_report_source(const Parser* 
            report->token < parser->tokens.count ? parser->tokens.sources[report->token] : BUSTER_CHECK_NONE;
 }
 
+// Sparse source diagnostics, including calls checked only by sizeof/typeof rather than a retained graph.
+typedef struct CheckInputKrDiagnostic CheckInputKrDiagnostic;
+struct CheckInputKrDiagnostic
+{
+    uint32_t token;
+    uint32_t warning;
+};
+
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputLiteralTable CheckInputLiteralTable;
 struct CheckInputLiteralTable
@@ -134,6 +142,7 @@ struct CheckInputNakedDiagnostic
 // A K&R definition's (C17 6.9.1): its type is the prototype of its parameters' promoted types, as clang gives it, which
 // its callers pass and its parameters convert from.
 #define CHECK_INPUT_FUNCTION_KR 0x08u
+#define CHECK_INPUT_FUNCTION_IMPLICIT 0x10u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -198,8 +207,8 @@ struct CheckInput
     uint8_t* function_flags;
     // Named K&R parameters bound the extra entry conversions without inflating ordinary units' reservations.
     uint32_t kr_parameter_count;
-    uint32_t* kr_definitions;
-    uint32_t kr_definition_count;
+    CheckInputKrDiagnostic* kr_diagnostics;
+    uint32_t kr_diagnostic_count;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -488,7 +497,7 @@ struct CheckInputReader
     uint32_t specifier_query_depth;
     bool specifier_pending;
     uint32_t implicit_function_capacity;
-    uint32_t kr_definition_capacity;
+    uint32_t kr_diagnostic_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
@@ -727,32 +736,39 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
     return type;
 }
 
-// Retain only K&R definitions' source points; ordinary translation units allocate no diagnostic column.
-static void check_input_kr_definition(CheckInputReader* reader, uint32_t token)
+// Only source diagnostics that cannot be carried by a retained expression need this list. Type-only queries
+// may revisit a call; adjacent repetitions coalesce here, and the report collector coalesces by source token.
+static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, uint32_t warning)
 {
     CheckInput* input = reader->output;
-    if (input->kr_definition_count == reader->kr_definition_capacity)
+    const uint32_t count = input->kr_diagnostic_count;
+    const bool repeated = count != 0 && input->kr_diagnostics[count - 1].token == token && input->kr_diagnostics[count - 1].warning == warning;
+    check_input_lane_refuse(reader, reader->lane, "a source-only non-prototype call diagnostic needs source-order publication");
+    if (!reader->lane && !repeated)
     {
-        const uint32_t capacity = reader->kr_definition_capacity == 0 ? 8 :
-                                  reader->kr_definition_capacity <= UINT32_MAX / 2 ? reader->kr_definition_capacity * 2 : 0;
-        uint32_t* definitions = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
-        if (definitions != NULL)
+        if (count == reader->kr_diagnostic_capacity)
         {
-            if (input->kr_definition_count != 0)
+            const uint32_t capacity = reader->kr_diagnostic_capacity == 0 ? 8 :
+                                      reader->kr_diagnostic_capacity <= UINT32_MAX / 2 ? reader->kr_diagnostic_capacity * 2 : 0;
+            CheckInputKrDiagnostic* diagnostics = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputKrDiagnostic, capacity) : NULL;
+            if (diagnostics != NULL)
             {
-                memcpy(definitions, input->kr_definitions, (uint64_t)input->kr_definition_count * sizeof(uint32_t));
+                if (count != 0)
+                {
+                    memcpy(diagnostics, input->kr_diagnostics, (uint64_t)count * sizeof(*diagnostics));
+                }
+                input->kr_diagnostics = diagnostics;
+                reader->kr_diagnostic_capacity = capacity;
             }
-            input->kr_definitions = definitions;
-            reader->kr_definition_capacity = capacity;
+            else
+            {
+                input->resource = true;
+            }
         }
-        else
+        if (!input->resource)
         {
-            input->resource = true;
+            input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning };
         }
-    }
-    if (!input->resource)
-    {
-        input->kr_definitions[input->kr_definition_count++] = token;
     }
 }
 
@@ -3312,7 +3328,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (body < count)
                 {
-                    check_input_kr_definition(reader, name);
+                    check_input_kr_diagnostic(reader, name, CHECK_WARNING_KR_DEFINITION);
                 }
                 valid = body < count && check_input_kr_declarations(reader, parameters, i, body);
                 uint32_t parameter_count = 0;
@@ -3730,6 +3746,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
             input->declarations[token] = token;
             reader->declared_types[token] = type;
             reader->declaration_kinds[token] = C_BINDING_FUNCTION;
+            input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT;
             reader->objects[token] = token + 1;
             reader->static_objects[token] = true;
             reader->linkage[token] = 2;
