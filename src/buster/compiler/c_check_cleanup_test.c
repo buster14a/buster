@@ -139,6 +139,21 @@ static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* tes
         "static void returns_void(int n){int a __attribute__((cleanup(note)))=80+n;if(n&1)return;a+=1;}"
         "int tested(int n){trace=0;int r=returns_int(n)+(int)returns_double(n)+(int)returns_ld(n)+(int)(returns_wide(n)>>64)+returns_char(n);"
         "returns_void(n);return (int)trace^r;}", "cleanup-returns", clang);
+    // A nested return is expanded while its enclosing return's expression is still pending. Both use the function's
+    // same return slot, with each body starting afresh, including floating and wide return classes.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "static int fi(int n){int a __attribute__((cleanup(note)))=3;return({if(n)return 1;2;});}"
+        "static double fd(int n){int a __attribute__((cleanup(note)))=5;return({if(n)return 3.5;4.5;});}"
+        "static long double fl(int n){int a __attribute__((cleanup(note)))=7;return({if(n)return 5.5L;6.5L;});}"
+        "static __int128 fw(int n){int a __attribute__((cleanup(note)))=9;return({if(n)return (__int128)11;(__int128)13;});}"
+        "int tested(int n){trace=0;int k=n&1;int r=fi(k)+(int)fd(k)*3+(int)fl(k)*5+(int)fw(k)*7;return r^(int)trace;}",
+        "cleanup-nested-scalar-returns", clang);
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "typedef struct S{long a,b;}S;typedef struct L{long a,b,c,d;}L;"
+        "static S fs(int n){int a __attribute__((cleanup(note)))=11;return({if(n)return(S){1,2};(S){3,4};});}"
+        "static L fm(int n){int a __attribute__((cleanup(note)))=13;return({if(n)return(L){5,6,7,8};(L){9,10,11,12};});}"
+        "int tested(int n){trace=0;S s=fs(n&1);L l=fm(n&1);return(int)(s.a+s.b*3+l.a*5+l.b*7+l.c*11+l.d*13)^(int)trace;}",
+        "cleanup-nested-aggregate-returns", clang);
     // The named return value (Sema's NRVO): every return after its declaration in its scope names it, and the cleanups'
     // writes reach the caller; any other return's value is kept before them.
     check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
