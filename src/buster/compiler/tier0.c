@@ -815,13 +815,13 @@ static uint8_t tier0_abi_register(uint8_t reg)
 }
 
 // The parts of an aggregate of `size` bytes in two registers (a location's, or a result's first two), registers[k]
-// holding eightbyte k, or with `high` the only part, eightbyte 1; BUSTER_ABI_REGISTER_NONE is no part, or with `split`
-// (a SPLIT location, or a STACK one of the high eightbyte alone) the part in the stack slot. Returns how many, into
-// `parts`.
-static uint32_t tier0_parts_of(const uint8_t* registers, bool high, bool split, uint32_t size, Tier0Part* parts)
+// holding eightbyte k, or with `high` the only part, eightbyte 1, and with `low` the only part, eightbyte 0;
+// BUSTER_ABI_REGISTER_NONE is no part, or with `split` (a SPLIT location, or a STACK one of the high or the low eightbyte
+// alone) the part in the stack slot. Returns how many, into `parts`.
+static uint32_t tier0_parts_of(const uint8_t* registers, bool high, bool low, bool split, uint32_t size, Tier0Part* parts)
 {
     uint32_t count = 0;
-    for (uint32_t k = 0; k < (high ? 1u : 2u); k += 1)
+    for (uint32_t k = 0; k < (high || low ? 1u : 2u); k += 1)
     {
         const uint8_t reg = registers[k];
         if (reg != BUSTER_ABI_REGISTER_NONE || split)
@@ -846,19 +846,22 @@ static uint32_t tier0_parts_of(const uint8_t* registers, bool high, bool split, 
 }
 
 // Whether an aggregate at `location` is on the stack whole, its bytes in its slots from its first: STACK, but for the high
-// eightbyte alone (BUSTER_ABI_FLAG_HIGH, which abi_assign puts in one slot when LLVM has no register left for it).
+// eightbyte alone (BUSTER_ABI_FLAG_HIGH, which abi_assign puts in one slot when LLVM has no register left for it) and the
+// low eightbyte alone of a larger value (BUSTER_ABI_FLAG_LOW, in one slot too: a copy of the value would run into the
+// next argument's).
 static bool tier0_aggregate_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
-    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && high;
-    return registers || slot ? tier0_parts_of(location.registers, high, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, parts) : 0;
+    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
+    return registers || slot ? tier0_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, parts) : 0;
 }
 
 // Whether parameter `p` keeps its incoming stack bytes as its home: a value on the stack, or an aggregate on the stack
@@ -878,7 +881,7 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
 // The parts of an aggregate result of `size` bytes returned in registers (none otherwise).
 static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* parts)
 {
-    return result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, size, parts) : 0;
+    return result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, parts) : 0;
 }
 
 // ABI register `reg`'s bit in a register set when it is one of `allowed` (BUSTER_TIER0_ARGUMENT_REGISTERS or
@@ -914,23 +917,27 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 
 // Whether `location` places an aggregate of `size` bytes: ignored, on the stack inside `stack_bytes` (the area its call's
 // arguments take, or an incoming one's) whole, or in argument registers (tier0_parts_valid), a SPLIT one's stack part in
-// an 8-byte slot, as is the high eightbyte alone on the stack, with no register.
+// an 8-byte slot, as is the high or the low eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
     const uint64_t slot = whole ? ((uint64_t)size + 7) & ~UINT64_C(7) : BUSTER_ABI_SLOT_BYTES;
     const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
     bool valid = location.kind == BUSTER_ABI_LOCATION_IGNORE || stack || location.kind == BUSTER_ABI_LOCATION_REGISTERS;
     valid = valid && (!stack || (location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && (uint64_t)location.stack_offset + slot <= stack_bytes));
-    if (location.kind == BUSTER_ABI_LOCATION_STACK && high)
+    if (location.kind == BUSTER_ABI_LOCATION_STACK && (high || low))
     {
-        valid = valid && location.registers[0] == BUSTER_ABI_REGISTER_NONE && location.registers[1] == BUSTER_ABI_REGISTER_NONE && size > 8 && size <= 16;
+        valid = valid && !(high && low) && location.registers[0] == BUSTER_ABI_REGISTER_NONE && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                size > 8 && size <= 16;
     }
     else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT)
     {
         valid = valid && tier0_parts_valid(location.registers, high, location.kind == BUSTER_ABI_LOCATION_SPLIT, size, BUSTER_TIER0_ARGUMENT_REGISTERS);
     }
+    // LOW is a STACK location's alone.
+    valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
     return valid;
 }
 

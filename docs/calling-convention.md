@@ -293,13 +293,18 @@ members' own:
   second, or none: an eightbyte each, one vector register for a `VECTOR`, two
   general registers for a `PAIR`.
 - **`STACK`:** the whole value at `stack_offset`. With `HIGH`, the value's
-  high eightbyte alone, in an 8-byte slot.
+  high eightbyte alone, in an 8-byte slot; with `LOW`, its low eightbyte alone,
+  in an 8-byte slot, though the value is larger (rule 6, below): the next
+  argument's slot starts 8 bytes after it, which a copy of the value would run
+  into.
 - **`SPLIT`:** one part in its register and the other, `NONE` in its place, in
   the 8-byte slot at `stack_offset`, where clang's count runs ahead of LLVM's
   registers (see "Two counts").
 
-The flags are `SIGN` and `ZERO` (the caller extends the value to 32 bits) and
-`HIGH` (the parts are the value's high eightbyte alone).
+The flags are `SIGN` and `ZERO` (the caller extends the value to 32 bits),
+`HIGH` (the parts are the value's high eightbyte alone) and `LOW` (the part is
+the low eightbyte alone of a value larger than 8 bytes, in a `STACK`
+location's slot).
 
 `AbiCall`, 16 bytes: `stack_bytes` (the argument area's size, a multiple of
 8, whose start is rsp at the call), `stack_alignment_log2` (4, or more when an
@@ -705,7 +710,13 @@ argument in order:
    the low eightbyte (unless it is padding) and then the high one each take
    LLVM's next register of its class (a general one for a `LOW_GENERAL` low
    eightbyte), or an 8-byte slot. The location is `REGISTERS`, `STACK` (both
-   on the stack) or `SPLIT`.
+   on the stack) or `SPLIT`. A value larger than 8 bytes whose high eightbyte
+   is NO_CLASS that goes on the stack so is `STACK` with `LOW`: its low
+   eightbyte alone, an `i64` or a `double`, in one 8-byte slot (clang copies
+   the whole value only once its own count has no register: rule 4's slot of
+   its size). That NO_CLASS eightbyte may hold bytes of a scalar that starts in
+   the low one, which clang classifies by its start (an 8-byte enum at offset 2
+   of a packed record), and which neither register nor slot passes.
 
 For `f(long, long, long, long, nullptr_t, struct {long, long}, long)` the
 struct is `SPLIT` between r9 and the stack's first slot, and the last `long`,
@@ -1316,10 +1327,12 @@ files. The counts below are the defaults'
   after five `long`s, with r9 left for the `long` after it, and an `i8` after
   six; and after a result of two `__int128`s in a vector, which LLVM demotes
   to a hidden pointer clang doesn't count (`DEMOTED`), and five `long`s, a
-  struct aligned to 16 that clang counts in a register, an `i64` at stack 0,
-  and the `long` after it at 8; and 513 bools after six `long`s, a copy of 80
-  bytes aligned to 128, the `long` after it at 80, and as a result, whose
-  hidden pointer clang doesn't count, the sixth `long` on the stack. And
+  struct aligned to 16 that clang counts in a register, an `i64` at stack 0
+  (`LOW`), and the `long` after it at 8; and 513 bools after six `long`s, a
+  copy of 80 bytes aligned to 128, the `long` after it at 80, and as a result,
+  whose hidden pointer clang doesn't count, the sixth `long` on the stack; and
+  that struct aligned to 16 after six `long`s, a copy of its 16 bytes at stack 0
+  (not `LOW`: clang's count has no register), the `long` after it at 16. And
   `va_arg`'s plans for a `long` aligned to 32, which reads the overflow area
   aligned to 8, and for that union, from two general registers' slots. Last
   the levels across four calls by each path: a struct of 101 bytes ending in
