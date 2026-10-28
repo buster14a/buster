@@ -118,6 +118,24 @@ struct CheckRegionProof
     uint32_t flags;
 };
 
+// The allocation/scheduling facts produced in node order. vector_blocks describes the independent validator,
+// rather than the graph, and is deliberately excluded when comparing a reader's recorded facts.
+typedef struct CheckGraphValidation CheckGraphValidation;
+struct CheckGraphValidation
+{
+    uint32_t maximum_arguments;
+    uint32_t maximum_effects;
+    uint32_t builtins[6];
+    uint32_t arguments;
+    uint32_t varargs;
+    uint32_t builtin_calls;
+    uint32_t vectors;
+    uint32_t x86;
+    uint32_t overloads;
+    uint32_t leaves;
+    uint32_t vector_blocks;
+};
+
 struct CheckGraph
 {
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
@@ -195,6 +213,13 @@ struct CheckGraph
     CheckRegionProofStep* region_steps;
     uint32_t region_step_count;
     uint32_t region_step_capacity;
+    // Only the source reader publishes these facts, after completing every node and sideband list. The graph
+    // is immutable after publication. Other producers leave recorded_pure null and always use validation.
+    // Exactly capacity bytes, no padding; the scheduler copies count bytes because its marks are mutable.
+    uint8_t* recorded_pure;
+    CheckGraphValidation recorded;
+    uint32_t recorded_nodes;
+    bool recorded_ready;
 };
 
 typedef enum CheckStatus
@@ -490,6 +515,8 @@ typedef struct CheckOptions CheckOptions;
 struct CheckOptions
 {
     bool scalar;
+    // Validate reader-owned graphs too, and compare their retained purity/allocation facts with the oracle.
+    bool verify;
     // 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
 };
@@ -583,6 +610,7 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
         graph->argument_offsets[node] = 0;
         graph->argument_counts[node] = 0;
         graph->count += 1;
+        graph->recorded_ready = false;
         result = node;
     }
     return result;
@@ -734,24 +762,69 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     return result;
 }
 
-// What check_graph_validate counts as it goes: each argument slice's and sideband list's consumption, in node order, and the
-// maxima and counts check_graph_run sizes its outputs by. Only a valid graph's are defined.
-typedef struct CheckGraphValidation CheckGraphValidation;
-struct CheckGraphValidation
+// Complete newly written nodes while their columns are hot. The reader calls this before adding the next
+// node, after the previous node's leaf, requested type, arguments and witnesses have been filled. The only
+// cross-node work is three already-produced purity bytes; required source order is preserved on both paths.
+static void check_graph_record_nodes(CheckGraph* graph)
 {
-    uint32_t maximum_arguments;
-    uint32_t maximum_effects;
-    uint32_t builtins[6];
-    uint32_t arguments;
-    uint32_t varargs;
-    uint32_t builtin_calls;
-    uint32_t vectors;
-    uint32_t x86;
-    uint32_t overloads;
-    uint32_t leaves;
-    // The blocks check_graph_validate_vector decided itself, without the exact path (0 on that path).
-    uint32_t vector_blocks;
-};
+    for (uint32_t node = graph->recorded_nodes; node < graph->count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t count = graph->argument_counts != NULL ? graph->argument_counts[node] : 0;
+        const bool varargs = op == CHECK_OP_VARARGS;
+        CheckGraphValidation* state = &graph->recorded;
+        graph->recorded_pure[node] = (uint8_t)check_graph_pure(graph, node, graph->recorded_pure);
+        if (varargs)
+        {
+            state->varargs += 1;
+        }
+        else if (count != 0)
+        {
+            state->maximum_arguments = count > state->maximum_arguments ? count : state->maximum_arguments;
+            state->arguments += count;
+        }
+        // Most nodes are leaves or ordinary arithmetic. Leave their cold, exceptional counters untouched:
+        // unconditional zero increments otherwise make Clang load/store the complete counter vector per node.
+        switch (op)
+        {
+            case CHECK_OP_BUILTIN_OVERFLOW: state->maximum_effects += 1; break;
+            case CHECK_OP_BUILTIN_MISC: state->builtins[0] += 1; break;
+            case CHECK_OP_BUILTIN_FLOAT: state->builtins[1] += 1; break;
+            case CHECK_OP_BUILTIN_QUERY: state->builtins[2] += 1; break;
+            case CHECK_OP_BUILTIN_ATOMIC: state->builtins[3] += 1; break;
+            case CHECK_OP_BUILTIN_VECTOR: state->builtins[4] += 1; break;
+            case CHECK_OP_BUILTIN_BIT_CAST: state->builtins[5] += 1; break;
+            default: break;
+        }
+    }
+    graph->recorded_nodes = graph->count;
+}
+
+static void check_graph_record_finish(CheckGraph* graph)
+{
+    check_graph_record_nodes(graph);
+    graph->recorded.builtin_calls = graph->builtin_count;
+    graph->recorded.vectors = graph->vector_member_count;
+    graph->recorded.x86 = graph->x86_count;
+    graph->recorded.overloads = graph->overload_count;
+    // check_graph_add already counts the compact VALUE leaves as it appends their slots.
+    graph->recorded.leaves = graph->leaf_count;
+    graph->recorded_ready = true;
+}
+
+static bool check_graph_recorded_equal(const CheckGraph* graph, const CheckGraphValidation* validation, const uint8_t* pure, uint32_t* failed)
+{
+    CheckGraphValidation expected = *validation;
+    expected.vector_blocks = 0;
+    bool result = graph->recorded_ready && graph->recorded_nodes == graph->count &&
+                  memcmp(&expected, &graph->recorded, sizeof(expected)) == 0;
+    for (uint32_t node = 0; result && node < graph->count; node += 1)
+    {
+        result = pure[node] == graph->recorded_pure[node];
+        *failed = result ? BUSTER_CHECK_NONE : node;
+    }
+    return result;
+}
 
 // The graph's own counts, its sideband lists and the columns every node needs, before any node.
 static bool check_graph_validate_lists(const CheckGraph* graph)
@@ -2425,8 +2498,25 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     CheckGraphValidation validation = { 0 };
     if (result)
     {
-        result = options->scalar ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
-                                   check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
+        const bool recorded = graph->recorded_ready && graph->recorded_nodes == count &&
+                              (count == 0 || graph->recorded_pure != NULL);
+        if (recorded && !options->verify)
+        {
+            validation = graph->recorded;
+            if (count != 0)
+            {
+                memcpy(pure, graph->recorded_pure, count);
+            }
+        }
+        else
+        {
+            result = options->scalar ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
+                                       check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
+            if (result && recorded)
+            {
+                result = check_graph_recorded_equal(graph, &validation, pure, &stream->failed_node);
+            }
+        }
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
     }
     const uint32_t maximum_arguments = validation.maximum_arguments;

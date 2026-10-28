@@ -614,6 +614,17 @@ static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph*
         counters.vector_blocks = 0;
         equal = memcmp(scalar_pure, vector_pure, graph->count) == 0 && memcmp(&scalar_state, &counters, sizeof(scalar_state)) == 0 &&
                 (blocks == BUSTER_CHECK_NONE || vector_state.vector_blocks == blocks);
+        // Reuse the vector oracle's finished bytes for the producer's independent node-order recording. This
+        // covers all generated operator/sideband classes, optional columns, and the guarded logical tails.
+        CheckGraph recorded = *graph;
+        recorded.recorded = (CheckGraphValidation){ 0 };
+        recorded.recorded_nodes = 0;
+        recorded.recorded_ready = false;
+        recorded.recorded_pure = vector_pure;
+        check_graph_record_finish(&recorded);
+        uint32_t failed = BUSTER_CHECK_NONE;
+        check_test_expect(test, check_graph_recorded_equal(&recorded, &scalar_state, scalar_pure, &failed),
+                          "recorded facts differ from independent validation on a generated or guarded graph");
     }
     check_test_expect(test, equal, description);
 }
