@@ -139,9 +139,10 @@ static void check_lanes_test_function(char* text, uint64_t capacity, uint64_t* u
     else if (kind == 6)
     {
         check_lanes_test_append(text, capacity, used,
-                                "    long r = 0;\n    switch (a & 7)\n    {\n"
+                                "    long image[65] = { [0 ... 64] = 17 };\n    long r = 0;\n    switch (a & 7)\n    {\n"
                                 "        case 0: r = b; break;\n        case 1: r = b * 2; break;\n        case 2: r = b - a; break;\n"
-                                "        case 3: r = a * a; break;\n        case 5: r = b ^ 5; break;\n        default: r = -b; break;\n    }\n");
+                                "        case 3: r = a * a; break;\n        case 5: r = b ^ 5; break;\n        default: r = -b; break;\n    }\n"
+                                "    r += image[(unsigned long)b & 63];\n");
     }
     else if (kind == 7)
     {

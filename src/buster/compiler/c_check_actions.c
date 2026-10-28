@@ -229,6 +229,9 @@ typedef struct CheckVectorMember CheckVectorMember;
 struct CheckAction
 {
     CheckOp op;
+    // The checker's scalar path (CheckOptions.scalar), whose actions take the exact twins of what has one: a member
+    // access's lookup compares one name at a time (type_lookup_member_scalar).
+    bool scalar;
     CheckValue operands[3];
     // Cast destination; sizeof/alignof type when nonzero. Otherwise these query operand 0's type.
     TypeId type;
@@ -262,6 +265,9 @@ struct CheckActionResult
     CheckDiagnostic diagnostic;
     uint32_t diagnostic_operand;
     uint32_t warnings;
+    // MEMBER and ARROW: the member's offset in bits from its record's start, through anonymous members, which the lowering
+    // takes from the stream rather than looking the member up again (#591). 0 for other actions.
+    uint64_t member_offset;
 };
 
 static void check_action_scalar(TypeTable* table, const CheckAction* action, CheckActionResult* result);
@@ -1568,89 +1574,28 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
     }
 }
 
-typedef struct CheckMemberFrame CheckMemberFrame;
-struct CheckMemberFrame
-{
-    uint32_t next;
-    uint32_t end;
-    uint32_t qualifiers;
-    uint64_t offset;
-};
-
 // The member of a record that a name finds, through its anonymous members, with its bit offset and the qualifiers it
-// inherits. Every member access runs it, inlined into check_action_member; the atomic alignment walk calls its copy
-// (check_action_member_lookup), so that a second caller doesn't take it out of check_action_member's code.
+// inherits: by the records' lookups (type_lookup_member), or on the scalar path by its exact twin. The usual scan/index
+// paths avoid a whole-table clear and a linear member scan; collision chains, anonymous depth and the capacity fallback
+// still determine their worst-case work (#591). Every member access runs it, inlined into check_action_member;
+// the atomic alignment walk calls its copy (check_action_member_lookup), so that a second caller doesn't take it out of
+// check_action_member's code.
 static inline __attribute__((always_inline)) uint32_t check_action_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset,
-                                                                                uint32_t* qualifiers, CheckActionResult* result)
+                                                                                uint32_t* qualifiers, bool scalar, CheckActionResult* result)
 {
-    Scratch scratch = scratch_begin(NULL);
-    const uint32_t count = table->types.count;
-    CheckMemberFrame* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckMemberFrame, count);
-    uint8_t* visited = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, count);
-    uint32_t member = 0;
-    uint32_t depth = 0;
-    if (stack == NULL || visited == NULL)
+    uint32_t member = scalar ? type_lookup_member_scalar(table, record, name, offset, qualifiers) : type_lookup_member(table, record, name, offset, qualifiers);
+    if (member == BUSTER_TYPE_MEMBER_UNKNOWN)
     {
         check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+        member = 0;
     }
-    else
-    {
-        memset(visited, 0, count);
-        const uint32_t index = type_index(record);
-        const uint32_t tag = table->types.index[index];
-        visited[index] = 1;
-        stack[depth++] = (CheckMemberFrame){
-            .next = table->tags.member_begin[tag],
-            .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-            .qualifiers = type_qualifiers(record),
-            .offset = 0,
-        };
-    }
-    while (member == 0 && depth != 0)
-    {
-        CheckMemberFrame* top = &stack[depth - 1];
-        if (top->next == top->end)
-        {
-            depth -= 1;
-        }
-        else
-        {
-            const uint32_t candidate = top->next++;
-            const uint64_t member_offset = top->offset + table->members.offset[candidate];
-            if (table->members.name[candidate] == name && name != 0)
-            {
-                member = candidate;
-                *offset = member_offset;
-                *qualifiers = top->qualifiers;
-            }
-            else if (table->members.name[candidate] == 0 && (table->members.flags[candidate] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
-            {
-                const TypeId inner = type_strip_aligned(table, table->members.type[candidate]);
-                const uint32_t index = type_index(inner);
-                const uint8_t kind = type_kind(table, inner);
-                if (!visited[index] && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
-                {
-                    const uint32_t tag = table->types.index[index];
-                    const uint32_t inherited = top->qualifiers | type_qualifiers(inner);
-                    visited[index] = 1;
-                    stack[depth++] = (CheckMemberFrame){
-                        .next = table->tags.member_begin[tag],
-                        .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-                        .qualifiers = inherited,
-                        .offset = member_offset,
-                    };
-                }
-            }
-        }
-    }
-    scratch_end(scratch);
     return member;
 }
 
 static __attribute__((noinline)) uint32_t check_action_member_lookup(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers,
                                                                       CheckActionResult* result)
 {
-    return check_action_find_member(table, record, name, offset, qualifiers, result);
+    return check_action_find_member(table, record, name, offset, qualifiers, false, result);
 }
 
 static void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)
@@ -1682,13 +1627,14 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
     {
         uint64_t offset = 0;
         uint32_t qualifiers = 0;
-        const uint32_t member = check_action_find_member(table, record, action->member, &offset, &qualifiers, result);
+        const uint32_t member = check_action_find_member(table, record, action->member, &offset, &qualifiers, action->scalar, result);
         if (member == 0)
         {
             check_action_diagnose(result, CHECK_DIAG_MEMBER, 0);
         }
         else
         {
+            result->member_offset = offset;
             result->value.type = type_qualify(table, table->members.type[member], qualifiers);
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
@@ -1716,23 +1662,28 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
     }
 }
 
+// Whether no member of a record, nor of the records and arrays it holds, is const. Each type is entered once: a sparse set
+// over type indices that nothing clears (as type_lookup_walk's), `entered` listing them and `places` giving each its place
+// there, so that a check costs the types it reaches, not a byte cleared per type of the table (#591).
 static bool check_action_record_modifiable(const TypeTable* table, TypeId record, CheckActionResult* result)
 {
     Scratch scratch = scratch_begin(NULL);
     const uint32_t count = table->types.count;
     TypeId* stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count);
-    uint8_t* visited = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, count);
-    bool valid = stack != NULL && visited != NULL;
+    uint32_t* entered = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
+    uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
+    bool valid = stack != NULL && entered != NULL && places != NULL;
     uint32_t depth = 0;
+    uint32_t seen = 0;
     if (!valid)
     {
         check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
     }
     else
     {
-        memset(visited, 0, count);
         const uint32_t index = type_index(type_strip_aligned(table, record));
-        visited[index] = 1;
+        places[index] = seen;
+        entered[seen++] = index;
         stack[depth++] = record;
     }
     while (valid && depth != 0)
@@ -1749,9 +1700,10 @@ static bool check_action_record_modifiable(const TypeTable* table, TypeId record
             const TypeId element = type_strip_aligned(table, type_element(table, next));
             const uint32_t element_index = type_index(element);
             valid = (type_qualifiers(element) & BUSTER_TYPE_CONST) == 0;
-            if (valid && !visited[element_index])
+            if (valid && !(places[element_index] < seen && entered[places[element_index]] == element_index))
             {
-                visited[element_index] = 1;
+                places[element_index] = seen;
+                entered[seen++] = element_index;
                 stack[depth++] = element;
             }
         }
@@ -1765,9 +1717,10 @@ static bool check_action_record_modifiable(const TypeTable* table, TypeId record
                 const TypeId member = type_strip_aligned(table, table->members.type[begin + i]);
                 const uint32_t member_index = type_index(member);
                 valid = (type_qualifiers(member) & BUSTER_TYPE_CONST) == 0;
-                if (valid && !visited[member_index])
+                if (valid && !(places[member_index] < seen && entered[places[member_index]] == member_index))
                 {
-                    visited[member_index] = 1;
+                    places[member_index] = seen;
+                    entered[seen++] = member_index;
                     stack[depth++] = member;
                 }
             }

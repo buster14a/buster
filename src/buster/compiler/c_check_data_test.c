@@ -1520,6 +1520,505 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
     check_data_test_close(&fixture);
 }
 
+static void check_data_test_zero_bits(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "zero classification guarded storage");
+    for (uint32_t size = 0; ready && size <= 257; size += 1)
+    {
+        uint8_t* bytes = mapping + page - size;
+        memset(bytes, 0, size);
+        check_test_expect(test, !check_data_nonzero_bits(bytes, 0, (uint64_t)size * 8, false) &&
+                               !check_data_nonzero_bits(bytes, 0, (uint64_t)size * 8, true),
+                          "zero byte scans agree at every vector tail and guarded end");
+        for (uint32_t tail = 0; size != 0 && tail < 8; tail += 1)
+        {
+            for (uint32_t head = 0; head < 8; head += 1)
+            {
+                const uint64_t end = (uint64_t)size * 8 - tail;
+                const uint64_t begin = head < end ? head : end;
+                const uint64_t positions[] = { 0, begin, end - 1, (uint64_t)size * 8 - 1 };
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(positions); i += 1)
+                {
+                    const uint64_t bit = positions[i];
+                    bytes[bit / 8] = (uint8_t)(1u << (bit % 8));
+                    const bool expected = bit >= begin && bit < end;
+                    check_test_expect(test, check_data_nonzero_bits(bytes, begin, end, false) == expected &&
+                                           check_data_nonzero_bits(bytes, begin, end, true) == expected,
+                                      "scalar/vector zero scans preserve partial-byte ownership");
+                    bytes[bit / 8] = 0;
+                }
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+}
+
+static void check_data_test_symbolic_zero(CheckTest* test, TypeTable* types)
+{
+    const uint64_t size = UINT64_C(1) << 30;
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, size);
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    const uint8_t copied[] = { 0, 0, 0x80, 0, 0, 0, 0, 0 };
+    for (uint32_t variant = 0; variant < 16; variant += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 4);
+        check_test_expect(test, ready, "symbolic zero fixture");
+        if (ready)
+        {
+            SymbolId map[3] = { 0 };
+            const bool tls = (variant % 2) != 0;
+            map[1] = check_data_test_symbol(&fixture.link, "huge_zero", BUSTER_LINK_SYMBOL_GLOBAL | (tls ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT));
+            CheckInitPart parts[3] = {
+                {
+                    .kind = CHECK_INIT_CLEAR,
+                    .type = array,
+                    .byte_count = size,
+                },
+                {
+                    .kind = CHECK_INIT_VALUE,
+                    .type = BUSTER_TYPE_UCHAR,
+                    .bit_offset = (size - 1) * 8,
+                    .value = check_test_integer(BUSTER_TYPE_UCHAR, 0),
+                },
+                {
+                    .kind = CHECK_INIT_CLEAR,
+                    .type = BUSTER_TYPE_UCHAR,
+                    .bit_offset = (size - 1) * 8,
+                    .byte_count = 1,
+                },
+            };
+            const CheckInitializer initializer = {
+                .type = array,
+                .parts = parts,
+                .count = variant < 2 ? 2 : BUSTER_ARRAY_LENGTH(parts),
+            };
+            const CheckDataObject object = {
+                .type = array,
+                .object = 1,
+                .initializer = BUSTER_CHECK_NONE,
+                .initializer_plan = &initializer,
+                .alignment_log2 = 6,
+            };
+            if (variant >= 2 && variant < 4)
+            {
+                parts[1].value = check_test_integer(BUSTER_TYPE_UCHAR, 255);
+                parts[2] = parts[1];
+                parts[2].value.integer = 0;
+            }
+            else if (variant >= 4 && variant < 6)
+            {
+                parts[1].kind = CHECK_INIT_BYTES;
+                parts[1].bit_offset = (size - sizeof(copied)) * 8;
+                parts[1].bytes = copied;
+                parts[1].byte_count = sizeof(copied);
+                parts[2].bit_offset = parts[1].bit_offset + 2 * 8 + 7;
+                parts[2].bit_width = 1;
+            }
+            else if (variant >= 6 && variant < 8)
+            {
+                parts[1].type = BUSTER_TYPE_UINT;
+                parts[1].bit_offset = (size - 2) * 8 + 5;
+                parts[1].bit_width = 9;
+                parts[1].value = check_test_integer(BUSTER_TYPE_UINT, 511);
+                parts[2].bit_offset = parts[1].bit_offset;
+                parts[2].bit_width = 9;
+            }
+            else if (variant >= 8 && variant < 10)
+            {
+                parts[1].type = pointer;
+                parts[1].bit_offset = (size - 8) * 8;
+                parts[1].value = (CheckValue){
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 2,
+                    .offset = 17,
+                };
+                parts[2].bit_offset = parts[1].bit_offset;
+                parts[2].byte_count = 8;
+            }
+            else if (variant >= 10)
+            {
+                parts[1].value.integer = 1;
+                parts[2] = parts[0];
+            }
+            memset(fixture.scratch.base, 0x5a, fixture.scratch.capacity);
+            CheckDataStatus expected = CHECK_DATA_OK;
+            if (variant == 12 || variant == 13)
+            {
+                fixture.scratch.capacity = variant == 12 ? 64 : 128;
+                expected = CHECK_DATA_RESOURCE;
+            }
+            else if (variant == 14)
+            {
+                parts[1].value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+                expected = CHECK_DATA_NON_CONSTANT;
+            }
+            else if (variant == 15)
+            {
+                parts[1].bit_offset = size * 8;
+                expected = CHECK_DATA_INVALID;
+            }
+            const Link previous = fixture.link;
+            uint8_t previous_tables[4096];
+            const bool fits = fixture.tables.length <= sizeof(previous_tables);
+            check_test_expect(test, fits, "symbolic zero rollback snapshot fits");
+            if (fits)
+            {
+                memcpy(previous_tables, fixture.tables.base, fixture.tables.length);
+            }
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                 &fixture.bytes, &fixture.scratch, &result);
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            if (expected == CHECK_DATA_OK)
+            {
+                check_test_expect(test, emitted && result.byte_count == 0 && result.fixup_count == 0 && result.atom_count == 1 &&
+                                   fixture.bytes.length == 0 && fixture.scratch.length == 0 && link_check(&fixture.link) == LINK_ERROR_NONE &&
+                                   atom != 0 && fixture.link.atoms.size[atom] == size && fixture.link.atoms.bytes[atom] == 0 &&
+                                   fixture.link.atoms.class[atom] == (tls ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS) &&
+                                   fixture.link.atoms.alignment_log2[atom] == 6 && fixture.link.symbols.size[map[1]] == size,
+                              "one-GiB zero aggregate preserves size/alignment/symbol/TLS with only 64-KiB scratch");
+            }
+            else
+            {
+                check_test_expect(test, !emitted && result.status == expected && fits &&
+                                       memcmp(&previous, &fixture.link, sizeof(previous)) == 0 &&
+                                       memcmp(previous_tables, fixture.tables.base, fixture.tables.length) == 0 &&
+                                       fixture.bytes.length == 0 && fixture.scratch.length == 0,
+                                  "zero-plan metadata exhaustion and invalid overwritten writes leave all publication state unchanged");
+            }
+            fixture.scratch.capacity = 65536;
+        }
+        check_data_test_close(&fixture);
+    }
+}
+
+static void check_data_test_zero_batch(CheckTest* test, TypeTable* types)
+{
+    enum { COUNT = 1024 };
+    const uint64_t size = UINT64_C(1) << 30;
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, size);
+    CheckInitPart parts[2] = {
+        {
+            .kind = CHECK_INIT_CLEAR,
+            .type = array,
+            .byte_count = size,
+        },
+        {
+            .kind = CHECK_INIT_VALUE,
+            .type = BUSTER_TYPE_UCHAR,
+            .value = check_test_integer(BUSTER_TYPE_UCHAR, 0),
+        },
+    };
+    const CheckInitializer initializer = {
+        .type = array,
+        .parts = parts,
+        .count = BUSTER_ARRAY_LENGTH(parts),
+    };
+    CheckDataObject objects[COUNT] = { 0 };
+    SymbolId map[COUNT + 1] = { 0 };
+    CheckDataTestLink fixture = { 0 };
+    bool ready = check_data_test_open(&fixture, COUNT + 2);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "zero_%u", i);
+        map[i + 1] = check_data_test_symbol(&fixture.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[i + 1] != 0;
+        objects[i] = (CheckDataObject){
+            .type = array,
+            .object = i + 1,
+            .initializer = BUSTER_CHECK_NONE,
+            .initializer_plan = &initializer,
+        };
+    }
+    check_test_expect(test, ready, "zero batch fixture symbols and names");
+    if (ready)
+    {
+        CheckDataResult result = { 0 };
+        const bool emitted = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                             &fixture.bytes, &fixture.scratch, &result);
+        check_test_expect(test, emitted && result.atom_count == COUNT && result.byte_count == 0 &&
+                               fixture.bytes.length == 0 && fixture.scratch.length == 0 && link_check(&fixture.link) == LINK_ERROR_NONE,
+                          "1024 one-GiB BSS objects release unused write caches inside a 64-KiB scratch batch");
+    }
+    check_data_test_close(&fixture);
+}
+
+static void check_data_test_boundary_sort(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[2];
+    bool ready = true;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        mappings[i] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "boundary sort guarded storage");
+    for (uint32_t shape = 0; ready && shape < 6; shape += 1)
+    {
+        for (uint32_t count = 0; count <= 200; count += 1)
+        {
+            uint64_t* keys = (uint64_t*)(mappings[0] + page) - count;
+            uint64_t* temporary = (uint64_t*)(mappings[1] + page) - count;
+            uint64_t scalar[200];
+            uint64_t scalar_temporary[200];
+            uint64_t expected[200];
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                uint64_t value = ((uint64_t)check_test_random(test) << 32) | check_test_random(test);
+                value = shape == 1 ? value & UINT32_MAX : shape == 2 ? value << 32 : shape == 3 ? UINT64_MAX :
+                        shape == 4 ? count - i : shape == 5 ? (i % 2 == 0 ? UINT64_MAX : 0) : value;
+                keys[i] = scalar[i] = value;
+                uint32_t at = i;
+                while (at != 0 && expected[at - 1] > value)
+                {
+                    expected[at] = expected[at - 1];
+                    at -= 1;
+                }
+                expected[at] = value;
+            }
+            const uint64_t* vector = check_data_sort_boundaries(keys, temporary, count, false);
+            const uint64_t* twin = check_data_sort_boundaries(scalar, scalar_temporary, count, true);
+            check_test_expect(test, memcmp(vector, expected, (uint64_t)count * 8) == 0 && memcmp(twin, expected, (uint64_t)count * 8) == 0,
+                              "64-bit boundary sort matches independent insertion oracle and scalar twin at guarded tails");
+        }
+    }
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], page * 2);
+        }
+    }
+}
+
+static void check_data_test_dense_cache(CheckTest* test, TypeTable* types)
+{
+    enum { COUNT = 8, SIZE = 256 };
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, SIZE);
+    CheckInitPart parts[SIZE];
+    uint8_t expected[SIZE];
+    for (uint32_t i = 0; i < SIZE; i += 1)
+    {
+        // Eight final zero writes keep this on the cached path even when the bounded direct-writer proof exists.
+        expected[i] = i + BUSTER_CHECK_DATA_WITNESS_PARTS >= SIZE ? 0 : (uint8_t)(i + 1);
+        parts[i] = (CheckInitPart){
+            .kind = CHECK_INIT_VALUE,
+            .type = BUSTER_TYPE_UCHAR,
+            .bit_offset = (uint64_t)i * 8,
+            .value = check_test_integer(BUSTER_TYPE_UCHAR, expected[i]),
+        };
+    }
+    const CheckInitializer initializer = { .type = array, .parts = parts, .count = SIZE };
+    CheckDataObject objects[COUNT];
+    SymbolId map[COUNT + 1] = { 0 };
+    CheckDataTestLink fixture = { 0 };
+    bool ready = check_data_test_open(&fixture, COUNT + 2);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "dense_%u", i);
+        map[i + 1] = check_data_test_symbol(&fixture.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[i + 1] != 0;
+        objects[i] = (CheckDataObject){
+            .type = array,
+            .object = i + 1,
+            .initializer = BUSTER_CHECK_NONE,
+            .initializer_plan = &initializer,
+        };
+    }
+    check_test_expect(test, ready, "dense byte-array cache fixture");
+    if (ready)
+    {
+        fixture.scratch.capacity = 4096;
+        CheckDataResult result = { 0 };
+        bool valid = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                     &fixture.bytes, &fixture.scratch, &result);
+        for (uint32_t i = 0; valid && i < COUNT; i += 1)
+        {
+            const AtomId atom = fixture.link.symbols.atom[map[i + 1]];
+            valid = atom != 0 && fixture.link.atoms.class[atom] == BUSTER_LINK_CLASS_DATA &&
+                    memcmp(fixture.link.atoms.bytes[atom], expected, SIZE) == 0;
+        }
+        check_test_expect(test, valid && result.byte_count == COUNT * SIZE && fixture.scratch.length == 0,
+                          "dense byte objects use compact scalar slots and release each cache before the next object within 4-KiB scratch");
+        fixture.scratch.capacity = 65536;
+    }
+    check_data_test_close(&fixture);
+}
+
+static void check_data_test_direct_writes(CheckTest* test, TypeTable* types)
+{
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, 16);
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
+    for (uint32_t mode = 0; mode < 6; mode += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 4);
+        check_test_expect(test, ready, "direct validated write fixture");
+        if (ready)
+        {
+            SymbolId map[3] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "direct", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckInitPart parts[] = {
+                { .kind = CHECK_INIT_CLEAR, .type = array, .byte_count = 16 },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .value = check_test_integer(BUSTER_TYPE_UCHAR, mode == 1 ? 0 : 17) },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .bit_offset = 8, .value = check_test_integer(BUSTER_TYPE_UCHAR, 18) },
+                { .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .bit_offset = 8, .value = check_test_integer(BUSTER_TYPE_UCHAR, 0) },
+            };
+            if (mode == 2 || mode == 3)
+            {
+                parts[1] = (CheckInitPart){
+                    .kind = CHECK_INIT_VALUE,
+                    .type = pointer,
+                    .bit_offset = 64,
+                    .value = {
+                        .type = pointer,
+                        .category = CHECK_RVALUE,
+                        .flags = BUSTER_CHECK_STATIC_OBJECT,
+                        .constant_kind = CHECK_CONSTANT_ADDRESS,
+                        .object = 2,
+                    },
+                };
+                parts[2] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = pointer, .bit_offset = 64, .byte_count = 8 };
+                parts[3] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_UCHAR, .value = check_test_integer(BUSTER_TYPE_UCHAR, 17) };
+                if (mode == 3)
+                {
+                    parts[2].byte_count = 0;
+                    map[2] = check_data_test_symbol(&fixture.link, "target", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+                }
+            }
+            else if (mode >= 4)
+            {
+                parts[1].value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+                parts[3].bit_offset = 15 * 8;
+                parts[3].value.integer = 19;
+                if (mode == 5)
+                {
+                    fixture.bytes.capacity = 0;
+                }
+            }
+            const CheckInitializer initializer = { .type = array, .parts = parts, .count = BUSTER_ARRAY_LENGTH(parts) };
+            const CheckDataObject object = { .type = array, .object = 1, .initializer = BUSTER_CHECK_NONE, .initializer_plan = &initializer };
+            const Link previous = fixture.link;
+            uint8_t tables[4096];
+            const bool fits = fixture.tables.length <= sizeof(tables);
+            if (fits)
+            {
+                memcpy(tables, fixture.tables.base, fixture.tables.length);
+            }
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                 &fixture.bytes, &fixture.scratch, &result);
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            if (mode < 4)
+            {
+                uint8_t expected[16] = { 0 };
+                expected[0] = mode == 1 ? 0 : 17;
+                const uint8_t class = mode == 1 ? BUSTER_LINK_CLASS_BSS : BUSTER_LINK_CLASS_DATA;
+                check_test_expect(test, emitted && atom != 0 && fixture.link.atoms.class[atom] == class &&
+                                       (mode == 1 ? fixture.link.atoms.bytes[atom] == 0 : memcmp(fixture.link.atoms.bytes[atom], expected, 16) == 0) &&
+                                       result.fixup_count == (mode == 3 ? 1u : 0u) && fixture.scratch.length == 0 &&
+                                       link_check(&fixture.link) == LINK_ERROR_NONE,
+                                  "direct/cached writes preserve overwritten integer and relocation bytes, including final zero classification");
+            }
+            else
+            {
+                check_test_expect(test, !emitted && result.status == CHECK_DATA_NON_CONSTANT && fits &&
+                                       memcmp(&previous, &fixture.link, sizeof(previous)) == 0 &&
+                                       memcmp(tables, fixture.tables.base, fixture.tables.length) == 0 &&
+                                       fixture.bytes.length == 0 && fixture.scratch.length == 0,
+                                  "direct admission and insufficient retained capacity preserve source-order diagnostics and complete rollback");
+            }
+            fixture.bytes.capacity = 16384;
+        }
+        check_data_test_close(&fixture);
+    }
+}
+
+static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
+{
+    enum { SIZE = 96, COUNT = 33 };
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, SIZE);
+    for (uint32_t run = 0; run < 128; run += 1)
+    {
+        CheckDataTestLink fixture = { 0 };
+        const bool ready = check_data_test_open(&fixture, 4);
+        check_test_expect(test, ready, "overwrite oracle fixture");
+        if (ready)
+        {
+            SymbolId map[2] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "overwrites", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckInitPart parts[COUNT] = { 0 };
+            uint8_t copied[COUNT][SIZE] = { 0 };
+            uint8_t expected[SIZE] = { 0 };
+            for (uint32_t i = 0; i < COUNT; i += 1)
+            {
+                const bool clear = i + 1 == COUNT || (check_test_random(test) % 4) == 0;
+                const bool bytes = !clear && (check_test_random(test) % 2) == 0;
+                const uint32_t begin = i + 1 == COUNT && run % 2 == 0 ? 0 : check_test_random(test) % (SIZE * 8);
+                const uint32_t available = SIZE * 8 - begin;
+                const uint32_t width = i + 1 == COUNT && run % 2 == 0 ? available : 1 + check_test_random(test) % (available < 32 ? available : 32);
+                parts[i] = (CheckInitPart){
+                    .kind = clear ? CHECK_INIT_CLEAR : bytes ? CHECK_INIT_BYTES : CHECK_INIT_VALUE,
+                    .type = BUSTER_TYPE_UINT,
+                    .bit_offset = bytes ? begin / 8 * 8 : begin,
+                    .bit_width = bytes ? 0 : width,
+                    .bytes = copied[i],
+                    .byte_count = bytes ? (width + 7) / 8 : 0,
+                    .value = check_test_integer(BUSTER_TYPE_UINT, check_test_random(test)),
+                };
+                const uint32_t start = (uint32_t)parts[i].bit_offset;
+                const uint32_t bits = bytes ? (uint32_t)parts[i].byte_count * 8 : width;
+                for (uint32_t bit = 0; bit < bits; bit += 1)
+                {
+                    const bool set = !clear && (bytes ? (check_test_random(test) % 2) != 0 : ((parts[i].value.integer >> bit) & 1) != 0);
+                    copied[i][bit / 8] |= (uint8_t)(set << (bit % 8));
+                    const uint8_t mask = (uint8_t)(1u << ((start + bit) % 8));
+                    expected[(start + bit) / 8] = (uint8_t)((expected[(start + bit) / 8] & ~mask) | (set ? mask : 0));
+                }
+            }
+            const bool readonly = (run % 4) == 0;
+            const CheckInitializer initializer = {
+                .type = readonly ? type_qualify(types, array, BUSTER_TYPE_CONST) : array,
+                .parts = parts,
+                .count = COUNT,
+            };
+            const CheckDataObject object = {
+                .type = initializer.type,
+                .object = 1,
+                .initializer = BUSTER_CHECK_NONE,
+                .initializer_plan = &initializer,
+            };
+            uint8_t nonzero = 0;
+            for (uint32_t i = 0; i < SIZE; i += 1)
+            {
+                nonzero |= expected[i];
+            }
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, 0, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                 &fixture.bytes, &fixture.scratch, &result);
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            const uint8_t class = readonly ? BUSTER_LINK_CLASS_RODATA : nonzero != 0 ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS;
+            check_test_expect(test, emitted && atom != 0 && fixture.link.atoms.class[atom] == class &&
+                                   (link_class_is_zero_fill(class) ? fixture.link.atoms.bytes[atom] == 0 :
+                                    memcmp(fixture.link.atoms.bytes[atom], expected, SIZE) == 0) && fixture.scratch.length == 0,
+                              "symbolic final-byte classification matches independent bit-store oracle including zero RODATA");
+        }
+        check_data_test_close(&fixture);
+    }
+}
 #include "c_check_data_bit_field_test.c"
 
 static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
@@ -1536,6 +2035,13 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_floating(test);
     check_data_test_composite(test, types);
     check_data_test_partitions(test, types);
+    check_data_test_zero_bits(test);
+    check_data_test_symbolic_zero(test, types);
+    check_data_test_zero_batch(test, types);
+    check_data_test_boundary_sort(test);
+    check_data_test_dense_cache(test, types);
+    check_data_test_direct_writes(test, types);
+    check_data_test_overwrite_oracle(test, types);
 }
 
 #endif

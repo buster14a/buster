@@ -22,54 +22,62 @@ static void check_test_source_region_transfers(CheckTest* test)
     const char* source = "int f(int x){outer:;{({inner:;if(x)goto inner;({deep:;x++;});x;});}"
                          "({sibling:;x;});return x;}";
     const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
-    CheckTestTypes types = { 0 };
     Arena arena = arena_reserve(UINT64_C(1) << 24);
     Arena scratch = arena_reserve(UINT64_C(1) << 24);
-    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && check_test_types_open(&types);
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
     ready = ready && arena.base != 0 && scratch.base != 0 && pp_run_source(&pp, "region-transfers.c", (const uint8_t*)source, strlen(source));
-    const ParseOptions parse_options = { 0 };
-    ready = ready && parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
-    CheckInput input = { 0 };
-    ready = ready && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
-    check_test_expect(test, ready && input.region_count == 3, "region-transfer fixture adapts nested and sibling statement expressions");
-    uint32_t* positions = ready ? arena_push_array(&scratch, parser.tokens.count, sizeof(uint32_t), 4) : 0;
-    if (positions != 0)
+    for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
     {
-        for (uint32_t position = 0; position < parser.tokens.count; position += 1)
+        arena_pop_to(&arena, 0);
+        arena_pop_to(&scratch, 0);
+        CheckTestTypes types = { 0 };
+        const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
+        bool adapted = check_test_types_open(&types) && parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        check_test_expect(test, adapted && parser.sizes == NULL && ((parser.postorder == NULL) == parse_options.tree_only),
+                          "region-transfer fixture retains no optional parser sizes, including tree-only schedules");
+        CheckInput input = { 0 };
+        adapted = adapted && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+        check_test_expect(test, adapted && input.report_count == 0 && input.region_count == 3,
+                          "reader-owned traversal adapts nested and sibling statement expressions on every schedule");
+        const uint64_t slots = (uint64_t)parser.tokens.count + 1;
+        uint32_t* columns = adapted ? arena_push_array(&scratch, 9 * slots, sizeof(uint32_t), 4) : NULL;
+        check_test_expect(test, columns != NULL, "region-transfer oracle traversal allocation");
+        if (columns != NULL)
         {
-            positions[parser.postorder[position]] = position;
-        }
-        for (uint32_t token = 0; token < parser.tokens.count; token += 1)
-        {
-            const uint32_t position = positions[token];
-            check_test_expect(test, position < parser.tokens.count && parser.postorder[position] == token &&
-                              parser.sizes[position] != 0 && parser.sizes[position] <= position + 1,
-                              "every token, including control punctuation, has a bounded postorder subtree");
-        }
-        const CheckInputReader reader = { .parser = &parser, .output = &input, .postorder_positions = positions };
-        // Every token pair includes region boundaries, descendants, siblings, both jump directions and an absent token.
-        for (uint32_t from = 0; from <= parser.tokens.count; from += 1)
-        {
-            for (uint32_t to = 0; to <= parser.tokens.count; to += 1)
+            // Derive test-only metadata after check_input released its scratch. Production retains this same
+            // traversal for all of the reader's consumers; it never needs Parser.sizes or another size pass.
+            uint32_t* postorder = columns + 2 * slots;
+            uint32_t* positions = columns + 3 * slots;
+            uint32_t* sizes = columns + 8 * slots;
+            parse_tree_columns(parser.tree.parents, parser.tokens.count, columns, columns + slots, postorder, positions,
+                               columns + 4 * slots, columns + 5 * slots, columns + 6 * slots, columns + 7 * slots, sizes);
+            for (uint32_t token = 0; token < parser.tokens.count; token += 1)
             {
-                const uint32_t source_token = from == parser.tokens.count ? BUSTER_CHECK_NONE : from;
-                const uint32_t target_token = to == parser.tokens.count ? BUSTER_CHECK_NONE : to;
-                parser.options.scalar = true;
-                const bool expected = check_input_region_transfer(&reader, source_token, target_token);
-                parser.options.scalar = false;
-                check_test_expect(test, check_input_region_transfer(&reader, source_token, target_token) == expected,
-                                  "bounded region transfer equals the full ancestor walk for every token pair");
+                const uint32_t position = positions[token];
+                check_test_expect(test, position < parser.tokens.count && postorder[position] == token && sizes[position] != 0 && sizes[position] <= position + 1,
+                                  "every token, including control punctuation, has a bounded reader-owned subtree");
+            }
+            const CheckInputReader reader = { .parser = &parser, .output = &input, .postorder_positions = positions, .subtree_sizes = sizes };
+            // Every token pair includes region boundaries, descendants, siblings, both jump directions and an absent token.
+            for (uint32_t from = 0; from <= parser.tokens.count; from += 1)
+            {
+                for (uint32_t to = 0; to <= parser.tokens.count; to += 1)
+                {
+                    const uint32_t source_token = from == parser.tokens.count ? BUSTER_CHECK_NONE : from;
+                    const uint32_t target_token = to == parser.tokens.count ? BUSTER_CHECK_NONE : to;
+                    parser.options.scalar = true;
+                    const bool expected = check_input_region_transfer(&reader, source_token, target_token);
+                    parser.options.scalar = false;
+                    check_test_expect(test, check_input_region_transfer(&reader, source_token, target_token) == expected,
+                                      "bounded region transfer equals the full ancestor walk without parser-owned size metadata");
+                }
             }
         }
+        parse_release(&parser);
+        check_test_types_close(&types);
     }
-    else
-    {
-        check_test_expect(test, false, "region-transfer postorder fixture allocation");
-    }
-    parse_release(&parser);
     pp_release(&pp);
     intern_release(&identifiers);
-    check_test_types_close(&types);
     arena_release(&scratch);
     arena_release(&arena);
 
@@ -91,9 +99,9 @@ static void check_test_source_region_transfers(CheckTest* test)
             sizes[token] = token + 1;
         }
         CheckInputRegion region = { .opening = 0, .closing = COUNT - 1 };
-        Parser chain = { .tokens = { .count = COUNT }, .tree = { .parents = parents }, .sizes = sizes };
+        Parser chain = { .tokens = { .count = COUNT }, .tree = { .parents = parents } };
         CheckInput output = { .expression_regions = selected, .regions = &region };
-        const CheckInputReader reader = { .parser = &chain, .output = &output, .postorder_positions = order };
+        const CheckInputReader reader = { .parser = &chain, .output = &output, .postorder_positions = order, .subtree_sizes = sizes };
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
             output.region_count = variant;

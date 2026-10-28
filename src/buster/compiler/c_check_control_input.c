@@ -58,7 +58,7 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
     const Parser* parser = reader->parser;
     bool valid = true;
     // Most units have no GNU statement expression. Otherwise only regions below the source and target's common
-    // ancestor can be entered: a region above it holds both. Existing postorder intervals recognize that ancestor
+    // ancestor can be entered: a region above it holds both. The reader's postorder intervals recognize that ancestor
     // without another token column or a walk from the source. Keep the full parent walk on the scalar path as oracle.
     const bool scalar = parser->options.scalar;
     const uint32_t source_position = !scalar && reader->output->region_count != 0 && source < parser->tokens.count ? reader->postorder_positions[source] : BUSTER_CHECK_NONE;
@@ -73,7 +73,7 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
         if (!scalar)
         {
             const uint32_t position = reader->postorder_positions[ancestor];
-            const uint32_t size = parser->sizes[position];
+            const uint32_t size = reader->subtree_sizes[position];
             if (source_position <= position && position - source_position < size)
             {
                 break;

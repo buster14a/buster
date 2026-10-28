@@ -9,21 +9,7 @@
 
 #define BUSTER_CHECK_CONSTANT_BOUND_CONTEXT 2u
 
-// Every mutation, including speculative-call restoration and unselected-range clearing, keeps the final nonzero-row
-// count. The driver can skip the token column entirely when it is empty; no extra final pass computes this metadata.
-static void check_input_constant_warning_set(CheckInput* input, uint32_t token, uint8_t warnings)
-{
-    input->constant_warning_count = input->constant_warning_count - (input->constant_warnings[token] != 0) + (warnings != 0);
-    input->constant_warnings[token] = warnings;
-}
-
-static void check_input_constant_warning_add(CheckInput* input, uint32_t token, uint8_t warnings)
-{
-    if (warnings != 0)
-    {
-        check_input_constant_warning_set(input, token, input->constant_warnings[token] | warnings);
-    }
-}
+#include "c_check_warning_input.c"
 
 // clang's Sema has GNU's extensions in every C language mode, -std=c99 as -std=gnu99, and only -pedantic warns about
 // them: folding a constant expression that isn't an ICE among them. GNU still names -std=gnu*, which the vector
@@ -51,21 +37,7 @@ static bool check_input_integer_attribute(const CheckInputReader* reader, const 
 
 static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t warnings)
 {
-    if (reader->output->constant_warnings != 0 && first < end && end <= reader->parser->tokens.count)
-    {
-        for (uint32_t token = first; token < end; token += 1)
-        {
-            const bool independent = reader->constant_contexts != 0 && (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) != 0;
-            if (!independent)
-            {
-                check_input_constant_warning_set(reader->output, token, reader->output->constant_warnings[token] & (uint8_t)~warnings);
-                if (reader->output->constant_warning_ignored != 0)
-                {
-                    reader->output->constant_warning_ignored[token] &= (uint8_t)~warnings;
-                }
-            }
-        }
-    }
+    check_input_warning_range(reader, first, end, warnings, 0);
 }
 
 static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored)
@@ -74,7 +46,7 @@ static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
         const bool present = (reader->output->constant_warnings[first] & CHECK_WARNING_GNU_CONSTANT) != 0;
-        check_input_constant_warning_add(reader->output, first, CHECK_WARNING_GNU_CONSTANT);
+        check_input_warning_add(reader, first, CHECK_WARNING_GNU_CONSTANT);
         if (reader->output->constant_warning_ignored != 0)
         {
             if (ignored && !present)
@@ -204,17 +176,7 @@ static uint32_t check_constant_unevaluated_warnings(void)
 
 static void check_input_warning_suppress(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t warnings)
 {
-    check_input_constant_warning_clear(reader, first, end, warnings);
-    if (reader->warning_suppressed != 0 && first < end && end <= reader->parser->tokens.count)
-    {
-        for (uint32_t token = first; token < end; token += 1)
-        {
-            if (reader->constant_contexts == 0 || (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_BOUND_CONTEXT) == 0)
-            {
-                reader->warning_suppressed[token] |= (uint8_t)warnings;
-            }
-        }
-    }
+    check_input_warning_range(reader, first, end, warnings, warnings);
 }
 
 static bool check_constant_warning_unevaluated(const TypeTable* types, const CheckAction* action, uint32_t operand, uint32_t count)
@@ -573,24 +535,16 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
 
 static uint32_t check_constant_range_root(const CheckConstantInput* input, uint32_t first, uint32_t end)
 {
-    const Parser* parser = input->reader->parser;
     uint32_t root = BUSTER_CHECK_NONE;
-    uint32_t roots = 0;
     if (input->raw && first < end)
     {
         root = first;
-        roots = 1;
     }
-    for (uint32_t token = first; !input->raw && token < end; token += 1)
+    else if (!input->raw)
     {
-        const uint32_t parent = parser->tree.parents[token];
-        if (parent < first || parent >= end)
-        {
-            root = token;
-            roots += 1;
-        }
+        root = check_input_range_root(input->reader, first, end);
     }
-    return roots == 1 && root >= input->first && root < input->end && input->present[root - input->first] ? root : BUSTER_CHECK_NONE;
+    return root >= input->first && root < input->end && input->present[root - input->first] ? root : BUSTER_CHECK_NONE;
 }
 
 static bool check_constant_range_value(CheckConstantInput* input, uint32_t first, uint32_t end, CheckValue* value)
@@ -1684,7 +1638,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
+                check_input_warning_add(reader, action.node, checked.warnings);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -1941,7 +1895,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        check_input_constant_warning_add(input->reader->output, action->node, (uint8_t)checked.warnings);
+        check_input_warning_add(input->reader, action->node, checked.warnings);
     }
     if (checked.diagnostic == CHECK_DIAG_NONE && (action->op == CHECK_OP_CAST || action->op == CHECK_OP_CONVERT || action->op == CHECK_OP_INITIALIZE))
     {
@@ -1956,6 +1910,7 @@ static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t 
     const uint8_t warnings = input->reader->output->constant_warnings[closing];
     const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
     check_input_constant_warning_set(input->reader->output, closing, warnings);
+    check_input_warning_changed(input->reader, closing, warnings);
     return valid;
 }
 
@@ -1984,7 +1939,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
     bool valid = true;
     for (uint32_t order = before; valid && order < after; order += 1)
     {
-        const uint32_t token = parser->postorder[order];
+        const uint32_t token = reader->postorder[order];
         if (token < input->first || token >= input->end)
         {
             continue;
@@ -2447,7 +2402,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, &checked);
-                check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
+                check_input_warning_add(reader, action.node, checked.warnings);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -2656,7 +2611,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            check_input_constant_warning_add(reader->output, action.node, (uint8_t)checked.warnings);
+            check_input_warning_add(reader, action.node, checked.warnings);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             ranges[*value_count] = range;

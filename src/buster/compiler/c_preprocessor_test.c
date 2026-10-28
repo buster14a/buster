@@ -1279,7 +1279,7 @@ static const PPTestCase pp_test_cases[] = {
     { "an expansion of a template with ## past 16 tokens",
       "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
       0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
-    // Arguments whose names of macros are all direct objects (pp_direct_argument), expanded in place before the template
+    // Arguments whose names of macros are all direct objects (pp_argument_in_place), expanded in place before the template
     // or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
     // ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
     { "arguments of direct objects, expanded in place",
@@ -1299,6 +1299,45 @@ static const PPTestCase pp_test_cases[] = {
     { "arguments of direct objects used twice",
       "#define D(a, b) a b a b\n#define X x\n#define P(a) [a]\n#define W(a, b) D(a, b) P(a)\nD(X, z) D(z, X) W(X, X) W( X ,z)\n",
       0, "c17", "x z x z z x z x x x x x [x] x z x z [x]\n", false },
+    // Invocations in arguments expanded in place (pp_nested_invocation): pastes, a simple template, #, no parameters, a
+    // variadic argument left out and given, beside other invocations and direct objects; and the ones left to the main
+    // loop, a paste that makes a macro's name and an invocation whose argument names a direct object.
+    { "invocations in arguments, expanded in place",
+      "#define F(a) (a + 1)\n#define C(x, y) x ## y\n#define G(x) [x]\n#define S(x) #x\n#define Z() zz\n#define V(x, ...) x __VA_ARGS__\n#define X 2\n#define foo 7\nF(C(a, b)) F(G(1)) F(S(a  b)) F(Z()) F(V(1)) F(V(1, 2, 3)) F(C(a, b) G(c) X) F(X C(p, q)) F(C(fo, o)) F(G(X))\n",
+      0, "c17", "(ab + 1) ([1] + 1) (\"a b\" + 1) (zz + 1) (1 + 1) (1 2, 3 + 1) (ab [c] 2 + 1) (2 pq + 1) (7 + 1) ([2] + 1)\n", false },
+    // An invocation that makes nothing, between other tokens, alone, first and last (the space it leaves pending), and
+    // invocations next to each other and to a token.
+    { "empty and adjacent invocations in arguments",
+      "#define F(a) <a>\n#define P(x, y) x ## y\n#define G(x) [x]\nF(x P(, ) y) F(P(, )) F(P(, ) y) F(x P(, )) F(G(1)G(2)) F( G(1) G(2) ) F(G(1)z)\n",
+      0, "c17", "<x y> <> <y> <x> <[1][2]> <[1] [2]> <[1]z>\n", false },
+    // The invoked macro's name in its own expansion, and a disabled macro's in an invocation's argument: painted, so
+    // that neither expands before the '(' after it once the outer expansion is rescanned.
+    { "invocations in arguments beside painted names",
+      "#define F(a) a (2)\n#define S(x) x S\n#define G(x) [x]\n#define H(x) F(G(H x))\n#define K(x) F(G(x) K)\nF(S(1)) H(3) K(4)\n",
+      0, "c17", "1 S (2) [H 3] (2) [4] K (2)\n", false },
+    // Invocations in arguments that start and end lines, from a file's text and from an expansion, with clang's line
+    // markers.
+    { "invocations in arguments on new lines",
+      "#define F(a) <a>\n#define C(x, y) x ## y\n#define W(a) F(a) [F(a)]\nF(\nC(a, b)) F(C(a,\nb)\n) W(\nC(c, d)) F(\n  C(e, f) g)\nW(x\n  C(g, h)\n  z)\n",
+      0, "c17", "<ab> <ab> <cd> [<cd>] <ef g>\n<x gh z> [<x gh z>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<ab> <ab> <cd> [<cd>] <ef g>\n\n\n\n\n\n<x gh z> [<x gh z>]\n" },
+    // Eight invocations in one invocation's arguments, the most pp_finish_simple plans (BUSTER_PP_NESTED_PLANS), and nine.
+    { "invocations in arguments past the plans kept",
+      "#define F(a, b) {a | b}\n#define G(x) [x]\nF(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8)) F(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8) G(9))\n",
+      0, "c17", "{[1] [2] [3] [4] | [5] [6] [7] [8]} {[1] [2] [3] [4] | [5] [6] [7] [8] [9]}\n", false },
+    // The outer body requires rescan rather than painting its arguments on direct output. An inner self name must
+    // already be painted when the later invocation supplies its parentheses.
+    { "invocations in arguments retain paint through outer rescan",
+      "#define F(x) T(x)\n#define T(x) x (2)\n#define S(x) x S\nF(S(1))\n",
+      0, "c17", "1 S (2)\n", false },
+    // An empty invocation leaves name-space pending. A plain run consumes it before another invocation, then a later
+    // stringification observes the space between 'a' and 'b', even though no source space follows the empty call.
+    { "invocations in arguments pass pending space to an intervening run",
+      "#define F(x) S(x)\n#define S(x) #x\n#define E(x,y) x ## y\n#define G(x) [x]\nF(a E(,)b G(1))\n",
+      0, "c17", "\"a b [1]\"\n", false },
+    // A plain argument does not authorize in-place expansion when the nested body's name itself still expands.
+    { "invocations in arguments leave expanding body names to rescan",
+      "#define F(x) [x]\n#define G(x) X x\n#define X 9\nF(G(2))\n",
+      0, "c17", "[9 2]\n", false },
     // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
     // name takes the main loop's path).
     { "poisoned names a template pastes",
@@ -4783,7 +4822,7 @@ static bool pp_test_raw_recovery_failures(void)
     return result;
 }
 
-// #595's review: an argument expanded in place (pp_expand_direct_argument) that runs out of room, as the history records
+// #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
 // pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing

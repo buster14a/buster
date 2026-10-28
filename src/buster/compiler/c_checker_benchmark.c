@@ -120,7 +120,7 @@ static bool check_benchmark_equal(const CheckStream* a, const CheckStream* b, ui
     for (uint32_t i = 0; equal && i < a->count; i += 1)
     {
         equal = check_benchmark_value_equal(&a->values[i], &b->values[i]) && a->diagnostics[i] == b->diagnostics[i] &&
-                a->warnings[i] == b->warnings[i] && a->warning_ignored[i] == b->warning_ignored[i];
+                a->warnings[i] == b->warnings[i] && a->warning_ignored[i] == b->warning_ignored[i] && a->member_offsets[i] == b->member_offsets[i];
         equal = equal && a->conversions[i].store.type == b->conversions[i].store.type && a->conversions[i].store.flags == b->conversions[i].store.flags;
         for (uint32_t j = 0; equal && j < 3; j += 1)
         {
@@ -166,7 +166,7 @@ static bool check_benchmark_generate(CheckGraph* graph, bool chain)
             valid = node != BUSTER_CHECK_NONE;
             if (valid)
             {
-                graph->leaves[node] = (CheckValue){
+                *check_graph_leaf_of(graph, node) = (CheckValue){
                     .type = BUSTER_TYPE_ULONG,
                     .category = CHECK_RVALUE,
                     .flags = BUSTER_CHECK_ICE,

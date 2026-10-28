@@ -56,6 +56,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             {
                 reader->designator_indices[token] = close;
                 reader->designator_valid[token] = 2;
+                check_input_visit(reader, token, BUSTER_CHECK_RESOLVE_QUERY);
                 reader->designator_ranges[token] = range;
                 memset(reader->ignored + token, 1, close - token + 1);
                 token = close + 1;
@@ -91,6 +92,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         reader->incomplete_array_types[declaration] = type;
         reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
         reader->initializer_finish_heads[end] = declaration;
+        check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->inference_end = end > reader->inference_end ? end : reader->inference_end;
     }
     if (!valid)

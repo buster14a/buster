@@ -265,7 +265,7 @@ static bool check_query_syntax(const TypeTable* types, const CheckGraph* graph, 
     const CBuiltinId builtin = (CBuiltinId)(graph->members != NULL ? graph->members[node] : 0);
     bool effect = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_ASSIGN || op == CHECK_OP_BUILTIN_OVERFLOW ||
                   op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_ATOMIC || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
-    effect |= op == CHECK_OP_VALUE && (graph->leaves[node].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+    effect |= op == CHECK_OP_VALUE && (check_graph_leaf_of(graph, node)->flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
     const CheckRegionProof* region = op == CHECK_OP_STATEMENT_VALUE ? check_graph_region_proof(graph, node) : NULL;
     effect |= op == CHECK_OP_STATEMENT_VALUE && region == NULL && ((graph->members != NULL ? graph->members[node] : 0) & BUSTER_CHECK_SIDE_EFFECT) != 0;
     if (region != NULL)
