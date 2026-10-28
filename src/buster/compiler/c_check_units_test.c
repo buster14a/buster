@@ -10,27 +10,27 @@
 //   unit's functions through their tables and prints what they return. A unit's functions call later units' and its own
 //   earlier ones, read and write their globals (initialized, zero-filled and thread-local), take their functions'
 //   addresses into tables and their globals' into pointers, pass and return structs by value, call printf, and have
-//   static functions, statics and static locals of the same names as the other units'. Each program compiled:
+//   static functions, statics and static locals of the same names as the other units'; each unit also has a function
+//   and a zero-filled global in sections of their own names (#619's). And a program of synth's shape
+//   (check_units_test_synth: 12 units of 30 functions, each calling three of any unit's while a depth lasts, and writing
+//   another unit's global). Each program compiled:
 //   - by clang -O0, whose program's output and exit status are the expected ones (the oracle of what the C means);
 //   - each unit alone with -c, linked by cc: a program that must print and exit as clang's does;
 //   - all units at once with -c, by --lanes 1, 2, 3 and 8, by default, and by 8 with --poison-arenas (the lanes' arenas
 //     overwritten with a pattern between units): each unit's object the same bytes as alone;
 //   - all units at once into an executable, by --lanes 1, 2, 3 and 8, by default and by 8 with --poison-arenas, by each
-//     path: the same bytes, a
-//     program that prints and exits as clang's does, and that defines the same symbols as cc's link of the units'
-//     objects (nm: each named symbol the objects define, but the compiler's .L labels, with its binding and its kind:
-//     code or data);
+//     path: the same bytes, a program that prints and exits as clang's does, and that defines the same symbols as cc's
+//     link of the units' objects (nm: each named symbol the objects define, but the compiler's .L labels, with its
+//     binding and its kind: code or data);
 //   - all units at once with -fsyntax-only: exit status 0, and nothing on standard error.
 // - Diagnostics: three units, one with a warning, one with an error and one clean, by --lanes 1, 2, 3 and 8, with -c,
 //   -fsyntax-only and into an executable: standard error is each unit's own alone, in the command line's order, the
 //   exit status 1; -c writes the objects of the units without errors, and the link no executable.
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
-//   --dump-typed, -g for an executable, and two units whose objects have one name: exit status 1, the message, and no
-//   output.
+//   --dump-typed, --id-order, -g for an executable, and two units whose objects have one name: exit status 1, the
+//   message, and no output.
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
-//   And a program of synth's shape (check_units_test_synth: 12 units of 30 functions, each calling three of any unit's
-//   while a depth lasts, and writing another unit's global), compiled and checked as the generated programs are.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
 //   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
 //   files' order.
@@ -179,8 +179,9 @@ static bool check_units_test_program(CheckUnitsTestTally* tally, const char* dir
             for (uint32_t v = 0; v < count; v += 1)
             {
                 fprintf(file, "extern unsigned value_%u;\nextern unsigned zero_%u;\nextern _Thread_local unsigned local_%u;\nextern const char* name_%u;\n"
-                              "extern unsigned* pointer_%u;\nextern unsigned (*table_%u[%u])(unsigned);\nstruct pair swap_%u(struct pair p);\n",
-                        v, v, v, v, v, v, BUSTER_CHECK_UNITS_TEST_FUNCTIONS, v);
+                              "extern unsigned* pointer_%u;\nextern unsigned (*table_%u[%u])(unsigned);\nstruct pair swap_%u(struct pair p);\n"
+                              "extern unsigned placed_%u;\nunsigned placed_function_%u(unsigned x);\n",
+                        v, v, v, v, v, v, BUSTER_CHECK_UNITS_TEST_FUNCTIONS, v, v, v);
                 for (uint32_t f = 0; f < BUSTER_CHECK_UNITS_TEST_FUNCTIONS; f += 1)
                 {
                     fprintf(file, "unsigned function_%u_%u(unsigned x);\n", v, f);
@@ -191,6 +192,11 @@ static bool check_units_test_program(CheckUnitsTestTally* tally, const char* dir
             fprintf(file, "unsigned value_%u = %uu;\nunsigned zero_%u;\n_Thread_local unsigned local_%u = %uu;\nconst char* name_%u = \"unit %u\";\n", u,
                     initial[u], u, u, initial[u] + 1, u, u);
             fprintf(file, "unsigned* pointer_%u = &value_%u;\n\n", u, (u + 1) % count);
+            // A zero-filled global in a data section of its own name, which an executable's data holds as zeros, and a
+            // function in a text section of its own.
+            fprintf(file, "__attribute__((section(\".data.units_%u\"))) unsigned placed_%u;\n\n", u, u);
+            fprintf(file, "__attribute__((section(\".text.units_%u\"))) unsigned placed_function_%u(unsigned x)\n{\n    placed_%u += x;\n    return placed_%u * %uu;\n}\n\n",
+                    u, u, u, u, multiplier[u]);
             for (uint32_t f = 0; f < BUSTER_CHECK_UNITS_TEST_FUNCTIONS; f += 1)
             {
                 fprintf(file, "unsigned function_%u_%u(unsigned x)\n{\n    static unsigned calls;\n    calls += 1;\n    zero_%u += x;\n    local_%u += calls;\n", u, f, u, u);
@@ -224,7 +230,8 @@ static bool check_units_test_program(CheckUnitsTestTally* tally, const char* dir
                 {
                     fprintf(file, "    for (unsigned f = 0; f < %u; f += 1)\n    {\n        checksum = checksum * 33u + table_%u[f](f + %uu);\n    }\n",
                             BUSTER_CHECK_UNITS_TEST_FUNCTIONS, v, v);
-                    fprintf(file, "    p = swap_%u(p);\n    printf(\"%%s %%u %%u %%u\\n\", name_%u, value_%u, zero_%u, local_%u);\n", v, v, v, v, v);
+                    fprintf(file, "    checksum = checksum * 7u + placed_function_%u(%uu);\n", v, v + 3);
+                    fprintf(file, "    p = swap_%u(p);\n    printf(\"%%s %%u %%u %%u %%u\\n\", name_%u, value_%u, zero_%u, local_%u, placed_%u);\n", v, v, v, v, v, v);
                 }
                 fprintf(file, "    printf(\"%%u %%ld %%ld %%u\\n\", checksum, p.first, p.second, counter);\n    return (int)(checksum & 63u);\n}\n");
             }

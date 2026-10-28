@@ -222,7 +222,7 @@ rm "$flags_file" "$sources_file"
 # (#153's --id-order).
 unset CPATH C_INCLUDE_PATH
 ./build/compiler test-checker-corpus --clang clang --deferred 8 --id-order 153 build/c-testsuite/tests/single-exec
-== Compile c-testsuite's programs as the units of one command
+== Compile c-testsuite's programs as the units of one command [2 CPUs]
 # #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
 ./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
