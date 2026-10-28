@@ -1673,6 +1673,12 @@ static __attribute__((unused)) bool files_run_initialize(FilesRun* run, FileCach
         .lane_count = lane_count,
         .partition_count = BUSTER_FILES_PARTITIONS_PER_LANE * lane_count,
     };
+    // The probes only read the cache once the lanes start. Snapshot the shared search directories on this one lane;
+    // paths in unlisted includer directories retain their ordinary probes. No listing is needed for a flat walk.
+    for (uint32_t d = 0; follow && d < search->directory_count; d += 1)
+    {
+        file_cache_list_directory(cache, search->directories[d], search->directory_lengths[d]);
+    }
     run->arena = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->files = arena_reserve(BUSTER_FILES_ARENA_BYTES);
     run->round = arena_reserve(BUSTER_FILES_ARENA_BYTES);
