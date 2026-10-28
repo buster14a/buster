@@ -57,7 +57,10 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    columns with room for the largest body that a lane mostly never touches, so
    a lane's arenas are base pages throughout: the kernel clears a huge page
    whole the first time any of it is touched. The table's index has room for
-   the top level's types and 4,096 more, and grows past them as any index does.
+   the top level's types and a slack more (at most 4,096 and the top level's
+   own count, and at least 512), and grows past them as any index does. Where
+   the top level's index has that room already, its slots are copied as they
+   are, rather than its types placed again.
 
    The state (`CheckDeferred`) keeps its memory (`CheckDeferredMemory`) from one
    reading to the next: its own arena, the top level's table and index, and
