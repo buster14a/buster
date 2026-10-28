@@ -123,6 +123,9 @@ struct CheckProgram
     const Parser* parser;
     const InternTable* identifiers;
     const CheckInitializers* initializers;
+    // Per initializer plan, whether an executable VALUE reaches this automatic compound literal. Null without any
+    // automatic compound literal; unevaluated operands retain their diagnostic plans without needing constant data.
+    uint8_t* compound_initializers;
     const CheckAsms* asms;
     CheckControl* controls;
     // The SWITCH controls followed by four CASE controls or more, which a jump table may dispatch
@@ -1407,6 +1410,10 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 else
                 {
                     const CheckInitializer* plan = program->initializers->plans + selected - 1;
+                    if (program->compound_initializers != NULL)
+                    {
+                        program->compound_initializers[selected - 1] = 1;
+                    }
                     reference_count = check_program_reference_initializer(program, plan, epoch, nodes, stack, &depth, seen, references, needed, reference_count);
                 }
             }
@@ -1924,6 +1931,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
+        bool compound_initializers = false;
         for (uint32_t i = options.initializers != 0 ? options.initializers->count : 0; i-- > 0;)
         {
             const uint32_t declaration = options.initializers->declaration_tokens[i];
@@ -1940,6 +1948,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
                 // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
                 plan_next[i] = BUSTER_CHECK_NONE;
+                compound_initializers |= !input->static_objects[declaration];
             }
             else if (token < count && steps < count)
             {
@@ -1949,6 +1958,18 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             else
             {
                 check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
+            }
+        }
+        if (compound_initializers && program->status == CHECK_PROGRAM_OK)
+        {
+            program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
+            if (program->compound_initializers == NULL)
+            {
+                check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
+            }
+            else
+            {
+                memset(program->compound_initializers, 0, options.initializers->count);
             }
         }
         check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, options.scalar);

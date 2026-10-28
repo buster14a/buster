@@ -820,7 +820,7 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
 {
     CheckProgramLowered* lowered = &code->lowered;
     const uint32_t count = program->body_count;
-    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1;
     const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
     uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
     uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
@@ -832,8 +832,9 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         check_program_object_access(program, access, defined, false);
         for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
         {
-            const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
-            access[symbol] = lowered->runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+            const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
+            const uint32_t symbol = lowered->runtime_symbols[runtime];
+            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -899,6 +900,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
         check_program_object_access(program, access, defined, scalar);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
+        access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_MEMCPY] = BUSTER_TIER0_ACCESS_GOT;
     }
     // Lane 0's writer's columns (CheckEmitRun.columns), in an arena of base pages reserved for the room they take
     // (check_lower_writer_bytes): the lanes' first arenas' scratch, kept while it has the room and otherwise reserved
@@ -1239,7 +1241,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // The asm templates' names' symbols (check_program_emit_asm_symbols), their own after the runtime's and the jump
     // tables' (CheckProgramLowered.case_symbol_base): its undefined globals among the names the unit refers to without
     // defining.
-    const SymbolId asm_first = (SymbolId)(program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + 1 + switch_symbols);
+    const CheckLowerInitializers* pools = &result->lowered.initializers;
+    const SymbolId asm_first = (SymbolId)(program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + 1 + switch_symbols);
     SymbolId* asm_symbols = valid && asms->name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, asms->name_count) : 0;
     uint32_t asm_own = 0;
     valid = valid && (asms->name_count == 0 || asm_symbols != 0);
@@ -1253,11 +1256,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0) + (valid ? result->lowered.table_count : 0);
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) + (valid ? result->lowered.table_count : 0);
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
-    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -1393,6 +1396,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                             BUSTER_LINK_SOURCE_NONE) == helper->symbol;
+    }
+    // Constant automatic initializers have one local readonly symbol per pooled byte image, before runtime symbols.
+    for (uint32_t p = 0; valid && p < pools->count; p += 1)
+    {
+        char spelling[48];
+        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_initializer_%u", p);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT,
+                                            BUSTER_LINK_SOURCE_NONE) == pools->symbol_base + p;
+        if (valid && binding != NULL)
+        {
+            result->link.symbols.source[pools->symbol_base + p] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
     }
     // The runtime's functions the lowering made symbols of its own for, in their order (CheckProgramLowered.runtime_order).
     for (uint32_t r = 0; valid && r < result->lowered.runtime_symbol_count; r += 1)
@@ -1622,6 +1638,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         if (!source_body)
         {
             arena_pop_to(scratch, work_mark);
+        }
+    }
+    // Copy bytes into the byte arena, whose lifetime and rollback contract cover every published atom.
+    for (uint32_t p = 0; valid && p < pools->count; p += 1)
+    {
+        const CheckLowerInitPool* pool = pools->items + p;
+        uint8_t* data = arena_push(bytes, pool->size, 1);
+        const AtomId atom = data != NULL ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 0, pool->size,
+                                                       memcpy(data, pool->bytes, pool->size), 0) : 0;
+        valid = atom != 0 && link_define_symbol(&result->link, pools->symbol_base + p, atom, 0, pool->size);
+        if (valid)
+        {
+            result->link.symbols.source[pools->symbol_base + p] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);

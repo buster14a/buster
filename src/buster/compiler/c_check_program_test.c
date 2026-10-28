@@ -1294,7 +1294,8 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
-static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
+static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                             int32_t expected_pools, uint32_t entry_limit)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1362,16 +1363,36 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
         }
         if (lowered)
         {
+            for (uint32_t p = 0; p < 2; p += 1)
+            {
+                check_test_expect(test, expected_pools < 0 || lower[p].initializers.count == (uint32_t)expected_pools,
+                                  "automatic initializer pooling matches the independently expected threshold and constant eligibility");
+                for (uint32_t b = 0; entry_limit != 0 && b < program.body_count; b += 1)
+                {
+                    check_test_expect(test, lower[p].functions[b].count <= entry_limit,
+                                      "initializer code stays within a fixed typed-entry bound as payload grows");
+                }
+            }
+            check_test_expect(test, lower[0].initializers.count == lower[1].initializers.count,
+                              "automatic initializer pool counts agree across lowering paths");
+            for (uint32_t p = 0; p < lower[0].initializers.count && p < lower[1].initializers.count; p += 1)
+            {
+                const CheckLowerInitPool* a = lower[0].initializers.items + p;
+                const CheckLowerInitPool* b = lower[1].initializers.items + p;
+                check_test_expect(test, a->size == b->size && a->part == b->part && memcmp(a->bytes, b->bytes, a->size) == 0,
+                                  "automatic initializer byte images agree across lowering paths");
+            }
             check_test_expect(test, lower[0].errno_symbol == lower[1].errno_symbol && lower[0].errno_pointer_type == lower[1].errno_pointer_type &&
                                    lower[0].runtime_symbol_count == lower[1].runtime_symbol_count,
                               "runtime accessor identity and genuine pointer ABI agree across unit batches");
             if (lower[0].errno_symbol != 0)
             {
                 const bool fresh = lower[0].errno_symbol > program.symbol_count;
-                check_test_expect(test, type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
+                const uint64_t first_runtime = (uint64_t)program.symbol_count + lower[0].helpers.count + lower[0].initializers.count + 1;
+                check_test_expect(test, lower[0].runtime_symbols[CHECK_LOWER_RUNTIME_ERRNO] == lower[0].errno_symbol &&
+                                       type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
                                        type_element(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_INT &&
-                                       (fresh ? lower[0].runtime_symbol_count != 0 && lower[0].runtime_order[0] == CHECK_LOWER_RUNTIME_ERRNO &&
-                                                lower[0].errno_symbol == program.symbol_count + lower[0].helpers.count + 1 :
+                                       (fresh ? lower[0].errno_symbol >= first_runtime && lower[0].errno_symbol < first_runtime + lower[0].runtime_symbol_count :
                                                 lower[0].errno_symbol <= program.symbol_count),
                                   "errno accessor uses one reserved runtime symbol or an existing compatible global");
             }
@@ -1393,6 +1414,21 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
         }
         if (emitted)
         {
+            check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
+                              "initializer native code stays bounded independently of payload size");
+            if (code.lowered.initializers.count != 0)
+            {
+                const uint64_t access_mark = scratch.length;
+                uint8_t* defined = NULL;
+                const bool rebuilt = check_program_access(&code, &program, &output, &scratch, &defined);
+                const SymbolId copy = code.lowered.runtime_symbols[CHECK_LOWER_RUNTIME_MEMCPY];
+                const Tier0Function* first = code.lowered.functions;
+                check_test_expect(test, rebuilt && program.body_count != 0 && copy != 0 && copy < first->symbol_count &&
+                                       first->symbol_access[copy] == BUSTER_TIER0_ACCESS_GOT &&
+                                       first->symbol_access[code.lowered.initializers.symbol_base] == BUSTER_TIER0_ACCESS_DIRECT,
+                                  "backend consumers retain final pooled-data and external memcpy access after runtime symbol numbering");
+                arena_pop_to(&scratch, access_mark);
+            }
             snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
             check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
         }
@@ -1408,10 +1444,164 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
     intern_release(&identifiers);
 }
 
+static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
+{
+    check_test_program_source_limits(test, source, name, clang, char_unsigned, -1, 0);
+}
+
 // A program fixture with plain char signed, x86-64's.
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
 {
     check_test_program_source_char(test, source, name, clang, false);
+}
+
+static void check_test_program_initializer_facts(CheckTest* test)
+{
+    enum
+    {
+        COUNT = 32,
+        SIZE = 131,
+    };
+    CheckTestTypes types = { 0 };
+    Arena output = arena_reserve(65536);
+    Arena scratch = arena_reserve(65536);
+    bool ready = check_test_types_open(&types) && output.base != NULL && scratch.base != NULL;
+    for (uint32_t i = 0; ready && i < 256; i += 1)
+    {
+        ready = type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, i + 100) != 0;
+    }
+    const TypeId array = ready ? type_array(&types.table, BUSTER_TYPE_CHAR, SIZE) : 0;
+    const TypeId record = ready ? type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, 1) : 0;
+    const TypeMember member = { .name = 1, .type = array, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
+    uint8_t* facts = ready ? BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, types.table.types.count) : NULL;
+    ready = ready && facts != NULL;
+    if (ready)
+    {
+        memset(facts, 0, types.table.types.count);
+        ready = check_lower_copy_type_facts(&types.table, types.table.types.count, facts, &scratch, false);
+    }
+    check_test_expect(test, ready, "initializer pool containment facts are prepared once for a large frozen type table");
+    if (ready)
+    {
+        uint8_t literal[SIZE];
+        memset(literal, 1, sizeof(literal));
+        CheckInitPart part = { .kind = CHECK_INIT_BYTES, .type = array, .bytes = literal, .byte_count = SIZE };
+        CheckInitializer plans[COUNT];
+        CheckControl controls[COUNT];
+        uint32_t declarations[COUNT];
+        uint8_t flags[COUNT] = { 0 };
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            plans[i] = (CheckInitializer){ .type = record, .parts = &part, .count = 1, .object_size = SIZE, .status = CHECK_INIT_OK };
+            controls[i] = (CheckControl){ .kind = CHECK_CONTROL_INITIALIZE, .target = i };
+            declarations[i] = i;
+        }
+        const CheckInput input = { .token_count = COUNT, .static_objects = flags };
+        const CheckInitializers initializers = { .plans = plans, .count = COUNT, .declaration_tokens = declarations };
+        const CheckProgram program = { .types = &types.table, .input = &input, .initializers = &initializers,
+                                       .controls = controls, .control_count = COUNT };
+        scratch.capacity = 256;
+        CheckLowerInitializers pools = { 0 };
+        bool pooled = check_lower_init_pools(&pools, &program, facts, types.table.types.count, &output, &scratch) && pools.count == COUNT;
+        for (uint32_t i = 0; pooled && i < COUNT; i += 1)
+        {
+            pooled = pools.items[i].part == BUSTER_CHECK_NONE && pools.items[i].size == SIZE &&
+                     memcmp(pools.items[i].bytes, literal, SIZE) == 0;
+        }
+        check_test_expect(test, pooled && scratch.length == 0,
+                          "many dense record pools need only plan-sized scratch, never a type-sized traversal per initializer");
+        scratch.capacity = 65536;
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    check_test_types_close(&types);
+}
+
+static void check_test_program_initializers(CheckTest* test, const char* clang)
+{
+    check_test_program_initializer_facts(test);
+    const uint32_t sizes[] = { 127, 128, 129, 135, 136, 137, 257, 512, 2049, 8193, 32769 };
+    char* source = malloc(40000);
+    check_test_expect(test, source != NULL, "large automatic initializer fixture allocation");
+    for (uint32_t k = 0; source != NULL && k < BUSTER_ARRAY_LENGTH(sizes); k += 1)
+    {
+        const uint32_t size = sizes[k];
+        uint32_t length = (uint32_t)snprintf(source, 40000, "int tested(int n){char a[]=\"");
+        for (uint32_t i = 0; i + 1 < size; i += 1)
+        {
+            source[length++] = (char)('a' + i % 26);
+        }
+        snprintf(source + length, 40000 - length,
+                 "\";int bad=0;for(int i=0;i<%u;i++)bad|=a[i]!=('a'+i%%26);bad|=a[%u];a[(unsigned)n%%%u]='!';return bad?123456:n;}",
+                 size - 1, size - 1, size - 1);
+        char name[64];
+        snprintf(name, sizeof(name), "automatic-string-%u", size);
+        check_test_program_source_limits(test, source, name, clang, false, size > BUSTER_CHECK_LOWER_INIT_UNROLLED, 320);
+    }
+    if (source != NULL)
+    {
+        uint32_t length = (uint32_t)snprintf(source, 40000, "int tested(int n){_Alignas(64) int a[1025]={");
+        for (uint32_t i = 0; i < 1025; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, 40000 - length, "%s%d", i != 0 ? "," : "", (int)i * 7 - 2000);
+        }
+        snprintf(source + length, 40000 - length,
+                 "};int bad=(unsigned long)a%%64;for(int i=0;i<1025;i++)bad|=a[i]!=i*7-2000;a[(unsigned)n%%1025]=n;return bad?123456:n;}");
+        check_test_program_source_limits(test, source, "automatic-constant-list", clang, false, 1, 320);
+    }
+    free(source);
+    const char* letters = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+    char text[4096];
+    snprintf(text, sizeof(text),
+             "int tested(int n){char a[130]=\"%s\";char b[257]=\"%s\\0XY\";"
+             "int bad=0;for(int i=0;i<130;i++)bad|=a[i]!=('a'+i%%26);for(int i=0;i<130;i++)bad|=b[i]!=a[i];"
+             "bad|=b[130]|(b[131]!='X')|(b[132]!='Y');for(int i=133;i<257;i++)bad|=b[i];return bad?123456:n;}", letters, letters);
+    check_test_program_source_limits(test, text, "automatic-truncated-embedded-nul-tail", clang, false, 2, 320);
+    snprintf(text, sizeof(text),
+             "int tested(int n){int a[257]=L\"%s\\0XY\\u1234\";unsigned short b[257]=u\"%s\\0XY\\u1234\";"
+             "int bad=0;for(int i=0;i<130;i++)bad|=(a[i]!=('a'+i%%26))|(b[i]!=a[i]);"
+             "for(int i=130;i<257;i++)bad|=a[i]!=b[i];bad|=a[130]|(a[131]!='X')|(a[132]!='Y');"
+             "bad|=a[133]!=0x1234;for(int i=134;i<257;i++)bad|=a[i];return bad?123456:n;}", letters, letters);
+    check_test_program_source_limits(test, text, "automatic-wide-embedded-nul-tail", clang, false, 2, 320);
+    snprintf(text, sizeof(text),
+             "struct __attribute__((packed)) S{char x;char a[131];int y;};int tested(int n){int k=n;struct S s={(char)k++,\"%s\",k++};"
+             "int bad=(s.x!=(char)n)|(s.y!=n+1)|(k!=n+2);for(int i=0;i<130;i++)bad|=s.a[i]!=('a'+i%%26);"
+             "bad|=s.a[130];return bad?123456:n;}", letters);
+    check_test_program_source_limits(test, text, "automatic-mixed-runtime-string", clang, false, 1, 320);
+    snprintf(text, sizeof(text),
+             "int tested(int n){char a[]=\"%s\";double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x;}", letters);
+    check_test_program_source_limits(test, text, "automatic-pool-synthesized-errno-symbol", clang, false, 1, 320);
+    snprintf(text, sizeof(text),
+             "int*__errno_location(void);int tested(int n){char a[]=\"%s\";*__errno_location()=7;"
+             "double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x+*__errno_location();}", letters);
+    check_test_program_source_limits(test, text, "automatic-pool-existing-errno-symbol", clang, false, 1, 320);
+    snprintf(text, sizeof(text),
+             "struct S{char bytes[513];};int tested(int n){struct S a={\"%s\"};struct S b;b=a;"
+             "double x=__builtin_sqrt((double)(n&3)+1.0);return b.bytes[(unsigned)n%%130]+(int)x+1000*(a.bytes[512]!=0||b.bytes[512]!=0);}", letters);
+    check_test_program_source_limits(test, text, "automatic-pool-copy-errno-and-zero-tail", clang, false, 1, 320);
+    check_test_program_source_limits(test,
+        "int tested(int n){int a[257]={[0 ... 256]=3,[31]=9,[256]=17};int bad=0;"
+        "for(int i=0;i<257;i++)bad|=a[i]!=(i==31?9:i==256?17:3);return bad?123456:n;}",
+        "automatic-designated-overrides", clang, false, 1, 320);
+    check_test_program_source_limits(test,
+        "int tested(int n){int* a=(int[65]){[0 ... 64]=7};a[0]=n;return a[0]==n&&a[64]==7?n:123456;}",
+        "automatic-compound-literal-image", clang, false, 1, 320);
+    check_test_program_source_limits(test,
+        "int tested(int n){return sizeof((int[65]){[0 ... 64]=7})==260?n:123456;}",
+        "automatic-unevaluated-compound-no-image", clang, false, 0, 320);
+    check_test_program_source_limits(test,
+        "int tested(int n){int k=n;int a[40]={k++,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,k++};"
+        "return a[0]==n&&a[39]==n+1&&k==n+2?n:123456;}", "automatic-runtime-list", clang, false, 0, 0);
+    check_test_program_source_limits(test,
+        "int tested(int n){volatile int a[40]={[0 ... 39]=7};int bad=0;for(int i=0;i<40;i++)bad|=a[i]!=7;return bad?123456:n;}",
+        "automatic-volatile-list", clang, false, 0, 0);
+    check_test_program_source_limits(test,
+        "struct S{int a[65];volatile int flag;};int tested(int n){struct S s={{[0 ... 64]=7}};"
+        "return s.a[0]==7&&s.a[64]==7&&s.flag==0?n:123456;}", "automatic-omitted-volatile-member", clang, false, 0, 0);
+    check_test_program_source_limits(test,
+        "int tested(int n){int a[8193]={[0 ... 32]=7,[8192]=9};return a[0]==7&&a[32]==7&&a[8191]==0&&a[8192]==9?n:123456;}",
+        "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
 // A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
