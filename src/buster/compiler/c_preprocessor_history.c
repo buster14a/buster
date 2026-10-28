@@ -551,7 +551,16 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             origin = expansion->parent;
         }
     }
-    pp_diagnostic_includes(pp, &diagnostic, location);
+    if (severity == PP_SEVERITY_NOTE)
+    {
+        // Clang omits include stacks for attached notes, but their source still makes the next primary's
+        // include context change. A note in another header therefore causes that next prefix to repeat.
+        pp->diagnostic_include_range = pp_find_range(pp, location);
+    }
+    else
+    {
+        pp_diagnostic_includes(pp, &diagnostic, location);
+    }
     pp_diagnostic_place(pp, &diagnostic, location);
     pp_diagnostic_append(&diagnostic, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : severity == PP_SEVERITY_NOTE ? "note" : "fatal error");
     pp_diagnostic_format(&diagnostic, format, arguments);
@@ -866,7 +875,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_
 }
 
 // Notes share the primary's visibility, completion, error budget and fatal cutoff. Their output-token locations
-// retain their own macro histories, while collection owns the complete note span and all message bytes.
+// retain their own macro histories, while collection owns the complete note span and all message bytes. Every
+// descriptor must name an existing output token and a non-NULL message; callers supply an immutable bounded span.
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_diagnose_output_notes_at(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...)
 {
     va_list arguments;

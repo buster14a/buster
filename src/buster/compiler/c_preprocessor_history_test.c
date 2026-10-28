@@ -597,9 +597,80 @@ static bool pp_test_history_publication(void)
     return failures == 0;
 }
 
-static bool pp_test_diagnostic_collection(void)
+static uint32_t pp_test_diagnostic_note_includes(void)
 {
     uint32_t failures = 0;
+    char directory[] = "/tmp/buster-note-includes.XXXXXX";
+    const bool created = mkdtemp(directory) != NULL;
+    char first[512];
+    char second[512];
+    char source_name[512];
+    snprintf(first, sizeof(first), "%s/first.h", directory);
+    snprintf(second, sizeof(second), "%s/second.h", directory);
+    snprintf(source_name, sizeof(source_name), "%s/source.c", directory);
+    const bool files = created && pp_test_write_file(first, "int first;\n") && pp_test_write_file(second, "int second;\n");
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        for (uint32_t collect = 0; collect < 2; collect += 1)
+        {
+            FILE* diagnostics = tmpfile();
+            const PPOptions options = {
+                .language = { .standard = 2017, .gnu = true },
+                .scalar = scalar != 0,
+                .diagnostics = diagnostics,
+                .no_standard_includes = true,
+                .collect_diagnostics = collect != 0,
+            };
+            InternTable identifiers = { 0 };
+            Preprocessor pp = { 0 };
+            const char source[] = "#include \"first.h\"\n#include \"second.h\"\n";
+            bool ready = files && diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                         pp_run_source(&pp, source_name, (const uint8_t*)source, sizeof(source) - 1) && pp.output.count == 6;
+            if (ready)
+            {
+                const PPOutputDiagnosticNote note = { 1, "previous definition is here" };
+                pp.diagnostic_source = true;
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_ERROR, 4, 4, &note, 1, "first primary");
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_ERROR, 4, 5, &note, 1, "second primary");
+                pp_diagnostic_publish(&pp);
+                pp_diagnostic_summary(&pp);
+            }
+            char* text = NULL;
+            size_t length = 0;
+            ready = ready && pp_test_read_output(diagnostics, &text, &length);
+            char expected[4096];
+            const int written = snprintf(expected, sizeof(expected),
+                "In file included from %s:2:\n%s:1:5: error: first primary\n%s:1:5: note: previous definition is here\n"
+                "In file included from %s:2:\n%s:1:5: error: second primary\n%s:1:5: note: previous definition is here\n2 errors generated.\n",
+                source_name, second, first, source_name, second, first);
+            const bool exact = ready && text != NULL && written >= 0 && (uint32_t)written < sizeof(expected) &&
+                               strcmp(text, expected) == 0 && pp.errors == 2 && pp.warnings == 0 && !pp.fatal;
+            failures += !exact;
+            if (!exact)
+            {
+                printf("diagnostic note includes scalar=%u collect=%u: %s\n", scalar, collect, text != NULL ? text : "unavailable");
+            }
+            free(text);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            if (diagnostics != NULL)
+            {
+                fclose(diagnostics);
+            }
+        }
+    }
+    unlink(first);
+    unlink(second);
+    if (created)
+    {
+        rmdir(directory);
+    }
+    return failures;
+}
+
+static bool pp_test_diagnostic_collection(void)
+{
+    uint32_t failures = pp_test_diagnostic_note_includes();
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
         for (uint32_t mode = 0; mode < 4; mode += 1)
@@ -804,7 +875,7 @@ static bool pp_test_diagnostic_collection(void)
             }
         }
     }
-    printf("diagnostic collection: %u of 24 fail (ordering, attached groups, quiet counts, allocation refusal and rejected replay)\n", failures);
+    printf("diagnostic collection: %u of 28 fail (ordering, attached groups, quiet counts, allocation refusal and rejected replay)\n", failures);
     return failures == 0;
 }
 
