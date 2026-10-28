@@ -6059,9 +6059,13 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     function->parameters = parameters;
                 }
             }
-            // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
-            // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
-            const Tier0Check check = status->status == CHECK_PROGRAM_OK ? tier0_validate_inline(function) : (Tier0Check){ .error = TIER0_OK };
+            // The stream's rules, by the vector path where it takes the stream and by the scalar validator otherwise, which
+            // --scalar runs alone (#569).
+            Tier0Check check = { .error = TIER0_OK };
+            if (status->status == CHECK_PROGRAM_OK)
+            {
+                check = shared->scalar ? tier0_validate_scalar(function) : tier0_validate(function);
+            }
             if (check.error != TIER0_OK)
             {
                 status->status = CHECK_PROGRAM_INVALID;
