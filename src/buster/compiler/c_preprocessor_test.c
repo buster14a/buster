@@ -4824,9 +4824,9 @@ static bool pp_test_raw_recovery_failures(void)
 
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
-// starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
-// pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing
-// taken away, gives F's whole expansion.
+// starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
+// scalar path first captures the expansion. Limit the buffer each path actually fills: each fault must give one
+// fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)
 {
     enum
@@ -4841,25 +4841,29 @@ static bool pp_test_direct_argument_failures(void)
     }
     length += (uint32_t)snprintf(source + length, sizeof(source) - length, "\nF(X)\n");
     bool result = true;
-    for (uint32_t fault = 0; fault < 3; fault += 1)
+    for (uint32_t run = 0; run < 6; run += 1)
     {
+        const uint32_t fault = run % 3;
         static InternTable table;
         static Preprocessor pp;
-        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .scalar = run >= 3, .quiet = true };
         const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
         const uint32_t capacity = initialized ? pp.arguments.capacity : 0;
+        const uint32_t captures = initialized ? pp.captures.capacity : 0;
         pp.fail_origin_growth = initialized && fault == 0;
         pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
+        pp.captures.capacity = initialized && fault == 1 && pp.options.scalar ? 64 : captures;
         const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
         const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
                                                        : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
         if (!passed)
         {
-            printf("direct argument failure %u: ran %u, fatal %u, errors %u, output %u\n", fault, ran, initialized && pp.fatal, initialized ? pp.errors : 0,
-                   initialized ? pp.output.count : 0);
+            printf("direct argument failure %u, scalar %u: ran %u, fatal %u, errors %u, output %u\n", fault, options.scalar, ran, initialized && pp.fatal,
+                   initialized ? pp.errors : 0, initialized ? pp.output.count : 0);
         }
         result = result && passed;
         pp.arguments.capacity = capacity;
+        pp.captures.capacity = captures;
         pp.fail_origin_growth = false;
         if (initialized)
         {
