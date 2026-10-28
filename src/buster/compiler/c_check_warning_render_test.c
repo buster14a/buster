@@ -82,6 +82,16 @@ static void check_test_warning_render(CheckTest* test)
                               "completion orders a source group after EOF preprocessing and accepted primary owns its only attached note");
             check_test_expect(test, text == NULL || (strstr(text, "semantic warning") == NULL && strstr(text, "overflows its type") == NULL),
                               "legacy MESSAGE completion metadata never creates another warning group");
+            CheckWarningEvent suppressed = primary;
+            suppressed.flags = BUSTER_CHECK_WARNING_SUPPRESSED;
+            CheckWarningBuffer suppressed_facts = { .arena = &retained };
+            const uint32_t before_errors = pp.errors;
+            const bool suppressed_ready = check_warning_append(&suppressed_facts, &suppressed, &note, 1);
+            const CheckWarningEvents suppressed_view = check_warning_view(&suppressed_facts);
+            check_test_expect(test, suppressed_ready && check_driver_warning_severity(&pp, &input, &suppressed) == CHECK_WARNING_IGNORE &&
+                                   !check_driver_warning_promoted(&pp, &input, &suppressed_view, NULL) &&
+                                   check_driver_warning_events(&parser, &pp, &input, &types.table, &suppressed_view, NULL, &scratch) && pp.errors == before_errors,
+                              "semantic suppression survives a source error mapping without reviving its primary or attached note");
             if (mode == 3)
             {
                 uint8_t headers[6] = { 0, 1, 0, 0, 0, 0 };

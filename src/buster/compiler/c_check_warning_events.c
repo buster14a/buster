@@ -89,6 +89,8 @@ typedef enum CheckWarningCompletion
 // nonstandard ICE fold can start ignored under the same -Wgnu-folding-constant policy. Completion/lookahead is also
 // independent of the diagnostic location: a later preprocessing diagnostic can precede an earlier source warning.
 #define BUSTER_CHECK_WARNING_DEFAULT_IGNORED 0x01u
+// A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
+#define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 
 typedef struct CheckWarningPayload CheckWarningPayload;
@@ -181,7 +183,7 @@ static __attribute__((unused)) bool check_warning_append(CheckWarningBuffer* buf
 {
     bool valid = buffer != NULL && buffer->arena != NULL && event != NULL && event->id < CHECK_WARNING_ID_COUNT &&
                  event->kind < CHECK_WARNING_EVENT_KIND_COUNT && event->token != UINT32_MAX &&
-                 (event->flags & ~BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
+                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
                  ((event->completion_kind == CHECK_WARNING_COMPLETE_TU_END) == (event->completion == UINT32_MAX)) &&
                  buffer->count <= buffer->capacity && (buffer->count == 0 || buffer->events != NULL) &&
                  buffer->note_count <= buffer->note_capacity && (buffer->note_count == 0 || buffer->notes != NULL) &&
