@@ -4,7 +4,7 @@
 // Sparse semantic warning facts, shared by readers, checked streams and initializer plans. IDs name policy, not
 // bits in a token/node column. A published view is immutable: later appends never change its prefix. Deferred
 // readers borrow a frozen prefix and own separate suffix buffers; the unit merge copies/remaps only those suffixes.
-// Include after the arena, TypeId and IdentId definitions. No function here chooses severity or renders text.
+// Include after the arena and TypeId definitions. No function here chooses severity or renders text.
 #ifndef BUSTER_C_CHECK_WARNING_EVENTS_INCLUDED
 #define BUSTER_C_CHECK_WARNING_EVENTS_INCLUDED
 
@@ -97,7 +97,8 @@ struct CheckWarningPayload
     // Only these two fields contain TypeIds and need type remapping when a deferred body's facts are merged.
     TypeId first_type;
     TypeId second_type;
-    IdentId name;
+    // An IdentId in source consumers; standalone graph clients need not include the interner.
+    uint32_t name;
     uint32_t token;
     uint32_t data;
 };
