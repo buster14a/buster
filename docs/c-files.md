@@ -117,35 +117,7 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   units and lanes read it at once.
 - **A path entry per path looked up:** the path's record, or none (no file, a
   directory, a file too big or unreadable). A translation unit's include
-  search then makes no file probe for a path the cache already looked up;
-  optional directory metadata is recorded separately below.
-- **Directory snapshots for negative include candidates (#653):** on the
-  first missing candidate in an explicit or standard search directory, its entry-name hashes are retained in
-  an optional arena of at most 16 MiB. An absent first path component needs
-  no file open. A listed component always takes the existing probe, including
-  symlinks and subdirectory names; a hash collision can only retain a probe.
-  Dot, dot-dot, empty and overlong components retain the probe too. Complete,
-  readable and searchable listings on btrfs, ext4 and tmpfs qualify; the
-  directory flags must report that casefold is disabled. Unsupported filesystems,
-  permission failures, partial reads and allocation exhaustion fall back to
-  the existing search. Include order, `#include_next`, and each file's path
-  and system-header level are still decided by `pp_include_candidate`.
-  The preprocessor fills listings lazily, so a unit with no includes makes
-  none. A run-ahead records a listing on lane 0 after a probe wave reports
-  a missing candidate in that directory, inside the measured walk; the next
-  wave's probes on lanes only read the snapshots. Flat walks, files with no
-  literal includes and directories where every lookup succeeds need no
-  listing. The scalar and vector paths
-  share this syscall filter; the entry-name hash table is scalar, since its
-  purpose is to eliminate OS calls rather than token-processing work.
-  A first successful lookup does not enumerate its directory, including
-  explicit `-I` searches. A quoted include's own source directory is probed
-  directly unless it already has a snapshot from the search list.
-  As with cached files and negative paths, the filesystem is a snapshot for
-  the cache's lifetime: new directory entries require a fresh `FileCache`.
-  Listing opens/entries are recorded in `FileCache.directory_opens` and
-  `directory_entries`, separately from `FileCacheCounts`' file probes;
-  `directory_skips` counts candidates omitted by the listing.
+  search then makes no system call for a path the cache already looked up.
 - **A translation unit keeps its own state about each file:** `PPFile` (how a
   path was found, its system level) and `PPFileData`, which copies the record's
   prepared fields when the unit first enters the file and keeps `once` (`#pragma
@@ -154,7 +126,7 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   its own (`PPOptions.files` null) makes one, so every earlier command runs as
   before: `-E`'s text is byte-identical, and `test-preprocessor --clang`
   passes.
-- **File probes in one place:** `file_cache_probe` opens a path, reads its
+- **System calls in one place:** `file_cache_probe` opens a path, reads its
   identity, and unless a record has that identity, maps or reads its bytes.
   `FileCacheCounts` counts its opens, mappings and reads for whoever called
   it: a unit's `Preprocessor.probes`, or a run's lanes.

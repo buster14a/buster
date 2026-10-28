@@ -4605,13 +4605,6 @@ the 9700X's numbers.
 
 ## Per-file jobs tests
 
-The preprocessor's lookup-accounting fixtures also check directory snapshots
-(#653): skipped missing first components, existing symlinks/subdirectories,
-dot/dot-dot and overlong-component fallback, repeated/shared cache use,
-fresh-cache visibility of new names, exhausted optional storage, and casefold
-where the temporary filesystem permits it. File-probe counters exclude the
-separately recorded directory-listing opens.
-
 `./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
 [--flat] [options] [path...]` (about 0.7 s without paths) checks `c_files.c`.
 Every check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8),
