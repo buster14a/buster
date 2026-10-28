@@ -186,6 +186,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         .initializers = &path.initializers,
         .asms = &path.asms,
         .identifiers = pp.table,
+        .prepared_data = &data,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };

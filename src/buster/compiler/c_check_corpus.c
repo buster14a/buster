@@ -1133,6 +1133,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         .initializers = &path->initializers,
         .asms = &path->asms,
         .identifiers = pp->table,
+        .prepared_data = &data,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };
@@ -1371,7 +1372,7 @@ static bool check_corpus_programs_equal(const CheckProgram* a, const CheckProgra
     }
     for (uint32_t i = 0; equal && i < a->builtin_count; i += 1)
     {
-        equal = a->builtin_nodes[i] == b->builtin_nodes[i];
+        equal = a->builtin_nodes[i] == b->builtin_nodes[i] && a->builtin_bodies[i] == b->builtin_bodies[i];
     }
     for (uint32_t i = 0; equal && a->asm_offsets != NULL && i <= a->input->asm_count; i += 1)
     {

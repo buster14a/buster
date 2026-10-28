@@ -32,12 +32,34 @@ struct CheckDataPrepared
     uint32_t declaration_count;
     uint32_t* declared_objects;
     uint32_t* declared_latest;
+    // Selection policy reduced with each object's declarations, plus the literal's default sentinel at declared_count.
+    uint32_t* declared_roots;
+    uint8_t* declared_inline;
+    // Each emitted data definition's declared-object index, or declared_count for string literals.
+    uint32_t* definition_declared;
     uint32_t declared_count;
     uint32_t object_count;
     LinkCapacity capacity;
     uint32_t token;
     CheckDataInputStatus status;
 };
+
+static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
+{
+    uint32_t flags = 0;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        if (!attribute->ignored)
+        {
+            flags |= attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_RETAIN ? BUSTER_C_LOWERING_USED : 0;
+            flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
+            flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
+            *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
+        }
+    }
+    return flags;
+}
 
 typedef struct CheckDataInput CheckDataInput;
 struct CheckDataInput
@@ -148,7 +170,9 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     result->declared_latest = result->declared_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, declared) : 0;
     uint32_t* definition = result->declared_latest != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, declared) : 0;
     uint8_t* alignments = definition != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, declared) : 0;
-    if (valid && declared != 0 && alignments == 0)
+    result->declared_roots = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)declared + 1) : NULL;
+    result->declared_inline = result->declared_roots != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)declared + 1) : NULL;
+    if (valid && ((declared != 0 && alignments == 0) || result->declared_inline == NULL))
     {
         valid = false;
         result->status = CHECK_DATA_INPUT_RESOURCE;
@@ -163,11 +187,25 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             result->declared_objects[objects] = object;
             definition[objects] = BUSTER_CHECK_NONE;
             alignments[objects] = 0;
+            result->declared_roots[objects] = 0;
+            result->declared_inline[objects] = 1;
             objects += 1;
         }
         const uint32_t at = objects - 1;
         result->declared_latest[at] = token;
         const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+        const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
+        bool gnu_inline = false;
+        result->declared_roots[at] |= check_program_attribute_roots(attributes, function, &gnu_inline);
+        result->declared_inline[at] |= gnu_inline ? 2 : 0;
+        if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
+        {
+            const uint8_t spelling = input->function_flags != NULL ? input->function_flags[token] : 0;
+            if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
+            {
+                result->declared_inline[at] &= (uint8_t)~1u;
+            }
+        }
         if (attributes != 0 && attributes->alignment_log2 > alignments[at])
         {
             alignments[at] = attributes->alignment_log2;
@@ -182,6 +220,11 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         }
     }
     result->declared_count = objects;
+    if (valid)
+    {
+        result->declared_roots[objects] = 0;
+        result->declared_inline[objects] = 1;
+    }
     uint64_t object_capacity = input->string_count;
     uint64_t reference_capacity = 0;
     for (uint32_t at = 0; valid && at < objects; at += 1)
@@ -211,8 +254,9 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         result->objects = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, object_capacity) : 0;
         result->reference_offsets = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
         result->reference_counts = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
+        result->definition_declared = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
         result->references = reference_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, reference_capacity) : 0;
-        valid = (object_capacity == 0 || (result->objects != 0 && result->reference_offsets != 0 && result->reference_counts != 0)) &&
+        valid = (object_capacity == 0 || (result->objects != 0 && result->reference_offsets != 0 && result->reference_counts != 0 && result->definition_declared != NULL)) &&
                 (reference_capacity == 0 || result->references != 0);
         result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_RESOURCE;
     }
@@ -250,6 +294,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             if (valid)
             {
                 const uint32_t written = result->count;
+                result->definition_declared[written] = at;
                 result->objects[written] = (CheckDataObject){
                     .type = type,
                     .object = object,
@@ -301,6 +346,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         if (valid)
         {
             const uint32_t at = result->count++;
+            result->definition_declared[at] = result->declared_count;
             result->objects[at] = (CheckDataObject){
                 .type = string->type,
                 .object = string->object,

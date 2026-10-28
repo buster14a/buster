@@ -92,6 +92,7 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
         .initializers = &path.initializers,
         .asms = &path.asms,
         .identifiers = pp.table,
+        .prepared_data = &data,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };
