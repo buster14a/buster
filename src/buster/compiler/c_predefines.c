@@ -896,7 +896,8 @@ struct PredefinesOptions
     uint64_t sanitizers;
     uint64_t ubsan_feature_ignored;
     bool sanitize_coverage;
-    // -target's or --target='s triple (predefines_target_valid), or null for clang's default, x86_64-pc-linux-gnu.
+    // -target's or --target='s triple (predefines_target_valid), or null for the build Clang's configured default
+    // (BUSTER_CLANG_DEFAULT_TARGET, x86_64-pc-linux-gnu when a direct build leaves it undefined).
     const char* target;
     // The options clang's driver reads only the last of, which predefines_finish checks (-march's CPU and -mtune are
     // above): the last -mfpmath=, -mcmodel=, -mabi= and -fveclib= value (null for none); the last -O, -fgnuc-version=

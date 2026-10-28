@@ -176,7 +176,16 @@ jobs:
             path=scalar
           fi
           printf '\nSelected host path: %s (%s)\n' "$path" "$BUSTER_HOST_ARCH"
-          if [ "$BUSTER_HOST_ARCH" = x86-64 ]; then test "$path" = scalar; fi
+          if [ "$BUSTER_HOST_ARCH" = x86-64 ] && [ "$path" != scalar ]; then
+            printf '%s\n' '::error::Baseline hosted correctness requires BUSTER_HOST_VECTOR=0; the compiler selected a vector path.'
+            exit 1
+          fi
+          # Native correctness must exercise the vector algorithms. A different runner CPU must fail eligibility
+          # here rather than let both required matrix legs qualify only the scalar fallback.
+          if [ "$BUSTER_HOST_ARCH" = native ] && [ "$path" != vector ]; then
+            printf '%s\n' '::error::Native hosted correctness requires BUSTER_HOST_VECTOR=1 (the full native vector feature set). This runner selected scalar and cannot qualify vector correctness.'
+            exit 1
+          fi
 
       - name: Check baseline fallback memory and arithmetic boundaries
         run: |
@@ -608,7 +617,7 @@ jobs:
           ./build/compiler test-streaming --cross-check
           == Test GNU syntax metadata against clang
           ./build/compiler test-gnu --clang
-          == Test experimental Tier 1 scheduling and model coverage
+          == Test experimental Tier 1 scheduling, model coverage and native execution
           ./build/compiler test-tier1-schedule
           == Test the x86 semantics
           # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
