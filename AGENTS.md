@@ -5595,8 +5595,13 @@ checks
 that each stop's backtrace goes through the program's functions to `_start`,
 two of them above `_start` at least once (the unwinder used an FDE), each frame
 at its function's line of `streamed.c` (the DWARF's: function f is line f + 1),
-and that perf's samples with DWARF call graphs name the program's functions,
-reach `_start` and give lines of `streamed.c`. The files go in a directory under `$TMPDIR` (or `/tmp`), removed
+and that at least four separate perf samples with DWARF call graphs name the program's functions,
+reach its actual `_start` and give lines of `streamed.c`. The larger cross-check fixture repeats the entry's
+callee/fold block 128 times in the generated typed stream and C, keeping the same function set and normal DWARF/unwind generation
+long enough for sampling. Other generator callers keep the ordinary single pass; zero and one repetitions produce
+identical streams and C. There is no sampling retry. Collection failures print exit statuses, data size and bounded
+stderr/profile text; negative controls reject one sample, duplicate frames and wrapper names.
+The files go in a directory under `$TMPDIR` (or `/tmp`), removed
 unless `--keep` or a failure. The 9700X job's test step runs it with
 `--cross-check`.
 

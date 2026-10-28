@@ -188,6 +188,83 @@ static bool stream_test_frame_line(const StreamProgram* program, const char* lin
     return same;
 }
 
+typedef struct StreamTestProfile StreamTestProfile;
+struct StreamTestProfile
+{
+    bool named;
+    bool reached;
+    bool sourced;
+    uint32_t complete;
+};
+
+// perf script separates call graphs with blank lines. Count graphs, not repeated frame names in one graph.
+static StreamTestProfile stream_test_profile(const char* sample)
+{
+    StreamTestProfile result = { 0 };
+    bool named = false;
+    bool reached = false;
+    bool sourced = false;
+    while (sample != NULL && *sample != 0)
+    {
+        const char* end = strchr(sample, '\n');
+        const char* source = strstr(sample, "streamed.c:");
+        sourced |= source != NULL && (end == NULL || source < end);
+        const char* symbol = sample;
+        while (*symbol == ' ' || *symbol == '\t')
+        {
+            symbol += 1;
+        }
+        if (*symbol == '\n' || *symbol == 0)
+        {
+            result.complete += named && reached && sourced;
+            named = false;
+            reached = false;
+            sourced = false;
+        }
+        else
+        {
+            while (*symbol != 0 && *symbol != ' ' && *symbol != '\n')
+            {
+                symbol += 1;
+            }
+            while (*symbol == ' ')
+            {
+                symbol += 1;
+            }
+            named |= stream_test_function_name(symbol);
+            reached |= strncmp(symbol, "_start", 6) == 0 && (symbol[6] == ' ' || symbol[6] == '\n' || symbol[6] == 0);
+            result.named |= named;
+            result.reached |= reached;
+            result.sourced |= sourced;
+        }
+        sample = end != NULL ? end + 1 : NULL;
+    }
+    result.complete += named && reached && sourced;
+    return result;
+}
+
+static bool stream_test_profile_valid(StreamTestProfile profile)
+{
+    return profile.named && profile.reached && profile.sourced && profile.complete >= 4;
+}
+
+static void stream_test_profile_contract(StreamTestTally* tally)
+{
+#define BUSTER_STREAM_TEST_SAMPLE "  400100 u0_f0\n  streamed.c:1\n  400200 _start\n  streamed.c:9\n\n"
+    const StreamTestProfile one = stream_test_profile(BUSTER_STREAM_TEST_SAMPLE);
+    const StreamTestProfile four = stream_test_profile(BUSTER_STREAM_TEST_SAMPLE BUSTER_STREAM_TEST_SAMPLE BUSTER_STREAM_TEST_SAMPLE BUSTER_STREAM_TEST_SAMPLE);
+    const StreamTestProfile duplicate = stream_test_profile("  400100 u0_f0\n  streamed.c:1\n  400200 _start\n  400200 _start\n  400200 _start\n  400200 _start\n\n");
+    const StreamTestProfile wrapper = stream_test_profile("  400100 u0_f0\n  streamed.c:1\n  400200 _start_wrapper\n\n");
+    const StreamTestProfile split = stream_test_profile("  400100 u0_f0\n  streamed.c:1\n\n  400200 _start\n\n");
+    stream_test_expect(tally, one.named && one.reached && one.sourced && one.complete == 1 && !stream_test_profile_valid(one), "one complete sample remains below the profiling minimum", NULL);
+    stream_test_expect(tally, four.complete == 4 && stream_test_profile_valid(four), "four complete call graphs meet the profiling minimum", NULL);
+    stream_test_expect(tally, duplicate.complete == 1 && !stream_test_profile_valid(duplicate), "duplicate _start frames do not invent more samples", NULL);
+    stream_test_expect(tally, !wrapper.reached && !stream_test_profile_valid(wrapper), "a wrapper name cannot stand in for the streamed _start", NULL);
+    stream_test_expect(tally, split.named && split.reached && split.sourced && !stream_test_profile_valid(split), "frames in separate incomplete samples do not form one call graph", NULL);
+    stream_test_expect(tally, !stream_test_profile_valid(stream_test_profile(NULL)), "missing profile text cannot qualify a sample", NULL);
+#undef BUSTER_STREAM_TEST_SAMPLE
+}
+
 // The consumers on a streamed file: readelf without warnings, gdb's backtraces through the program's functions to
 // _start with their lines, and perf's samples with DWARF call graphs that name its functions, reach _start and give
 // their lines.
@@ -278,36 +355,15 @@ static void stream_test_consumers(StreamTestTally* tally, const StreamProgram* p
     const String8 samples = scripted ? object_test_read_file(arena, output) : (String8){ 0 };
     // perf script's lines are an address and a symbol, each with its source line on the line after it: some name a
     // program function, some _start, a caller, and some give a line of streamed.c.
-    bool named = false;
-    bool reached = false;
-    bool sourced = false;
-    const char* sample = samples.pointer;
-    while (sample != 0 && *sample != 0)
-    {
-        const char* end = strchr(sample, '\n');
-        const char* source = strstr(sample, "streamed.c:");
-        sourced = sourced || (source != 0 && (end == 0 || source < end));
-        const char* symbol = sample;
-        while (*symbol == ' ' || *symbol == '\t')
-        {
-            symbol += 1;
-        }
-        while (*symbol != 0 && *symbol != ' ' && *symbol != '\n')
-        {
-            symbol += 1;
-        }
-        while (*symbol == ' ')
-        {
-            symbol += 1;
-        }
-        named = named || stream_test_function_name(symbol);
-        reached = reached || strncmp(symbol, "_start", 6) == 0;
-        sample = strchr(sample, '\n');
-        sample = sample != 0 ? sample + 1 : 0;
-    }
-    stream_test_expect(tally, scripted && named && reached, "perf's samples name the program's functions and reach _start", path);
+    const StreamTestProfile profile = stream_test_profile(samples.pointer);
+    const bool named = profile.named;
+    const bool reached = profile.reached;
+    const bool sourced = profile.sourced;
+    const uint32_t start_samples = profile.complete;
+    stream_test_expect(tally, scripted && stream_test_profile_valid(profile), "at least four perf samples name the program's functions and reach _start", path);
     stream_test_expect(tally, scripted && sourced, "perf's samples give the functions' lines in streamed.c", path);
-    if (!(scripted && named && reached && sourced))
+    printf("streaming perf: %u samples reach the streamed program's _start (minimum 4)\n", start_samples);
+    if (!(scripted && stream_test_profile_valid(profile)))
     {
         struct stat metadata = { 0 };
         const bool data_present = stat(data, &metadata) == 0;
@@ -436,6 +492,7 @@ static int run_streaming_tests(int argc, char** argv)
         fprintf(stderr, "usage: test-streaming [--seed N] [--units N] [--cross-check] [--keep]\n");
     }
     StreamTestTally tally = { 0 };
+    stream_test_profile_contract(&tally);
     char directory[PATH_MAX];
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-streaming-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
@@ -448,7 +505,7 @@ static int run_streaming_tests(int argc, char** argv)
     valid = valid && arena.base != 0 && scratch.base != 0;
     // A small program and a larger one, each in a shape with calls, loops, floating values, pointers, objects and
     // calls through pointers.
-    const Tier0ProgramOptions options = {
+    Tier0ProgramOptions options = {
         .functions = 8,
         .statements = 16,
         .expression_nodes = 10,
@@ -463,6 +520,9 @@ static int run_streaming_tests(int argc, char** argv)
     const uint32_t sizes[2] = { 3, units };
     for (uint32_t s = 0; valid && s < 2; s += 1)
     {
+        // The original short functions stay short; repeat their entry's calls in the profiled fixture so a
+        // sampled consumer has sustained work in those same functions, with their actual streamed _start.
+        options.entry_repetitions = cross_check && s == 1 ? BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS : 0;
         StreamProgram program;
         const uint64_t mark = arena.length;
         const bool generated = stream_program_generate(&program, &arena, &scratch, &tables, seed + 1000ull * s, sizes[s], options);
