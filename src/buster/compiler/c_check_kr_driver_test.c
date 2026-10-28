@@ -36,8 +36,9 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
         { arity, "-Wno-deprecated-non-prototype", NULL, false, 1, 0 },
         { arity, "-Werror", NULL, false, 0, 1 },
         { "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}int g(void){return sizeof((&f)(1,2));}\n", "-Werror", NULL, false, 0, 1 },
+        // Keep the fall-through body inside the admitted return-flow subset while retaining a source-only call warning.
         { "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
-          "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nstruct S{long a,b;};struct S g(void){int(*p)()=f;p(1);}\n",
+          "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nstruct S{long a,b;};struct S g(void){int(*p)()=f;int z=sizeof(p(1));}\n",
           NULL, NULL, false, 1, 1 },
     };
     char source[512];
