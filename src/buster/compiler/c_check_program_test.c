@@ -1098,6 +1098,18 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
                 }
                 check_test_expect(test, program.reference_count == references && writes == initializations,
                                   "checked body preserves exact live reference and ordered initializer counts");
+                if (program.body_count == 0)
+                {
+                    const uint64_t output_mark = output.length;
+                    const uint64_t scratch_mark = scratch.length;
+                    CheckLowerShared shared = { 0 };
+                    CheckProgramLowered prepared = { 0 };
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
+                                      "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    arena_pop_to(&output, output_mark);
+                    arena_pop_to(&scratch, scratch_mark);
+                }
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
@@ -1393,9 +1405,26 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+#include "c_check_program_batch_test.c"
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_copies(test, clang);
+    check_test_program_batch(test);
+    check_test_program_source(test,
+        "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
+        "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
+        "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
+        "v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}",
+        "batch-ordinary-and-ordered-fallback", clang);
+    check_test_program_source(test,
+        "struct part{char tag;int value;double real;struct part*next;};"
+        "static volatile int side;static int touch(int n){side+=n&3;return side;}"
+        "int tested(int n){struct part b={2,n+7,(double)n*0.5,0},a={1,n-3,0.25,&b};"
+        "struct part*p=&a;p->value=(short)(unsigned char)(n+9);"
+        "int v=(short)(unsigned char)p->value+(int)p->next->real+(int)(double)p->next->value;"
+        "v+=(_Bool)p->next->value;v+=n?touch(p->value):touch(p->next->value);return v+side;}",
+        "batch-member-address-load-conversion-chains", clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
@@ -1684,6 +1713,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
         "vla-typedef-captures-bound-once", clang);
     check_test_program_source(test,
+        "int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;"
+        "x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];"
+        "return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}", "vla-declaration-span-scopes-and-commas", clang);
+    check_test_program_source(test,
         "int tested(int n){n+=10;int(*p)[++n],x=(n*=2),(*q)[++n];return (int)sizeof(*p)+(int)sizeof(*q)+n+x;}",
         "vla-declarator-and-initializer-order", clang);
     check_test_program_source(test,
@@ -1797,6 +1830,32 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
         "return (int)__builtin_strlen(b)+(__builtin_memcmp(a,b,k)>0)-(__builtin_memcmp(a,b,k)<0)+b[2];}",
         "memory-builtin-runtime-loops", clang);
+    check_test_program_source(test,
+        "unsigned char a[512],b[512];int tested(int n){unsigned k=(unsigned)n%300;"
+        "for(unsigned i=0;i<512;i++)a[i]=(unsigned char)(1+i%255);"
+        "__builtin_memset(b,0x180,512);__builtin_memcpy(b+3,a+1,k);__builtin_memmove(b+4,b+3,k);"
+        "__builtin_memmove(b+2,b+4,k);b[k+2]=0;"
+        "return (int)__builtin_strlen((char*)b+2)+__builtin_memcmp(a+1,b+2,k)+b[400];}",
+        "memory-builtin-wide-runtime", clang);
+    check_test_program_source(test,
+        "unsigned char a[128],b[128];int effects[3];int tested(int n){effects[0]=effects[1]=effects[2]=0;"
+        "for(unsigned i=0;i<128;i++)a[i]=(unsigned char)(i+n);"
+        "__builtin_memset(b,0x1a5,33);__builtin_memcpy(b,a,32);"
+        "__builtin_memmove(b+1,b,15);__builtin_memmove(b,b+1,16);"
+        "__builtin_memcpy((effects[0]++,b+40),(effects[1]++,a+40),(effects[2]++,8));"
+        "int r=__builtin_memcmp(a+40,b+40,8);__builtin_memset((effects[0]++,b),7,(0));"
+        "return r+effects[0]+effects[1]*10+effects[2]*100+b[7]+b[15]+b[32]+__builtin_memcmp(a,b,1)+__builtin_memcmp(a,b,0);}",
+        "memory-builtin-small-constants-and-effects", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int change_rounding(int);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;change_rounding(n);"
+        "__builtin_memcpy(b,a,(unsigned long)(1.0+0x1.fffffffffffffp-1));change_rounding(0);return b[0]+b[1]*256;}",
+        "memory-builtin-runtime-size-under-fenv", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;clear_fp();"
+        "__builtin_memcpy(b,a,__builtin_constant_p(1.0/3.0));return b[0]+b[1]*256+fp_state()*65536;}",
+        "memory-builtin-size-query-runtime-answer", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
@@ -2348,6 +2407,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test, source, name, clang);
     }
     check_test_program_boundary(test, "", "empty-program", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S0{int x;};struct S1{struct S0 x;};", "types-only-no-abi", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S{int x;};struct S value={42};int values[3]={1,2,3};", "objects-only-no-abi", true, true, 0, 0);
     check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
     check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);

@@ -453,11 +453,16 @@ static int run_preprocessor_oracle(int argument_count, char** arguments)
 
 static int run_preprocessor_tests(int argument_count, char** arguments)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     bool oracle = false;
     for (int i = 0; i < argument_count; i += 1)
     {
         oracle |= strcmp(arguments[i], "--compare-clang") == 0;
     }
     // --clang alone retains the fixture interface; --compare-clang accepts --clang PATH.
-    return oracle ? run_preprocessor_oracle(argument_count, arguments) : run_preprocessor_fixture_tests(argument_count, arguments);
+    const int returned = oracle ? run_preprocessor_oracle(argument_count, arguments) : run_preprocessor_fixture_tests(argument_count, arguments);
+    oracle_epoch_end(epoch);
+    return returned;
 }
