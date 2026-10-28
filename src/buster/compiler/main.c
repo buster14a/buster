@@ -436,10 +436,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_checker_driver.c"
 #pragma clang section text = ""
 // The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681): the build waits for that
-// unit, which reaches the whole compiler, and their code was a quarter of its compile (32.9 s alone, 25.0 s so), while
-// their time is the compiler's code they call and clang's processes, which run as fast (test-checker, its asm, driver,
-// debug and lanes tests, the deferred reader's, the corpus's and c-testsuite's, as before). No benchmark's timed code
-// calls them: they generate inputs and compare results outside the samples. A new test of the checker's goes inside.
+// unit, which reaches the whole compiler, and their code was a fifth of its compile (on the 9700X, 33.7 s in the build,
+// 27.4 s so, the build 33.7 and 28.5 s), while their time is the compiler's code they call and clang's processes, which
+// run as fast (test-checker, its asm, driver, debug and lanes tests, the deferred reader's, the corpus's and
+// c-testsuite's). No benchmark's timed code calls them: they generate inputs and compare results outside the samples.
+// A new test of the checker's goes inside.
 #pragma clang optimize off
 #include "buster/compiler/c_checker_test.c"
 #pragma clang optimize on
