@@ -26,8 +26,9 @@ subset (430, in its 220 programs) and of Lua 5.4.8's 32 files but `lua.c` and
 ("Bytes per source token" below).
 
 The adapter refuses what no function of those corpora has: vector values
-(`VECTOR`, `IR_ERROR_TYPE`) and #136's machine operations (`X86` rows,
-`IR_ERROR_OPCODE`), which have no IR type or operation. The stable printer's text
+(`VECTOR`, `IR_ERROR_TYPE`), #136's machine operations (`X86` rows) and #148's
+frame address (`FRAME_ADDRESS`, both `IR_ERROR_OPCODE`), which have no IR type or
+operation. The stable printer's text
 is read back by `ir_parse.c` (#175).
 
 ## Lifetime and stage contract
@@ -321,7 +322,8 @@ need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
 as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
-operations below. Typed validation still requires class U64 and `value == 0` for each, and a
+operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
+refused, as `X86` is (`IR_ERROR_OPCODE`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -344,12 +346,12 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`VECTOR` values and `X86` rows are refused with
-`IR_ERROR_TYPE` and `IR_ERROR_OPCODE` at their entry, after validation and before
-anything is allocated. `BUSTER_TYPED_X86` is the last typed kind; a static
-assertion makes a later kind fail to build until this adapter lowers or refuses
-it, since the plan and the emitter would take an unnamed kind for a binary
-operation.
+`VECTOR` values are refused with `IR_ERROR_TYPE`, and `X86` rows and
+`FRAME_ADDRESS` with `IR_ERROR_OPCODE`, at their entry, after validation and
+before anything is allocated: no function of the corpora has one. A static
+assertion pins the typed kinds' count, `X86` the last, so that a new kind fails to
+build until this adapter lowers or refuses it, since the plan and the emitter
+would take an unnamed kind for a binary operation.
 
 The ordered replay is written once in `ir_lower_emit.c` and instantiated for
 counting and filling. Counting fixes its output to null; filling receives the

@@ -72,8 +72,9 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after X86 must be lowered (or refused, as X86 is) here before tier0_validate accepts it.
-_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
+// (before X86, the last) must be lowered (or refused, as FRAME_ADDRESS and X86 are) here before tier0_validate accepts
+// it.
+_Static_assert(BUSTER_TYPED_KINDS == 48 && BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -728,10 +729,10 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_X86)
+        else if (kind == BUSTER_TYPED_X86 || kind == BUSTER_TYPED_FRAME_ADDRESS)
         {
-            // A machine operation (#136), which this adapter doesn't lower and the plan and the emitter would take for a
-            // binary operation: no function of the corpora has one (docs/ir.md).
+            // A machine operation (#136) and a frame's address (#148), which this adapter doesn't lower and the plan and
+            // the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }

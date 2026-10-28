@@ -330,12 +330,14 @@ designs and the compilers already built this way.
   what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
-  [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
-  single-exec programs by the direct path, by both paths into the same bytes,
-  and runs it against its expected output; `--cross-check` also links its `-c`
-  object with `cc`, and compares the functions and objects it defines with
-  `clang -O0 -c`'s (#129, `c_lowering_symbols.c`). `--self-test` checks the
-  harness with a stand-in compiler.
+  [--clang PATH] [--id-order N] [--cross-check] [--keep] DIR` compiles each of
+  c-testsuite's single-exec programs by the direct path, by both paths, the
+  scalar one with its identifiers' ids in another order (#153's `--id-order`),
+  into the same bytes, and runs it against its expected output;
+  `--cross-check` also links its `-c` object with `cc`, and compares the
+  functions and objects it defines with `clang -O0 -c`'s (#129,
+  `c_lowering_symbols.c`). `--self-test` checks the harness with a stand-in
+  compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
@@ -352,8 +354,10 @@ designs and the compilers already built this way.
   checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`), and `-g` attaching DWARF of its functions' source
-  lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
+  `check_program_select`), `--id-order N` handing the unit's identifiers their
+  ids in another order, on which nothing it writes may depend (#153's test
+  option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
+  source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
   `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
@@ -1052,8 +1056,8 @@ designs and the compilers already built this way.
   dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
   jump through the function's one dispatch block, as clang's indirect gotos go,
   which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
-  long double and `__int128`; it refuses
-  vectors and `X86` rows, which no corpus function has. `test-ir` checks
+  long double and `__int128`; it refuses vectors, `X86` rows and the frame
+  address (`FRAME_ADDRESS`), which no corpus function has. `test-ir` checks
   independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR (values, objects,
   indirect calls, records by value, the dynamic stack) against the typed-stream
@@ -2576,14 +2580,21 @@ allocation failures. Jobs run in forward and reverse order with delayed
 completion at 1, 2, 3 and 8 lanes; the bytes must agree.
 
 `test-preprocessor` (without files), `test-object-writer`, `test-executable`,
-`test-dynamic`, `test-static` and `test-files` also check output after changing
+`test-dynamic`, `test-static`, `test-files`, `test-check-lanes`,
+`test-checker-deferred` and `test-c-testsuite` also check output after changing
 opaque identifier assignments. Each accepts `--id-order N` (default 153). The
 object test covers both section modes at every lane count; the preprocessor
 compares both `-E` text modes and diagnostics through both kernels and both job
 orders; the per-file jobs' test primes the shared table before the walk fills
 the cache, and compares every translation unit's `-E` text, diagnostics and
-locations and every cached file's tokens at every lane count. The 9700X workflow
-runs these checks as part of the stage commands.
+locations and every cached file's tokens at every lane count. The C compile's
+tests use the driver's `--id-order N` (`check_driver_id_order`, which primes
+the unit's table with its own names in another order): `test-check-lanes`
+compares objects, executables and diagnostics at 1 and 8 lanes with one lane's
+of the plain compile, `test-checker-deferred` the deferred reader with source
+order's, and `test-c-testsuite` each scalar build with its vector one;
+`test-checker-corpus --id-order N` checks a corpus so. The 9700X workflow runs
+these checks as part of the stage commands.
 
 `./build/compiler benchmark-diagnostics [--only scalar|selected]
 [--after-scalar MS]` compares the
@@ -4937,9 +4948,10 @@ and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
 
-`./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
-issue's cases through the scalar path, the vector path and the deferred reader
-on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
+`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 86
+fixtures of the issue's cases through the scalar path, the vector path and the
+deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
+resolution, and on 8 with the identifiers' ids in another order (#153):
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
 and by the lanes' rule, its reader copied only by lanes that take a part, in
@@ -5030,14 +5042,16 @@ bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
-[--programs N] [--keep]` emits generated programs of up to 600 functions (of
-libgcc's functions in random first-use orders, computed gotos through static
-tables of labels' addresses, switches, structs by value, long doubles,
-variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
+[--programs N] [--id-order N] [--keep]` emits generated programs of up to 600
+functions (of libgcc's functions in random first-use orders, computed gotos
+through static tables of labels' addresses, switches, structs by value, long
+doubles, variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
 8 with a slow lane, and on 8 that can't be pinned (which `lane_run` runs, then
 counts as lanes that didn't start), by both paths, with `-g`'s rows and unwind
 tables and without: each must be the one lane's object or failure, run again
-on one lane only when its lanes didn't start. Then the serial retry's other
+on one lane only when its lanes didn't start, and each compiled again with its
+identifiers' ids in another order (#153, the driver's `--id-order`) and emitted
+on one lane and on 8, the first compile's. Then the serial retry's other
 causes, each emission one lane's: a lane short of room
 (`CheckProgramLanes.squeeze_body`: the lane that takes a body's part left only
 so many bytes in one of its arenas, from none up, doubling, until the part
@@ -5051,9 +5065,10 @@ reservation; the 8 lanes' other arenas not reserved), each one lane's; then
 emissions with the least room of the caller's scratch they take, found by
 halving, which must be less than lane 0's columns take, each one lane's; then
 the lane rule, and the driver's
-objects and executables by `--lanes` and by default, each one lane's, the
-executables exiting alike, and with lanes that don't start, and the failing
-programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
+objects and executables by `--lanes`, by default and by `--lanes 8
+--id-order N`, each one lane's, the executables exiting alike, and with lanes
+that don't start, and the failing programs' exit statuses and diagnostics by
+`--lanes 8`, with the ids in another order too, each `--lanes 1`'s.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
@@ -5185,7 +5200,8 @@ others, its measurements are informational.
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
 [--symbols] [--symbols-minimum N] [--seed N] [--deferred N [--deferred-bindings
-stacks|batch|direct]] [--keep] [preprocessor options] file-or-directory...`
+stacks|batch|direct]] [--id-order N] [--keep] [preprocessor options]
+file-or-directory...`
 checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's
 presumed file and line, and the scalar and vector paths, column by column.
@@ -5199,7 +5215,10 @@ dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
-directories so, with the count they compare. `--semantic-mutations N` then checks N
+directories so, with the count they compare. `--id-order N` checks each file
+with its identifiers' ids in another order (#153, as the driver's `--id-order`
+gives them), which the 9700X job does for c-testsuite's programs with
+`--deferred 8`. `--semantic-mutations N` then checks N
 mutants of the units it found no difference in (#133's last "Done when" item,
 `c_check_mutation.c`):
 
@@ -5453,9 +5472,11 @@ operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
-`ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
+`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`, a frame pointer's 14 integer
 depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
-scope of its own, around calls with stack arguments, run natively; and the
+scope of its own, around calls with stack arguments, run natively; the frame's
+address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
+allocation, run natively; and the
 aggregates at locations written by hand, 13 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
 SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
@@ -5544,7 +5565,7 @@ Every kind (NONE, X86 and one past the kinds among them) of every class after
 no operand, one or two of every class, with values at its kind's bounds and
 past them, in a function of every kind of local, direct and indirect calls,
 a result object, a long double result, the access column and a label, with
-and without the memory classes (559,200 streams); joins of `?:` and `&&` at
+and without the memory classes (562,944 streams); joins of `?:` and `&&` at
 depths and across blocks, loops, values at the end; values carried across
 64-entry blocks at every depth to 40, calls spanning blocks, the limits, and
 more than 128 locals and calls (the gathers); each stream with its columns

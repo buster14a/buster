@@ -407,7 +407,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "backend-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -427,7 +427,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-debug",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|branch_sizing|calling_convention|debug|foreign_test|lane|link|object_writer|"
+                   "c_types_transparent|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
                    "object_writer_test|tier0|unwind[a-z0-9_]*|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|bind|import|runtime",
     },
@@ -435,7 +435,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-lanes",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -510,7 +510,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "ir-lowering",
         .sources = "ir|ir_validate|ir_benchmark|ir_lower[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z0-9_]*|"
-                   "c_types|calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics",
+                   "c_types|calling_convention(_builtins)?|link|object_writer|lane|x86_64_encoder|x86_semantics",
     },
     {
         .name = "ir-optimize",
@@ -550,7 +550,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "lowering-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -591,7 +591,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "streaming",
         .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
-                   "c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
+                   "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
         .name = "types",
@@ -599,7 +599,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "unwind",
-        .sources = "unwind[a-z0-9_]*|debug[a-z0-9_]*|c_types|calling_convention|lane|tier0|tier0_generate|"
+        .sources = "unwind[a-z0-9_]*|debug[a-z0-9_]*|c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|"
                    "x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
@@ -1681,6 +1681,12 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the compiler's code outside the attribution's sources",
         .files = "src/buster/compiler/tier0.c src/buster/compiler/c_checker_driver_test.c",
         .outputs_false = "compile_time",
+    },
+    {
+        .name = "immutable builtin ABI facts reach their consumers",
+        .files = "src/buster/compiler/calling_convention_builtins.c",
+        .measured = "calling-convention backend backend-source check-debug check-lanes ir-lowering lowering-source "
+                    "streaming unwind",
     },
     {
         .name = "a checker source with a digit in its name",
