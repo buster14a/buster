@@ -1601,9 +1601,9 @@ What the lowering covers past scalars (#145's programs):
   which makes its local a frame slot, and drops the result. A function of a
   parameter other than a pointer is refused by name (clang's code bit-casts
   the address to the `_Bool`, invalid IR that leaves the address's low bit),
-  and so is one whose result returns in memory, as a 128-bit integer or as a
-  vector. The body's selection references the function. `test-checker`'s
-  sections (`c_check_cleanup_test.c`) compare 50 fixtures' acceptance and
+  and so is one whose result is an aggregate (including one returned in
+  registers), a 128-bit integer or a vector. The body's selection references
+  the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare 54 fixtures' acceptance and
   first errors with clang's, and run programs of each exit, each class of
   returned value, the named return value's cases, statement expressions,
   switches and the functions' kinds natively against clang -O0's build on
