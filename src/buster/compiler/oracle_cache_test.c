@@ -2280,9 +2280,11 @@ static void oracle_test_adapter(OracleTest* test)
     snprintf(object, sizeof(object), "%s/adapter.o", directory);
     snprintf(output, sizeof(output), "%s/adapter-output", directory);
     snprintf(errors, sizeof(errors), "%s/adapter-errors", directory);
-    bool ready = oracle_test_write_text(directory, "adapter.c", "#include \"adapter.h\"\nint main(void) { return VALUE + ADD; }\n") &&
-                 oracle_test_write_text(directory, "adapter.h", "#define VALUE 7\n");
-    char* arguments[] = { "clang", "-std=c17", "-DADD=0", "-c", "adapter.c", "-o", "adapter.o", 0 };
+    bool ready = oracle_test_write_epoch(directory, "adapter.c", "#include \"adapter.h\"\nint main(void) { return VALUE + ADD; }\n") &&
+                 oracle_test_write_epoch(directory, "adapter.h", "#define VALUE 7\n");
+    // As oracle_test_outputs does: direct Clang output can read /dev/urandom for a temporary name, which is rightly
+    // unkept. Its stdout object has the same bytes, written by the traced shell. That shell's inputs include mtimes.
+    char* arguments[] = { "sh", "-c", "clang -std=c17 \"$1\" -c adapter.c -o - > adapter.o", "sh", "-DADD=0", 0 };
     const char* files[] = { "adapter.o" };
     OracleRun run = {
         .cache = &use,
@@ -2312,11 +2314,11 @@ static void oracle_test_adapter(OracleTest* test)
     oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && !linking.taken &&
                        oracle_test_run(&execution, 0, 0, 0, 0) == 7 && !execution.taken,
                        "adapter: restored object links and executes independently");
-    ready = ready && oracle_test_write_text(directory, "adapter.h", "#define VALUE 8\n") && unlink(object) == 0 &&
+    ready = ready && oracle_test_write_epoch(directory, "adapter.h", "#define VALUE 8\n") && unlink(object) == 0 &&
             oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
     oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 8,
                        "adapter: header change rebuilds executable behavior");
-    arguments[2] = "-DADD=1";
+    arguments[4] = "-DADD=1";
     ready = ready && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
     oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 9,
                        "adapter: exact compiler flags change executable behavior");
@@ -2330,7 +2332,7 @@ static void oracle_test_adapter(OracleTest* test)
         char bytes[17];
         uint8_t guard;
     } diagnostic = { .guard = 0xa7 };
-    ready = ready && oracle_test_write_text(directory, "adapter.c", "#error deliberately rejected source\n") && unlink(object) == 0;
+    ready = ready && oracle_test_write_epoch(directory, "adapter.c", "#error deliberately rejected source\n") && unlink(object) == 0;
     const int rejected = ready ? oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) : -1;
     uint64_t full_length = 0;
     char* full = oracle_test_read(errors, &full_length);
@@ -2338,9 +2340,24 @@ static void oracle_test_adapter(OracleTest* test)
                        diagnostic.bytes[sizeof(diagnostic.bytes) - 1] == 0 && memcmp(full, diagnostic.bytes, sizeof(diagnostic.bytes) - 1) == 0,
                        "adapter: rejection preserves full capture and bounded diagnostic prefix");
     free(full);
-    oracle_test_expect(test, rejected == 1 && oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) == 1 && run.taken,
+    // The shell made an empty output even on rejection; restore the cold run's absent output pre-state first.
+    oracle_test_expect(test, rejected == 1 && unlink(object) == 0 &&
+                       oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) == 1 && run.taken,
                        "adapter: cached rejection retains its nonzero status");
     oracle_test_expect(test, oracle_test_run(&run, directory, errors, 0, 0) == -1, "adapter: capture write failure is not compiler rejection");
+    // Uncacheable dependencies are a safe fallback, not a compiler rejection or launcher failure. Force one even
+    // on hosts whose Clang uses getrandom instead of the random device for direct output's temporary name.
+    char* uncacheable[] = { "sh", "-c", "head -c 1 /dev/urandom > /dev/null && clang -c adapter.c -o adapter.o", 0 };
+    OracleRun fallback = { .cache = &use, .purpose = "oracle test: uncacheable compiler adapter", .arguments = uncacheable,
+                           .directory = directory, .files = files, .file_count = 1, .dependencies = true, .timeout = 10 };
+    const uint64_t unkept = use.counts->unkept;
+    bool fresh = oracle_test_write_epoch(directory, "adapter.c", "int main(void) { return 3; }\n") &&
+                 oracle_test_run(&fallback, output, errors, 0, 0) == 0 && !fallback.taken;
+    fresh = fresh && unlink(object) == 0 && oracle_test_run(&fallback, output, errors, 0, 0) == 0 && !fallback.taken;
+    oracle_test_expect(test, fresh && use.counts->unkept == unkept + 2,
+                       "adapter: uncacheable compiler success runs again without becoming rejection");
+    oracle_test_expect(test, fresh && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 3,
+                       "adapter: uncacheable object still links and executes freshly");
     char* missing[] = { "buster-oracle-test-tool-that-does-not-exist", 0 };
     OracleRun absent = { .cache = &use, .purpose = "oracle test: absent adapter tool", .arguments = missing, .timeout = 1 };
     oracle_test_expect(test, oracle_test_run(&absent, 0, 0, 0, 0) == -1, "adapter: missing tool is not compiler rejection");
