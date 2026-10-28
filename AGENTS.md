@@ -401,11 +401,16 @@ designs and the compilers already built this way.
   `docs/profiling.md`'s "Placement"): a new one goes there too. The checker
   unit's own tests (`c_checker_test.c` with the sections it includes, and its
   commands' other `*_test.c`) are included between `#pragma clang optimize
-  off` and `on` (#681): the build waits for that unit, and their code was a
-  fifth of its compile (on the 9700X, 33.7 s in the build and 27.4 s
-  unoptimized; the build 33.7 and 28.5 s), while the tests ran as fast,
-  their time being the compiler's code and clang's processes, and `-c` of
-  sqlite3.c as fast too (+0.10% wall). No benchmark's timed code calls them.
+  off` and `on` (#681). On the 9700X, the measured `716c980d` to `4ce693ad`
+  pair's checker-unit mean fell from 33.7 to 27.35 s; compilation-phase wall
+  time fell from 33.7 to 28.5 s (two builds per role, excluding final linking
+  and remaining script overhead). One SQLite compile hold, 21 runs per role,
+  observed +0.10% median wall, +48,704 instructions (+0.00353%) and +380 KiB
+  peak RSS. Four added eager libm imports and layout changes were not isolated
+  from each other; this is no general runtime-neutrality claim or timing of
+  later heads. [The frozen record](https://github.com/buster14a/buster-performance/tree/db74207d9a1a5bd6b59742afc25d53d5e2e03c68/docs/measurements/checker-unit-build-681-2026-10-28)
+  retains the original controller's limitations and correctness scope.
+  No benchmark's timed code calls these tests.
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
