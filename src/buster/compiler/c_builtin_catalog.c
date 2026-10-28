@@ -86,6 +86,12 @@
     X(CIMAG, 0x156u, "__builtin_cimag") \
     X(CIMAGF, 0x157u, "__builtin_cimagf") \
     X(CIMAGL, 0x158u, "__builtin_cimagl") \
+    X(ISGREATER, 0x159u, "__builtin_isgreater") \
+    X(ISGREATEREQUAL, 0x15au, "__builtin_isgreaterequal") \
+    X(ISLESS, 0x15bu, "__builtin_isless") \
+    X(ISLESSEQUAL, 0x15cu, "__builtin_islessequal") \
+    X(ISLESSGREATER, 0x15du, "__builtin_islessgreater") \
+    X(ISUNORDERED, 0x15eu, "__builtin_isunordered") \
     X(SQRT, 0x200u, "__builtin_sqrt") \
     X(SQRTF, 0x201u, "__builtin_sqrtf") \
     X(COPYSIGN, 0x202u, "__builtin_copysign") \

@@ -386,6 +386,51 @@ mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
 
+K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
+decision has it. The declarator records an identifier list's names as the
+definition's parameters, in the list's order, without a prototype
+(`CheckDeclaratorPart.identifier_list`), and its scan ends before the
+declaration list, since no specifier follows a group in a declarator. The
+declaration list (`check_input_kr_declarations`) gives each name its type,
+adjusted as a parameter's, under C17 6.9.1p6's constraints, each refused where
+clang reports it:
+- no storage class but `register`, no function specifier or typedef;
+- only the list's names, each declared once, and none with an initializer;
+- every listed name declared (clang refuses the implicit `int`).
+
+A struct, union or enum defined in the list, and a variably modified
+parameter there, are refused by name. The definition's type is the prototype of
+its parameters' default argument promotions, as clang types it (`float a`
+makes `float (double)`). So a later prototype must agree with them, and its
+calls convert their arguments as a prototype's do. Where clang only warns about
+a call with the wrong number of arguments, the checker refuses it.
+
+An identifier list outside a definition is refused, as C17 6.7.6.3p3 has it.
+The producer lowers a K&R definition whose parameters' types the promotions
+leave alone. It refuses by name one with a `char`, `short`, `_Bool` or `float`
+parameter, which would convert from its promoted type on entry
+(`CHECK_INPUT_FUNCTION_KR`).
+
+Where clang takes a construct C's constraints exclude, the checker takes it
+too:
+- a declaration of no declarator, which declares its tag or nothing, at file
+  scope, in a block and as a member, whatever its storage class, typedef,
+  qualifiers and attributes (clang warns, `-Wmissing-declarations`, and this
+  doesn't), though a function specifier there is an error;
+- a union's flexible array members, anywhere among its members, each of size 0
+  and its element's alignment (GNU's extension; `type_complete_record` takes
+  them);
+- an incomplete type, `void`'s too, in a `_Generic` association, which matches
+  no control (C2y's extension);
+- a static assertion of a floating constant, converted to `_Bool` as clang
+  converts it (`check_graph_floating_assertion`).
+
+`inline` and the `_Noreturn` keyword declare only functions, as clang has it.
+Each is refused at its keyword on an object, a typedef (`_Noreturn` on a
+function's type too) or a member, and so is an `inline main`. `CheckInputAttribute.keyword`
+tells the keyword's record from a `noreturn` attribute's, which clang only
+warns about there.
+
 ## Entry points and storage ownership
 
 The implementation is included in the compiler's existing C translation units.
@@ -624,8 +669,17 @@ Exotic floating formats retain explicit unsupported folding requirements.
 
 Constraint diagnostics and evaluation faults are separate. An invalid operand
 type is an error even in an unselected expression. A possible divide by zero,
-overflow, invalid shift or out-of-range floating conversion travels with its
-value and source node until an enclosing context requires that evaluation.
+overflow or invalid shift travels with its value and source node until an
+enclosing context requires that evaluation. A floating value converted to an
+integer type outside its range is undefined, and clang's folding takes it as
+APFloat converts it, saturated to the type's range and a NaN to 0.
+`check_action_convert_plain` folds it so: a GNU constant
+(`BUSTER_CHECK_GNU_FLOAT_RANGE`), not an integer constant expression. clang
+takes it where one is required (an enumerator's value, a case label, a static
+assertion), and as a static initializer's value (`int b = (int)1e10;` is
+`INT_MAX`), but not in an array bound, which it doesn't fold, and neither does
+the checker (`check_input_vla_bound`'s folding, `check_input_integer_attribute`).
+`__builtin_constant_p` of it is 1, as clang's is, with no proof of its own.
 `&&`, `||` and `?:` discard faults in unselected operands; `sizeof` does not
 evaluate its ordinary operand. Thus these two cases have different outcomes:
 
@@ -1412,6 +1466,48 @@ both checker schedules and, with `--executable`, both production command routes;
 it compares warning decisions, complete messages and presumed line/column pairs
 with Clang, and covers guarded classifier/interval tails and allocation failure.
 
+## The constraint catalogue
+
+`test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
+every Constraints paragraph of C17's 6.4 to 6.10 it has a violation of each of the paragraph's rules and a valid
+twin. Fixtures of the conversions (6.3), the constant expressions (6.6) and the initializers (6.7.9) join them:
+322 fixtures and 644 sources in all, 21 of 6.3, 14 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
+6.9 and 20 of 6.10.
+
+Each source is checked as the corpus check checks a file (`check_corpus_file`): preprocessing, the parse, the
+checker and the program's control flow, as the driver checks it, by both paths alike. A directive's source (6.10)
+runs through the preprocessor's two kernels instead (`check_test_constraint_preprocess`), its first error's line read
+from the diagnostics, since the corpus check gives a preprocessing error no place. Every source is also checked by
+`clang -fsyntax-only -std=gnu17`. The acceptance and the first error's line must be clang's and the fixture's own
+record of them. A fixture records clang's verdict on its violation:
+- an error, for 263;
+- acceptance with a warning clang gives by default, for 33;
+- acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
+
+Every valid twin is accepted.
+
+The first survey of the catalogue (main at `321f597`) found 14 of the 644 sources differing from clang, each
+fixed with its fixture there:
+- **Rejected, where clang takes them:**
+  - declarations and members of no declarator;
+  - a union's flexible array member;
+  - an incomplete type in a `_Generic` association;
+  - a static assertion of a floating constant;
+  - an out-of-range floating constant converted to an integer in a static initializer;
+  - K&R definitions, all five of their fixtures' sources ("Implementation boundary" above, and "Constant
+    evaluation").
+- **Accepted, where clang refuses them:** the `_Noreturn` keyword on an object, and an `inline main`.
+
+One difference stays, recorded with the line the checker refuses the violation at. It's GNU's folding of a
+`const` object's value in an integer constant expression: `const int k = 3; enum { E = k };`, which clang folds,
+silently but for `-Wgnu-folding-constant`. The checker reads an object's value only as an address constant's
+place, not its initializer's value. It refuses the enumerator as clang refuses a non-`const` object's. Clang
+reads the initializers of `const` objects of every type there (members of a `const` struct's too), and this
+would need their values at the declaration.
+
+The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
+declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
+
 ## Corpus comparison and semantic mutations
 
 ```sh
@@ -1476,8 +1572,9 @@ corpus comparison, without mutants, on a laptop's clang 23). Two are left:
 
 - the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
   `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
-  floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s
-  families don't have yet.
+  which the floating comparison builtins check now (#148,
+  [the builtin integration guide](c-builtins-integration.md)): with them the
+  libc corpus agrees with clang (below).
 
 What the mutants and the bases found, each fixed with its fixture:
 

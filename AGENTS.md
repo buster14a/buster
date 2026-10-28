@@ -944,9 +944,13 @@ designs and the compilers already built this way.
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
-  source bodies.
+  source bodies by the scalar schedule, the vector path's level order and its postorder batches
+  (`CheckOptions.postorder`, #133's question of which order wins).
   `test-checker [--seed N] [--clang PATH] [--program-initializers]` compares fresh scalar/vector tables,
-  protected tails and original source fixtures against Clang.
+  protected tails and original source fixtures against Clang, and checks the constraint catalogue
+  (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
+  a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
+  file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
@@ -5140,8 +5144,8 @@ mutants of the units it found no difference in (#133's last "Done when" item,
 It prints each kind's sites, mutants, clang's rejections and differences, and
 exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
 and semantic mutations") has the four corpora's configurations, the campaigns'
-counts and the two base differences left (two of #148's builtins in the libc
-corpus; Lua's labels as values agree since #133 took them). The 9700X job's test step checks 8
+counts and the base differences the comparisons found, all fixed (the libc corpus's last two, `fmaxl.c` and
+`fminl.c`, by #148's floating comparison builtins; Lua's labels as values since #133 took them). The 9700X job's test step checks 8
 mutants of the frozen SQLite source and 96 of the oracle's four musl sources
 with seed 133; a run that differs fails it, and `--keep` with `--minimize`
 reproduces it locally.

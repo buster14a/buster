@@ -50,31 +50,6 @@ static CheckQueryNumber check_query_float(long double value)
     return check_query_normalize(number);
 }
 
-// Clang's builtin speculative evaluator retains the saturated APValue from an undefined FP-to-integer
-// conversion. This proof-only repair never changes an ordinary action's fault or grants lexical ICE provenance.
-static bool check_query_speculative_conversion(const TypeTable* types, const CheckValue* original, uint32_t node, CheckValue* converted)
-{
-    const CheckValue real = original->constant_kind == CHECK_CONSTANT_COMPLEX ? check_complex_component(types, original, false) : *original;
-    uint32_t width = 0;
-    bool sign = false;
-    const bool applied = original->fault == CHECK_FAULT_NONE && real.constant_kind == CHECK_CONSTANT_FLOATING &&
-                         converted->fault == CHECK_FAULT_FLOAT_RANGE && converted->fault_node == node &&
-                         check_action_integer_type(types, converted->type, &width, &sign);
-    if (applied)
-    {
-        const CheckQueryNumber number = check_query_float(real.floating);
-        const unsigned __int128 limit = (unsigned __int128)1 << (width - 1);
-        converted->integer = number.special >= 2 ? 0 : number.negative ? (sign ? limit : 0) : (sign ? limit - 1 : check_action_mask(width));
-        converted->constant_kind = CHECK_CONSTANT_INTEGER;
-        converted->floating = 0;
-        converted->imaginary = 0;
-        converted->fault = CHECK_FAULT_NONE;
-        converted->fault_node = 0;
-        converted->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-    }
-    return applied;
-}
-
 static bool check_query_number_equal(CheckQueryNumber a, CheckQueryNumber b)
 {
     a = check_query_normalize(a);
@@ -241,12 +216,7 @@ static CheckValue check_query_convert(TypeTable* types, const CheckAction* actio
     }
     if (conversion.type != 0 && conversion.type != value.type)
     {
-        const CheckValue original = value;
         check_action_convert_value(types, &value, conversion.type, action->node);
-        if (speculative)
-        {
-            check_query_speculative_conversion(types, &original, action->node, &value);
-        }
     }
     return value;
 }
@@ -433,10 +403,6 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     else
     {
         check_action_scalar(types, &action, &result);
-        if (lane != 2 && (action.op == CHECK_OP_CAST || action.op == CHECK_OP_CONVERT || action.op == CHECK_OP_INITIALIZE))
-        {
-            check_query_speculative_conversion(types, action.operands, node, &result.value);
-        }
     }
     const uint32_t mask = check_query_operand_mask(types, &action);
     bool valid = result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&

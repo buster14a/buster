@@ -131,7 +131,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
         valid = valid && (!evaluated || check_action_is_integer(reader->types, value.type));
-        const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & BUSTER_CHECK_GNU_DIVISION) == 0 &&
+        // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
+        const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
                             (check_input_integer_ice(reader, &value) || check_input_vla_force_constant(reader, open, parameter));
         if (valid && evaluated && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {

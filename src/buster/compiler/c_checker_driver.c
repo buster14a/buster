@@ -39,7 +39,6 @@ static const char* check_driver_fault_message(CheckFault fault)
         case CHECK_FAULT_DIVIDE_BY_ZERO: result = "division by zero in constant expression"; break;
         case CHECK_FAULT_SHIFT_COUNT: result = "invalid shift count in constant expression"; break;
         case CHECK_FAULT_SHIFT_VALUE: result = "invalid signed shift in constant expression"; break;
-        case CHECK_FAULT_FLOAT_RANGE: result = "constant conversion is outside the target type's range"; break;
         case CHECK_FAULT_UNSUPPORTED_CONSTANT: result = "constant expression is not yet supported"; break;
         case CHECK_FAULT_NONE: break;
     }

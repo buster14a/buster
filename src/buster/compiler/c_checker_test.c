@@ -395,7 +395,35 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
         .node = 93
     };
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.value.fault == CHECK_FAULT_FLOAT_RANGE && result.value.fault_node == 93, "out-of-range floating conversion is a deferred fault");
+    // Undefined, which clang's folding saturates: a GNU constant, not an ICE, that no array bound takes.
+    check_test_expect(test, result.value.fault == CHECK_FAULT_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == INT32_MAX &&
+                      (result.value.flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM)) == 0 &&
+                      (result.value.flags & (BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE)) == (BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE),
+                      "out-of-range floating conversion saturates as clang folds it");
+    const long double saturated[] = { -1e30L, __builtin_nanl(""), __builtin_infl(), -__builtin_infl(), 0x1p31L, -0x1p31L - 1 };
+    const TypeId saturating[] = { BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_LONG };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(saturating); t += 1)
+    {
+        uint32_t width = 0;
+        bool sign = false;
+        check_action_integer_type(table, saturating[t], &width, &sign);
+        const unsigned __int128 mask = width == 128 ? ~(unsigned __int128)0 : ((unsigned __int128)1 << width) - 1;
+        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(saturated); v += 1)
+        {
+            const long double input = saturated[v];
+            // Independently: in range truncates; a NaN is 0; else the nearer of the type's two ends.
+            const long double low = sign ? -(long double)((unsigned __int128)1 << (width - 1)) : 0;
+            const long double high = sign ? (long double)((unsigned __int128)1 << (width - 1)) : (long double)((unsigned __int128)1 << (width - 1)) * 2;
+            const bool range = input == input && input > low - 1 && input < high;
+            const unsigned __int128 expected = range ? (unsigned __int128)(__int128)input & mask : input != input ? 0 :
+                                               input < 0 ? (sign ? (unsigned __int128)1 << (width - 1) : 0) : (sign ? ((unsigned __int128)1 << (width - 1)) - 1 : mask);
+            action = (CheckAction){ .op = CHECK_OP_CAST, .type = saturating[t], .operands = { check_test_float(BUSTER_TYPE_LONG_DOUBLE, input) }, .node = 94 };
+            result = check_test_action(test, table, action);
+            check_test_expect(test, result.value.fault == CHECK_FAULT_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                              result.value.integer == expected && ((result.value.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0) == !range,
+                              "floating conversion to each integer width saturates past its range and truncates in it");
+        }
+    }
     action = (CheckAction){
         .op = CHECK_OP_ADD,
         .operands = {
@@ -1470,14 +1498,18 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     check_test_expect(test, scalar_valid && scalar.status == CHECK_STATUS_OK && scalar.count == graph->count, "scalar graph run failed");
     check_test_expect(test, scratch->length == scratch_mark, "scalar graph retained scratch storage");
     const uint64_t scalar_end = output->length;
-    for (uint32_t batch = partitions ? 1 : BUSTER_CHECK_BATCH; scalar_valid && batch <= BUSTER_CHECK_BATCH; batch += 1)
+    // Each batch size by both of the vector path's orders, by level and in postorder (CheckOptions.postorder).
+    for (uint32_t run = partitions ? 2 : 2 * BUSTER_CHECK_BATCH; scalar_valid && run < 2 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
+        const uint32_t batch = run / 2;
         const CheckOptions vector_options = {
-            .batch_size = batch
+            .batch_size = batch,
+            .postorder = (run & 1) != 0,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
-        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count), "graph paths or batch partitions differ");
+        check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count),
+                          (run & 1) != 0 ? "graph paths or postorder batch partitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {
@@ -4443,6 +4475,7 @@ static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
+static void check_test_constraints(CheckTest* test, const char* clang);
 static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
@@ -4516,6 +4549,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&output);
             arena_release(&storage);
             check_test_sources(&test, clang);
+            check_test_constraints(&test, clang);
             check_test_initializer_nesting(&test, clang);
             check_test_member_scaling(&test, clang);
             check_test_source_extensions(&test, clang);

@@ -1348,11 +1348,15 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
-            "union flexible member GNU extension rejected",
-            "union U { int n; int data[]; };\n",
-            true,
+            // GNU's extension, which clang takes: a union's flexible array members anywhere among its members, each of size
+            // 0 and its element's alignment.
+            "union flexible members, GNU's extension",
+            "union U { int n; char data[]; }; _Static_assert(sizeof(union U)==4 && _Alignof(union U)==4, \"after\");\n"
+            "union V { double data[]; char c; }; _Static_assert(sizeof(union V)==8 && _Alignof(union V)==8, \"first\");\n"
+            "union W { char data[]; }; _Static_assert(sizeof(union W)==0, \"alone\");\n"
+            "struct T { int k; union U u; }; _Static_assert(sizeof(struct T)==8, \"nested\");\n",
             false,
-            true
+            false
         },
         {
             "flexible member must be last",

@@ -2587,8 +2587,8 @@ static uint64_t type_integer_width(const TypeTable* table, TypeId type)
     return result;
 }
 
-// Checks a member: its type complete (a flexible array member, the last member and not a bit-field, excepted), not a
-// function, void or variably modified; a bit-field's type an integer type, its width at most its type's, and 0 only
+// Checks a member: its type complete (a flexible array member, the last member or any of a union's, and not a
+// bit-field, excepted), not a function, void or variably modified; a bit-field's type an integer type, its width at most its type's, and 0 only
 // unnamed; its alignment in range.
 static TypeError type_check_member(const TypeTable* table, const TypeMember* member, bool last, bool* flexible)
 {
@@ -2867,10 +2867,13 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
     {
         error = TYPE_ERROR_FULL;
     }
+    // A union's flexible array members may be any of its members, as GNU's extension, which clang takes, has them: each
+    // is at offset 0, of size 0 and its element's alignment.
+    const bool any_flexible = error == TYPE_ERROR_NONE && type_kind(table, record) == BUSTER_TYPE_KIND_UNION;
     for (uint32_t i = 0; error == TYPE_ERROR_NONE && i < count; i += 1)
     {
         bool flexible = false;
-        error = type_check_member(table, &members[i], i + 1 == count, &flexible);
+        error = type_check_member(table, &members[i], any_flexible || i + 1 == count, &flexible);
         flags |= flexible ? BUSTER_TYPE_FLAG_FLEXIBLE : 0;
     }
     if (error == TYPE_ERROR_NONE)
