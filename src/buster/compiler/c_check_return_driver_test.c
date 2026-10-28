@@ -29,6 +29,18 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
         { "struct S{long a,b;};struct S f(void){if(0)__builtin_trap();}\n", NULL, NULL },
         { "struct S{long a,b;};struct S f(struct S s){return s;s.a=1;}\n", NULL, NULL },
         { "struct S{long a,b,c,d;};struct S f(struct S s){return s;if(s.a)s.b=1;else s.c=2;}\n", NULL, NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(1){case 1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b,c,d;};struct S f(struct S s){switch(1){case 1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(2){case 1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(2){case 1:break;default:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(1){case 1:break;default:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch((unsigned)-1){case -1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(-2){case -4 ... -1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch((unsigned)-1){case 4294967290U ... 4294967295U:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){int n;switch(n=1){case 1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(__builtin_constant_p(s.a)){case 0:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};enum E{A,B};struct S f(enum E e,struct S s){switch(e){case A:return s;case B:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};enum E{A,B};struct S f(struct S s){switch(A){case B:return s;}}\n", "-Werror=return-type", NULL },
     };
     char source[512];
     char objects[2][512];

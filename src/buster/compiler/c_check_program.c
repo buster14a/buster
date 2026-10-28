@@ -397,7 +397,7 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
     return effects;
 }
 
-static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+static const CheckValue* check_program_runtime_value(const CheckProgram* program, uint32_t node, uint32_t condition)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckValue* value = program->stream->values + condition;
@@ -419,23 +419,27 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     // the environment or raise an exception, including a signaling NaN whose bits are known here.
     const bool known = available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
-                       value->fault == CHECK_FAULT_NONE &&
-                       check_action_truth(program->types, value, truth);
-    return known;
+                       value->fault == CHECK_FAULT_NONE;
+    return known ? value : NULL;
 }
 
-static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
+static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+{
+    const CheckValue* value = check_program_runtime_value(program, node, condition);
+    return value != NULL && check_action_truth(program->types, value, truth);
+}
+
+static bool check_program_integer_value(const CheckProgram* program, const CheckValue* value, TypeId target, unsigned __int128* result)
 {
     uint32_t width = 0;
     uint32_t source_width = 0;
     bool sign = false;
     bool source_sign = false;
-    bool valid = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
+    bool valid = check_action_integer_type(program->types, target, &width, &sign);
     if (valid)
     {
-        const CheckValue* value = program->stream->values + node;
         valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
-                (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(program->types, value->type, &source_width, &source_sign);
+                check_action_integer_type(program->types, value->type, &source_width, &source_sign);
         if (valid)
         {
             const unsigned __int128 mask = check_action_mask(source_width);
@@ -448,6 +452,12 @@ static bool check_program_case_value(const CheckProgram* program, uint32_t node,
         }
     }
     return valid;
+}
+
+static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
+{
+    return node < program->stream->count && (program->stream->values[node].flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+           check_program_integer_value(program, program->stream->values + node, target, result);
 }
 
 static unsigned __int128 check_program_case_order(const CheckProgram* program, const CheckProgramCase* item, bool upper)
@@ -1360,9 +1370,32 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);
                 }
+                else if (pass != 0 && entry->kind == CHECK_CONTROL_SWITCH)
+                {
+                    // Clang also recognizes exhaustive enum switches. Their enumerator set is not retained here;
+                    // avoid a false fall-off warning until that coverage fact is available, as for noreturn calls.
+                    uint32_t source = entry->node;
+                    for (uint32_t steps = 0; source < graph->count && steps < graph->count && graph->ops[source] == CHECK_OP_CONVERT; steps += 1)
+                    {
+                        source = graph->operand0[source];
+                    }
+                    const CheckValue* value = check_program_runtime_value(program, entry->node, entry->node);
+                    const bool enumeration = source < graph->count &&
+                        type_kind(program->types, type_strip_aligned(program->types, program->stream->values[source].type)) == BUSTER_TYPE_KIND_ENUM;
+                    warning_safe &= !enumeration || (value != NULL && value->constant_kind == CHECK_CONSTANT_INTEGER);
+                }
                 else if (entry->kind == CHECK_CONTROL_CASE)
                 {
-                    targets[0] = program->cases[entry->target].target;
+                    const CheckProgramCase* item = program->cases + entry->target;
+                    const uint32_t condition = program->input->token_nodes[item->owner];
+                    const CheckValue* value = pass != 0 ? check_program_runtime_value(program, condition, condition) : NULL;
+                    CheckProgramCase selected = { .type = item->type };
+                    const bool known = value != NULL && check_program_integer_value(program, value, item->type, &selected.lower);
+                    const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
+                    const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
+                                               ordered <= check_program_case_order(program, item, true);
+                    targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
+                    next = !known || !taken;
                 }
                 else if (entry->kind == CHECK_CONTROL_ASM || entry->kind == CHECK_CONTROL_JUMP_INDIRECT)
                 {
