@@ -14,8 +14,9 @@ and writes, and what a substitution may change are questions the selectors
 encoder's input stays trusted.
 
 This document records the contract, the form choice, the design of the vector
-paths and their scalar twins, the tests (whose oracle is the processor), the
-covered subset and how to add a form, and the 9700X's measurements.
+paths and their scalar twins, the consumers, the tests (whose oracle is the
+processor), the covered subset and how to add a form, and the 9700X's
+measurements.
 
 ## What is where
 
@@ -70,7 +71,14 @@ address.
 
 Legacy SSE forms also keep a vector register's bits above 127
 (`BUSTER_X86_EFFECT_KEEP_UPPER`). A write of an XMM register is then a partial
-write of its ZMM register, which the resolved effects below count as a read.
+write of its ZMM register, which the resolved effects below count as a read. A
+VEX or EVEX write zeroes the register past the bytes it defines (`ZERO`, to bit
+511), or defines all of it (`WHOLE`, a ZMM register's 64 bytes), so it reads
+nothing of the destination.
+
+An x87 register operand (ST(i)) is no role: it is part of the x87's state,
+which the `X87` property below says the form reads and writes. An x87 form's
+memory operand is a role as any other's.
 
 **Implicit registers** are general-register masks besides the explicit
 operands, for the fixed registers #140 pre-colors:
@@ -105,7 +113,8 @@ with a count of 0 they are kept, which `x86_flags_substitutable` respects.
 - `ADDRESS`: lea computes the address and accesses nothing;
 - `ALIGNED`: legacy SSE's 16-byte operands fault unless aligned, so a load folds
   into `xorps` only when aligned;
-- `STACK_READ` and `STACK_WRITE`;
+- `STACK_READ` and `STACK_WRITE` (push's and call's 8 bytes below RSP, pushw's
+  2);
 - `ATOMIC`: lock prefixes, and xchg with memory;
 - `FENCE`: mfence;
 - `BIT_STRING`: bt with a register offset reaches past its operand.
@@ -113,17 +122,26 @@ with a count of 0 they are kept, which `x86_flags_substitutable` respects.
 **Properties** (`BUSTER_X86_EFFECT_*`):
 
 - `FAULT`: div's divide error, ud2's and int3's traps;
-- `ZERO_IDIOM`: xor, sub and their vector kin with reg and rm the same register
-  read nothing of what they write. A general register's is kept only where the
-  write leaves no old bits, so `xor al, al` reads RAX; a legacy SSE one's
-  (`pxor xmm3, xmm3`) keeps its register's bits above 127, so its resolved
-  effects still read the register;
+- `ZERO_IDIOM`: xor, sub and their vector kin with their two sources the same
+  register read nothing of what they write. The sources are reg and rm, or for
+  a VEX or EVEX form vvvv and rm (`vpxord xmm1, xmm2, xmm2` writes xmm1 and reads
+  nothing; `vpxord xmm2, xmm1, xmm2` is no idiom). A general register's is kept
+  only where the write leaves no old bits, so `xor al, al` reads RAX; a legacy
+  SSE one's (`pxor xmm3, xmm3`) keeps its register's bits above 127, so its
+  resolved effects still read the register;
 - `MXCSR`: reads the rounding, DAZ and FTZ controls;
-- `FP_EXCEPTION`: may raise floating-point exceptions;
+- `FP_EXCEPTION`: may raise floating-point exceptions (MXCSR's, or an x87
+  form's in its status word);
 - `ZERO_SOURCE`: bsf and bsr keep or leave undefined their destination for a
   zero source, so they read it;
 - `CONDITIONAL`: cmov and cmpxchg write under a condition (a 32-bit cmov
   zeroes the upper half either way);
+- `X87`: an x87 form reads and writes the x87's state (its registers, the
+  stack's top and tags, and its status word, whose condition codes every x87
+  instruction may change) and reads its control word (precision and rounding);
+  `X87_CONTROL`: fldcw writes the control word too;
+- `ZERO_UPPER`: vzeroupper zeroes the bits above 127 of ZMM0 to ZMM15 and keeps
+  their low 128, so it reads and writes all 16 (ZMM16 to ZMM31 keep theirs);
 - `KEEP_UPPER`, above.
 
 **Control**: none, jump, conditional branch, call, return or trap.
@@ -152,9 +170,9 @@ record:
     CF 1).
 - `x86_instructions_effects` gives each record's resources as two 64-bit sets,
   read and written. `BUSTER_X86_RESOURCE_*` lays them out: general registers,
-  vector registers, the flags, MXCSR, memory, control and call. This is what
-  #172's dependency graph and #140's checks compare, 16 records at a time. The
-  operands resolve as follows:
+  vector registers, the flags, MXCSR, memory, control and call, and the x87's
+  state and its control word. This is what #172's dependency graph and #140's
+  checks compare, 16 records at a time. The operands resolve as follows:
   - a register operand is its register: a vector one the whole ZMM register,
     its XMM and YMM parts included;
   - a memory operand reads its base and index, and lea's do too;
@@ -163,7 +181,13 @@ record:
   - a zero idiom's register isn't read, but a legacy SSE one's is, for those
     upper bits (its low 128 bits still depend on nothing, which
     `BUSTER_X86_EFFECT_ZERO_IDIOM` says);
-  - the stack and fences are memory.
+  - the stack and fences are memory;
+  - an x87 form reads the x87's state and control word and writes the state,
+    fldcw the control word too; vzeroupper reads and writes ZMM0 to ZMM15;
+  - a record with an opmask (an EVEX form's: `x86_validate` refuses one in any
+    other's) merges or zeroes its destination's elements by a mask register,
+    which the sets have no resource for: it reads and writes everything, as an
+    uncovered form does.
 
 Memory is one resource: alias analysis is the consumer's. A form's memory read
 alone doesn't prove that a load may move or fold; that stays #136's and #141's
@@ -200,13 +224,21 @@ the width) exactly when the form takes `v`. The issue's boundaries:
 | 256 | no value | imm16 | imm32 | imm32 |
 | 0xffffffff | no value | no value | imm8 (it's −1) | none: needs a register |
 
-The assembler's matcher (`x86_match.c`, #222) keeps ranges of its own.
-`test-x86-semantics` checks that they agree with this rule on the 112 forms it
-supports whose immediate is a value. The one difference: the matcher refuses the
-unsigned spelling of a sign-extended pattern that this rule takes. One case is
-`add eax, 0xffffffff` with an imm8; the test counts 18 such pairs. Switching
-`x86_match.c` to `x86_immediate_encodes` would remove its copy; that is #222's
-call, while it is in progress.
+The assembler's matcher (`x86_match.c`, #222) takes a value's immediate by this
+rule (`x86_match_immediate` calls `x86_immediate_encodes`, once the operand is a
+value of the operation's width) and writes the field's bits
+(`x86_immediate_field`). So the unsigned spelling of a sign-extended pattern
+takes the shorter field, as GNU as gives it: `add eax, 0xffffffff` is `83 c0
+ff`, `pushw 0xffc8` is `66 6a c8`. It used ranges of its own until #221's
+follow-up, which refused 18 such pairs. Its vector path keeps the rule as two
+intervals per form (`x86_match_range`): the field's signed range, and the
+unsigned spellings of its negative values at the width. Any other immediate (a
+count, a control byte) takes the field's bits, signed or unsigned, as GNU as
+takes them. `test-x86-semantics` checks the scalar rule and the intervals against
+`x86_immediate_encodes` on the 114 forms the matcher supports with a value
+immediate, at every boundary value and at `__int128`s past 64 bits, and that
+every form the matcher reads as sign-extending is such a form; `test-assembler`
+compares the two paths, and with `--cross-check` GNU as's bytes on the spellings.
 
 ## Form choice
 
@@ -324,8 +356,12 @@ input, every bit of the context too.
 64-bit lane:
 
 - the records' halves are transposed by two `vpermt2q`;
-- each lane's effects record comes from a scalar lookup of its index and a
-  16-byte load into its part of a ZMM register;
+- each lane's effects record comes from a scalar lookup by its form's number
+  (the fixup flag masked off) in `x86_effects_by_form`, the forms' index three
+  times over (the forms', their FS copies' and their GS copies'), and a 16-byte
+  load into its part of a ZMM register. `x86_semantics_row`'s arithmetic for
+  the segment overrides, a compare and a subtraction per lane, had taken a
+  quarter of the loop's instructions (below);
 - each lane computes what `x86_instruction_effects_scalar` does, with masks for
   its branches;
 - a legacy SSE form's read of the vector registers it writes is `write &
@@ -334,19 +370,76 @@ input, every bit of the context too.
   reads at the end, with an uncovered form's everything. The loop has many
   mask registers in flight already: a `vptestmq` for the property, or a join
   inside the chain of masked ORs that builds the read set, measured slower
-  (below).
+  (below);
+- a record with an opmask is an uncovered one's lane (`vptestnmq` of the
+  records' last bytes, joined with the covered forms' mask);
+- the rare records are the scalar twin's: an x87 form's, vzeroupper's and a
+  form's with an operand in vvvv. A masked `vpternlogq` ORs the effects
+  records' upper halves (their properties and the vvvv role) into a register,
+  one `vptestmq` of it after the loop says whether any lane was rare, and then
+  `x86_instruction_effects_scalar` overwrites the rare lanes after the stores.
+  A count in a general register cost more (below): the lanes' lookups take
+  every general register the loop has.
+  Code generators emit them rarely (Tier 0's long double code, its vector
+  constants' zeroing, a function's vzeroupper), so the common lane pays the test
+  alone, rather than the vvvv role and the x87's resources in every lane. An
+  EVEX form isn't one: clang -O2's AVX-512 code has many (`vmovdqu64`), and
+  sending them there cost the loop 20% (below).
 
 Gathers would cost more here: a `vpgatherdd` of 16 is 64 µops on Zen 5
 (`docs/coding-style.md`). The records and outputs are read and written with
 masked loads and stores, so nothing past either array is touched.
 
+## The consumers
+
+Each consumer reads the tables rather than keeping a copy of their rules:
+
+- **Tier 0** (#136, `tier0.c`) marks each template record with an immediate a
+  request and chooses all of a function's at once (`x86_choose_forms`, or its
+  twin on the scalar path), with the flags its template reads live. The
+  records its emitter writes with a computed constant (the frame's reservation
+  and release, its realignment, `ALLOCA`'s rounding, a vector constant's words)
+  take their imm8 or imm32 form by `x86_immediate_encodes`. Every record it
+  emits but an X86 entry's (the front end's row, any VEX or EVEX form) has a
+  covered form: `test-tier0` checks it on every program it compiles (the x87's,
+  the 128-bit integers', the vectors' and the deep values' too).
+  `tier0_operation_form_valid` still keeps its own list of the VEX forms with
+  implicit operands, which the rows refuse: it can't ask the tables until they
+  cover VEX and EVEX forms.
+- **Tier 1's selector** (#141, `tier1_select.c`) chooses its immediates' forms
+  by the rows, one request at a time with the scalar twin; the scheduler (#172,
+  `tier1_schedule.c`) builds its dependency graph from the resolved effects.
+- **The unwind tables' analyzer** (`unwind_tier0.c`) refuses a function with an
+  uncovered form, which every Tier 0 function with long doubles, 128-bit
+  integers or vectors had; their forms are covered now, so only the analyzer's
+  own frame rules decide. (The C driver reads the frame Tier 0 publishes
+  instead, `unwind_tier0_frame`.)
+- **The assembler's matcher** (#222, `x86_match.c`) takes value immediates by
+  the shared rule (above), and so does C's inline assembly, which matches its
+  templates' instructions through it.
+
+**Where Tier 0 folds loads.** It folds a local's home (a register or a frame
+slot) into the entry that uses it, and `x = x op v` into one read-modify-write;
+it folds no load through a pointer, and every fold takes entries next to each
+other. test-checker's folds section (`c_check_program_folds_test.c`) checks
+this through the C driver's lowering, from Tier 0's records and their resolved
+effects: a volatile object read as often as the source reads it (twice for
+`g + g`, once for a value used twice), a volatile increment one read and one
+write, a load through a pointer kept on its side of a store through it, and an
+atomic increment written by a locked form in its helper. A program whose locals'
+homes are read and written through pointers to them between their uses runs
+natively against clang. Folding loads through pointers is Tier 1's (#141).
+
 ## Tests
 
-`test-x86-semantics` takes about 0.2 s on the 9700X. Its oracle for the tables
+`test-x86-semantics` takes about 0.3 s on the 9700X. Its oracle for the tables
 is the processor. A harness runs records in the test's own process:
 
-- `x86_semantics_test_enter` loads all 16 general registers, the flags and ZMM0
-  to ZMM15 from a state, runs the code, and stores them back;
+- `x86_semantics_test_enter` saves the C code's x87 and SSE state (FXSAVE64),
+  loads the state's x87 state (FXRSTOR64: the control and status words, the tags
+  and the registers, with every exception masked), then all 16 general
+  registers, the flags and ZMM0 to ZMM15, runs the code, and stores them back,
+  the x87's state last, before restoring the C code's;
 - memory operands are RIP-relative into a data page, and RSP points into a
   stack of the harness's;
 - a fault names the record.
@@ -356,12 +449,15 @@ is the processor. A harness runs records in the test's own process:
 run checks that:
 
 - what the form doesn't write stays as it was: registers, vector registers to
-  bit 511, kept flags, and the bytes of memory around its operand and below the
-  stack;
-- a narrower write keeps or zeroes the rest as its record says, and legacy SSE
-  keeps the upper lanes;
+  bit 511, kept flags, the x87's state and its control word, and the bytes of
+  memory around its operand and below the stack;
+- a narrower write keeps or zeroes the rest as its record says, legacy SSE
+  keeps the upper lanes, a VEX or EVEX write zeroes them to bit 511, and
+  vzeroupper zeroes ZMM0 to ZMM15's above bit 127 and keeps the rest;
 - defined flags and results don't change when everything the form doesn't read
-  changes, every register and vector register compared whole;
+  changes, every register and vector register compared whole, the x87's state
+  among them (a random one, of mostly normal numbers near 1, a random precision,
+  rounding, stack top and tags);
 - a destination that only merges doesn't read the bytes it defines;
 - every write shows a change in some run. A run can't always show one: a byte
   rotated by 8, a value that is its own result, a condition that didn't hold.
@@ -377,7 +473,11 @@ run checks that:
   effects;
 - resolved register and memory operands, zero idioms and shift counts;
 - the substitution matrix of every live-flag set;
-- a sample of uncovered forms, each of which must get the conservative record.
+- a sample of uncovered forms, each of which must get the conservative record;
+- resolved x87 records (their memory, the x87's state and control word, fucomip's
+  flags, fcmovbe's), vzeroupper's, `vpxord`'s idiom of its sources and the same
+  record with reg and rm alike, a masked EVEX record, AVX moves, `shld` by CL and
+  `shrd` by an immediate count of 32 (masked to 0), stmxcsr and pushw.
 
 cmov and setcc run on all 64 combinations of the status flags, against a model
 of the conditions in C, at each width.
@@ -397,7 +497,7 @@ both substitution directions and against themselves. A deterministic RORX
 and ROR witness rotates EAX = 2 to 1 after setting CF: RORX keeps it set, and
 ROR clears it, so the helpers must refuse that substitution with CF live.
 
-**The immediate's contract**, on all 189 covered forms with an immediate,
+**The immediate's contract**, on all 195 covered forms with an immediate,
 against about 60 boundary values: a field that takes a value gives it back,
 and one that doesn't can't.
 
@@ -415,16 +515,11 @@ and one that doesn't can't.
 - every candidate of every row must be chosen by some request.
 
 **#180's target:** every candidate of every row must be allowed at the baseline
-target, and each chosen record must pass `x86_target_validate` there. #180's
-table fails closed, so the test lists the 142 covered forms it doesn't allow at
-the baseline. These are of two kinds:
-
-- forms that need a feature: popcnt, lzcnt, tzcnt, roundss and roundsd;
-- baseline forms its rows don't classify yet: xchg, bt, the locked forms,
-  comiss and comisd, the SSE logic, movd and movq, cmpss and cmpsd, and
-  endbr64.
-
-A selector that emits the second kind adds them to #180's rows.
+target, and each chosen record must pass `x86_target_validate` there. The test
+lists the covered forms #180's table doesn't allow at the baseline, 29 of them,
+all forms that need a feature: popcnt, lzcnt, tzcnt, roundss and roundsd, the AVX
+and AVX-512 moves, vpxord and vzeroupper, and endbr64. The forms a host can't
+run (its native target lacks their features) are listed too, and not executed.
 
 **The twins:**
 
@@ -436,6 +531,9 @@ A selector that emits the second kind adds them to #180's rows.
 **With `--cross-check`:** each chosen record, printed by the encoder test's
 printer, must assemble with GNU as to the chosen form's bytes, 18,603 of them.
 So GNU as picks the same encoding for the instruction the chooser picked.
+
+**`x86_match.c`:** its scalar rule and its vector path's intervals against
+`x86_immediate_encodes` (above), exactly.
 
 Mutations of the tables, each built and run once, are caught. Among them:
 
@@ -452,7 +550,7 @@ Mutations of the tables, each built and run once, are caught. Among them:
 
 ## The covered subset
 
-612 forms:
+712 forms:
 
 - **The integer ALU:** add, or, adc, sbb, and, sub, xor and cmp (every form,
   with their locked forms on memory); test; not, neg, inc and dec (and their
@@ -460,11 +558,14 @@ Mutations of the tables, each built and run once, are caught. Among them:
 - **Moves and extensions:** mov (but the moffs forms), movzx, movsx and
   movsxd, lea, xchg; cbw, cwde and cdqe, cwd, cdq and cqo.
 - **Shifts and rotates:** rol, ror, shl, shr and sar, by 1, CL and an imm8.
-- **Control and the stack:** push and pop (r64, r/m64, imm8 and imm32), call
+- **Control and the stack:** push and pop (r64, r/m64, imm8 and imm32), pushw
+  (imm8 and imm16), call
   (rel32, r/m64), jmp (rel8, rel32, r/m64), ret (and imm16), jcc (rel8,
   rel32), setcc and cmovcc of all 16 conditions, leave, nop (and the
   multi-byte ones), int3, ud2, endbr64, mfence.
-- **Bits:** bswap, bt (register and imm8), bsf, bsr, tzcnt, lzcnt and popcnt.
+- **Bits:** bswap, bt (register and imm8), bsf, bsr, tzcnt, lzcnt and popcnt;
+  shld and shrd at 32 and 64 bits, by CL and by an imm8 (at 16 bits a count past
+  the width leaves the result undefined, which the record can't say).
 - **Atomics:** lock cmpxchg and lock xadd.
 - **SSE and SSE2:**
   - the moves: movss and movsd, movaps, movups, movapd, movupd, movdqa and
@@ -475,11 +576,23 @@ Mutations of the tables, each built and run once, are caught. Among them:
     cvtss2sd and cvtsd2ss;
   - roundss and roundsd (SSE4.1);
   - the bitwise operations: xorps, xorpd, andps, andpd, andnps, andnpd, orps,
-    orpd, pxor, pand, pandn and por.
+    orpd, pxor, pand, pandn and por;
+  - stmxcsr. It stores all of MXCSR, its exception flags too, which the
+    `FP_EXCEPTION` forms before it may set: the resolved effects have no
+    resource for those flags, so a consumer that moves stmxcsr keeps its order
+    against those forms.
+- **The x87**, Tier 0's long double: fld, fild and the constants (fld1 to
+  fldz); fst, fstp, fist and fistp; fadd, fsub, fsubr, fmul, fdiv and fdivr in
+  each of their five shapes; fchs and fabs; fcmovcc of the 8 conditions; fcomi,
+  fcomip, fucomi and fucomip; fldcw and fnstcw.
+- **VEX and EVEX**, the forms Tier 0's own vector code emits: vmovdqu (128 and
+  256 bits), vmovdqu64 (128, 256 and 512), vpxord (each width, and its
+  broadcasts) and vzeroupper.
 
-VEX and EVEX forms are uncovered for now (#180's levels will bring them, with
-their merges from vvvv and their zeroed upper lanes), and so are x87, string
-instructions and the moffs forms.
+The other VEX and EVEX forms are uncovered (#180's levels will bring them, with
+their merges from vvvv, their zeroed upper lanes and their masks), the front
+end's X86 rows among them, and so are the string instructions and the moffs
+forms.
 
 ## Adding a form
 
@@ -491,16 +604,21 @@ instructions and the moffs forms.
    - its implicit registers, memory, immediate kind, control and properties.
 
    The form table supplies the rest: the operands' roles and classes, a general
-   register's rest, the width. Initialization refuses a row that doesn't fit
-   its form, and rows that overlap.
+   register's rest, the width. An x87 row has `X87` (and fldcw's
+   `X87_CONTROL`), and its ST(i) operands get no role. Initialization refuses a
+   row that doesn't fit its form, an x87 register outside an x87 row among them,
+   and rows that overlap.
 2. If a fixture of the issue's kind fits (a fixed register, a partial write, a
    flag), add one to `x86_semantics_fixtures`.
-3. Run `test-x86-semantics`: it executes the form from random states. A form
+3. If the vector resolver should leave the form's records to its scalar twin
+   (a property or a role it doesn't resolve itself), add it to the rare facts in
+   `x86_instructions_effects`.
+4. Run `test-x86-semantics`: it executes the form from random states. A form
    that branches or traps isn't executed; add a fixture of its effects instead,
    as call's and ret's are. A form that needs operands the harness doesn't
    generate gets them where `x86_semantics_check_run` makes division and bt
    fault-free.
-4. If a selector gives it immediates, add its row and candidates to
+5. If a selector gives it immediates, add its row and candidates to
    `x86_choice_sources`, shortest first. A candidate of another instruction
    names the flags it defines alike. The test then runs every candidate against
    its reference, and `--cross-check` against GNU as.
@@ -584,15 +702,18 @@ movabs are faster too. Whole-program run time waits for the code generators
 
 ## Next steps
 
-- **#136 and #141:** use the rows and the effects, and add the forms they emit
-  to the subset as they grow, with the selector integration tests the issue
-  lists: single-use and multi-use loads, interfering writes, volatile and
-  atomic accesses.
-- **#180:** add rows for forms beyond the baseline where the target allows
-  them (BMI2's shlx, VEX's three-operand scalar arithmetic), and cover their
-  effects, including VEX's merges from vvvv and zeroed upper lanes.
+- **#141:** its load folding (addressing modes, loads folded into their
+  consumers) is where single-use and multi-use loads, interfering writes and
+  volatile and atomic accesses decide a fold; its tests of them belong with it,
+  on the resolved effects. Its selector's requests could go to the vector
+  choice in batches, as Tier 0's do.
+- **VEX and EVEX coverage:** the front end's X86 rows and the x86 builtins
+  (#725) emit any VEX or EVEX form. Covering them (#180's levels: BMI2's shlx,
+  VEX's three-operand scalar arithmetic, their merges from vvvv, zeroed upper
+  lanes and masks) would let `tier0_operation_form_valid` ask the tables for
+  the forms with implicit operands, rather than keep its own list, and the
+  resolved effects cover masked records with an opmask resource.
 - **#181:** key its latencies by the same forms, and decide inc and dec.
-- **#222:** may switch `x86_match.c`'s immediate ranges to the shared rule.
 
 ## Boundary audit #298
 

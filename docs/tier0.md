@@ -809,7 +809,10 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   instruction of unknown effects.
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
-  and `dec`.
+  and `dec`. The records the emitter writes with a constant it computes (the frame's reservation and release, its
+  realignment, `ALLOCA`'s rounding, a vector constant's words) take their imm8 or imm32 by `x86_immediate_encodes`, the
+  same rule (#221). Every form the emitter writes has `x86_semantics.c`'s effects, which `test-tier0` checks on every
+  record it compiles but the X86 entries'.
 
 ## The two paths
 
@@ -1584,8 +1587,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   for real functions.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
-  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a
-  function with long double code, whose x87 forms `x86_semantics.c` has no rows for yet.
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It refused every
+  function with long double code too, whose x87 forms `x86_semantics.c` had no rows for until #221 covered them.
 
 ## Boundary audit #298
 

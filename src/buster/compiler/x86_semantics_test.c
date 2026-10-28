@@ -764,6 +764,14 @@ static bool x86_semantics_check_fixtures(void)
     x86_semantics_expect(&tally, covered + 1 == x86_effects_count, "%u covered forms, and %u records past the conservative one", covered, x86_effects_count - 1);
     printf("effects: %u covered forms of %u, %u records of %u bytes and an index of %u bytes\n", covered, (uint32_t)X86_FORM_COUNT, x86_effects_count,
            (uint32_t)sizeof(X86Effects), (uint32_t)sizeof(x86_effects_index));
+    // Every form number's record by x86_effects_by_form, as x86_semantics_row finds it (a segment override's copies, the
+    // fixup flag and the numbers past the copies among them).
+    bool by_form = true;
+    for (uint32_t number = 0; number < 2 * (BUSTER_X86_FORM_NUMBER + 1); number += 1)
+    {
+        by_form &= x86_effects(number) == &x86_effects_records[x86_effects_index[x86_semantics_row(number)]];
+    }
+    x86_semantics_expect(&tally, by_form, "x86_effects by form number is x86_semantics_row's record for every number");
     return x86_semantics_report(&tally);
 }
 
@@ -2670,6 +2678,9 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
                 records[i].reg |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_REGISTER_HIGH_BYTE : 0;
             }
             records[i].rm = x86_random_below(&state, 4) == 0 ? records[i].reg : records[i].rm;
+            // An opmask only where x86_validate takes one, an EVEX form's: any other form's record has none.
+            const bool evex = x86_form_descriptions[x86_semantics_row(form)].family == BUSTER_X86_FAMILY_EVEX;
+            records[i].decorations = evex ? records[i].decorations : (uint8_t)(records[i].decorations & ~BUSTER_X86_DECORATION_MASK);
         }
         x86_instructions_effects_scalar(records, count, scalar_reads, scalar_writes);
         x86_instructions_effects(records, count, vector_reads, vector_writes);

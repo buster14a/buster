@@ -397,7 +397,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
         .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
-                   "object_writer|x86_64_encoder|x86_match|x86_target[a-z0-9_]*",
+                   "object_writer|x86_64_encoder|x86_match|x86_semantics|x86_target[a-z0-9_]*",
     },
     {
         .name = "backend",
