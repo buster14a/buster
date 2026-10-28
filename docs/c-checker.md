@@ -335,13 +335,16 @@ does, each rule checked against clang's answers on probes of it:
   before expressions have types, so whether an element initializes a whole
   struct, or starts brace elision, comes from the tree: the element's root's
   type, from an identifier's declaration, a compound literal's type, a `?:`'s
-  third operand, a parenthesized expression or a call of a function by its name,
-  and a subscript's, a member's and an indirection's of these (`x[1]`,
+  third operand, a parenthesized expression or a call of a function by its name
+  (of an intrinsic, by the prototype the reader keeps at the call's `)`), and a
+  subscript's, a member's and an indirection's of these (`x[1]`,
   `bind->runtime->libc.soname`, `*p`), each step applied to its base's type from
   the innermost out. It came from the last typed token in the element, and so a
   compound literal with a member's value, `(struct L){ .target = n }`, read as
   `n`'s type, and `{ x[1], x[2] }` of structs as a struct's first two members:
-  one element where clang has two.
+  one element where clang has two. An intrinsic's call, which no declaration
+  types, still read so: `{ __builtin_ia32_compressqi512_mask(a, w, m), a }` of
+  byte vectors as its mask's scalar, one element where clang has two.
 - **Compound literals in a static object's initializer**, in a function too:
   clang folds a block-scope compound literal's value, an automatic object's, as
   GNU C does, into a `static` array's element or a `static` struct, where its
@@ -1247,6 +1250,24 @@ What the lowering covers past scalars (#145's programs):
   with no baseline runtime speedup claimed for them. The record includes raw
   samples, identities, native/Clang scalar/vector checks and source-corpus
   receipts, including the successful pinned c-testsuite rerun.
+- **C11 atomics (#671).** The C11 builtin family and ordinary atomic lvalues
+  share the existing raw-bit native leaves for aligned representations through
+  eight bytes, with generic libatomic calls for other layouts. Reads, assignment,
+  compound updates and prefix/postfix increments preserve one evaluation of each
+  source operand. Atomic storage padding, static size/alignment and addressable
+  locals are distinct from their unwrapped C values. The
+  [builtin guide](c-builtins-integration.md#atomic-and-terminal-helper-calls)
+  records the runtime ABI and remaining value-representation limits.
+  Floating min/max under `FENV_ACCESS ON` calls the target's `fminf`, `fmin`,
+  `fmaxf` or `fmax` within the retry, as Clang's strict path does, retaining
+  native DAZ behavior and requiring `-lm` when linking. Address and RHS
+  evaluation remain outside that retry. This does not extend the existing
+  floating retry-exception conformance claim.
+  Atomic vector loads, stores, exchange and compare-exchange retain vector value
+  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  updates of atomic vectors are explicitly refused until their retry computation
+  has a vector lowering.
+
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
@@ -1373,6 +1394,35 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
+  X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
+  name, of its family's records with its rule's form, as clang -O0's code
+  computes it, its arguments at their prototype's types (an 8- or 16-bit
+  integer widened to the 32 bits a general register's field reads) and its
+  immediates constants. The families: compares into an opmask and selects under
+  one, KMOV, masked loads and stores, two-vector operations and permutes,
+  shifts, an element's extraction (of a 256-bit vector's high lane, after
+  extracting the lane) and insertion, the elements' top bits, BMI2's PDEP, PEXT
+  and BZHI, undefined vectors (zeros), the opmask operations (KAND, KADD,
+  KUNPCK, KOR, KXOR, KSHIFTL, and `ktestz`'s, whose row's result the caller
+  tests), compression and expansion (into a vector and into memory), masks of
+  the elements' top bits and vectors of a mask's, truncating conversions of a
+  low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
+  VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
+  VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
+  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
+  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
+  integers. A builtin the table doesn't name is refused by name ("this x86
+  builtin"), and so are one whose instructions the target hasn't, a gather's or
+  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
+  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
+  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
+  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  prototypes' types, the masks' and the vectors' from the call's argument, with
+  every result folded into the program's hash, by both paths against clang
+  -O0's code for znver5; they run where the host has the rows' features
+  (`x86_target_native`), and compile and link elsewhere. `test-checker
+  --program-vectors` runs them and the vector programs alone.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -1606,11 +1656,40 @@ does in Clang. Both output paths share the publication gate, including deferred
 preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
 graph's construction.
 
-Collection still has two pre-existing recovery boundaries: a preprocessing
-error prevents semantic collection of earlier source (#698), and an undeclared
-identifier can leave later independent expression warnings outside the safe
-graph prefix (#699). The publication limit does not supply those missing
-diagnostics or establish a combined source-order merge across stages.
+The source driver collects preprocessing, parser and checker groups before
+publication (#698). Their order follows expansion-output boundaries and proven
+semantic completion points, independently of the diagnostic's located token.
+For example, an earlier missing name precedes a later `#error`; runtime shift
+warnings complete after their function's closing brace and its lookahead, so
+an EOF preprocessing diagnostic can precede that warning. Required constant
+evaluation retains its own expression-completion boundary in a sparse warning
+fact. Include stacks and macro/explicit notes are rendered with their primary
+after the final order is known. The shared gate then counts only published
+groups and applies the error budget once. Standalone preprocessing retains
+immediate publication.
+
+A nonfatal preprocessing error leaves the source stream available for
+diagnostics. A real preprocessing fatal leaves only its produced prefix;
+existing complete-declaration/statement recovery can diagnose safe original
+fragments there. Either outcome remains a rejected unit and cannot replace an
+object file, even if the final budget hides a later error. Diagnostic capture
+exhaustion also rejects the unit and publishes one fatal rather than accepting
+an incompletely diagnosed warning-only source. Failed history replays keep
+queued groups' backing alive or replace a silent failure safely.
+
+After the whole declaration/body resolver has completed, ordinary missing-name
+binding reports can retain independent later declarations (#699). Two bounded
+forest passes give each rejected top-level declaration its earlier safe graph
+prefix; independent declarations keep their full graphs. Missing operands
+acquire no invented value or type. Initializer, assembly and control scans use
+the same local completion cuts, including whole-switch completion barriers,
+and independent tentative-definition constraints still run at translation-unit
+end. Type-query/declarator failures, unsupported pragmas, resource failures and
+unfinished resolver states retain the conservative prefix. Repaired/deferred
+views with skipped bodies do not enable this new binding recovery. A successful
+deferred merge has the same complete unit as source order and uses the same cuts.
+All these views remain
+diagnostic-only and preserve the original source rejection.
 
 ### What the lowering costs (#531)
 
