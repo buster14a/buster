@@ -139,6 +139,15 @@ BUSTER_HOST_INLINE unsigned host_clz64(uint64_t value)
 #define _lzcnt_u64(value) host_clz64(value)
 #endif
 
+#if !defined(__POPCNT__)
+BUSTER_HOST_INLINE long long host_popcnt64(unsigned long long value)
+{
+    return __builtin_popcountll(value);
+}
+#undef _mm_popcnt_u64
+#define _mm_popcnt_u64(value) host_popcnt64(value)
+#endif
+
 // Generated directly from Rijndael's GF(2^8) inverse and affine transform,
 // using polynomial 0x11b and affine constant 0x63. No upstream table is copied.
 static const uint8_t host_aes_sbox[256] = {
