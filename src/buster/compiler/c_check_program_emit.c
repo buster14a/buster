@@ -1143,6 +1143,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     }
                 }
             }
+            // A definition a #pragma clang section setting places (#619) is refused as a section attribute is.
+            if (valid && program->input->sections != 0 && object != 0 && object < program->object_count && program->object_symbols[object] != 0 &&
+                check_input_section_placed(program->input->sections, token))
+            {
+                result->status = CHECK_PROGRAM_UNSUPPORTED;
+                result->reason = "a definition '#pragma clang section' places in a section";
+                result->token = token;
+                valid = false;
+            }
         }
     }
     arena_pop_to(scratch, attributes_mark);

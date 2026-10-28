@@ -30,6 +30,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOOP_PARENTHESIS,
     CHECK_INPUT_NAKED_STATEMENT,
     CHECK_INPUT_NAKED_PARAMETER,
+    // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
+    CHECK_INPUT_SECTION,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -51,6 +53,7 @@ static const char* const check_input_messages[] =
     "unroll pragma's count unclosed",
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
+    "invalid '#pragma clang section' or section type conflict",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -111,6 +114,9 @@ struct CheckInputPackedMember
 };
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
+typedef struct CheckInputSections CheckInputSections;
+typedef struct CheckInputSectionSetting CheckInputSectionSetting;
+typedef struct CheckInputSectionEvent CheckInputSectionEvent;
 struct CheckInputNakedDiagnostic
 {
     uint32_t position;
@@ -153,6 +159,9 @@ struct CheckInput
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
     CheckInputLoopDiagnostic* loop_diagnostic;
     CheckInputNakedDiagnostic* naked_diagnostic;
+    // #619: the unit's #pragma clang section settings, its section diagnostics and the definitions the settings place
+    // (c_check_section_input.c); NULL in a unit without a section pragma or attribute.
+    CheckInputSections* sections;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -575,6 +584,13 @@ struct CheckInputReader
     uint32_t function_end;
     uint32_t function_body;
     bool naked_functions;
+    // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
+    // the first setting's position (section_record_from) or the first section attribute (section_recording) on.
+    CheckInputSectionEvent* section_events;
+    uint32_t section_event_count;
+    uint32_t section_event_capacity;
+    uint32_t section_record_from;
+    bool section_recording;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -1471,6 +1487,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_pack_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
+#include "c_check_section_input.c"
 
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
@@ -3069,6 +3086,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->output->initializer_begins[name] = i + 1;
                     reader->output->initializer_ends[name] = valid ? reader->ends[right] + 1 : i + 1;
                     i = valid ? reader->ends[right] + 1 : i;
+                }
+                if (valid && !is_typedef)
+                {
+                    check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
+                                                    !function && reader->static_objects[name], type);
                 }
                 more = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                 if (more)
@@ -5240,6 +5262,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .resolve_position = BUSTER_CHECK_NONE,
         .resolve_message = CHECK_INPUT_UNSUPPORTED,
         .expression_limit = count,
+        .section_record_from = BUSTER_CHECK_NONE,
         .fragment_end = original_end,
         .deferred = deferred,
         .syntax = syntax,
@@ -5629,6 +5652,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
+                prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -5699,6 +5723,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 types = reader.types;
                 // Lanes may have appended warnings after a top-level range last summarized their shared columns.
                 reader.warning_index_ready = false;
+            }
+            if (input->sections != 0 || reader.section_event_count != 0)
+            {
+                check_input_section_conflicts(&reader);
             }
             if (input->report_count == 0 && !input->resource)
             {
