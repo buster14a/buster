@@ -3684,25 +3684,27 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
             call->gp_offset = writer->gp_offset;
             call->fp_offset = writer->fp_offset;
         }
-        // A 128-bit integer comes as a struct of two eightbytes does, its value loaded from their address.
-        const bool wide = argument && check_lower_wide(writer, requested);
+        // A 128-bit integer comes as a struct of two eightbytes does, and a vector as a struct of its bytes (a 16-byte one in
+        // an XMM register's slot of the save area, a wider one in the overflow area), its value loaded from their address.
+        const uint8_t requested_class = argument ? check_lower_class(writer, requested) : BUSTER_TYPED_CLASS_VOID;
+        const bool bytes = check_lower_wide_class(requested_class) || requested_class == BUSTER_TYPED_CLASS_VECTOR;
         if (argument)
         {
             // A struct or union's bytes are copied from the save area into a frame object of its own (with room for
             // whole eightbytes), or read in the overflow area; its value is their address.
             const bool aggregate = check_lower_aggregate(writer, requested);
-            const uint64_t size = aggregate || wide ? type_size(types, requested) : 0;
+            const uint64_t size = aggregate || bytes ? type_size(types, requested) : 0;
             call->plan = abi_va_arg(writer->abi_table, types, requested);
-            call->result_class = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, requested);
+            call->result_class = bytes ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, requested);
             // (An empty one, which the call ignores, still names its object: 1 byte, as its frame object takes.)
             call->size = aggregate && size == 0 ? 1 : (uint32_t)size;
-            call->object = aggregate || wide ? check_lower_object(writer, (size + 7) & ~UINT64_C(7), type_alignment_log2(types, requested)) : 0;
+            call->object = aggregate || bytes ? check_lower_object(writer, (size + 7) & ~UINT64_C(7), type_alignment_log2(types, requested)) : 0;
         }
-        if (wide)
+        if (bytes)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, requested), 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, requested_class, check_lower_access_value(types, requested_class, requested));
         }
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_VARARGS, .node = index, .type = wide ? BUSTER_TYPE_ULONG : stream->values[node].type });
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_VARARGS, .node = index, .type = bytes ? BUSTER_TYPE_ULONG : stream->values[node].type });
         if (start)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, call->overflow_arg_area);

@@ -1161,7 +1161,11 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area, and
+  `va_arg` of a vector takes the path of a struct of its bytes, as a 128-bit
+  integer's does (a 16-byte one from its XMM register's slot of the save area,
+  a wider one in the overflow area, where the call puts it), and loads the
+  vector from their address. Named
   arguments aligned past 16 bytes align the incoming area to them, which
   Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
