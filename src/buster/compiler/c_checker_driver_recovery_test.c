@@ -52,6 +52,8 @@ static bool check_test_driver_recovery_groups(const char* text, char* groups, ui
 static void check_test_driver_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
+        "int first(void){return 2147483647+1;}\nint incomplete = ;\n#error later\n",
+        "int first(void){return 1<<32;}\n#warning lookahead\nint incomplete = ;\n#error later\n",
         "int first(void){return missing;}\n#error later\n",
         "#error earlier\nint later(void){return missing;}\n",
         "int first(void){return missing;}\nint later(void){return 1<<32;}\n",

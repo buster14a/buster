@@ -2095,7 +2095,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &pp, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -2507,7 +2507,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {

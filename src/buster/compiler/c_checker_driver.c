@@ -137,17 +137,18 @@ static uint64_t check_driver_warning_key(uint32_t token, uint32_t flags, uint32_
     return (uint64_t)token << 32 | (uint64_t)(uint16_t)flags << 16 | (uint16_t)enabled;
 }
 
-static uint32_t check_driver_publication_position(const Parser* parser, const Preprocessor* pp, uint32_t boundary)
+static uint32_t check_driver_publication_position(const Parser* parser, const Preprocessor* pp, uint32_t boundary, uint32_t publication_end)
 {
     return boundary < parser->tokens.count ? parser->tokens.sources[boundary] :
-           boundary == parser->tokens.count ? pp->output.count : pp->output.count + 1u;
+           boundary == parser->tokens.count ? publication_end : pp->output.count + 1u;
 }
 
 // Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
 // brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
 // sparse warning; no clean unit acquires a token-wide completion column.
 static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
-                                              const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning)
+                                              const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning, uint32_t publication_end,
+                                              const Parser* original)
 {
     const uint32_t runtime = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
                              CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW;
@@ -193,6 +194,17 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
     }
     if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
     {
+        // Repair may replace a real, completed body's final brace with a synthetic one. Its original tree still
+        // proves that body's lookahead; only genuinely unfinished bodies need the repaired TU-end boundary.
+        const uint32_t original_end = original != parser ? check_diagnostic_parse_end(original) : 0;
+        for (uint32_t parent = token, steps = 0; original != parser && parent < original->tokens.count && steps < original->tokens.count; steps += 1)
+        {
+            if (original->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY && original->tokens.kinds[parent] == PARSE_KIND_R_BRACE && parent + 1u < original_end)
+            {
+                return check_driver_publication_position(original, pp, parent + 1u, pp->output.count);
+            }
+            parent = original->tree.parents[parent];
+        }
         const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
         if (node < input->graph.count && input->graph.source_positions != NULL)
         {
@@ -208,7 +220,7 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
             parent = parser->tree.parents[parent];
         }
     }
-    return check_driver_publication_position(parser, pp, boundary);
+    return check_driver_publication_position(parser, pp, boundary, publication_end);
 }
 
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
@@ -297,7 +309,8 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
 // reports are gathered as keys of their token and their place in that order, and sorted: each token's first is the
 // first of its keys.
-static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+static bool check_driver_reports(const Parser* parser, const Parser* original, Preprocessor* pp, uint32_t publication_end,
+                                  const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
 {
@@ -481,7 +494,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag);
+                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag, publication_end, original);
                     pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;
@@ -519,7 +532,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     if (completion != 0)
                     {
-                        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, check_driver_publication_position(parser, pp, completion), "%s", message);
+                        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, check_driver_publication_position(parser, pp, completion, publication_end), "%s", message);
                     }
                     else
                     {
@@ -1463,6 +1476,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             }
             check_clock_mark(stage_clock, CHECK_STAGE_PARSE);
             const uint32_t tokens = checking->tokens.count;
+            // A complete declaration prefix ends before the original parser's lookahead, not at the whole PP EOF.
+            // Repairs retain their synthetic/end boundary; completed original bodies are handled independently.
+            const uint32_t publication_end = !repairing && tokens < parser.tokens.count ? parser.tokens.sources[tokens] : pp.output.count;
             const TypeCapacity capacity = {
                 .types = tokens <= (1u << 27) ? tokens * 4 + 64 : 0,
                 .parameters = tokens,
@@ -1602,7 +1618,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                                     control.position < tokens ? control.position + 1u : tokens };
                             }
                         }
-                        if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL,
+                        if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, &stream, repairing ? &repair : NULL,
                                                   original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                                   excess_tokens, excess_count, quiet, &scratch))
                         {
@@ -1698,7 +1714,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                 }
                 else
                 {
-                    if (!check_driver_reports(checking, &pp, &input, NULL, repairing ? &repair : NULL,
+                    if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, NULL, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch))
                     {
                         fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
