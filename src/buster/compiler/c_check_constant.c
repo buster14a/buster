@@ -212,13 +212,14 @@ static void check_constant_warning_operands(CheckConstantInput* input, const Che
 typedef struct CheckConstantPart CheckConstantPart;
 struct CheckConstantPart
 {
+    uint64_t extent;
     uint32_t next;
     uint32_t token;
     uint32_t qualifiers;
     uint32_t parameter_first;
     uint32_t parameter_last;
     uint32_t parameter_count;
-    uint64_t extent;
+    uint32_t parameter_names;
     uint8_t kind;
     uint8_t flags;
 };
@@ -229,7 +230,35 @@ struct CheckConstantParameter
     TypeId type;
     uint32_t next;
     uint32_t name;
+    uint32_t name_children[2];
 };
+
+// Each prototype owns a digital search tree in its existing parameter records. Links are index + 1, with zero
+// empty. Low bits first distribute consecutive interned names without hashing or clearing an identifier table.
+// Every edge fixes another name bit: at most 32 unequal records can precede an empty link or an equal name.
+// Insert only when the old scan ran, after parameter adjustment, preserving source-order failure and activation.
+static bool check_constant_parameter_unique(CheckConstantPart* function, CheckConstantParameter* parameters, uint32_t parameter)
+{
+    const uint32_t name = parameters[parameter].name;
+    bool unique = true;
+    if (name != 0)
+    {
+        uint32_t* link = &function->parameter_names;
+        uint32_t bits = name;
+        while (unique && *link != 0)
+        {
+            CheckConstantParameter* previous = &parameters[*link - 1];
+            unique = previous->name != name;
+            link = &previous->name_children[bits & 1];
+            bits >>= 1;
+        }
+        if (unique)
+        {
+            *link = parameter + 1;
+        }
+    }
+    return unique;
+}
 
 typedef struct CheckConstantTypeFrame CheckConstantTypeFrame;
 typedef struct CheckConstantTypeAttribute CheckConstantTypeAttribute;
@@ -837,16 +866,13 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                         if (valid)
                         {
                             const uint32_t name = frame->name != BUSTER_CHECK_NONE ? parser->tokens.names[frame->name] : 0;
-                            for (uint32_t previous = function->parameter_first; valid && name != 0 && previous != BUSTER_CHECK_NONE; previous = parameters[previous].next)
-                            {
-                                valid = parameters[previous].name != name;
-                            }
                             parameters[parameter_count] = (CheckConstantParameter)
                             {
                                 .type = adjusted,
                                 .next = BUSTER_CHECK_NONE,
                                 .name = name,
                             };
+                            valid = check_constant_parameter_unique(function, parameters, parameter_count);
                             if (function->parameter_last != BUSTER_CHECK_NONE)
                             {
                                 parameters[function->parameter_last].next = parameter_count;

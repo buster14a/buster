@@ -282,6 +282,37 @@ expression is refused with its bound, as a statement expression that holds a
 declaration is ("Variable-length arrays" below). A definition in a `typeof` is
 still refused, there as anywhere.
 
+Type-name prototypes check duplicate parameter names with a separate digital
+search tree per prototype (`check_constant_parameter_unique`, #604). A root
+and two child indices per existing parameter record consume interned 32-bit
+names directly, low bit first. Each unequal record fixes another bit, bounding
+an insertion by 32 unequal comparisons, independent of the parameter count.
+Zero names are skipped. Nested and sibling prototypes have independent roots;
+the tree is private to one `check_constant_type` scratch lifetime. It adds no
+allocation or identifier-table initialization. Parameter records grow from
+12 to 20 bytes; the scratch reservation grows by eight bytes per token of the
+bounded type slice. Reordering the part record keeps it at 40 bytes.
+
+The check stays after parameter type adjustment and before reading the next
+parameter, preserving the existing failure order and binding activation.
+The source-order insertions and their dependent bit decisions use scalar
+loads; the full scalar/vector source readers exercise the same membership
+rule. The affected path is declaration-time evaluation, for example
+`enum { N=sizeof(int (*)(int p0,int p1)) };`; a body-level `return sizeof(...)`
+uses the ordinary declarator reader and is a separate, already-linear control.
+
+On the locked 9700X against main `92c025e7`, a 4,096-name prototype takes
+11.27–11.41 ms as a whole `-fsyntax-only` process before this change and
+2.01–2.09 ms afterward (5.46–5.61 times faster); following 100 ms of scalar
+work it improves 5.15–5.33 times. Instructions fall 77.94%. SQLite's timing
+stays within the identical copies' variation; a possible few-percent cost on
+many small prototypes is unresolved. The 4,096-unnamed-parameter control
+uses about 2 MiB more peak RSS, while the named control stays near 31 MiB.
+[The pinned qualification and measurements](https://github.com/buster14a/buster-performance/tree/3e6cd7e2a88ae93b11797050f9fb8806be18ecc9/docs/measurements/prototype-parameter-names-604-2026-10-27)
+include all named/unnamed sizes, source/binary identities, memory costs,
+the passing target suites and the excluded setup run. These are measurements
+of this reader change and its recorded controls, not whole-compiler acceptance.
+
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
 the destination function-pointer type. Initializers, casts, assignments,
@@ -326,6 +357,25 @@ pointer qualification, function calls and their parameter conversions.
 Anonymous member lookup and aggregate
 modifiability use bounded iterative walks, including inherited qualification
 on anonymous members.
+
+Before record layout, `check_input_tag_definition` packs that record's direct
+members for `check_input_record_names` (`c_check_record_input.c`). Direct names
+have already passed the reader's generation-stamped duplicate check. While
+packing, the reader records whether an unnamed non-bit-field member exists and
+skips namespace allocation/validation entirely when none does. An anonymous
+nonrecord still enters the defensive helper and fails as before. Named fields
+introduce only their own name, even when their type contains another record's
+definition. The temporary hash table starts from the direct member count and
+grows geometrically at half occupancy as anonymous fields expose more names.
+Its clearing and rebuilding therefore follow the visited namespace, rather
+than the entire nested token span (#614). The explicit expansion stack starts
+with one local frame and grows only with anonymous depth; the token span still
+bounds that depth. Both scratch structures belong to this validation call and
+restore its arena mark on success, duplicate or allocation failure. Duplicate
+diagnostics retain the later containing direct member; layout receives the
+same packed members. `test-checker` exercises colliding identifier IDs, repeated
+table/stack growth, every scratch byte limit, named versus anonymous nesting,
+and Clang-checked source layouts and first-error lines on both parser paths.
 
 `CheckStream` holds expression results. `CheckProgram` adds checked control
 bracketing, body references and shared object/function identities without
@@ -430,6 +480,24 @@ operand so comparison uses the promoted switch type. Validation checks node
 order, ownership, slice coverage and branch targets before interpreting a
 region. Body extraction includes these dependencies and remaps every retained
 node reference while preserving branch targets within each compacted slice.
+
+Overload declaration lookup uses transient signature buckets keyed separately
+by name and lexical scope, and by name and translation-unit linkage. Each
+fingerprint preserves canonical parameter identity, including nominal tags and
+nested function ABIs, while ignoring alignment sugar and the outer function's
+return type and ABI. Append-only type-DAG fingerprints are computed once per
+type. Eight contiguous bucket keys are compared together, with an exact scalar
+twin; collisions still undergo the original signature and compatibility checks.
+
+Validated redeclarations carry accumulated attributes, definition state and
+canonical object identity. Identical type representatives can then be replaced
+in the transient index. Ordinary declarations recorded before a name becomes
+overloaded must first have their complete history checked. Merely compatible
+return types cannot end that history walk: compatibility of old-style function
+pointers is not transitive. The immutable source candidate chains and captured
+call heads remain intact, so declarations in later or sibling scopes cannot
+change an earlier call. Declaration-only scaling is measured separately from
+call-site overload resolution (#612).
 
 ### Typed output
 
@@ -638,6 +706,34 @@ back all its output on failure and validates the completed Link on success.
 Tests pass these atoms through the production ELF writer and independently
 compare bytes, symbol targets and relocation addends with Clang's object files.
 
+Static bit-field writes (`check_data_bit_field_value`, #601) merge only the
+partial boundary bytes and replace each interior byte once. They consume the
+validated integer's low bits, including signed and 128-bit values; an unaligned
+128-bit field can occupy 17 destination bytes. Clears mask the boundaries and
+zero the interior with `memset`, including ranges wider than a scalar. Neither
+helper reads or writes beyond the checked extent, requires padding, or changes
+the source order of overlapping designated writes and union replacements.
+`c_check_data_bit_field_test.c` checks every scalar width and byte offset against
+an independent bitwise reference at guarded allocation edges, larger clears,
+ordered overlapping plans and adjacent relocations. Source fixtures also pass
+packed 128-bit fields and replacements through the ELF writer and Clang.
+
+The locked [9700X comparison for #601](https://github.com/buster14a/buster-performance/tree/960c8cd2fd82c707f89296ef386352e7b28edee5/docs/measurements/static-bitfields-601-2026-10-27)
+compares `92c025e7` with `268c6a85`, Clang 23.1.1, `-O3 -march=native`,
+without debug information, on CPU 2 with one lane. Each whole-process case has
+24 samples per variant, warmed case-specific output files, two fresh tmpfs
+executable copies and a second baseline as its A/A control. Eleven paired
+stage-clock samples measure publication independently of parsing and checking.
+
+For 65,536 records with two 31-bit fields, whole compilation takes
+47.473 → 42.322 ms (10.85% less time), with 13.38% fewer user instructions;
+publication takes 8.535 → 3.423 ms (59.90% less time). For 16,384 packed
+128-bit records, whole time falls 13.37% and publication time 72.19%.
+Peak RSS is essentially unchanged. SQLite and the configured Lua sources'
+whole-time changes lie within their A/A copy ranges; this is no claim of an
+ordinary-corpus, cold-cache or multicore speedup. The record retains all
+identities, commands, raw reports, guarded tests and disassembly, and separates
+an excluded pilot whose shared output file biased some whole-process timings.
 Materialized payloads are constructed directly in an unpublished suffix of
 `bytes`, with no second payload copy when atoms are published. A zero-fill
 candidate releases its suffix; a failed batch restores the original length
@@ -710,13 +806,41 @@ What the lowering covers past scalars (#145's programs):
   register as a struct of it would, or from its 8-byte stack slot, which
   Tier 0's prologue copies into the object (an aligned typedef passes as its
   base, so the slot is aligned to 8 alone).
-- **Copies.** Struct and union assignment and initialization are `COPY`s of
-  at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard, and neither
-  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
-  value is used keeps its destination's address in a temporary too, pushed
-  again after the last `COPY`: whatever reads it takes its class from the entry
-  before it, which a `COPY`, of class `VOID`, can't give (#440).
+- **Copies.** Struct and union assignment and initialization up to 256 bytes
+  use one bounded `COPY`. Larger nonvolatile copies use one `memmove` runtime call (#597),
+  through the same symbol publication, ABI assignment and live-value preservation
+  as other runtime calls. The pointers and `size_t` have unsigned long's U64
+  INTEGER ABI on the generated SysV x86-64 target; no new type is created after
+  shared type classification. The call returns the destination when the
+  assignment's value is used, and its return is discarded otherwise. `memmove`
+  permits self-assignment. The number of typed entries and machine records is
+  bounded independently of the object size, so syntax-sized lowering capacities
+  cover this producer's actual demand. Small kept assignments retain the
+  destination in a temporary (#440), because `COPY` itself has class `VOID`.
+  Zero-size copies still evaluate their operands without touching memory.
+  Volatile copies retain the existing inline pieces, including self-assignment's
+  accesses; a library routine may skip copying when its pointers are equal.
+  The producer follows the copied value through comma, conditional, selected
+  and statement expressions, whose lvalue conversions can erase a source's
+  volatile qualifier. Its bounded private worklist borrows unused task storage.
+  A shared type-facts bit also retains volatile subobjects through by-value
+  records, arrays and aligned/atomic wrappers, stopping at pointer pointees.
+  Its memoized nonrecursive preparation visits each type and member edge once;
+  a bounded scalar/vector member scan skips that preparation when no member
+  is volatile. Initializer copies retain the declared destination's qualifiers
+  even when a plan's part type is unqualified. Shape and native regressions
+  cover destination-only volatility, nested volatile arrays, self-copy,
+  initialization/return and nonvolatile pointers to volatile storage.
+  The [9700X comparison](https://github.com/buster14a/buster-performance/blob/3d131b17c8b08bc2688da9c929e26ffea01055d2/docs/measurements/aggregate-copies-597-2026-10-27/README.md)
+  at compiler `03d79f50` records an 8192-byte discarded assignment shrinking
+  from 223 typed entries, 1152 machine records and 6197 text bytes to 6, 11
+  and 43, with hot-buffer runtime 52.659 to 23.647 ns per call. Copies through
+  262144 bytes compile where the baseline exhausts code capacity from 16384;
+  all 18 tested objects through 256 bytes remain byte-identical. Five release
+  test groups pass. There is no demonstrated compile-time gain; 257-byte calls
+  cost more than the old expansion, and the single-placement SQLite control's
+  median increases 0.79% with overlapping ranges. The report preserves these
+  limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,

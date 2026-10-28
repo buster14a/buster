@@ -590,8 +590,23 @@ struct Foreign
 // of the argument it is about.
 static __attribute__((unused)) ForeignFailure foreign_arguments(ForeignCommand* command, int argc, char** argv, Arena* arena);
 // Resolves `command` on a group of `lanes` lanes (pinned to `cpus`, if given), by `path`: fills `foreign`, whose arena
-// it reserves. Returns the first failure by position (also foreign->failure); release `foreign` either way.
+// it reserves. Returns the first failure by position (also foreign->failure); release `foreign` either way. It is
+// foreign_begin and foreign_run_lanes, between which a caller may open the first inputs (foreign_open_first).
 static __attribute__((unused)) ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t lanes, const uint32_t* cpus);
+// Sets `foreign` up to resolve `command` by `path` on up to `capacity` lanes: reserves its arena, and pushes its inputs
+// and its lanes' states. Returns false, with foreign->failure saying why, if `capacity` is 0 or past
+// BUSTER_LANE_MAX_COUNT or the arena can't hold them; release `foreign` either way.
+static __attribute__((unused)) bool foreign_begin(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t capacity);
+// Opens the command line's inputs on the calling thread, as lane 0 (foreign_open_input), in link order, until the
+// objects among them, and the archives under --whole-archive, come to `enough` bytes, or every one is open; returns
+// those bytes, or 0 once one fails (lane 0's failure, as in the open phase, which the link then fails in on any number
+// of lanes). The lanes open the others, and the scripts' inputs, in their open phase. A caller decides from the bytes
+// how many lanes the link pays for (link-foreign's default, #594): one lane's link then opens each input once, as on
+// one lane it would.
+static __attribute__((unused)) uint64_t foreign_open_first(Foreign* foreign, uint64_t enough);
+// Resolves what foreign_begin set up on a group of `lanes` lanes, at most its capacity (pinned to `cpus`, if given).
+// Returns the first failure by position (also foreign->failure); release `foreign` either way.
+static __attribute__((unused)) ForeignFailure foreign_run_lanes(Foreign* foreign, uint32_t lanes, const uint32_t* cpus);
 // Unmaps the inputs and releases the arena.
 static __attribute__((unused)) void foreign_release(Foreign* foreign);
 // The id of the loaded object a global symbol belongs to.
@@ -3473,7 +3488,11 @@ static void foreign_lane_main(void* argument)
     {
         foreign->started = true;
     }
-    lane->arena = arena_reserve(BUSTER_FOREIGN_LANE_ARENA_BYTES);
+    // Lane 0's may be reserved already: foreign_open_first's.
+    if (lane->arena.base == 0)
+    {
+        lane->arena = arena_reserve(BUSTER_FOREIGN_LANE_ARENA_BYTES);
+    }
     if (lane->arena.base == 0)
     {
         foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
@@ -3539,25 +3558,26 @@ static void foreign_lane_main(void* argument)
     }
 }
 
-static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t lanes, const uint32_t* cpus)
+static bool foreign_begin(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t capacity)
 {
     *foreign = (Foreign){
         .path = path,
-        .lanes = lanes,
+        .lanes = capacity,
         .command = command,
         .arena = arena_reserve(BUSTER_FOREIGN_ARENA_BYTES),
     };
-    ForeignFailure result = { 0 };
-    foreign->lane_states = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, ForeignLane, lanes);
+    foreign->lane_states = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, ForeignLane, capacity);
     foreign->inputs = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, ForeignInput, (uint64_t)command->argument_count + 1);
-    if (lanes == 0 || lanes > BUSTER_LANE_MAX_COUNT || foreign->lane_states == 0 || foreign->inputs == 0)
+    const bool counted = capacity != 0 && capacity <= BUSTER_LANE_MAX_COUNT;
+    const bool result = counted && foreign->lane_states != 0 && foreign->inputs != 0;
+    if (!result)
     {
-        result = foreign_failure(lanes == 0 || lanes > BUSTER_LANE_MAX_COUNT ? FOREIGN_ERROR_LANES : FOREIGN_ERROR_MEMORY, 0, 0, 0);
+        foreign->failure = foreign_failure(!counted ? FOREIGN_ERROR_LANES : FOREIGN_ERROR_MEMORY, 0, 0, 0);
     }
     else
     {
-        memset(foreign->lane_states, 0, lanes * sizeof(ForeignLane));
-        for (uint32_t i = 0; i < lanes; i += 1)
+        memset(foreign->lane_states, 0, capacity * sizeof(ForeignLane));
+        for (uint32_t i = 0; i < capacity; i += 1)
         {
             foreign->lane_states[i].failed_at = UINT32_MAX;
         }
@@ -3571,6 +3591,42 @@ static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* comman
             };
         }
         foreign->input_count = command->argument_count;
+    }
+    return result;
+}
+
+static uint64_t foreign_open_first(Foreign* foreign, uint64_t enough)
+{
+    ForeignLane* lane = foreign->failure.error == FOREIGN_ERROR_NONE && foreign->lane_states != 0 ? &foreign->lane_states[0] : 0;
+    if (lane != 0 && lane->arena.base == 0)
+    {
+        lane->arena = arena_reserve(BUSTER_FOREIGN_LANE_ARENA_BYTES);
+    }
+    // Without its arena, lane 0 fails in foreign_lane_main, which reserves it again.
+    bool going = lane != 0 && lane->arena.base != 0 && lane->failed_at == UINT32_MAX;
+    uint64_t bytes = 0;
+    for (uint32_t i = 0; going && i < foreign->input_count && bytes < enough; i += 1)
+    {
+        const ForeignInput* input = &foreign->inputs[i];
+        foreign_open_input(foreign, i, lane);
+        const bool whole = input->kind == FOREIGN_KIND_ARCHIVE && (input->flags & BUSTER_FOREIGN_INPUT_WHOLE_ARCHIVE) != 0;
+        bytes += input->kind == FOREIGN_KIND_OBJECT || whole ? input->bytes.length : 0;
+        going = lane->failed_at == UINT32_MAX;
+    }
+    return lane != 0 && lane->failed_at == UINT32_MAX ? bytes : 0;
+}
+
+static ForeignFailure foreign_run_lanes(Foreign* foreign, uint32_t lanes, const uint32_t* cpus)
+{
+    ForeignFailure result = foreign->failure;
+    if (result.error == FOREIGN_ERROR_NONE && (lanes == 0 || lanes > foreign->lanes))
+    {
+        result = foreign_failure(FOREIGN_ERROR_LANES, 0, 0, 0);
+    }
+    else if (result.error == FOREIGN_ERROR_NONE)
+    {
+        // The lanes past `lanes` hold nothing: only foreign_open_first, lane 0's, ran before.
+        foreign->lanes = lanes;
         // lane_run returns false when it couldn't start every lane, and then ran none, and also when a lane couldn't be
         // pinned to its CPU, which only a benchmark asks for: the lanes ran then.
         lane_run(lanes, foreign_lane_main, foreign, cpus);
@@ -3587,6 +3643,12 @@ static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* comman
     foreign->command = 0;
     foreign->failure = result;
     return result;
+}
+
+static ForeignFailure foreign_run(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t lanes, const uint32_t* cpus)
+{
+    foreign_begin(foreign, command, path, lanes);
+    return foreign_run_lanes(foreign, lanes, cpus);
 }
 
 static void foreign_release(Foreign* foreign)

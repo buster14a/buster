@@ -1236,6 +1236,11 @@ struct Preprocessor
     // The output, and the three stacks of buffers.
     PPTokens output;
     PPTokens arguments;
+    // Lazy delimiter links for immutable raw argument slices, indexed through argument_indexed. A write after a
+    // stack rewind invalidates its suffix (pp_room); live contexts retain their bounded, unchanged prefix.
+    uint32_t* argument_links;
+    uint32_t argument_indexed;
+    Arena argument_link_arena;
     PPTokens captures;
     PPTokens expansions;
     // Files: the cache they're read through (PPOptions.files, or one of the unit's own, in `arena`), this unit's data of
@@ -1521,6 +1526,10 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preproc
 // Room for `more` tokens in a stack, or a fatal error.
 static bool pp_room(Preprocessor* pp, PPTokens* tokens, uint32_t more)
 {
+    if (tokens == &pp->arguments && more != 0 && tokens->count < pp->argument_indexed)
+    {
+        pp->argument_indexed = tokens->count;
+    }
     const bool result = (uint64_t)tokens->count + more <= tokens->capacity;
     if (!result && !pp->fatal)
     {
@@ -7757,6 +7766,134 @@ static bool pp_new_argument(Preprocessor* pp)
 #define BUSTER_PP_FAST_SEPARATORS 64
 // The deepest nesting of parentheses pp_collect_arguments' 8-bit depths hold.
 #define BUSTER_PP_FAST_DEPTH 63
+// Small arguments keep the existing collectors; indexing pays when nested invocations would copy long suffixes.
+#define BUSTER_PP_ARGUMENT_INDEX_MIN 128
+
+// Index each newly written argument token once. At '(' the link is its matching ')'; at ')' it is the first comma
+// at that depth, or itself; each comma links to the next comma or ')'. While building, openers and commas form an
+// explicit backwards stack. Closing a level reverses its commas once, so all pairing work is linear. An unmatched
+// opener retains a backwards link, which cannot be mistaken for a matching closer. Delimiter masks batch the scan;
+// only delimiters need ordered pairing, with exactly the same pairing on the scalar path.
+// Each appended segment is a complete argument collection, not a continuation of an unmatched indexed opener:
+// pp_invoke calls this only after collection has closed, while prescanning its retained argument buffer. A rewind
+// keeps a live owner's complete prefix and later collections append complete segments after it. Restarting previous
+// at NONE therefore never needs to connect a new closer to an opener before argument_indexed. Unmatched delimiters
+// may occur in an argument's tokens, but only complete invocations inside its own context are borrowed.
+static bool pp_index_arguments(Preprocessor* pp)
+{
+    if (pp->argument_links == 0)
+    {
+        const uint64_t bytes = (uint64_t)BUSTER_PP_MAX_STACK_TOKENS * sizeof(uint32_t);
+        pp->argument_link_arena = arena_reserve_small(bytes, BUSTER_PP_TABLE_SMALL_BYTES);
+        pp->argument_links = arena_push_array(&pp->argument_link_arena, BUSTER_PP_MAX_STACK_TOKENS, sizeof(uint32_t), 64);
+        if (pp->argument_links == 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory indexing macro arguments");
+        }
+    }
+    const bool result = pp->argument_links != 0;
+    const uint8_t* kinds = pp->arguments.kinds;
+    uint32_t* links = pp->argument_links;
+    uint32_t previous = BUSTER_PP_NONE;
+    for (uint32_t t = pp->argument_indexed; result && t < pp->arguments.count; t += 64)
+    {
+        const uint32_t count = pp->arguments.count - t < 64 ? pp->arguments.count - t : 64;
+        uint64_t delimiters = 0;
+        if (pp->vectorized)
+        {
+            const __mmask64 valid = _bzhi_u64(~0ull, count);
+            const __m512i plain = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+            delimiters = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_L_PAREN)) |
+                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_R_PAREN)) |
+                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_COMMA));
+        }
+        else
+        {
+            for (uint32_t j = 0; j < count; j += 1)
+            {
+                const uint8_t kind = kinds[t + j] & 0x7F;
+                delimiters |= (uint64_t)(kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA) << j;
+            }
+        }
+        for (uint64_t bits = delimiters; bits != 0; bits &= bits - 1)
+        {
+            const uint32_t at = t + (uint32_t)__builtin_ctzll(bits);
+            const uint8_t kind = kinds[at] & 0x7F;
+            if (kind == C_TOKEN_L_PAREN || (kind == C_TOKEN_COMMA && previous != BUSTER_PP_NONE))
+            {
+                links[at] = previous;
+                previous = at;
+            }
+            else if (kind == C_TOKEN_R_PAREN && previous != BUSTER_PP_NONE)
+            {
+                uint32_t first = at;
+                while ((kinds[previous] & 0x7F) == C_TOKEN_COMMA)
+                {
+                    const uint32_t before = links[previous];
+                    links[previous] = first;
+                    first = previous;
+                    previous = before;
+                }
+                const uint32_t parent = links[previous];
+                links[previous] = at;
+                links[at] = first;
+                previous = parent;
+            }
+        }
+    }
+    pp->argument_indexed = result ? pp->arguments.count : pp->argument_indexed;
+    return result;
+}
+
+// Borrow a nested invocation's raw arguments from its current argument buffer. No token, flag or origin is changed;
+// each record names a slice that stays alive until the owning outer invocation is substituted. The context must
+// contain the whole invocation: barriers, expansion boundaries and directives still use the ordinary collectors.
+// A new invocation saves the unchanged stack count, so finishing it frees only its own appended tokens and records.
+static bool pp_collect_argument_slice(Preprocessor* pp, PPInvocation* invocation, bool variadic, uint32_t parameter_count)
+{
+    PPContext* context = &pp->contexts[pp->context_count - 1];
+    const uint32_t open = context->position;
+    bool result = context->kind == BUSTER_PP_CONTEXT_BUFFER && context->barrier && context->tokens == &pp->arguments && context->pending_flags == 0 &&
+                  pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_ARGUMENT &&
+                  open < context->end && pp->arguments.kinds[open] == C_TOKEN_L_PAREN &&
+                  (context->end - open >= BUSTER_PP_ARGUMENT_INDEX_MIN || context->end <= pp->argument_indexed);
+    result = result && pp_index_arguments(pp);
+    const uint32_t close = result ? pp->argument_links[open] : BUSTER_PP_NONE;
+    result = result && close > open && close < context->end;
+    if (result)
+    {
+        const uint32_t first = pp->argument_record_count - 1;
+        uint32_t record = first;
+        uint32_t begin = open + 1;
+        uint32_t next = pp->argument_links[close];
+        while (result && next < close && !(variadic && record - first + 1 >= parameter_count))
+        {
+            pp->argument_records[record] = (PPArgument){ .raw_begin = begin, .raw_end = next };
+            result = record + 1 < BUSTER_PP_MAX_STACK_TOKENS;
+            record += result;
+            begin = next + 1;
+            next = pp->argument_links[next];
+        }
+        if (result)
+        {
+            pp->argument_records[record] = (PPArgument){ .raw_begin = begin, .raw_end = close };
+            pp->argument_record_count = record + 1;
+            const PPToken token = pp_stack_token(&pp->arguments, close);
+            invocation->expansion_end = (token.flags & BUSTER_PP_FROM_MACRO) ? context->expansion_end : token.location;
+            if (invocation->history != 0)
+            {
+                pp->history[invocation->history - 1].end = token.location;
+                pp->history[invocation->history - 1].end_origin = token.origin;
+            }
+            context->position = close + 1;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many macro arguments");
+        }
+    }
+    return result;
+}
 
 // The byte indices 0 to 63, for pp_prefix_sum_bytes' permutes.
 static const uint8_t pp_byte_indices[64] __attribute__((aligned(64))) = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 };
@@ -10050,8 +10187,9 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
     }
     valid = valid && pp_new_argument(pp);
-    const bool collected = valid && pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count);
-    const bool finished = collected && pp_finish_simple(pp, &invocation);
+    const bool collected = valid && (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
+                                    (pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count)));
+    const bool finished = collected && pp->vectorized && pp_finish_simple(pp, &invocation);
     valid = valid && !finished;
     if (valid && !collected)
     {
@@ -17152,6 +17290,7 @@ static void pp_release_unit(Preprocessor* pp)
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
     pp_tokens_release(&pp->expansions);
+    arena_release(&pp->argument_link_arena);
     // The cache's records own the files' mappings, and a unit's own cache is in its arena.
     if (pp->owns_cache)
     {

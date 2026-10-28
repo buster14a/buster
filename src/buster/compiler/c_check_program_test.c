@@ -1367,11 +1367,11 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
                               "runtime accessor identity and genuine pointer ABI agree across unit batches");
             if (lower[0].errno_symbol != 0)
             {
-                const bool fresh = lower[0].runtime_symbol_count == 1;
-                check_test_expect(test, lower[0].runtime_symbol_count <= 1 &&
-                                       type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
+                const bool fresh = lower[0].errno_symbol > program.symbol_count;
+                check_test_expect(test, type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
                                        type_element(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_INT &&
-                                       (fresh ? lower[0].errno_symbol == program.symbol_count + lower[0].helpers.count + 1 :
+                                       (fresh ? lower[0].runtime_symbol_count != 0 && lower[0].runtime_order[0] == CHECK_LOWER_RUNTIME_ERRNO &&
+                                                lower[0].errno_symbol == program.symbol_count + lower[0].helpers.count + 1 :
                                                 lower[0].errno_symbol <= program.symbol_count),
                                   "errno accessor uses one reserved runtime symbol or an existing compatible global");
             }
@@ -1615,6 +1615,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
+#include "c_check_program_copy_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -1778,6 +1779,7 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
