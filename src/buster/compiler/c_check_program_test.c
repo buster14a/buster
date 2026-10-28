@@ -2026,7 +2026,7 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 
 static void check_test_program_many_arguments(CheckTest* test, const char* clang)
 {
-    static const uint32_t counts[] = { 65, 127, 238, 239 };
+    static const uint32_t counts[] = { 65, 127, 130, 238, 239 };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
     {
         char* source = NULL;
@@ -2080,7 +2080,21 @@ static void check_test_program_many_arguments(CheckTest* test, const char* clang
                         fprintf(text, "%s(long)n", a != 0 ? "," : "");
                     }
                 }
-                fprintf(text, ");return (int)((direct+indirect)%%1000003);}");
+                fprintf(text, ");");
+                if (counts[c] >= 130)
+                {
+                    // A wide call must refill the live prefix, even when its compact negative stack effect wraps.
+                    fprintf(text, "long held=(long)n-many(");
+                    for (uint32_t a = 0; a < counts[c]; a += 1)
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                    fprintf(text, ");return (int)((direct+indirect+held)%%1000003);}");
+                }
+                else
+                {
+                    fprintf(text, "return (int)((direct+indirect)%%1000003);}");
+                }
             }
             else
             {
