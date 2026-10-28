@@ -2103,7 +2103,7 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
                 }
-                TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                TypeId destination = parameter ? type_conversion_operand(table, parameters[i]) : type_default_argument_promote(table, value.type);
                 bool assignable = check_action_assignable(table, destination, &value, action, &converted);
                 bool transparent = false;
                 if (!assignable && parameter && converted.diagnostic == CHECK_DIAG_NONE)
