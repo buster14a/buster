@@ -18,6 +18,10 @@ path. Baseline memory boundary tests also run with undefined-behavior checks.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
 executes their results on that same emulated CPU.
+That leg links generic Ubuntu startup objects, libc and compiler support routines
+from checksum-pinned packages in a private directory (`BUSTER_HOST_RUNTIME`).
+It uses their loader explicitly for emulation: a hosted VM's installed startup
+objects and libraries can require a newer ISA independently of `-march=x86-64`.
 
 The hosted tests fetch the frozen corpus from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).

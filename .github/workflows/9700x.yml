@@ -147,6 +147,10 @@ jobs:
       - name: Install current Clang 23 and test tools
         run: bash tools/ci/setup-hosted.sh
 
+      - name: Fetch generic baseline startup objects and runtime for emulation
+        if: matrix.host_arch == 'x86-64'
+        run: bash tools/ci/setup-baseline-runtime.sh
+
       - name: Fetch and verify frozen corpus inputs
         run: |
           corpus="$RUNNER_TEMP/preprocessor-391e729af658"
@@ -199,12 +203,18 @@ jobs:
           mkdir "$smoke"
           printf '\357\273\277#define A 7\nint buster_add(int x){return x+A;}\n' > "$smoke/input.c"
           printf '.text\n.globl buster_asm\nbuster_asm:\nmov $7, %%eax\nadd $3, %%eax\nret\n' > "$smoke/input.s"
-          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler -E -P -o "$smoke/input.i" "$smoke/input.c"
-          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler -c -march=x86-64 -o "$smoke/input.o" "$smoke/input.c"
-          timeout 60s qemu-x86_64 -cpu qemu64 ./build/compiler assemble -march=x86-64 -o "$smoke/asm.o" "$smoke/input.s"
+          library="$BUSTER_HOST_RUNTIME/usr/lib/x86_64-linux-gnu"
+          loader="$library/ld-linux-x86-64.so.2"
+          qemu=(qemu-x86_64 -cpu qemu64 "$loader" --library-path "$library")
+          timeout 60s "${qemu[@]}" ./build/compiler -E -P -o "$smoke/input.i" "$smoke/input.c"
+          timeout 60s "${qemu[@]}" ./build/compiler -c -march=x86-64 -o "$smoke/input.o" "$smoke/input.c"
+          timeout 60s "${qemu[@]}" ./build/compiler assemble -march=x86-64 -o "$smoke/asm.o" "$smoke/input.s"
           printf 'int buster_add(int); int buster_asm(void); int main(void){return buster_add(5)!=12 || buster_asm()!=10;}\n' > "$smoke/main.c"
-          clang -march=x86-64 "$smoke/main.c" "$smoke/input.o" "$smoke/asm.o" -o "$smoke/program"
-          timeout 60s qemu-x86_64 -cpu qemu64 "$smoke/program"
+          clang -c -march=x86-64 "$smoke/main.c" -o "$smoke/main.o"
+          clang -no-pie -nostdlib "$library/crt1.o" "$library/crti.o" "$smoke/main.o" \
+            "$smoke/input.o" "$smoke/asm.o" "$library/libc.so.6" \
+            "$BUSTER_HOST_RUNTIME/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a" "$library/crtn.o" -o "$smoke/program"
+          timeout 60s "${qemu[@]}" "$smoke/program"
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers

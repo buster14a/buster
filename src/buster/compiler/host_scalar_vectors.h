@@ -7,6 +7,11 @@
 #define BUSTER_HOST_SCALAR_VECTORS_H
 #include <stdbool.h>
 
+// Keep emulated operations out of line: expanding their lane loops into every
+// experimental encoder variant makes optimized baseline builds needlessly large.
+// All callers and helpers use the same host ABI; vector host builds omit this file.
+#define BUSTER_HOST_EMULATED static __attribute__((noinline, unused))
+
 typedef union HostV128 HostV128;
 union HostV128
 {
@@ -49,7 +54,7 @@ union HostV512
     int64_t i64[8];
 };
 
-BUSTER_HOST_INLINE __m256i host_mm256_add_epi16(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_add_epi16(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -61,7 +66,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_add_epi16(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_add_epi32(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_add_epi32(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -73,7 +78,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_add_epi32(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_add_epi64(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_add_epi64(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -85,7 +90,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_add_epi64(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_and_si256(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_and_si256(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -97,7 +102,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_and_si256(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_blendv_epi8(__m256i a, __m256i b, __m256i index)
+BUSTER_HOST_EMULATED __m256i host_mm256_blendv_epi8(__m256i a, __m256i b, __m256i index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -110,7 +115,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_blendv_epi8(__m256i a, __m256i b, __m256i 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_broadcastsi128_si256(__m128i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_broadcastsi128_si256(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -121,7 +126,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_broadcastsi128_si256(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_castsi128_si256(__m128i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_castsi128_si256(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -129,14 +134,14 @@ BUSTER_HOST_INLINE __m256i host_mm256_castsi128_si256(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256 host_mm256_castsi256_ps(__m256i a)
+BUSTER_HOST_EMULATED __m256 host_mm256_castsi256_ps(__m256i a)
 {
     __m256 r;
     memcpy(&r, &a, sizeof(r));
     return r;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm256_castsi256_si128(__m256i a)
+BUSTER_HOST_EMULATED __m128i host_mm256_castsi256_si128(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -144,7 +149,7 @@ BUSTER_HOST_INLINE __m128i host_mm256_castsi256_si128(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_cmpeq_epi32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_cmpeq_epi32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -156,7 +161,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_cmpeq_epi32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm256_cmpeq_epi8_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm256_cmpeq_epi8_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -168,7 +173,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm256_cmpeq_epi8_mask(__m256i a, __m256i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_cmpge_epu32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_cmpge_epu32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -180,7 +185,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_cmpge_epu32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_cmpgt_epi32(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_cmpgt_epi32(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -192,7 +197,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_cmpgt_epi32(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_cmpgt_epi32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_cmpgt_epi32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -204,7 +209,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_cmpgt_epi32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_cmple_epu32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_cmple_epu32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -216,7 +221,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_cmple_epu32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm256_cmplt_epu8_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm256_cmplt_epu8_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -228,7 +233,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm256_cmplt_epu8_mask(__m256i a, __m256i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm256_cvtepi16_epi8(__m256i a)
+BUSTER_HOST_EMULATED __m128i host_mm256_cvtepi16_epi8(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -239,7 +244,7 @@ BUSTER_HOST_INLINE __m128i host_mm256_cvtepi16_epi8(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_cvtepu8_epi16(__m128i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_cvtepu8_epi16(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -250,7 +255,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_cvtepu8_epi16(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_cvtepu8_epi32(__m128i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_cvtepu8_epi32(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -261,13 +266,13 @@ BUSTER_HOST_INLINE __m256i host_mm256_cvtepu8_epi32(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE int64_t host_mm256_extract_epi64(__m256i a, int index)
+BUSTER_HOST_EMULATED int64_t host_mm256_extract_epi64(__m256i a, int index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     return (int64_t)a_.u64[(unsigned)index & 3];
 }
 
-BUSTER_HOST_INLINE __m128i host_mm256_extracti128_si256(__m256i a, int index)
+BUSTER_HOST_EMULATED __m128i host_mm256_extracti128_si256(__m256i a, int index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -275,7 +280,7 @@ BUSTER_HOST_INLINE __m128i host_mm256_extracti128_si256(__m256i a, int index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_inserti128_si256(__m256i a, __m128i b, int index)
+BUSTER_HOST_EMULATED __m256i host_mm256_inserti128_si256(__m256i a, __m128i b, int index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -285,21 +290,21 @@ BUSTER_HOST_INLINE __m256i host_mm256_inserti128_si256(__m256i a, __m128i b, int
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_load_si256(const void* memory)
+BUSTER_HOST_EMULATED __m256i host_mm256_load_si256(const void* memory)
 {
     HostV256 r = { 0 };
     memcpy(&r.value, memory, 32);
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_loadu_si256(const void* memory)
+BUSTER_HOST_EMULATED __m256i host_mm256_loadu_si256(const void* memory)
 {
     HostV256 r = { 0 };
     memcpy(&r.value, memory, 32);
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_cmpneq_epi32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_cmpneq_epi32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -311,12 +316,12 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_cmpneq_epi32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_mask_cmpneq_epi32_mask(__mmask8 k, __m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_mask_cmpneq_epi32_mask(__mmask8 k, __m256i a, __m256i b)
 {
     return (__mmask8)(k & host_mm256_cmpneq_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_mask_mov_epi32(__m256i src, __mmask8 k, __m256i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_mask_mov_epi32(__m256i src, __mmask8 k, __m256i a)
 {
     HostV256 src_ __attribute__((unused)) = { .value = src };
     HostV256 a_ __attribute__((unused)) = { .value = a };
@@ -328,7 +333,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_mask_mov_epi32(__m256i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_mask_set1_epi32(__m256i src, __mmask8 k, int32_t a)
+BUSTER_HOST_EMULATED __m256i host_mm256_mask_set1_epi32(__m256i src, __mmask8 k, int32_t a)
 {
     HostV256 src_ __attribute__((unused)) = { .value = src };
     HostV256 r = { 0 };
@@ -339,7 +344,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_mask_set1_epi32(__m256i src, __mmask8 k, i
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm256_mask_storeu_epi32(void* memory, __mmask8 k, __m256i a)
+BUSTER_HOST_EMULATED void host_mm256_mask_storeu_epi32(void* memory, __mmask8 k, __m256i a)
 {
     HostV256 a_ = { .value = a };
     for (unsigned i = 0; i < 8; i += 1)
@@ -348,7 +353,7 @@ BUSTER_HOST_INLINE void host_mm256_mask_storeu_epi32(void* memory, __mmask8 k, _
     }
 }
 
-BUSTER_HOST_INLINE void host_mm256_mask_storeu_epi64(void* memory, __mmask8 k, __m256i a)
+BUSTER_HOST_EMULATED void host_mm256_mask_storeu_epi64(void* memory, __mmask8 k, __m256i a)
 {
     HostV256 a_ = { .value = a };
     for (unsigned i = 0; i < 4; i += 1)
@@ -357,7 +362,7 @@ BUSTER_HOST_INLINE void host_mm256_mask_storeu_epi64(void* memory, __mmask8 k, _
     }
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_maskz_add_epi16(__mmask16 k, __m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_maskz_add_epi16(__mmask16 k, __m256i a, __m256i b)
 {
     HostV256 result = { .value = host_mm256_add_epi16(a, b) };
     HostV256 r = { 0 };
@@ -368,7 +373,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_maskz_add_epi16(__mmask16 k, __m256i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_maskz_compress_epi32(__mmask8 k, __m256i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_maskz_compress_epi32(__mmask8 k, __m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -380,7 +385,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_maskz_compress_epi32(__mmask8 k, __m256i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_maskz_loadu_epi32(__mmask8 k, const void* memory)
+BUSTER_HOST_EMULATED __m256i host_mm256_maskz_loadu_epi32(__mmask8 k, const void* memory)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -390,7 +395,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_maskz_loadu_epi32(__mmask8 k, const void* 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_maskz_loadu_epi8(__mmask32 k, const void* memory)
+BUSTER_HOST_EMULATED __m256i host_mm256_maskz_loadu_epi8(__mmask32 k, const void* memory)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -400,7 +405,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_maskz_loadu_epi8(__mmask32 k, const void* 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_maskz_set1_epi32(__mmask8 k, int32_t a)
+BUSTER_HOST_EMULATED __m256i host_mm256_maskz_set1_epi32(__mmask8 k, int32_t a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -410,7 +415,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_maskz_set1_epi32(__mmask8 k, int32_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE int host_mm256_movemask_epi8(__m256i a)
+BUSTER_HOST_EMULATED int host_mm256_movemask_epi8(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     uint32_t r = 0;
@@ -421,7 +426,7 @@ BUSTER_HOST_INLINE int host_mm256_movemask_epi8(__m256i a)
     return (int)r;
 }
 
-BUSTER_HOST_INLINE int host_mm256_movemask_ps(__m256 a)
+BUSTER_HOST_EMULATED int host_mm256_movemask_ps(__m256 a)
 {
     HostV256 a_;
     memcpy(&a_, &a, sizeof(a));
@@ -433,7 +438,7 @@ BUSTER_HOST_INLINE int host_mm256_movemask_ps(__m256 a)
     return (int)r;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_mullo_epi16(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_mullo_epi16(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -445,7 +450,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_mullo_epi16(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_or_si256(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_or_si256(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -457,7 +462,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_or_si256(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_permutex2var_epi8(__m256i a, __m256i index, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_permutex2var_epi8(__m256i a, __m256i index, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 index_ __attribute__((unused)) = { .value = index };
@@ -470,7 +475,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_permutex2var_epi8(__m256i a, __m256i index
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_permutexvar_epi32(__m256i index, __m256i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_permutexvar_epi32(__m256i index, __m256i a)
 {
     HostV256 index_ __attribute__((unused)) = { .value = index };
     HostV256 a_ __attribute__((unused)) = { .value = a };
@@ -482,7 +487,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_permutexvar_epi32(__m256i index, __m256i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_set1_epi16(int a)
+BUSTER_HOST_EMULATED __m256i host_mm256_set1_epi16(int a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -492,7 +497,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_set1_epi16(int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_set1_epi32(int32_t a)
+BUSTER_HOST_EMULATED __m256i host_mm256_set1_epi32(int32_t a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -502,7 +507,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_set1_epi32(int32_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_set1_epi8(int a)
+BUSTER_HOST_EMULATED __m256i host_mm256_set1_epi8(int a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -512,7 +517,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_set1_epi8(int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_setr_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7)
+BUSTER_HOST_EMULATED __m256i host_mm256_setr_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7)
 {
     HostV256 r = { 0 };
     r.u32[0] = (uint32_t)a0;
@@ -526,7 +531,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_setr_epi32(int32_t a0, int32_t a1, int32_t
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_setr_epi64x(int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+BUSTER_HOST_EMULATED __m256i host_mm256_setr_epi64x(int64_t a0, int64_t a1, int64_t a2, int64_t a3)
 {
     HostV256 r = { 0 };
     r.u64[0] = (uint64_t)a0;
@@ -536,13 +541,13 @@ BUSTER_HOST_INLINE __m256i host_mm256_setr_epi64x(int64_t a0, int64_t a1, int64_
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_setzero_si256(void)
+BUSTER_HOST_EMULATED __m256i host_mm256_setzero_si256(void)
 {
     HostV256 r = { 0 };
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_shuffle_epi8(__m256i a, __m256i index)
+BUSTER_HOST_EMULATED __m256i host_mm256_shuffle_epi8(__m256i a, __m256i index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 index_ __attribute__((unused)) = { .value = index };
@@ -554,7 +559,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_shuffle_epi8(__m256i a, __m256i index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_slli_epi16(__m256i a, int count)
+BUSTER_HOST_EMULATED __m256i host_mm256_slli_epi16(__m256i a, int count)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -565,7 +570,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_slli_epi16(__m256i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_slli_epi32(__m256i a, int count)
+BUSTER_HOST_EMULATED __m256i host_mm256_slli_epi32(__m256i a, int count)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -576,7 +581,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_slli_epi32(__m256i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_srli_epi16(__m256i a, int count)
+BUSTER_HOST_EMULATED __m256i host_mm256_srli_epi16(__m256i a, int count)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -587,7 +592,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_srli_epi16(__m256i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_srli_epi32(__m256i a, int count)
+BUSTER_HOST_EMULATED __m256i host_mm256_srli_epi32(__m256i a, int count)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -598,12 +603,12 @@ BUSTER_HOST_INLINE __m256i host_mm256_srli_epi32(__m256i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm256_storeu_si256(void* memory, __m256i a)
+BUSTER_HOST_EMULATED void host_mm256_storeu_si256(void* memory, __m256i a)
 {
     memcpy(memory, &a, 32);
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_sub_epi16(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_sub_epi16(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -615,7 +620,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_sub_epi16(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_sub_epi32(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_sub_epi32(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -627,7 +632,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_sub_epi32(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_sub_epi8(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_sub_epi8(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -639,7 +644,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_sub_epi8(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm256_test_epi16_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm256_test_epi16_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -651,7 +656,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm256_test_epi16_mask(__m256i a, __m256i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm256_test_epi32_mask(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm256_test_epi32_mask(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -663,7 +668,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm256_test_epi32_mask(__m256i a, __m256i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_xor_si256(__m256i a, __m256i b)
+BUSTER_HOST_EMULATED __m256i host_mm256_xor_si256(__m256i a, __m256i b)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -675,7 +680,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_xor_si256(__m256i a, __m256i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_zextsi128_si256(__m128i a)
+BUSTER_HOST_EMULATED __m256i host_mm256_zextsi128_si256(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -683,7 +688,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_zextsi128_si256(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_abs_epi32(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_abs_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -694,7 +699,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_abs_epi32(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_add_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_add_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -706,7 +711,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_add_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_add_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_add_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -718,7 +723,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_add_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_add_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_add_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -730,7 +735,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_add_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_add_epi8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_add_epi8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -742,7 +747,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_add_epi8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_aesenc_epi128(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_aesenc_epi128(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -754,7 +759,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_aesenc_epi128(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_alignr_epi32(__m512i a, __m512i b, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_alignr_epi32(__m512i a, __m512i b, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -766,7 +771,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_alignr_epi32(__m512i a, __m512i b, int imm
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_alignr_epi64(__m512i a, __m512i b, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_alignr_epi64(__m512i a, __m512i b, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -778,7 +783,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_alignr_epi64(__m512i a, __m512i b, int imm
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_and_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_and_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -790,7 +795,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_and_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_and_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_and_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -802,7 +807,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_and_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_and_si512(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_and_si512(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -814,7 +819,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_and_si512(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_andnot_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_andnot_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -826,7 +831,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_andnot_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_andnot_si512(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_andnot_si512(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -838,7 +843,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_andnot_si512(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_bitshuffle_epi64_mask(__m512i a, __m512i control)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_bitshuffle_epi64_mask(__m512i a, __m512i control)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 control_ __attribute__((unused)) = { .value = control };
@@ -850,7 +855,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_bitshuffle_epi64_mask(__m512i a, __m512i
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_broadcast_i32x4(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_broadcast_i32x4(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -861,7 +866,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_broadcast_i32x4(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_castsi128_si512(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_castsi128_si512(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -869,7 +874,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_castsi128_si512(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_castsi256_si512(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_castsi256_si512(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -877,7 +882,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_castsi256_si512(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm512_castsi512_si128(__m512i a)
+BUSTER_HOST_EMULATED __m128i host_mm512_castsi512_si128(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -885,7 +890,7 @@ BUSTER_HOST_INLINE __m128i host_mm512_castsi512_si128(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm512_castsi512_si256(__m512i a)
+BUSTER_HOST_EMULATED __m256i host_mm512_castsi512_si256(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -893,7 +898,7 @@ BUSTER_HOST_INLINE __m256i host_mm512_castsi512_si256(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmp_epi64_mask(__m512i a, __m512i b, int predicate)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmp_epi64_mask(__m512i a, __m512i b, int predicate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -905,7 +910,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmp_epi64_mask(__m512i a, __m512i b, int 
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmp_epu64_mask(__m512i a, __m512i b, int predicate)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmp_epu64_mask(__m512i a, __m512i b, int predicate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -917,7 +922,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmp_epu64_mask(__m512i a, __m512i b, int 
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmpeq_epi16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmpeq_epi16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -929,7 +934,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmpeq_epi16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpeq_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpeq_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -941,7 +946,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpeq_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpeq_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpeq_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -953,7 +958,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpeq_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmpeq_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmpeq_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -965,7 +970,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmpeq_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpge_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpge_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -977,7 +982,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpge_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpge_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpge_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -989,7 +994,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpge_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmpge_epu16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmpge_epu16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1001,7 +1006,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmpge_epu16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpge_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpge_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1013,7 +1018,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpge_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpge_epu64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpge_epu64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1025,7 +1030,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpge_epu64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmpge_epu8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmpge_epu8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1037,7 +1042,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmpge_epu8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpgt_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpgt_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1049,7 +1054,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpgt_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmpgt_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmpgt_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1061,7 +1066,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmpgt_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmpgt_epu16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmpgt_epu16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1073,7 +1078,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmpgt_epu16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpgt_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpgt_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1085,7 +1090,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpgt_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpgt_epu64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpgt_epu64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1097,7 +1102,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpgt_epu64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmpgt_epu8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmpgt_epu8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1109,7 +1114,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmpgt_epu8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmple_epi16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmple_epi16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1121,7 +1126,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmple_epi16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmple_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmple_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1133,7 +1138,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmple_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmple_epu64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmple_epu64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1145,7 +1150,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmple_epu64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmple_epu8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmple_epu8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1157,7 +1162,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmple_epu8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmplt_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmplt_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1169,7 +1174,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmplt_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmplt_epu16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmplt_epu16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1181,7 +1186,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmplt_epu16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmplt_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmplt_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1193,7 +1198,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmplt_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmplt_epu64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmplt_epu64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1205,7 +1210,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmplt_epu64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmplt_epu8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmplt_epu8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1217,7 +1222,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmplt_epu8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpneq_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpneq_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1229,7 +1234,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpneq_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpneq_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpneq_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1241,7 +1246,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpneq_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_cmpneq_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_cmpneq_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1253,7 +1258,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_cmpneq_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpneq_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpneq_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1265,7 +1270,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpneq_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_conflict_epi32(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_conflict_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1276,7 +1281,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_conflict_epi32(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm512_cvtepi32_epi16(__m512i a)
+BUSTER_HOST_EMULATED __m256i host_mm512_cvtepi32_epi16(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -1287,7 +1292,7 @@ BUSTER_HOST_INLINE __m256i host_mm512_cvtepi32_epi16(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepi32_epi64(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepi32_epi64(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1298,7 +1303,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepi32_epi64(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm512_cvtepi32_epi8(__m512i a)
+BUSTER_HOST_EMULATED __m128i host_mm512_cvtepi32_epi8(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -1309,7 +1314,7 @@ BUSTER_HOST_INLINE __m128i host_mm512_cvtepi32_epi8(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm512_cvtepi64_epi16(__m512i a)
+BUSTER_HOST_EMULATED __m128i host_mm512_cvtepi64_epi16(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -1320,7 +1325,7 @@ BUSTER_HOST_INLINE __m128i host_mm512_cvtepi64_epi16(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm512_cvtepi64_epi32(__m512i a)
+BUSTER_HOST_EMULATED __m256i host_mm512_cvtepi64_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -1331,7 +1336,7 @@ BUSTER_HOST_INLINE __m256i host_mm512_cvtepi64_epi32(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm512_cvtepi64_epi8(__m512i a)
+BUSTER_HOST_EMULATED __m128i host_mm512_cvtepi64_epi8(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -1342,7 +1347,7 @@ BUSTER_HOST_INLINE __m128i host_mm512_cvtepi64_epi8(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepi8_epi32(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepi8_epi32(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1353,7 +1358,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepi8_epi32(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu16_epi32(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu16_epi32(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1364,7 +1369,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu16_epi32(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu16_epi64(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu16_epi64(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1375,7 +1380,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu16_epi64(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu32_epi64(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu32_epi64(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1386,7 +1391,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu32_epi64(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi16(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu8_epi16(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1397,7 +1402,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi16(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi32(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu8_epi32(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1408,7 +1413,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi32(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi64(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_cvtepu8_epi64(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1419,7 +1424,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_cvtepu8_epi64(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm512_cvtusepi16_epi8(__m512i a)
+BUSTER_HOST_EMULATED __m256i host_mm512_cvtusepi16_epi8(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -1430,7 +1435,7 @@ BUSTER_HOST_INLINE __m256i host_mm512_cvtusepi16_epi8(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_dpbusd_epi32(__m512i src, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_dpbusd_epi32(__m512i src, __m512i a, __m512i b)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1443,7 +1448,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_dpbusd_epi32(__m512i src, __m512i a, __m51
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm512_extracti32x4_epi32(__m512i a, int index)
+BUSTER_HOST_EMULATED __m128i host_mm512_extracti32x4_epi32(__m512i a, int index)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -1451,7 +1456,7 @@ BUSTER_HOST_INLINE __m128i host_mm512_extracti32x4_epi32(__m512i a, int index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm512_extracti64x4_epi64(__m512i a, int index)
+BUSTER_HOST_EMULATED __m256i host_mm512_extracti64x4_epi64(__m512i a, int index)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 r = { 0 };
@@ -1459,7 +1464,7 @@ BUSTER_HOST_INLINE __m256i host_mm512_extracti64x4_epi64(__m512i a, int index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_gf2p8affine_epi64_epi8(__m512i a, __m512i matrix, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_gf2p8affine_epi64_epi8(__m512i a, __m512i matrix, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 matrix_ __attribute__((unused)) = { .value = matrix };
@@ -1471,7 +1476,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_gf2p8affine_epi64_epi8(__m512i a, __m512i 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi32(__m512i index, const void* memory, int scale)
+BUSTER_HOST_EMULATED __m512i host_mm512_i32gather_epi32(__m512i index, const void* memory, int scale)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 r = { 0 };
@@ -1482,7 +1487,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi32(__m512i index, const void*
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi64(__m256i index, const void* memory, int scale)
+BUSTER_HOST_EMULATED __m512i host_mm512_i32gather_epi64(__m256i index, const void* memory, int scale)
 {
     HostV256 index_ __attribute__((unused)) = { .value = index };
     HostV512 r = { 0 };
@@ -1493,7 +1498,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi64(__m256i index, const void*
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_i32scatter_epi32(void* memory, __m512i index, __m512i a, int scale)
+BUSTER_HOST_EMULATED void host_mm512_i32scatter_epi32(void* memory, __m512i index, __m512i a, int scale)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1503,7 +1508,7 @@ BUSTER_HOST_INLINE void host_mm512_i32scatter_epi32(void* memory, __m512i index,
     }
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_inserti32x4(__m512i a, __m128i b, int index)
+BUSTER_HOST_EMULATED __m512i host_mm512_inserti32x4(__m512i a, __m128i b, int index)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -1513,7 +1518,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_inserti32x4(__m512i a, __m128i b, int inde
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_inserti64x4(__m512i a, __m256i b, int index)
+BUSTER_HOST_EMULATED __m512i host_mm512_inserti64x4(__m512i a, __m256i b, int index)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV256 b_ __attribute__((unused)) = { .value = b };
@@ -1523,36 +1528,36 @@ BUSTER_HOST_INLINE __m512i host_mm512_inserti64x4(__m512i a, __m256i b, int inde
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_kunpackb(__mmask16 a, __mmask16 b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_kunpackb(__mmask16 a, __mmask16 b)
 {
     return (__mmask16)(((uint64_t)a << 8) | ((uint64_t)b & (UINT64_MAX >> 56)));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_kunpackd(__mmask64 a, __mmask64 b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_kunpackd(__mmask64 a, __mmask64 b)
 {
     return (__mmask64)(((uint64_t)a << 32) | ((uint64_t)b & (UINT64_MAX >> 32)));
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_kunpackw(__mmask32 a, __mmask32 b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_kunpackw(__mmask32 a, __mmask32 b)
 {
     return (__mmask32)(((uint64_t)a << 16) | ((uint64_t)b & (UINT64_MAX >> 48)));
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_load_si512(const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_load_si512(const void* memory)
 {
     HostV512 r = { 0 };
     memcpy(&r.value, memory, 64);
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_loadu_si512(const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_loadu_si512(const void* memory)
 {
     HostV512 r = { 0 };
     memcpy(&r.value, memory, 64);
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_lzcnt_epi32(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_lzcnt_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1563,7 +1568,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_lzcnt_epi32(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_lzcnt_epi64(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_lzcnt_epi64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -1574,7 +1579,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_lzcnt_epi64(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_madd_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_madd_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1586,7 +1591,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_madd_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maddubs_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maddubs_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1598,7 +1603,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maddubs_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_add_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi32(a, b) };
     HostV512 r = { 0 };
@@ -1610,7 +1615,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_add_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi64(a, b) };
     HostV512 r = { 0 };
@@ -1622,7 +1627,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi8(__m512i src, __mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_add_epi8(__m512i src, __mmask64 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi8(a, b) };
     HostV512 r = { 0 };
@@ -1634,7 +1639,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_add_epi8(__m512i src, __mmask64 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_and_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_and_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_and_epi64(a, b) };
     HostV512 r = { 0 };
@@ -1646,7 +1651,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_and_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_andnot_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_andnot_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1658,7 +1663,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_andnot_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_andnot_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_andnot_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_andnot_epi64(a, b) };
     HostV512 r = { 0 };
@@ -1670,12 +1675,12 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_andnot_epi64(__m512i src, __mmask8 k,
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_bitshuffle_epi64_mask(__mmask64 k, __m512i a, __m512i control)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_bitshuffle_epi64_mask(__mmask64 k, __m512i a, __m512i control)
 {
     return (__mmask64)(k & host_mm512_bitshuffle_epi64_mask(a, control));
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi32(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_blend_epi32(__mmask16 k, __m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1687,7 +1692,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi32(__mmask16 k, __m512i a, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi64(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_blend_epi64(__mmask8 k, __m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1699,7 +1704,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi64(__mmask8 k, __m512i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi8(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_blend_epi8(__mmask64 k, __m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1711,27 +1716,27 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_blend_epi8(__mmask64 k, __m512i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_mask_cmpeq_epi16_mask(__mmask32 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_mask_cmpeq_epi16_mask(__mmask32 k, __m512i a, __m512i b)
 {
     return (__mmask32)(k & host_mm512_cmpeq_epi16_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpeq_epi32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpeq_epi32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpeq_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_cmpeq_epi64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_cmpeq_epi64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_cmpeq_epi64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmpeq_epi8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmpeq_epi8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmpeq_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpeq_epu32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpeq_epu32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1743,22 +1748,22 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpeq_epu32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpeq_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpeq_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpeq_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpge_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpge_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpge_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmpge_epu8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmpge_epu8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmpge_epu8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_cmpgt_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_cmpgt_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1770,32 +1775,32 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_cmpgt_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpgt_epi32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpgt_epi32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpgt_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpgt_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpgt_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpgt_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_cmpgt_epu64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_cmpgt_epu64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_cmpgt_epu64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmpgt_epu8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmpgt_epu8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmpgt_epu8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_mask_cmple_epi16_mask(__mmask32 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_mask_cmple_epi16_mask(__mmask32 k, __m512i a, __m512i b)
 {
     return (__mmask32)(k & host_mm512_cmple_epi16_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_cmple_epu16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_cmple_epu16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1807,57 +1812,57 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_cmple_epu16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_mask_cmple_epu16_mask(__mmask32 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_mask_cmple_epu16_mask(__mmask32 k, __m512i a, __m512i b)
 {
     return (__mmask32)(k & host_mm512_cmple_epu16_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmple_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmple_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmple_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_cmple_epu64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_cmple_epu64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_cmple_epu64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmplt_epi8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmplt_epi8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmplt_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmplt_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmplt_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmplt_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmplt_epu8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmplt_epu8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmplt_epu8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpneq_epi32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpneq_epi32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpneq_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_cmpneq_epi64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_cmpneq_epi64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_cmpneq_epi64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_cmpneq_epi8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_cmpneq_epi8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_cmpneq_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_cmpneq_epu32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_cmpneq_epu32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_cmpneq_epu32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_cmpneq_epu64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_cmpneq_epu64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -1869,12 +1874,12 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_cmpneq_epu64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_cmpneq_epu64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_cmpneq_epu64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_cmpneq_epu64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_compress_epi16(__m512i src, __mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_compress_epi16(__m512i src, __mmask32 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1888,7 +1893,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_compress_epi16(__m512i src, __mmask32
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_compressstoreu_epi32(void* memory, __mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_compressstoreu_epi32(void* memory, __mmask16 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     unsigned at = 0;
@@ -1898,7 +1903,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_compressstoreu_epi32(void* memory, __mma
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_compressstoreu_epi8(void* memory, __mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_compressstoreu_epi8(void* memory, __mmask64 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     unsigned at = 0;
@@ -1908,7 +1913,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_compressstoreu_epi8(void* memory, __mmas
     }
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_expand_epi16(__m512i src, __mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_expand_epi16(__m512i src, __mmask32 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1922,7 +1927,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_expand_epi16(__m512i src, __mmask32 k
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi32(__m512i src, __mmask16 k, __m512i index, const void* memory, int scale)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_i32gather_epi32(__m512i src, __mmask16 k, __m512i index, const void* memory, int scale)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -1935,7 +1940,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi32(__m512i src, __mmask1
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi64(__m512i src, __mmask8 k, __m256i index, const void* memory, int scale)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_i32gather_epi64(__m512i src, __mmask8 k, __m256i index, const void* memory, int scale)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV256 index_ __attribute__((unused)) = { .value = index };
@@ -1948,7 +1953,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi64(__m512i src, __mmask8
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_i32scatter_epi32(void* memory, __mmask16 k, __m512i index, __m512i a, int scale)
+BUSTER_HOST_EMULATED void host_mm512_mask_i32scatter_epi32(void* memory, __mmask16 k, __m512i index, __m512i a, int scale)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1958,7 +1963,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i32scatter_epi32(void* memory, __mmask16
     }
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_i64gather_epi64(__m512i src, __mmask8 k, __m512i index, const void* memory, int scale)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_i64gather_epi64(__m512i src, __mmask8 k, __m512i index, const void* memory, int scale)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -1971,7 +1976,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i64gather_epi64(__m512i src, __mmask8
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi32(void* memory, __mmask8 k, __m512i index, __m256i a, int scale)
+BUSTER_HOST_EMULATED void host_mm512_mask_i64scatter_epi32(void* memory, __mmask8 k, __m512i index, __m256i a, int scale)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV256 a_ __attribute__((unused)) = { .value = a };
@@ -1981,7 +1986,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi32(void* memory, __mmask8 
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi64(void* memory, __mmask8 k, __m512i index, __m512i a, int scale)
+BUSTER_HOST_EMULATED void host_mm512_mask_i64scatter_epi64(void* memory, __mmask8 k, __m512i index, __m512i a, int scale)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -1991,7 +1996,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi64(void* memory, __mmask8 
     }
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi16(__m512i src, __mmask32 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_loadu_epi16(__m512i src, __mmask32 k, const void* memory)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2003,7 +2008,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi16(__m512i src, __mmask32 k,
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi32(__m512i src, __mmask16 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_loadu_epi32(__m512i src, __mmask16 k, const void* memory)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2015,7 +2020,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi32(__m512i src, __mmask16 k,
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi64(__m512i src, __mmask8 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_loadu_epi64(__m512i src, __mmask8 k, const void* memory)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2027,7 +2032,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi64(__m512i src, __mmask8 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi8(__m512i src, __mmask64 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_loadu_epi8(__m512i src, __mmask64 k, const void* memory)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2039,7 +2044,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_loadu_epi8(__m512i src, __mmask64 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_max_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_max_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2051,7 +2056,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_max_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_max_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_max_epi32(a, b) };
     HostV512 r = { 0 };
@@ -2063,7 +2068,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epi32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_max_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_max_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2075,7 +2080,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_max_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_max_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_max_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2087,7 +2092,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_max_epu32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_max_epu32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2099,7 +2104,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_max_epu32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epu32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_max_epu32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_max_epu32(a, b) };
     HostV512 r = { 0 };
@@ -2111,7 +2116,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epu32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_max_epu64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_max_epu64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2123,7 +2128,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_max_epu64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epu64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_max_epu64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_max_epu64(a, b) };
     HostV512 r = { 0 };
@@ -2135,7 +2140,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_max_epu64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_min_epu32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_min_epu32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2147,7 +2152,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_min_epu32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_min_epu32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_min_epu32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_min_epu32(a, b) };
     HostV512 r = { 0 };
@@ -2159,7 +2164,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_min_epu32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi16(__m512i src, __mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_mov_epi16(__m512i src, __mmask32 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2171,7 +2176,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi16(__m512i src, __mmask32 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi32(__m512i src, __mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_mov_epi32(__m512i src, __mmask16 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2183,7 +2188,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi64(__m512i src, __mmask8 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_mov_epi64(__m512i src, __mmask8 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2195,7 +2200,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi8(__m512i src, __mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_mov_epi8(__m512i src, __mmask64 k, __m512i a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2207,7 +2212,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_mov_epi8(__m512i src, __mmask64 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mullo_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mullo_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2219,7 +2224,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mullo_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_mullo_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_mullo_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_mullo_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2231,7 +2236,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_mullo_epi64(__m512i src, __mmask8 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_or_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_or_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2243,7 +2248,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_or_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_or_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_or_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_or_epi32(a, b) };
     HostV512 r = { 0 };
@@ -2255,7 +2260,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_or_epi32(__m512i src, __mmask16 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_or_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_or_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2267,7 +2272,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_or_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_or_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_or_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_or_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2279,7 +2284,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_or_epi64(__m512i src, __mmask8 k, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi16(__m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutexvar_epi16(__m512i index, __m512i a)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2291,7 +2296,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi16(__m512i index, __m512i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi16(__m512i src, __mmask32 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_permutexvar_epi16(__m512i src, __mmask32 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi16(index, a) };
     HostV512 r = { 0 };
@@ -2303,7 +2308,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi16(__m512i src, __mmas
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi32(__m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutexvar_epi32(__m512i index, __m512i a)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2315,7 +2320,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi32(__m512i index, __m512i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi32(__m512i src, __mmask16 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_permutexvar_epi32(__m512i src, __mmask16 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi32(index, a) };
     HostV512 r = { 0 };
@@ -2327,7 +2332,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi32(__m512i src, __mmas
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi64(__m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutexvar_epi64(__m512i index, __m512i a)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2339,7 +2344,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi64(__m512i index, __m512i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi64(__m512i src, __mmask8 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_permutexvar_epi64(__m512i src, __mmask8 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi64(index, a) };
     HostV512 r = { 0 };
@@ -2351,7 +2356,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi64(__m512i src, __mmas
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi8(__m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutexvar_epi8(__m512i index, __m512i a)
 {
     HostV512 index_ __attribute__((unused)) = { .value = index };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -2363,7 +2368,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutexvar_epi8(__m512i index, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi8(__m512i src, __mmask64 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_permutexvar_epi8(__m512i src, __mmask64 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi8(index, a) };
     HostV512 r = { 0 };
@@ -2375,7 +2380,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_permutexvar_epi8(__m512i src, __mmask
     return r.value;
 }
 
-BUSTER_HOST_INLINE int32_t host_mm512_mask_reduce_add_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED int32_t host_mm512_mask_reduce_add_epi32(__mmask16 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint32_t r = 0;
@@ -2386,7 +2391,7 @@ BUSTER_HOST_INLINE int32_t host_mm512_mask_reduce_add_epi32(__mmask16 k, __m512i
     return (int32_t)r;
 }
 
-BUSTER_HOST_INLINE int32_t host_mm512_mask_reduce_or_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED int32_t host_mm512_mask_reduce_or_epi32(__mmask16 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint32_t r = 0;
@@ -2397,7 +2402,7 @@ BUSTER_HOST_INLINE int32_t host_mm512_mask_reduce_or_epi32(__mmask16 k, __m512i 
     return (int32_t)r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi32(__m512i src, __mmask16 k, int32_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_set1_epi32(__m512i src, __mmask16 k, int32_t a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2408,7 +2413,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi32(__m512i src, __mmask16 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi64(__m512i src, __mmask8 k, int64_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_set1_epi64(__m512i src, __mmask8 k, int64_t a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2419,7 +2424,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi64(__m512i src, __mmask8 k, i
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi8(__m512i src, __mmask64 k, int a)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_set1_epi8(__m512i src, __mmask64 k, int a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -2430,7 +2435,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi8(__m512i src, __mmask64 k, i
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi64(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_sllv_epi64(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -2442,7 +2447,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi64(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_sllv_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_sllv_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
 {
     HostV512 result = { .value = host_mm512_sllv_epi64(a, count) };
     HostV512 r = { 0 };
@@ -2454,7 +2459,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_sllv_epi64(__m512i src, __mmask8 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srai_epi32(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srai_epi32(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2465,7 +2470,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srai_epi32(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_srai_epi32(__m512i src, __mmask16 k, __m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_srai_epi32(__m512i src, __mmask16 k, __m512i a, int count)
 {
     HostV512 result = { .value = host_mm512_srai_epi32(a, count) };
     HostV512 r = { 0 };
@@ -2477,7 +2482,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_srai_epi32(__m512i src, __mmask16 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srav_epi64(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srav_epi64(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -2489,7 +2494,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srav_epi64(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_srav_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_srav_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
 {
     HostV512 result = { .value = host_mm512_srav_epi64(a, count) };
     HostV512 r = { 0 };
@@ -2501,7 +2506,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_srav_epi64(__m512i src, __mmask8 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srli_epi32(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srli_epi32(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2512,7 +2517,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srli_epi32(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_srli_epi32(__m512i src, __mmask16 k, __m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_srli_epi32(__m512i src, __mmask16 k, __m512i a, int count)
 {
     HostV512 result = { .value = host_mm512_srli_epi32(a, count) };
     HostV512 r = { 0 };
@@ -2524,7 +2529,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_srli_epi32(__m512i src, __mmask16 k, 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srli_epi64(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srli_epi64(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2535,7 +2540,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srli_epi64(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_srli_epi64(__m512i src, __mmask8 k, __m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_srli_epi64(__m512i src, __mmask8 k, __m512i a, int count)
 {
     HostV512 result = { .value = host_mm512_srli_epi64(a, count) };
     HostV512 r = { 0 };
@@ -2547,7 +2552,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_srli_epi64(__m512i src, __mmask8 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srlv_epi64(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srlv_epi64(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -2559,7 +2564,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srlv_epi64(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_srlv_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_srlv_epi64(__m512i src, __mmask8 k, __m512i a, __m512i count)
 {
     HostV512 result = { .value = host_mm512_srlv_epi64(a, count) };
     HostV512 r = { 0 };
@@ -2571,7 +2576,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_srlv_epi64(__m512i src, __mmask8 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_store_epi32(void* memory, __mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_store_epi32(void* memory, __mmask16 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     for (unsigned i = 0; i < 16; i += 1)
@@ -2580,7 +2585,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_store_epi32(void* memory, __mmask16 k, _
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi16(void* memory, __mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_storeu_epi16(void* memory, __mmask32 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     for (unsigned i = 0; i < 32; i += 1)
@@ -2589,7 +2594,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi16(void* memory, __mmask32 k, 
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi32(void* memory, __mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_storeu_epi32(void* memory, __mmask16 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     for (unsigned i = 0; i < 16; i += 1)
@@ -2598,7 +2603,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi32(void* memory, __mmask16 k, 
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi64(void* memory, __mmask8 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_storeu_epi64(void* memory, __mmask8 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     for (unsigned i = 0; i < 8; i += 1)
@@ -2607,7 +2612,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi64(void* memory, __mmask8 k, _
     }
 }
 
-BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi8(void* memory, __mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_mask_storeu_epi8(void* memory, __mmask64 k, __m512i a)
 {
     HostV512 a_ = { .value = a };
     for (unsigned i = 0; i < 64; i += 1)
@@ -2616,7 +2621,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_storeu_epi8(void* memory, __mmask64 k, _
     }
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sub_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_sub_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2628,7 +2633,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sub_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi16(__m512i src, __mmask32 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_sub_epi16(__m512i src, __mmask32 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi16(a, b) };
     HostV512 r = { 0 };
@@ -2640,7 +2645,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi16(__m512i src, __mmask32 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sub_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_sub_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2652,7 +2657,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sub_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_sub_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi32(a, b) };
     HostV512 r = { 0 };
@@ -2664,7 +2669,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi32(__m512i src, __mmask16 k, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sub_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_sub_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2676,7 +2681,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sub_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_sub_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2688,7 +2693,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sub_epi8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_sub_epi8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2700,7 +2705,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sub_epi8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi8(__m512i src, __mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_sub_epi8(__m512i src, __mmask64 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi8(a, b) };
     HostV512 r = { 0 };
@@ -2712,7 +2717,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_sub_epi8(__m512i src, __mmask64 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_test_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_test_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2724,12 +2729,12 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_test_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_test_epi32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_test_epi32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_test_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_test_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_test_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2741,12 +2746,12 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_test_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_test_epi64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_test_epi64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_test_epi64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_test_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_test_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2758,12 +2763,12 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_test_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_test_epi8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_test_epi8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_test_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_testn_epi32_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_testn_epi32_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2775,12 +2780,12 @@ BUSTER_HOST_INLINE __mmask16 host_mm512_testn_epi32_mask(__m512i a, __m512i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm512_mask_testn_epi32_mask(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm512_mask_testn_epi32_mask(__mmask16 k, __m512i a, __m512i b)
 {
     return (__mmask16)(k & host_mm512_testn_epi32_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_testn_epi64_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_testn_epi64_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2792,12 +2797,12 @@ BUSTER_HOST_INLINE __mmask8 host_mm512_testn_epi64_mask(__m512i a, __m512i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm512_mask_testn_epi64_mask(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm512_mask_testn_epi64_mask(__mmask8 k, __m512i a, __m512i b)
 {
     return (__mmask8)(k & host_mm512_testn_epi64_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_testn_epi8_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_testn_epi8_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2809,12 +2814,12 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_testn_epi8_mask(__m512i a, __m512i b)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_mask_testn_epi8_mask(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_mask_testn_epi8_mask(__mmask64 k, __m512i a, __m512i b)
 {
     return (__mmask64)(k & host_mm512_testn_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_xor_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_xor_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -2826,7 +2831,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_xor_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_xor_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_xor_epi64(__m512i src, __mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_xor_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2838,7 +2843,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_xor_epi64(__m512i src, __mmask8 k, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi32(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_add_epi32(__mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi32(a, b) };
     HostV512 r = { 0 };
@@ -2849,7 +2854,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi32(__mmask16 k, __m512i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi64(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_add_epi64(__mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2860,7 +2865,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi64(__mmask8 k, __m512i a, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi8(__mmask64 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_add_epi8(__mmask64 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi8(a, b) };
     HostV512 r = { 0 };
@@ -2871,7 +2876,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_add_epi8(__mmask64 k, __m512i a, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_and_epi64(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_and_epi64(__mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_and_epi64(a, b) };
     HostV512 r = { 0 };
@@ -2882,7 +2887,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_and_epi64(__mmask8 k, __m512i a, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi16(__mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_compress_epi16(__mmask32 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2894,7 +2899,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi16(__mmask32 k, __m512i 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_compress_epi32(__mmask16 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2906,7 +2911,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi32(__mmask16 k, __m512i 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi64(__mmask8 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_compress_epi64(__mmask8 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2918,7 +2923,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi64(__mmask8 k, __m512i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi8(__mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_compress_epi8(__mmask64 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2930,7 +2935,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_compress_epi8(__mmask64 k, __m512i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_conflict_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_conflict_epi32(__mmask16 k, __m512i a)
 {
     HostV512 result = { .value = host_mm512_conflict_epi32(a) };
     HostV512 r = { 0 };
@@ -2941,7 +2946,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_conflict_epi32(__mmask16 k, __m512i 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_expand_epi32(__mmask16 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2953,7 +2958,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi32(__mmask16 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi64(__mmask8 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_expand_epi64(__mmask8 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2965,7 +2970,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi64(__mmask8 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi8(__mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_expand_epi8(__mmask64 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -2977,7 +2982,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_expand_epi8(__mmask64 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_load_epi32(__mmask16 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_load_epi32(__mmask16 k, const void* memory)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -2987,7 +2992,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_load_epi32(__mmask16 k, const void* 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi16(__mmask32 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_loadu_epi16(__mmask32 k, const void* memory)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -2997,7 +3002,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi16(__mmask32 k, const void*
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi32(__mmask16 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_loadu_epi32(__mmask16 k, const void* memory)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -3007,7 +3012,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi32(__mmask16 k, const void*
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi64(__mmask8 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_loadu_epi64(__mmask8 k, const void* memory)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -3017,7 +3022,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi64(__mmask8 k, const void* 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi8(__mmask64 k, const void* memory)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_loadu_epi8(__mmask64 k, const void* memory)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3027,7 +3032,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_loadu_epi8(__mmask64 k, const void* 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi16(__mmask32 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_mov_epi16(__mmask32 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3038,7 +3043,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi16(__mmask32 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi32(__mmask16 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_mov_epi32(__mmask16 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3049,7 +3054,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi32(__mmask16 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi64(__mmask8 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_mov_epi64(__mmask8 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3060,7 +3065,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi64(__mmask8 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi8(__mmask64 k, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_mov_epi8(__mmask64 k, __m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3071,7 +3076,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_mov_epi8(__mmask64 k, __m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi32(__m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutex2var_epi32(__m512i a, __m512i index, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -3084,7 +3089,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi32(__m512i a, __m512i inde
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutex2var_epi32(__mmask16 k, __m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutex2var_epi32(__mmask16 k, __m512i a, __m512i index, __m512i b)
 {
     HostV512 result = { .value = host_mm512_permutex2var_epi32(a, index, b) };
     HostV512 r = { 0 };
@@ -3095,7 +3100,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutex2var_epi32(__mmask16 k, __m5
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi64(__m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutex2var_epi64(__m512i a, __m512i index, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -3108,7 +3113,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi64(__m512i a, __m512i inde
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutex2var_epi64(__mmask8 k, __m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutex2var_epi64(__mmask8 k, __m512i a, __m512i index, __m512i b)
 {
     HostV512 result = { .value = host_mm512_permutex2var_epi64(a, index, b) };
     HostV512 r = { 0 };
@@ -3119,7 +3124,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutex2var_epi64(__mmask8 k, __m51
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi16(__mmask32 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutexvar_epi16(__mmask32 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi16(index, a) };
     HostV512 r = { 0 };
@@ -3130,7 +3135,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi16(__mmask32 k, __m51
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi32(__mmask16 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutexvar_epi32(__mmask16 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi32(index, a) };
     HostV512 r = { 0 };
@@ -3141,7 +3146,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi32(__mmask16 k, __m51
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi64(__mmask8 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutexvar_epi64(__mmask8 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi64(index, a) };
     HostV512 r = { 0 };
@@ -3152,7 +3157,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi64(__mmask8 k, __m512
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi8(__mmask64 k, __m512i index, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_permutexvar_epi8(__mmask64 k, __m512i index, __m512i a)
 {
     HostV512 result = { .value = host_mm512_permutexvar_epi8(index, a) };
     HostV512 r = { 0 };
@@ -3163,7 +3168,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_permutexvar_epi8(__mmask64 k, __m512
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi32(__mmask16 k, int32_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_set1_epi32(__mmask16 k, int32_t a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -3173,7 +3178,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi32(__mmask16 k, int32_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi64(__mmask8 k, int64_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_set1_epi64(__mmask8 k, int64_t a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -3183,7 +3188,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi64(__mmask8 k, int64_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi8(__mmask64 k, int a)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_set1_epi8(__mmask64 k, int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3193,7 +3198,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi8(__mmask64 k, int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi32(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_sllv_epi32(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -3205,7 +3210,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi32(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_sllv_epi32(__mmask16 k, __m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_sllv_epi32(__mmask16 k, __m512i a, __m512i count)
 {
     HostV512 result = { .value = host_mm512_sllv_epi32(a, count) };
     HostV512 r = { 0 };
@@ -3216,7 +3221,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_sllv_epi32(__mmask16 k, __m512i a, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_sllv_epi64(__mmask8 k, __m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_sllv_epi64(__mmask8 k, __m512i a, __m512i count)
 {
     HostV512 result = { .value = host_mm512_sllv_epi64(a, count) };
     HostV512 r = { 0 };
@@ -3227,7 +3232,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_sllv_epi64(__mmask8 k, __m512i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi32(__mmask16 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_sub_epi32(__mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi32(a, b) };
     HostV512 r = { 0 };
@@ -3238,7 +3243,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi32(__mmask16 k, __m512i a, __
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi64(__mmask8 k, __m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_maskz_sub_epi64(__mmask8 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_sub_epi64(a, b) };
     HostV512 r = { 0 };
@@ -3249,7 +3254,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi64(__mmask8 k, __m512i a, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_max_epu8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_max_epu8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3261,7 +3266,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_max_epu8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_min_epi8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_min_epi8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3273,7 +3278,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_min_epi8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_min_epu8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_min_epu8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3285,7 +3290,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_min_epu8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask64 host_mm512_movepi8_mask(__m512i a)
+BUSTER_HOST_EMULATED __mmask64 host_mm512_movepi8_mask(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint64_t r = 0;
@@ -3296,7 +3301,7 @@ BUSTER_HOST_INLINE __mmask64 host_mm512_movepi8_mask(__m512i a)
     return (__mmask64)r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_movm_epi8(__mmask64 k)
+BUSTER_HOST_EMULATED __m512i host_mm512_movm_epi8(__mmask64 k)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3306,7 +3311,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_movm_epi8(__mmask64 k)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mul_epu32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mul_epu32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3318,7 +3323,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mul_epu32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mullo_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_mullo_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3330,7 +3335,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mullo_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_multishift_epi64_epi8(__m512i control, __m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_multishift_epi64_epi8(__m512i control, __m512i a)
 {
     HostV512 control_ __attribute__((unused)) = { .value = control };
     HostV512 a_ __attribute__((unused)) = { .value = a };
@@ -3342,7 +3347,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_multishift_epi64_epi8(__m512i control, __m
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_or_si512(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_or_si512(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3354,7 +3359,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_or_si512(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi16(__m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutex2var_epi16(__m512i a, __m512i index, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -3367,7 +3372,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi16(__m512i a, __m512i inde
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi8(__m512i a, __m512i index, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_permutex2var_epi8(__m512i a, __m512i index, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -3380,7 +3385,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_permutex2var_epi8(__m512i a, __m512i index
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_popcnt_epi32(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_popcnt_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3391,7 +3396,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_popcnt_epi32(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_popcnt_epi64(__m512i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_popcnt_epi64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3402,7 +3407,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_popcnt_epi64(__m512i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE int32_t host_mm512_reduce_add_epi32(__m512i a)
+BUSTER_HOST_EMULATED int32_t host_mm512_reduce_add_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     int32_t r = 0;
@@ -3413,7 +3418,7 @@ BUSTER_HOST_INLINE int32_t host_mm512_reduce_add_epi32(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE int64_t host_mm512_reduce_add_epi64(__m512i a)
+BUSTER_HOST_EMULATED int64_t host_mm512_reduce_add_epi64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     int64_t r = 0;
@@ -3424,7 +3429,7 @@ BUSTER_HOST_INLINE int64_t host_mm512_reduce_add_epi64(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE int64_t host_mm512_reduce_max_epi64(__m512i a)
+BUSTER_HOST_EMULATED int64_t host_mm512_reduce_max_epi64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     int64_t r = a_.i64[0];
@@ -3435,7 +3440,7 @@ BUSTER_HOST_INLINE int64_t host_mm512_reduce_max_epi64(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE uint32_t host_mm512_reduce_max_epu32(__m512i a)
+BUSTER_HOST_EMULATED uint32_t host_mm512_reduce_max_epu32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint32_t r = a_.u32[0];
@@ -3446,7 +3451,7 @@ BUSTER_HOST_INLINE uint32_t host_mm512_reduce_max_epu32(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE uint64_t host_mm512_reduce_max_epu64(__m512i a)
+BUSTER_HOST_EMULATED uint64_t host_mm512_reduce_max_epu64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint64_t r = a_.u64[0];
@@ -3457,7 +3462,7 @@ BUSTER_HOST_INLINE uint64_t host_mm512_reduce_max_epu64(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE uint32_t host_mm512_reduce_min_epu32(__m512i a)
+BUSTER_HOST_EMULATED uint32_t host_mm512_reduce_min_epu32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     uint32_t r = a_.u32[0];
@@ -3468,7 +3473,7 @@ BUSTER_HOST_INLINE uint32_t host_mm512_reduce_min_epu32(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE int32_t host_mm512_reduce_or_epi32(__m512i a)
+BUSTER_HOST_EMULATED int32_t host_mm512_reduce_or_epi32(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     int32_t r = 0;
@@ -3479,7 +3484,7 @@ BUSTER_HOST_INLINE int32_t host_mm512_reduce_or_epi32(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE int64_t host_mm512_reduce_or_epi64(__m512i a)
+BUSTER_HOST_EMULATED int64_t host_mm512_reduce_or_epi64(__m512i a)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     int64_t r = 0;
@@ -3490,7 +3495,7 @@ BUSTER_HOST_INLINE int64_t host_mm512_reduce_or_epi64(__m512i a)
     return r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_rol_epi32(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_rol_epi32(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3501,7 +3506,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_rol_epi32(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_rorv_epi32(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_rorv_epi32(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -3513,7 +3518,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_rorv_epi32(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sad_epu8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_sad_epu8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3525,7 +3530,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sad_epu8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi16(int a)
+BUSTER_HOST_EMULATED __m512i host_mm512_set1_epi16(int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -3535,7 +3540,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set1_epi16(int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi32(int32_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_set1_epi32(int32_t a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -3545,7 +3550,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set1_epi32(int32_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi64(int64_t a)
+BUSTER_HOST_EMULATED __m512i host_mm512_set1_epi64(int64_t a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -3555,7 +3560,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set1_epi64(int64_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi8(int a)
+BUSTER_HOST_EMULATED __m512i host_mm512_set1_epi8(int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3565,7 +3570,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set1_epi8(int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set4_epi32(int32_t a, int32_t b, int32_t c, int32_t d)
+BUSTER_HOST_EMULATED __m512i host_mm512_set4_epi32(int32_t a, int32_t b, int32_t c, int32_t d)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -3575,7 +3580,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set4_epi32(int32_t a, int32_t b, int32_t c
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7, int32_t a8, int32_t a9, int32_t a10, int32_t a11, int32_t a12, int32_t a13, int32_t a14, int32_t a15)
+BUSTER_HOST_EMULATED __m512i host_mm512_set_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7, int32_t a8, int32_t a9, int32_t a10, int32_t a11, int32_t a12, int32_t a13, int32_t a14, int32_t a15)
 {
     HostV512 r = { 0 };
     r.u32[0] = (uint32_t)a15;
@@ -3597,7 +3602,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set_epi32(int32_t a0, int32_t a1, int32_t 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set_epi64(int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7)
+BUSTER_HOST_EMULATED __m512i host_mm512_set_epi64(int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7)
 {
     HostV512 r = { 0 };
     r.u64[0] = (uint64_t)a7;
@@ -3611,7 +3616,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set_epi64(int64_t a0, int64_t a1, int64_t 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set_epi8(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40, int a41, int a42, int a43, int a44, int a45, int a46, int a47, int a48, int a49, int a50, int a51, int a52, int a53, int a54, int a55, int a56, int a57, int a58, int a59, int a60, int a61, int a62, int a63)
+BUSTER_HOST_EMULATED __m512i host_mm512_set_epi8(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40, int a41, int a42, int a43, int a44, int a45, int a46, int a47, int a48, int a49, int a50, int a51, int a52, int a53, int a54, int a55, int a56, int a57, int a58, int a59, int a60, int a61, int a62, int a63)
 {
     HostV512 r = { 0 };
     r.u8[0] = (uint8_t)a63;
@@ -3681,7 +3686,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set_epi8(int a0, int a1, int a2, int a3, i
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_setr_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7, int32_t a8, int32_t a9, int32_t a10, int32_t a11, int32_t a12, int32_t a13, int32_t a14, int32_t a15)
+BUSTER_HOST_EMULATED __m512i host_mm512_setr_epi32(int32_t a0, int32_t a1, int32_t a2, int32_t a3, int32_t a4, int32_t a5, int32_t a6, int32_t a7, int32_t a8, int32_t a9, int32_t a10, int32_t a11, int32_t a12, int32_t a13, int32_t a14, int32_t a15)
 {
     HostV512 r = { 0 };
     r.u32[0] = (uint32_t)a0;
@@ -3703,7 +3708,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_setr_epi32(int32_t a0, int32_t a1, int32_t
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_setr_epi64(int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7)
+BUSTER_HOST_EMULATED __m512i host_mm512_setr_epi64(int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7)
 {
     HostV512 r = { 0 };
     r.u64[0] = (uint64_t)a0;
@@ -3717,13 +3722,13 @@ BUSTER_HOST_INLINE __m512i host_mm512_setr_epi64(int64_t a0, int64_t a1, int64_t
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_setzero_si512(void)
+BUSTER_HOST_EMULATED __m512i host_mm512_setzero_si512(void)
 {
     HostV512 r = { 0 };
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_shuffle_epi32(__m512i a, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_shuffle_epi32(__m512i a, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3734,7 +3739,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_shuffle_epi32(__m512i a, int immediate)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_shuffle_epi8(__m512i a, __m512i index)
+BUSTER_HOST_EMULATED __m512i host_mm512_shuffle_epi8(__m512i a, __m512i index)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 index_ __attribute__((unused)) = { .value = index };
@@ -3746,7 +3751,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_shuffle_epi8(__m512i a, __m512i index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_shuffle_i32x4(__m512i a, __m512i b, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_shuffle_i32x4(__m512i a, __m512i b, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3758,7 +3763,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_shuffle_i32x4(__m512i a, __m512i b, int im
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_shuffle_i64x2(__m512i a, __m512i b, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_shuffle_i64x2(__m512i a, __m512i b, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3770,7 +3775,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_shuffle_i64x2(__m512i a, __m512i b, int im
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_sll_epi64(__m512i a, __m128i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_sll_epi64(__m512i a, __m128i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 count_ __attribute__((unused)) = { .value = count };
@@ -3782,7 +3787,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sll_epi64(__m512i a, __m128i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_slli_epi16(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_slli_epi16(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3793,7 +3798,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi16(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_slli_epi32(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_slli_epi32(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3804,7 +3809,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi32(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_slli_epi64(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_slli_epi64(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3815,7 +3820,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi64(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srai_epi64(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srai_epi64(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3826,7 +3831,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srai_epi64(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srav_epi32(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srav_epi32(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -3838,7 +3843,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srav_epi32(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srl_epi64(__m512i a, __m128i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srl_epi64(__m512i a, __m128i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV128 count_ __attribute__((unused)) = { .value = count };
@@ -3850,7 +3855,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srl_epi64(__m512i a, __m128i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srli_epi16(__m512i a, int count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srli_epi16(__m512i a, int count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -3861,7 +3866,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_srli_epi16(__m512i a, int count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_srlv_epi32(__m512i a, __m512i count)
+BUSTER_HOST_EMULATED __m512i host_mm512_srlv_epi32(__m512i a, __m512i count)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 count_ __attribute__((unused)) = { .value = count };
@@ -3873,22 +3878,22 @@ BUSTER_HOST_INLINE __m512i host_mm512_srlv_epi32(__m512i a, __m512i count)
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm512_store_si512(void* memory, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_store_si512(void* memory, __m512i a)
 {
     memcpy(memory, &a, 64);
 }
 
-BUSTER_HOST_INLINE void host_mm512_storeu_si512(void* memory, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_storeu_si512(void* memory, __m512i a)
 {
     memcpy(memory, &a, 64);
 }
 
-BUSTER_HOST_INLINE void host_mm512_stream_si512(void* memory, __m512i a)
+BUSTER_HOST_EMULATED void host_mm512_stream_si512(void* memory, __m512i a)
 {
     memcpy(memory, &a, 64);
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_subs_epu16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_subs_epu16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3900,7 +3905,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_subs_epu16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_subs_epu8(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_subs_epu8(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3912,7 +3917,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_subs_epu8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_ternarylogic_epi32(__m512i a, __m512i b, __m512i c, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_ternarylogic_epi32(__m512i a, __m512i b, __m512i c, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3925,7 +3930,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_ternarylogic_epi32(__m512i a, __m512i b, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_ternarylogic_epi64(__m512i a, __m512i b, __m512i c, int immediate)
+BUSTER_HOST_EMULATED __m512i host_mm512_ternarylogic_epi64(__m512i a, __m512i b, __m512i c, int immediate)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3938,7 +3943,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_ternarylogic_epi64(__m512i a, __m512i b, _
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_test_epi16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_test_epi16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3950,7 +3955,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_test_epi16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __mmask32 host_mm512_testn_epi16_mask(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __mmask32 host_mm512_testn_epi16_mask(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3962,7 +3967,7 @@ BUSTER_HOST_INLINE __mmask32 host_mm512_testn_epi16_mask(__m512i a, __m512i b)
     return (__mmask32)r;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpackhi_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3974,7 +3979,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpackhi_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3986,7 +3991,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpackhi_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -3998,7 +4003,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpackhi_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi16(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpacklo_epi16(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -4010,7 +4015,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpacklo_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -4022,7 +4027,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi64(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_unpacklo_epi64(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -4034,7 +4039,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_unpacklo_epi64(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_xor_epi32(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_xor_epi32(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -4046,7 +4051,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_xor_epi32(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_xor_si512(__m512i a, __m512i b)
+BUSTER_HOST_EMULATED __m512i host_mm512_xor_si512(__m512i a, __m512i b)
 {
     HostV512 a_ __attribute__((unused)) = { .value = a };
     HostV512 b_ __attribute__((unused)) = { .value = b };
@@ -4058,7 +4063,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_xor_si512(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_zextsi128_si512(__m128i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_zextsi128_si512(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -4066,7 +4071,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_zextsi128_si512(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_zextsi256_si512(__m256i a)
+BUSTER_HOST_EMULATED __m512i host_mm512_zextsi256_si512(__m256i a)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
     HostV512 r = { 0 };
@@ -4074,7 +4079,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_zextsi256_si512(__m256i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_aesenclast_si128(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __m128i host_mm_aesenclast_si128(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4086,7 +4091,7 @@ BUSTER_HOST_INLINE __m128i host_mm_aesenclast_si128(__m128i a, __m128i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmpeq_epi8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmpeq_epi8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4098,7 +4103,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmpeq_epi8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmpge_epu8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmpge_epu8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4110,7 +4115,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmpge_epu8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmpgt_epu8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmpgt_epu8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4122,7 +4127,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmpgt_epu8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmple_epu8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmple_epu8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4134,7 +4139,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmple_epu8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask8 host_mm_cmplt_epu32_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask8 host_mm_cmplt_epu32_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4146,7 +4151,7 @@ BUSTER_HOST_INLINE __mmask8 host_mm_cmplt_epu32_mask(__m128i a, __m128i b)
     return (__mmask8)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmplt_epu8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmplt_epu8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4158,7 +4163,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmplt_epu8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmpneq_epi8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmpneq_epi8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4170,7 +4175,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmpneq_epi8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_cmpneq_epu8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_cmpneq_epu8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4182,7 +4187,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_cmpneq_epu8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_cvtepi32_epi8(__m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_cvtepi32_epi8(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4193,7 +4198,7 @@ BUSTER_HOST_INLINE __m128i host_mm_cvtepi32_epi8(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_cvtepu8_epi32(__m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_cvtepu8_epi32(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4204,19 +4209,19 @@ BUSTER_HOST_INLINE __m128i host_mm_cvtepu8_epi32(__m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE int host_mm_extract_epi32(__m128i a, int index)
+BUSTER_HOST_EMULATED int host_mm_extract_epi32(__m128i a, int index)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     return (int)a_.u32[(unsigned)index & 3];
 }
 
-BUSTER_HOST_INLINE int host_mm_extract_epi8(__m128i a, int index)
+BUSTER_HOST_EMULATED int host_mm_extract_epi8(__m128i a, int index)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     return (int)a_.u8[(unsigned)index & 15];
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_insert_epi32(__m128i a, int value, int index)
+BUSTER_HOST_EMULATED __m128i host_mm_insert_epi32(__m128i a, int value, int index)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4225,7 +4230,7 @@ BUSTER_HOST_INLINE __m128i host_mm_insert_epi32(__m128i a, int value, int index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maddubs_epi16(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __m128i host_mm_maddubs_epi16(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4237,7 +4242,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maddubs_epi16(__m128i a, __m128i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_mask_blend_epi8(__mmask16 k, __m128i a, __m128i b)
+BUSTER_HOST_EMULATED __m128i host_mm_mask_blend_epi8(__mmask16 k, __m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4249,22 +4254,22 @@ BUSTER_HOST_INLINE __m128i host_mm_mask_blend_epi8(__mmask16 k, __m128i a, __m12
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_mask_cmpeq_epi8_mask(__mmask16 k, __m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_mask_cmpeq_epi8_mask(__mmask16 k, __m128i a, __m128i b)
 {
     return (__mmask16)(k & host_mm_cmpeq_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_mask_cmplt_epu8_mask(__mmask16 k, __m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_mask_cmplt_epu8_mask(__mmask16 k, __m128i a, __m128i b)
 {
     return (__mmask16)(k & host_mm_cmplt_epu8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_mask_cmpneq_epi8_mask(__mmask16 k, __m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_mask_cmpneq_epi8_mask(__mmask16 k, __m128i a, __m128i b)
 {
     return (__mmask16)(k & host_mm_cmpneq_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_mask_mov_epi8(__m128i src, __mmask16 k, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_mask_mov_epi8(__m128i src, __mmask16 k, __m128i a)
 {
     HostV128 src_ __attribute__((unused)) = { .value = src };
     HostV128 a_ __attribute__((unused)) = { .value = a };
@@ -4276,7 +4281,7 @@ BUSTER_HOST_INLINE __m128i host_mm_mask_mov_epi8(__m128i src, __mmask16 k, __m12
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_permutexvar_epi8(__m128i index, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_permutexvar_epi8(__m128i index, __m128i a)
 {
     HostV128 index_ __attribute__((unused)) = { .value = index };
     HostV128 a_ __attribute__((unused)) = { .value = a };
@@ -4288,7 +4293,7 @@ BUSTER_HOST_INLINE __m128i host_mm_permutexvar_epi8(__m128i index, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_mask_permutexvar_epi8(__m128i src, __mmask16 k, __m128i index, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_mask_permutexvar_epi8(__m128i src, __mmask16 k, __m128i index, __m128i a)
 {
     HostV128 result = { .value = host_mm_permutexvar_epi8(index, a) };
     HostV128 r = { 0 };
@@ -4300,7 +4305,7 @@ BUSTER_HOST_INLINE __m128i host_mm_mask_permutexvar_epi8(__m128i src, __mmask16 
     return r.value;
 }
 
-BUSTER_HOST_INLINE void host_mm_mask_storeu_epi16(void* memory, __mmask8 k, __m128i a)
+BUSTER_HOST_EMULATED void host_mm_mask_storeu_epi16(void* memory, __mmask8 k, __m128i a)
 {
     HostV128 a_ = { .value = a };
     for (unsigned i = 0; i < 8; i += 1)
@@ -4309,7 +4314,7 @@ BUSTER_HOST_INLINE void host_mm_mask_storeu_epi16(void* memory, __mmask8 k, __m1
     }
 }
 
-BUSTER_HOST_INLINE void host_mm_mask_storeu_epi8(void* memory, __mmask16 k, __m128i a)
+BUSTER_HOST_EMULATED void host_mm_mask_storeu_epi8(void* memory, __mmask16 k, __m128i a)
 {
     HostV128 a_ = { .value = a };
     for (unsigned i = 0; i < 16; i += 1)
@@ -4318,7 +4323,7 @@ BUSTER_HOST_INLINE void host_mm_mask_storeu_epi8(void* memory, __mmask16 k, __m1
     }
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_testn_epi8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_testn_epi8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4330,12 +4335,12 @@ BUSTER_HOST_INLINE __mmask16 host_mm_testn_epi8_mask(__m128i a, __m128i b)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_mask_testn_epi8_mask(__mmask16 k, __m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_mask_testn_epi8_mask(__mmask16 k, __m128i a, __m128i b)
 {
     return (__mmask16)(k & host_mm_testn_epi8_mask(a, b));
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_compress_epi16(__mmask8 k, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_compress_epi16(__mmask8 k, __m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4347,7 +4352,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_compress_epi16(__mmask8 k, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_compress_epi8(__mmask16 k, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_compress_epi8(__mmask16 k, __m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4359,7 +4364,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_compress_epi8(__mmask16 k, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi16(__mmask8 k, const void* memory)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_loadu_epi16(__mmask8 k, const void* memory)
 {
     HostV128 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
@@ -4369,7 +4374,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi16(__mmask8 k, const void* mem
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi32(__mmask8 k, const void* memory)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_loadu_epi32(__mmask8 k, const void* memory)
 {
     HostV128 r = { 0 };
     for (unsigned i = 0; i < 4; i += 1)
@@ -4379,7 +4384,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi32(__mmask8 k, const void* mem
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi8(__mmask16 k, const void* memory)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_loadu_epi8(__mmask16 k, const void* memory)
 {
     HostV128 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -4389,7 +4394,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_loadu_epi8(__mmask16 k, const void* mem
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_mov_epi32(__mmask8 k, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_mov_epi32(__mmask8 k, __m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4400,7 +4405,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_mov_epi32(__mmask8 k, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_mov_epi8(__mmask16 k, __m128i a)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_mov_epi8(__mmask16 k, __m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 r = { 0 };
@@ -4411,7 +4416,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_mov_epi8(__mmask16 k, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_set1_epi8(__mmask16 k, int a)
+BUSTER_HOST_EMULATED __m128i host_mm_maskz_set1_epi8(__mmask16 k, int a)
 {
     HostV128 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -4421,7 +4426,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_set1_epi8(__mmask16 k, int a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_movepi8_mask(__m128i a)
+BUSTER_HOST_EMULATED __mmask16 host_mm_movepi8_mask(__m128i a)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     uint64_t r = 0;
@@ -4432,7 +4437,7 @@ BUSTER_HOST_INLINE __mmask16 host_mm_movepi8_mask(__m128i a)
     return (__mmask16)r;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_mullo_epi64(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __m128i host_mm_mullo_epi64(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4444,7 +4449,7 @@ BUSTER_HOST_INLINE __m128i host_mm_mullo_epi64(__m128i a, __m128i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_packus_epi32(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __m128i host_mm_packus_epi32(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -4456,7 +4461,7 @@ BUSTER_HOST_INLINE __m128i host_mm_packus_epi32(__m128i a, __m128i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_shuffle_epi8(__m128i a, __m128i index)
+BUSTER_HOST_EMULATED __m128i host_mm_shuffle_epi8(__m128i a, __m128i index)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 index_ __attribute__((unused)) = { .value = index };
@@ -4468,7 +4473,7 @@ BUSTER_HOST_INLINE __m128i host_mm_shuffle_epi8(__m128i a, __m128i index)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
+BUSTER_HOST_EMULATED __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 {
     HostV128 a_ __attribute__((unused)) = { .value = a };
     HostV128 b_ __attribute__((unused)) = { .value = b };
@@ -5707,4 +5712,5 @@ BUSTER_HOST_INLINE __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 #undef _mm_test_epi8_mask
 #define _mm_test_epi8_mask host_mm_test_epi8_mask
 
+#undef BUSTER_HOST_EMULATED
 #endif

@@ -169,6 +169,23 @@ capture_source()
 {
     capture "${sources[$1]}" "$ir/$(basename "${sources[$1]%.c}").ll"
 }
+# Link a baseline runtime explicitly when CI emulates an old CPU. The host's
+# startup objects and loader can require a newer ISA even with -march=x86-64.
+link_program()
+{
+    local output="$1"
+    shift
+    if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
+        [ "${BUSTER_HOST_ARCH:-native}" = x86-64 ] || { echo 'build.sh: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64' >&2; return 1; }
+        local library="$BUSTER_HOST_RUNTIME/usr/lib/x86_64-linux-gnu"
+        local support="$BUSTER_HOST_RUNTIME/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a"
+        clang -no-pie -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
+            "$library/libm.so.6" "$library/libc.so.6" "$support" "$library/crtn.o" -o "$output"
+    else
+        clang -no-pie "${linker_flags[@]}" "$@" -lm -ldl -o "$output"
+    fi
+}
+
 # Builds build/compiler from the sources, with the flags in `defines`, and the objects in "$@" after theirs. The sources'
 # objects go in a directory of their own, so that build/ keeps one file besides compile_commands.json, which gets their
 # compile commands in the sources' order. It is linked at a fixed address (-no-pie), from the same code: as a PIE, its
@@ -192,7 +209,7 @@ build_compiler()
     for i in "${!sources[@]}"; do
         cat "$object_directory/$i.json"
     done > build/compile_commands.json
-    clang -no-pie "${linker_flags[@]}" "${linked[@]}" "$@" -lm -ldl -o build/compiler
+    link_program build/compiler "${linked[@]}" "$@"
 }
 # Links build_compiler's objects into $1 with $3 bytes of padding in .text before the objects of the source of index
 # $2, an object of its own, in the order build_compiler links them. The padding is a section of its own,
@@ -215,7 +232,7 @@ link_shifted()
         fi
         linked+=("$object_directory/$i.o")
     done
-    clang -no-pie "${linker_flags[@]}" "${linked[@]}" -lm -ldl -o "$1"
+    link_program "$1" "${linked[@]}"
     if ! nm "$1" | grep -q ' buster_shift_padding$' || { [ "$3" -ne 0 ] && cmp -s build/compiler "$1"; }; then
         echo "build.sh shifts: the linker dropped $1's padding" >&2
         return 1
