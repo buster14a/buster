@@ -220,3 +220,27 @@ The rule also holds on smaller units. On generated programs of 403 functions
 against 1.51 on one lane, 2.29 times faster, where 6 lanes are the best at
 2.48. On programs of 603 functions (40,125 tokens), it takes 6 lanes: 0.90 ms
 against 2.29, 2.53 times faster, where the best is 2.69, also on 6.
+
+### Backend startup for a unit without selected bodies (#590)
+
+The emission initializes the encoder's templates, x86 operand semantics and
+Tier 0's tables only when `CheckProgram.body_count` is nonzero. It initializes
+unwind tables under the same condition when unwind output is requested. The
+selected program's builtin and asm helpers come only from selected bodies, so
+a unit without bodies has no record sizing, encoding or unwind consumer.
+Data and symbol publication, attribute checks, linking and failure rollback
+still run. A later unit in the same process initializes the tables normally
+before its workers start; data-only emissions preserve already initialized
+state.
+
+`test-check-lanes` checks empty units, initialized data with string references,
+and dropped static functions containing a builtin helper, on both scalar and
+vector paths. Cold objects equal objects emitted after a real function has
+initialized the backend, with and without source rows/unwind and with a lane
+team requested. Data-only resource failures leave the tables cold. The test
+runs in an isolated child so it also works after a caller has used the backend.
+
+This does not change the tables or their hot lookup paths. The encoder's
+fixup-copy layout retains the measured choice documented in
+[x86-64-encoder.md](x86-64-encoder.md#fixups); lazy/subset tables would also have
+to cover validation, arbitrary asm forms and helpers before the workers start.
