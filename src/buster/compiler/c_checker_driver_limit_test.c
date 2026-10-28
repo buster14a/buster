@@ -249,6 +249,12 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
         check_test_expect(test, status == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
                           "error limit rejects malformed and overflowing values");
         free(text);
+        char* reference[] = { (char*)clang, "-fsyntax-only", option, source, NULL };
+        text = NULL;
+        const int oracle = check_test_driver_spawn(reference, &text);
+        check_test_expect(test, oracle == 1 && text != NULL && strstr(text, "invalid integral value") != NULL,
+                          "Clang independently rejects the same malformed and overflowing integral values");
+        free(text);
     }
     const char* warnings[] =
     {
