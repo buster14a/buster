@@ -1091,6 +1091,16 @@ static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter*
     }
 }
 
+// A type's vector bytes (check_lower_vector_bytes), from its class first: a type of the writer's table is a vector's
+// exactly where its class is VECTOR (check_lower_type_class), so that the calls, returns and temporaries of code
+// without vectors pay a load and a compare for them (#136).
+static uint32_t check_lower_vector_of(const CheckLowerWriter* writer, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const bool vector = index < writer->type_count ? writer->type_classes[index] == BUSTER_TYPED_CLASS_VECTOR : true;
+    return vector ? check_lower_vector_bytes(writer->program->types, type) : 0;
+}
+
 // Appends an entry. Its function's memory classes (Tier0Function.x87 and int128) come from its entries' classes once it
 // is lowered (check_lower_entry_classes).
 static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
@@ -1337,8 +1347,7 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
 // which LOCAL, STORE_LOCAL and SET_LOCAL of VECTOR take its width from (check_lower_vector_bytes).
 static uint32_t check_lower_temporary_of(CheckLowerWriter* writer, TypeId type)
 {
-    const TypeTable* types = writer->program->types;
-    const uint32_t bytes = check_lower_vector_bytes(types, type);
+    const uint32_t bytes = check_lower_vector_of(writer, type);
     uint32_t local = BUSTER_CHECK_NONE;
     if (bytes != 0)
     {
@@ -2577,7 +2586,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     // 128-bit integer's and a vector's, which LOCAL then reads.
     const TypeId result = stream->values[node].type;
     const bool aggregate_result = check_lower_aggregate(writer, result);
-    const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_bytes(types, result) != 0;
+    const bool wide_result = check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0;
     const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
@@ -2622,7 +2631,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
             // vector's an object of its bytes.
             const TypeId argument = stream->argument_conversions[first + a].type;
             const bool aggregate = check_lower_aggregate(writer, argument);
-            const uint32_t vector = check_lower_vector_bytes(types, argument);
+            const uint32_t vector = check_lower_vector_of(writer, argument);
             const bool wide = check_lower_wide(writer, argument) || vector != 0;
             abi->arguments[abi->argument_count++] = argument;
             writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, argument) : vector != 0 ? vector : wide ? 16 : 0;
@@ -2641,7 +2650,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const TypeId argument = stream->argument_conversions[first + a].type;
-            if (check_lower_wide(writer, argument) || check_lower_vector_bytes(types, argument) != 0)
+            if (check_lower_wide(writer, argument) || check_lower_vector_of(writer, argument) != 0)
             {
                 const uint8_t class = check_lower_class(writer, argument);
                 const uint32_t local = check_lower_temporary_of(writer, argument);
@@ -6194,11 +6203,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             function->result_size = (uint32_t)type_size(types, result);
         }
-        else if (check_lower_wide(writer, result) || check_lower_vector_bytes(types, result) != 0)
+        else if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
             // A 128-bit integer returns from its object's 16 bytes, in rax and rdx, as a struct of two eightbytes does, and a
             // vector from its object's, in xmm0, ymm0 or zmm0: the object comes after the parameters (below).
-            function->result_size = check_lower_wide(writer, result) ? 16 : check_lower_vector_bytes(types, result);
+            function->result_size = check_lower_wide(writer, result) ? 16 : check_lower_vector_of(writer, result);
         }
         uint32_t declared = 0;
         for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
@@ -6266,7 +6275,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             writer->gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
             writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
         }
-        if (check_lower_wide(writer, result) || check_lower_vector_bytes(types, result) != 0)
+        if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
             writer->result_object = check_lower_temporary_of(writer, result);
         }
