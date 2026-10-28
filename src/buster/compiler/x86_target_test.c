@@ -6,6 +6,8 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 
+#include "buster/compiler/x86_target_policy_test.c"
+
 static bool x86_target_test_cpuid(void)
 {
     X86CpuId cpu = { .xcr0 = 0xe6, .znver5 = true };
@@ -47,6 +49,8 @@ static bool x86_target_test_cpuid(void)
     passed &= !x86_target_parse("", 0, &unchanged) && unchanged.features == 123;
     passed &= !x86_target_parse("znver5-extra", 12, &unchanged) && unchanged.features == 123;
     passed &= x86_target_parse("znver5-extra", 6, &unchanged) && unchanged.architecture == X86_ARCH_ZNVER5;
+    const X86Target live = x86_target_native();
+    printf("target live native: features=%#llx, znver5=%u (CPUID with OS-enabled XCR0 state)\n", (unsigned long long)live.features, live.native_znver5);
     printf("target CPUID, XCR0 and bounded names: %s\n", passed ? "pass" : "FAIL");
     return passed;
 }
@@ -61,31 +65,76 @@ static bool x86_target_test_forms(void)
     } cases[] = {
         { X86_FORM_ADD_RM64_R64, 0 },
         { X86_FORM_ADDSD_X_XM64, 0 },
+        { X86_FORM_CMPSS_X_XM32_IMM8, 0 },
+        { X86_FORM_CMPSD_X_XM64_IMM8, 0 },
+        { X86_FORM_MOVD_X_RM32, 0 },
+        { X86_FORM_MOVQ_X_RM64, 0 },
+        { X86_FORM_XCHG_RM64_R64, 0 },
+        { X86_FORM_XCHG_RM8_R8, 0 },
+        { X86_FORM_XCHG_RM16_R16, 0 },
+        { X86_FORM_XCHG_RM32_R32, 0 },
+        { X86_FORM_PCMPEQD_X_XM128, 0 },
+        { X86_FORM_PCMPEQD_MM_MM, 0 },
+        { X86_FORM_PCMPEQD_MM_M64, 0 },
+        { X86_FORM_LOCK_XADD_M64_R64, 0 },
+        { X86_FORM_LOCK_BTC_M64_R64, 0 },
+        { X86_FORM_FLD_M80, 0 },
+        { X86_FORM_FSTP_M80, 0 },
+        { X86_FORM_FISTP_M64, 0 },
+        { X86_FORM_FUCOMIP_ST0_ST, 0 },
+        { X86_FORM_FCMOVNU_ST0_ST, 0 },
+        { X86_FORM_FISTTP_M16, 1 },
+        { X86_FORM_FISTTP_M32, 1 },
+        { X86_FORM_FISTTP_M64, 1 },
+        { X86_FORM_HADDPS_X_XM128, 1 },
+        { X86_FORM_PABSB_X_XM128, 1 },
+        { X86_FORM_PCMPISTRI_X_XM128_IMM8, 1 },
         { X86_FORM_FNSTCW_M16, 0 },
+        { X86_FORM_FLDCW_M16, 0 },
+        { X86_FORM_FNSTSW_M16, 0 },
+        { X86_FORM_FNCLEX, 0 },
         { X86_FORM_STMXCSR_M32, 0 },
+        { X86_FORM_LDMXCSR_M32, 0 },
         { X86_FORM_LOCK_CMPXCHG_M8_R8, 0 },
         { X86_FORM_LOCK_CMPXCHG_M16_R16, 0 },
         { X86_FORM_LOCK_CMPXCHG_M32_R32, 0 },
         { X86_FORM_LOCK_CMPXCHG_M64_R64, 0 },
+        { X86_FORM_MOVS_Q, 0 },
+        { X86_FORM_REP_MOVS_B, 0 },
+        { X86_FORM_REP_STOS_D, 0 },
+        { X86_FORM_REP_LODS_W, 0 },
+        { X86_FORM_REPE_CMPS_D, 0 },
+        { X86_FORM_REPNE_SCAS_Q, 0 },
         { X86_FORM_POPCNT_R64_RM64, 1 },
         { X86_FORM_LAHF, 1 },
         { X86_FORM_PSHUFB_X_XM128, 1 },
         { X86_FORM_ROUNDSD_X_XM64_IMM8, 1 },
         { X86_FORM_CMPXCHG16B_M128, 1 },
         { X86_FORM_LZCNT_R64_RM64, 2 },
+        { X86_FORM_XGETBV, 2 },
         { X86_FORM_TZCNT_R64_RM64, 2 },
         { X86_FORM_ANDN_R64_R64_RM64, 2 },
         { X86_FORM_SHLX_R64_RM64_R64, 2 },
         { X86_FORM_VADDSS_X_X_XM32, 2 },
+        { X86_FORM_VMOVSS_X_X_X, 2 },
+        { X86_FORM_VCVTTSD2SI_R64_XM64, 2 },
+        { X86_FORM_VFMSUB132SS_X_X_XM32, 2 },
+        { X86_FORM_VFNMSUB231PD_Y_Y_YM256, 2 },
+        { X86_FORM_VMULSS_X_X_XM32_EVEX, 3 },
+        { X86_FORM_VFMADDSUB132PS_Z_Z_ZM512, 3 },
         { X86_FORM_VPADDD_Y_Y_YM256, 2 },
         { X86_FORM_KMOVW_K_K, 3 },
+        { X86_FORM_VMOVDQA64_Z_ZM512, 3 },
+        { X86_FORM_VMOVDQU64_ZM512_Z, 3 },
         { X86_FORM_KMOVB_K_K, 3 },
         { X86_FORM_KMOVD_K_K, 3 },
         { X86_FORM_KMOVQ_K_K, 3 },
         { X86_FORM_AESENC_X_XM128, 4 }, // v4 does not imply the optional crypto extension.
+        { X86_FORM_PCLMULQDQ_X_XM128_IMM8, 4 },
         { X86_FORM_PUSHP_R64, 255 }, // APX is not implied by AVX-512.
         { X86_FORM_ANDN_R64_R64_RM64_EVEX, 255 },
         { X86_FORM_NONE, 255 },
+        { X86_FORM_FEMMS, 255 }, // Obsolete 3DNow! is not part of a supported profile.
     };
     uint8_t scalar[X86_FORM_COUNT];
     uint8_t vector[X86_FORM_COUNT];
@@ -158,10 +207,23 @@ static bool x86_target_test_forms(void)
         passed &= x86_target_validate(vector, 0, 0) == 0;
     }
     // Individual feature controls catch mistakes concealed by the cumulative v4 profile.
-    X86Target partial = { .features = BUSTER_X86_FEATURE(AVX512F) };
+    X86Target partial = { .features = BUSTER_X86_FEATURE(XSAVE) };
+    const X86Instruction xcr0_read = { .form = X86_FORM_XGETBV };
+    x86_target_forms(&partial, vector);
+    passed &= vector[X86_FORM_XGETBV] != 0 && x86_target_validate(vector, &xcr0_read, 1) == 1;
+    partial.features = BUSTER_X86_FEATURE(AVX);
+    x86_target_forms(&partial, vector);
+    passed &= vector[X86_FORM_XGETBV] == 0 && x86_target_validate(vector, &xcr0_read, 1) == 0;
+    partial.features = BUSTER_X86_FEATURE(AVX512F);
     x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVW_K_K] && !vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVQ_K_K];
-    partial.features |= BUSTER_X86_FEATURE(AVX512DQ);
+    passed &= vector[X86_FORM_VMOVDQA64_Z_ZM512] && vector[X86_FORM_VMOVDQA64_ZM512_Z];
+    passed &= vector[X86_FORM_VMOVDQU64_Z_ZM512] && vector[X86_FORM_VMOVDQU64_ZM512_Z];
+    partial.features = BUSTER_X86_FEATURE(AVX512DQ);
+    x86_target_forms(&partial, vector);
+    passed &= !vector[X86_FORM_VMOVDQA64_Z_ZM512] && !vector[X86_FORM_VMOVDQA64_ZM512_Z];
+    passed &= !vector[X86_FORM_VMOVDQU64_Z_ZM512] && !vector[X86_FORM_VMOVDQU64_ZM512_Z];
+    partial.features |= BUSTER_X86_FEATURE(AVX512F);
     x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVD_K_K];
     passed &= vector[X86_FORM_VADDSS_X_X_XM32_EVEX] && !vector[X86_FORM_VADDPS_X_X_XM128_EVEX];
@@ -275,15 +337,28 @@ static bool x86_target_test_preprocessor(const char* directory)
     return passed;
 }
 
+// Keep these fixtures with the preprocessor's home and its private state. The policy command runs in FRONTEND;
+// the separate selector/native command uses only BACKEND's encoder and selector state.
+BUSTER_HOME_FRONTEND bool run_x86_target_preprocessor_tests(const char* directory)
+{
+    bool passed = x86_target_test_compiler_macros();
+    passed &= x86_target_test_preprocessor(directory);
+    return passed;
+}
+
 static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
     passed &= x86_target_test_forms();
+    passed &= x86_target_test_matcher_admission();
+    passed &= x86_target_test_matrix();
+    passed &= x86_target_test_fma_masks();
     passed &= x86_target_test_pages();
     char directory[] = "/tmp/buster-target-XXXXXX";
     if (mkdtemp(directory) != 0)
     {
-        passed &= x86_target_test_preprocessor(directory);
+        passed &= run_x86_target_preprocessor_tests(directory);
+        passed &= x86_target_test_gas(directory);
         char path[4096];
         snprintf(path, sizeof(path), "%s/case.c", directory);
         unlink(path);

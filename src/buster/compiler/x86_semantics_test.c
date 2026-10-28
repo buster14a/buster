@@ -2797,7 +2797,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
         x86_target_forms(&native, x86_semantics_test_native);
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (x86_target_requirements[form] == 0 && x86_semantics_test_known_legacy(form))
+            if (x86_target_requirement(form) == 0 && x86_semantics_test_known_legacy(form))
             {
                 x86_semantics_test_native[form] = 1;
             }

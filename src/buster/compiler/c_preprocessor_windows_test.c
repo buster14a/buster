@@ -476,8 +476,8 @@ static bool pp_window_test_unit(const char* path, bool scalar, uint32_t window, 
 // `directory`. The file cache prepares its file and the unit's data copies the record (pp_copy_prepared). The vectorized
 // kernels prepare it in windows of several sizes: smaller than a line page, a page, a byte past one, and larger, and the
 // last source in the default windows. __LINE__, #line and -E's line markers then count from its line pages, which each
-// run's data of the file must have on a vector host. A scalar host prepares both requested modes whole and counts
-// from a cursor, without line pages. Each run's output and text with line markers must be the scalar twins', byte for byte.
+// run's data of the file must have. The scalar twins prepare it whole and count from a cursor. Each run's output and the
+// text -E prints with line markers must be the scalar twins', byte for byte. Returns whether every run's are.
 static bool pp_test_window_units(const char* directory, uint64_t seed)
 {
     static const uint32_t windows[] = { 1000, BUSTER_PP_LINE_PAGE_BYTES, BUSTER_PP_LINE_PAGE_BYTES + 1, 10000 };
@@ -511,21 +511,19 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
             const uint32_t window = large ? 0 : windows[w];
             const uint32_t bytes = window != 0 ? window : BUSTER_PP_WINDOW_BYTES;
             bool ran = pp_window_test_unit(path, false, window, &tables[1], &runs[1], &ready[1], &arenas[1], &printed[1], &lengths[1]);
-            // Require the selected representation as well as identical source bytes and complete semantic output.
-            bool layout = false;
+            // The file's data in the run: its bytes are the source's, and windows prepared it.
+            bool paged = false;
             for (uint32_t d = 0; ran && d < runs[1].data_count; d += 1)
             {
                 const PPFileData* data = &runs[1].datas[d];
-                layout |= data->length == text.length && data->length >= 2ull * bytes &&
-                          ((data->line_pages != NULL) == (BUSTER_HOST_VECTOR != 0));
+                paged |= data->length == text.length && data->length >= 2ull * bytes && data->line_pages != 0;
             }
             char label[64];
             snprintf(label, sizeof(label), "windows: unit %u, window %u", s, window);
-            const bool agrees = ran && layout && pp_same_streams(&runs[1], &runs[0], label) && lengths[0] == lengths[1] && memcmp(printed[0], printed[1], lengths[0]) == 0;
+            const bool agrees = ran && paged && pp_same_streams(&runs[1], &runs[0], label) && lengths[0] == lengths[1] && memcmp(printed[0], printed[1], lengths[0]) == 0;
             if (!agrees && !pp_test_quiet)
             {
-                printf("%s: %s\n", label, !ran ? "the run fails" : !layout ? (BUSTER_HOST_VECTOR ? "the file's data has no line pages" :
-                       "the scalar file's data unexpectedly has line pages") : "the output or its text with line markers isn't the scalar twins'");
+                printf("%s: %s\n", label, !ran ? "the run fails" : !paged ? "the file's data has no line pages" : "the output or its text with line markers isn't the scalar twins'");
             }
             same &= agrees;
             units += 1;
