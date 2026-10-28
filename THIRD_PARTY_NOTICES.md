@@ -17,6 +17,11 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The implicit function binding/diagnostic additions and
+`c_check_implicit_driver_test.c` (#623) are original project material under the
+default terms. Clang and the unconfigured zlib 1.3.1 tree are external
+qualification inputs; no external implementation or fixtures are imported.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

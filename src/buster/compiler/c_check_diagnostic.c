@@ -10,6 +10,8 @@
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 #define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
 #define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
+#define CHECK_WARNING_RETURN_TYPE 0x40000u
+#define CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION 0x80000u
 
 #include "c_check_packed_diagnostic.c"
 
@@ -49,6 +51,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wpointer-type-mismatch", NULL, "pointer type mismatch" },
     { "-Waddress-of-packed-member", NULL, "taking address of packed member may result in an unaligned pointer value" },
     { "-Wargument-outside-range", NULL, "argument value is outside the valid range" },
+    { "-Wreturn-type", NULL, "non-void function does not return a value" },
+    { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -70,11 +74,9 @@ static const char* check_diagnostic_message(uint32_t warning)
     return result;
 }
 
-static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
+static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, CheckWarningSeverity severity)
 {
     const uint32_t index = check_diagnostic_warning_index(warning);
-    CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
-                                    warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     if (history != NULL && index < BUSTER_ARRAY_LENGTH(check_warning_descriptions))
     {
@@ -111,6 +113,20 @@ static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input
         }
     }
     return severity;
+}
+
+static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
+{
+    const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
+                                          warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    return check_diagnostic_severity_from(input, token, source, warning, severity);
+}
+
+static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
+{
+    const CheckWarningSeverity baseline = input->implicit_function_diagnostic == 1 ? CHECK_WARNING_IGNORE :
+                                          input->implicit_function_diagnostic == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
+    return check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline);
 }
 
 static CheckWarningSeverity check_diagnostic_severity_default(const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored)
@@ -150,6 +166,14 @@ static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t nod
 static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
+    {
+        const uint32_t at = input->implicit_function_tokens[i];
+        if (at < first && check_diagnostic_implicit_function(input, at) >= CHECK_WARNING_ERROR)
+        {
+            first = at;
+        }
+    }
     for (uint32_t i = 0; stream != NULL && i < stream->x86_count; i += 1)
     {
         const CheckBuiltinX86Effect* effect = stream->x86 + i;
