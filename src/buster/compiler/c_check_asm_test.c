@@ -717,9 +717,14 @@ static void check_test_asm_label_metadata(CheckTest* test)
 
 static int run_checker_asm_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     const char* clang = argc == 2 && strcmp(argv[0], "--clang") == 0 ? argv[1] : "clang";
     CheckTest test = { 0 };
     CheckCorpusTally tally = { 0 };
+    // The process's oracle cache, set up before any fixture runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     char directory[] = "/tmp/buster-check-asm-XXXXXX";
     bool ready = (argc == 0 || argc == 2) && mkdtemp(directory) != NULL;
     for (uint32_t fixture = 0; ready && fixture < BUSTER_ARRAY_LENGTH(check_asm_fixtures); fixture += 1)
@@ -833,9 +838,12 @@ static int run_checker_asm_tests(int argc, char** argv)
     check_test_expect(&test, ready, "assembly fixture process and source accounting");
     check_test_asm_capacity(&test);
     check_test_asm_label_metadata(&test);
+    oracle_cache_report(oracle, "test-checker-asm");
     printf("test-checker-asm: %" PRIu64 " checks, %" PRIu64 " failures; sources=%" PRIu64 " accepted=%" PRIu64 "\n",
            test.checks, test.failures, tally.files, tally.checker_accepted);
-    return test.failures == 0 ? 0 : 1;
+    const int returned = test.failures == 0 ? 0 : 1;
+    oracle_epoch_end(epoch);
+    return returned;
 }
 
 #endif

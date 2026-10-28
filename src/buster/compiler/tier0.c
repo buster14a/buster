@@ -320,7 +320,8 @@ struct Tier0Operation
 // displacement fits a disp32. An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
 // most 2^30: past 16 bytes, the function's frame is realigned to the most any of them needs (Tier0Frame.alignment_log2).
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
-#define BUSTER_TIER0_MAX_LOCALS (1u << 16)
+// Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
+#define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30

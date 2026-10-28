@@ -96,6 +96,11 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
     { "statement-expressions", "int f(int a) { int r = ({ int t = a + 1; t * 2; }); return r + ({ a; }); }\nint g(int b) { return ({ int u = b; u; }); }\n", true },
     { "variable-length-arrays", "int f(int n, int a[n]) { int b[n]; b[0] = a[0]; return (int)sizeof b + b[0]; }\nint g(int m) { int c[m][2]; return (int)sizeof c; }\n", true },
+    { "vla-header-spans",
+      "void proto(int n, int a[n]);\n"
+      "int f(int n, int a[n][n+1], int (*callback)(int m, int b[m]), int z[n+2]) { typedef int A[n]; A a0; { A a1; int b[n+2]; } return sizeof a0; }\n"
+      "int g(int m, int (*p)[m+2]) { __typeof__(int[m+3]) a, b; return sizeof a + sizeof b + sizeof *p; }\n"
+      "int h(int k, int a[k]) { typedef int A[k+1]; A b; return sizeof b; }\n", true },
     { "varargs",
       "int sum(int count, ...) { __builtin_va_list list; __builtin_va_start(list, count); int total = 0;\n"
       "  for (int i = 0; i < count; i += 1) total += __builtin_va_arg(list, int); __builtin_va_end(list); return total; }\n"

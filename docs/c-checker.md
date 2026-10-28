@@ -660,6 +660,44 @@ whole-time changes lie within their A/A copy ranges; this is no claim of an
 ordinary-corpus, cold-cache or multicore speedup. The record retains all
 identities, commands, raw reports, guarded tests and disassembly, and separates
 an excluded pilot whose shared output file biased some whole-process timings.
+Materialized payloads are constructed directly in an unpublished suffix of
+`bytes`, with no second payload copy when atoms are published. A zero-fill
+candidate releases its suffix; a failed batch restores the original length
+before returning. When the byte arena cannot fit a candidate, temporary scratch
+storage permits its zero-fill classification and exact capacity demand to
+complete; a nonzero payload in that storage can never be published. Scratch
+otherwise holds metadata proportional to objects and initializer references,
+not a second image of every payload. Live input prefixes in either arena remain
+valid throughout planning. Literal pools, non-TLS readonly objects and objects
+with live relocations already determine their section without scanning bytes.
+Other materialized objects use an early-exit 64-byte zero test with bounded
+masked tails. Avoiding materialization of explicit-zero aggregates is separate
+work in [#596](https://github.com/buster14a/buster/issues/596).
+
+For [#600](https://github.com/buster14a/buster/issues/600), the locked 9700X
+comparison of `92c025e7` and `4e21ef63` measured complete single-lane `-c`
+processes, with fixed output files, two executable copies and both build
+orders (36 processes per build/input). The
+[qualification record](https://github.com/buster14a/buster-performance/tree/b9552b4f387d9673dd9e6e55dd4d04d16e51a491/docs/measurements/static-data-600-2026-10-27)
+retains all sizes, counters, arena probes, assembly and correctness evidence.
+
+| 64 MiB object | Before, ms | After, ms | Change |
+| --- | ---: | ---: | ---: |
+| writable array | 27.412 | 22.894 | -16.48% |
+| readonly array | 27.426 | 22.858 | -16.66% |
+| array with one relocation | 27.354 | 22.912 | -16.24% |
+
+A 64 MiB array's emitter scratch peak fell from 64 MiB + 48 bytes to 48
+bytes; readonly/literal/relocation-bearing objects scanned no payload bytes
+for classification. Whole `-c` peak RSS stayed about 149 MiB for the arrays:
+the ELF writer later constructs its complete output image in scratch while
+retained bytes remain live. SQLite's 147.103 to 146.697 ms was within the
+observed spread. The 1 MiB writable median rose by 0.054 ms (+2.46%) with
+overlapping ranges; the explicit-zero control retained its materialization
+and used about 2 MiB more peak RSS. Neither a general small-input speedup nor
+an improvement to #596 is claimed. All nineteen source cases matched the
+baseline's entire object and Clang's data oracle, and the checker, driver,
+Link, object-writer and call-graph qualification groups passed.
 
 ## Backend handoff
 
@@ -821,6 +859,28 @@ What the lowering covers past scalars (#145's programs):
   the same way, and so do initializer parts with a bit width. A field whose bits
   are spread over more than 8 bytes (a packed one) is refused.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The source reader's declaration handoff retains the half-open append range
+  of VLA records introduced by its specifiers and declarator. Only that range
+  is associated and given the declaration's scope; reusing a typedef creates
+  no new bound or capture. A suspended `typeof` specifier saves the range's
+  beginning across its source walk. A definition retains its header's range
+  until parameter activation, and deferred-body cuts save it for each lane,
+  whose private record table also contains other headers. The original
+  declaration-token/body filters still exclude nested prototypes. These ranges
+  use scalar indices, require no allocation or padded access, and are empty
+  for declarations without new bounds. One-bound declarations visit one record
+  each instead of all earlier records (#611); the small, ordered span updates
+  retain the existing scalar record layout and stable bound identities.
+  Empty ranges still validate variably modified declarations and retain their
+  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
+  34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
+  instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
+  The SQLite control adds 0.0112% instructions and shows mixed, small timing
+  changes within process/copy variability. The
+  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/b5a850b6171da718b16feb4db341109476e3db19/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
+  record exact sources and limits, five byte-identical baseline/head objects
+  and their stage receipts ([performance PR #27](https://github.com/buster14a/buster-performance/pull/27)).
   The control stream puts a `STACK_SAVE` before each block's first array, an
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
@@ -1250,6 +1310,21 @@ counts that size its tables, the walk in source order
 (`check_input_expressions`), and the passes after them. #529 cut the work
 they do per token where little of it was per declaration or expression:
 
+- **Attribute arguments (#605).** `check_input_attribute_validate` counts the
+  arguments in one forward delimiter walk, then fills a compact table of the
+  separating commas as it checks their shapes in a second forward walk.
+  Both skip complete parenthesis, bracket and brace groups through the
+  parser's matching-parent links. A validated list of A arguments retains
+  exactly A - 1 `uint32_t` token indices when A > 1, owned by the output
+  arena and shared immutably by attribute copies and merges. Empty and
+  single-argument attributes allocate no boundary table. The existing outer
+  bounds plus those indices give `check_input_attribute_argument` each
+  half-open argument range in constant time, without reading source tokens.
+  Shape validation, the declaration reader, and the constant reader's
+  preparation and evaluation reuse those ranges; numeric operands still
+  evaluate once, in source order. Malformed delimiters fail before a table
+  is published, and allocation failure reports the attribute's original
+  range as a resource error. No token-sized sparse column is added.
 - **Value chains.** The graph's walk gives each token the chain of its
   values, its children's chains joined, and counted the chain by walking each
   child's again. An initializer's separators are each a child of the next, so
@@ -1282,6 +1357,46 @@ they do per token where little of it was per declaration or expression:
 - **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
   distinct identifier, refuses a name that doesn't start with `__` before it
   scans its catalog, whose names all do (`test-preprocessor` checks it).
+
+Both ordinary and declaration-time `_Generic` readers use the same association
+index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
+nominal struct or union use that tag as a necessary compatibility key. Other
+types share an ambiguous key: enums and integers, function prototypes,
+transparent-union parameters and the two vector kinds still receive exact
+source-position-aware compatibility checks. Qualifiers and alignment never
+replace those checks. The control's key also filters provably incompatible
+control matches.
+
+The producer appends associations in source order into scratch-owned key and
+type columns. Each hash probe compares sixteen owned keys at once; the scalar
+twin computes the same candidate and empty masks. Equal-key candidates stay in
+insertion order through collisions and wraparound, so the first failing
+association and expression/warning handling keep their existing order. Up to
+eight associations use local storage; larger lists reserve a bounded,
+at-most-half-full table from the token span. Allocation and sizing failures
+propagate as resource failures, and each reader restores its scratch mark.
+The index records exact duplicate and control compatibility-query counts.
+
+For A distinct nominal tags, including pointers to forward-declared tags,
+duplicate validation makes zero compatibility queries; a control with one of
+those keys needs one exact query. Hash probing and input reading remain. This
+is a bounded improvement for the nominal families in #602; a large family
+sharing an ambiguous key can still require quadratic compatibility work.
+`test-checker` compares the index with independent pairwise semantic queries,
+checks source-time transparent unions, guarded groups, collisions, exhaustion
+and the query-count bound, and checks both source readers against Clang.
+
+On the locked 9700X (CPU 2, one lane, six repeated fresh-process samples),
+10,000 pointer associations went from 738.960 to 12.474 ms in an ordinary
+expression and from 785.990 to 58.097 ms in a declaration-time constant.
+Duplicate compatibility queries fell from 49,995,000 to zero in both readers,
+and control queries from 10,000 to one. The complete constant-expression
+compile still grows faster than linearly; this removes its quadratic
+association-compatibility work, without claiming every other operation is
+linear. SQLite's control instructions were effectively unchanged. The
+[source pins, full scaling/RSS/instruction table, exact-query logs and validation](https://github.com/buster14a/buster-performance/blob/b6424ad152a7cdc49ee9d3ca89e66ac850c90dbb/docs/measurements/generic-association-index-602-2026-10-27/README.md)
+retain both record and pointer families, scalar/vector/native equivalence and
+the experiment's limits.
 
 `test-checker` checks every scan, count and syntax bit, by both paths,
 against its own reading of columns of every length to 200 that end at a

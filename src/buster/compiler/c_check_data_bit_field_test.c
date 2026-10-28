@@ -183,7 +183,8 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                     .initializer_plan = &initializer,
                 };
                 CheckDataPlan plan;
-                const CheckDataStatus status = check_data_plan_object(types, NULL, &object, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, &fixture.scratch, &plan);
+                const CheckDataStatus status = check_data_plan_object(types, NULL, &object, map, BUSTER_ARRAY_LENGTH(map), &fixture.link,
+                                                                      &fixture.bytes, &fixture.scratch, &plan);
                 check_data_test_bit_field_reference(expected, 32 + shift, width, first_bits, false);
                 check_data_test_bit_field_reference(expected, 35 + shift, width + 3, 0, true);
                 check_data_test_bit_field_reference(expected, 33 + shift, width, value ^ (value >> 1), false);
@@ -192,6 +193,7 @@ static void check_data_test_bit_field_plans(CheckTest* test, TypeTable* types)
                 check_test_expect(test, status == CHECK_DATA_OK && plan.size == sizeof(expected) && memcmp(plan.bytes, expected, sizeof(expected)) == 0 && fixup,
                                   "static bit-field plans preserve ordered signed/wide overlapping writes and an adjacent relocation");
                 arena_pop_to(&fixture.scratch, 0);
+                arena_pop_to(&fixture.bytes, 0);
             }
         }
     }

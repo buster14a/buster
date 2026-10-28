@@ -63,6 +63,29 @@ The current implementation removes intersecting reservations for the whole
 input interval. Producers may split around constraints to recover registers.
 It does not yet search for optimal split positions around fixed ranges.
 
+Fixed filtering reuses the position-sorted end events and the dead event buckets.
+It sweeps fixed starts strictly before each value interval's end and keeps the
+maximum fixed end for each of the two classes' 32 physical registers. Two
+16-register vector comparisons identify the reservations whose maximum end is
+strictly greater than the value interval's start. This preserves half-open
+boundaries and removes the same union of masks from the entire interval,
+including unsorted, nested and duplicate fixed ranges and multibit clobbers.
+
+Preparation costs O(positions + fixed ranges + events), including required-use
+events, with four temporary bytes per fixed range and a 256-byte register table.
+The existing sixteen-interval vector cross-product handles pair counts no larger
+than `positions + 16*(intervals + fixed ranges)`. This keeps tiny functions and
+small fixed sets on the simple path while bounding its work linearly as well.
+The scalar allocator keeps its independent cross-product reference. Empty fixed
+sets allocate no additional scratch.
+
+The current native caller receives its input from `tier1_liveness_build`, whose
+allocation initializer leaves `fixed` empty. `tier1_emit_prepare` copies that
+input and adds allowed masks and required uses; calls save and restore live
+caller registers separately. Thus this change addresses the allocator API's
+fixed-range scaling; it does not establish a speedup in the current native
+pipeline or the default Tier 0 compiler.
+
 `tier1_allocate` and `tier1_allocate_scalar` return an explicit status and an
 arena-owned `Tier1Allocation`. Each input interval owns the compact range
 `fragment_offsets[i] .. fragment_offsets[i+1]` in the output's start/end,
@@ -137,6 +160,64 @@ the input. Registers and stack slots may use disjoint id ranges, but a machine
 consumer still needs a legal lowering for a memory-to-memory copy. CFG edge
 placement and critical-edge splitting are not done by this routine.
 
+The deterministic policy is unchanged: emit the lowest input index whose
+destination has no remaining source users; when none is ready, save the lowest
+pending destination to scratch. Up to eight moves use the independent scan
+implementation, `tier1_resolve_moves_scalar`. The only current production caller
+is `tier1_emit_call`, bounded by the six SysV integer argument registers; the
+general API keeps its full 2^20-move limit and opaque location domain.
+
+Larger sets use `tier1_resolve_moves_indexed`. Eight-wide masked initialization
+validates scratch exclusion, marks identities and constructs packed
+`(destination, input index)` keys. A nonrecursive merge sort detects duplicate
+destinations; binary searches map each source to its destination owner. Source
+use counts and a minimum heap replace repeated pending-move scans. Each emitted
+move updates only its source owner's count, and each move enters the ready
+heap once. A monotonically advancing cursor finds the first pending move when
+breaking cycles. Sorting, lookup and heap work are O(N log N), with O(N) storage,
+including adversarial opaque ids and fan-out.
+
+When the ready heap is empty, every remaining destination has at least one
+source user. There are at most as many source edges as remaining moves, so
+every remaining destination has exactly one user: the residual graph is a set
+of disjoint cycles. Saving one destination makes its move ready; its sole
+remaining consumer reads scratch instead. That cycle drains before another
+save can reuse scratch. The algorithm needs neither repeated source rewriting
+nor a scan for that consumer.
+
+Both paths retain at most 16*N bytes for output columns. The indexed path uses
+28*N temporary bytes (two u64 key arrays and three u32 dependency/count/heap
+arrays), plus alignment; the small scan uses 5*N temporary bytes. Inputs remain
+immutable, errors restore the entry arena length and preserve the result, and
+success discards all temporary arrays. Sorting requires temporary capacity, so
+capacity exhaustion can precede duplicate-destination diagnosis.
+
+### Resolver measurements (#608)
+
+On the approved locked Ryzen 7 9700X, Clang 23.1.1 with the normal optimized
+flags, three independent processes pinned to CPU 2 measured the complete
+resolver call and arena reset at source `e2dcb4b63c2611946be26a424a4618f6b584cfb8`.
+The 1024-move adversarial chain took 116.487–117.449 ms with the original scan
+and 13.309–13.314 microseconds with dispatch. Median retired instructions fell
+from 3,842,936,080 to 420,805. Across 32–1024 moves, doubling N increased the
+original chain's instruction work by 7.39–7.96 times, and dispatch's by
+2.13–2.15 times. Reversed chains, independent moves, cycles and fan-out were
+also measured at every requested size and retain the indexed path's bounded
+work. These are resolver measurements, separate from whole-compiler throughput.
+
+At 1024 moves the indexed call peaks at 44 KiB of arena storage versus 21 KiB
+for the scan; both retain 16 KiB. The small cutoff preserves the current
+caller's original algorithm and smaller arena budget. Its tuning remains an
+opportunity: forced indexing takes 43.811–44.878 ns on the six-move synthetic
+chain, while dispatch takes 106.910–117.510 ns; the original scan wins on the
+one- and two-move chains. The actual caller's shuffle distribution remains
+unmeasured, so these data establish neither an optimal cutoff nor a corpus
+speedup. The native/Clang pipeline, allocation, liveness, selection, call-graph
+and resolver ASan/UBSan qualification all passed on the locked host.
+
+The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
+record the shapes, complete process ranges, memory costs and validation scope.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
@@ -191,6 +272,22 @@ oracle compares interval fragments pairwise; another expands them into a
 per-position register occupancy map. A move oracle executes sequential output
 against an independent snapshot of the parallel assignment. Guard-page tests
 end every input column at an inaccessible page through 65 elements.
+Fixed filtering also compares exact masks with an independent per-position
+bitmap, compares complete allocations with explicitly prefiltered inputs, and
+exercises indexed capacity rollback after an existing arena prefix. The 8,192
+nonoverlapping fixed/value interval fixture checks every resulting register
+without invoking the deliberately quadratic allocation verifier.
+
+The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
+reversed chain, independent moves, long and disjoint cycles, fan-out and
+identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512 and
+1024 moves, with sparse ids including UINT32_MAX. A 2^20-move chain checks the
+full accepted limit. Snapshot execution checks meaning, the independent scan
+checks exact ordering on small sets, and the scalar/vector indexed paths agree
+exactly. Read-only guarded columns cover every tail through 33 elements; a
+byte-by-byte capacity sweep checks rollback, prior arena contents and retained
+output length. Scratch collisions, duplicate destinations, excessive counts
+and absent columns fail transactionally.
 
 Original native straight-line reductions execute the assigned register/spill
 plans through the existing encoder with rematerialization enabled and disabled,
@@ -210,6 +307,15 @@ this benchmark. Default samples alternate variant order; isolated and
 scalar-conditioned modes expose different host power states. Run repeated
 processes through the per-run 9700X lock, pinned to CPU 2, before retaining a
 performance claim. No performance acceptance is asserted by adding the tool.
+
+The [#609 fixed-filtering record](https://github.com/buster14a/buster-performance/tree/11051131ad5c4ae57c65d170fb38c6f5f3154796/docs/measurements/tier1-fixed-609-2026-10-27)
+compares compiler code `9a652c02` with `92c025e7` under the shared 9700X lock.
+At 8,192 sparse value/fixed intervals, filtering takes 6.954 ms versus 57.849 us
+(120.21x), and complete allocation 7.131 ms versus 263.745 us (27.04x).
+It covers dense/call/mixed constraints, no-fixed/tiny controls, scalar conditioning,
+exact output checks and native/guard/rollback qualification. Indexed scratch adds
+4*F bytes; all tiny samples, including slower ones, are retained in the record.
+These are allocator API measurements; the current native producer supplies F=0.
 
 Both issues remain open until source-corpus interval production and native
 spill/reload/phi/call lowering are integrated and qualified. Required remaining

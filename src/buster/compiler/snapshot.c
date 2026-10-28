@@ -26,7 +26,10 @@
 //     directory's hash must be its bytes' (executable.c's chunk hash, over the file up to the pieces' records, with the
 //     hash's field as zeros); this very executable must have written it (the identity of /proc/self/exe: st_dev,
 //     st_ino, st_size, st_mtim and st_ctim, which a rebuild changes); its kind must be the one asked for; and every
-//     path the import probed must be as it was (runtime_probes_current). A piece's records are checked by binding,
+//     non-deferred path the import probed must be as it was (runtime_probes_current). Binding checks libgcc_s's search
+//     only when a strong reference or a version need can depend on it, or before reporting an undefined name. It also
+//     checks permitted strong undefined names in shared libraries, which a newly installed library could define.
+//     A piece's records are checked by binding,
 //     when it first reads them: their hash must be the one the directory holds (runtime_piece_current). So the layouts
 //     it holds are this executable's own, a link reads only what it wrote, and checks only what it reads: a static
 //     hello world reads 442 of the static runtime's 2,622 pieces, and hashing all 8.6 MB took three quarters of the
@@ -128,7 +131,7 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 7
+#define BUSTER_SNAPSHOT_VERSION 8
 // Each kind's file: a dynamic PIE's runtime's, a static executable's, a static PIE's and a shared library's.
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
@@ -950,6 +953,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             probes[p].path.length = probe->path.length;
             probes[p].directory = probe->directory;
             probes[p].found = probe->found;
+            probes[p].deferred = probe->deferred;
             probes[p].device = probe->device;
             probes[p].inode = probe->inode;
             probes[p].size = probe->size;
