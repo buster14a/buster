@@ -3387,4 +3387,44 @@ static void oracle_run_release(OracleRun* run)
     run->errors = 0;
 }
 
+// A synchronous test tool's exit status, or -1 for a launcher, timeout, capture or cache-check failure. Optional
+// capture files receive the complete bytes; diagnostics receives a bounded NUL-terminated prefix. Declared output
+// artifacts and dependency tracing are the caller's OracleRun contract. Generated programs must still run directly.
+static int oracle_test_run(OracleRun* run, const char* output_path, const char* error_path, char* diagnostics, size_t capacity)
+{
+    const bool ran = oracle_run(run);
+    bool written = true;
+    const char* paths[] = { output_path, error_path };
+    const char* bytes[] = { run->output, run->errors };
+    const uint64_t lengths[] = { run->output_length, run->errors_length };
+    for (uint32_t capture = 0; capture < 2; capture += 1)
+    {
+        if (paths[capture] != 0)
+        {
+            FILE* file = fopen(paths[capture], "wb");
+            if (file != 0)
+            {
+                written = fwrite(bytes[capture] != 0 ? bytes[capture] : "", 1, lengths[capture], file) == lengths[capture] && written;
+                written = fclose(file) == 0 && written;
+            }
+            else
+            {
+                written = false;
+            }
+        }
+    }
+    if (diagnostics != 0 && capacity != 0)
+    {
+        const uint64_t kept = run->errors_length < capacity - 1 ? run->errors_length : capacity - 1;
+        if (kept != 0)
+        {
+            memcpy(diagnostics, run->errors, kept);
+        }
+        diagnostics[kept] = 0;
+    }
+    const int result = ran && written && WIFEXITED(run->status) ? WEXITSTATUS(run->status) : -1;
+    oracle_run_release(run);
+    return result;
+}
+
 #endif

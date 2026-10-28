@@ -26,6 +26,21 @@ static void asm_test_check(AsmTest* test, bool accepted, const char* name, const
     }
 }
 
+// Only the external oracle/tool is cached. The assembler paths and generated executables still run on every test.
+static int asm_test_tool(char* const* arguments, const char* artifact, const char* output, const char* errors)
+{
+    const char* files[] = { artifact };
+    OracleRun run = {
+        .purpose = "assembler independent tool oracle",
+        .arguments = arguments,
+        .files = files,
+        .file_count = artifact != 0,
+        .dependencies = true,
+        .timeout = BUSTER_OBJECT_TEST_RUN_SECONDS,
+    };
+    return oracle_test_run(&run, output, errors, 0, 0);
+}
+
 static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86Architecture architecture)
 {
     if (test->architecture != architecture)
@@ -150,7 +165,8 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
     char theirs_path[PATH_MAX];
     char output[PATH_MAX];
     char errors[PATH_MAX];
-    snprintf(assembly, sizeof(assembly), "%s/oracle.s", directory);
+    // A stable fixture identity gives each source its own key instead of churning the cache's 32 variants of oracle.s.
+    snprintf(assembly, sizeof(assembly), "%s/oracle-%016llx.s", directory, (unsigned long long)test->checks);
     snprintf(theirs_path, sizeof(theirs_path), "%s/oracle.o", directory);
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
@@ -160,9 +176,10 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
         const size_t capacity = strlen(source) + 64;
         char* oracle_source = arena_push(&test->scalar, capacity, 1);
         const int length = oracle_source != 0 ? snprintf(oracle_source, capacity, "%s\n.section .note.GNU-stack,\"\",@progbits\n", source) : -1;
-        passed = length > 0 && object_write_file(assembly, (const uint8_t*)oracle_source, length) == OBJECT_ERROR_NONE;
+        unlink(theirs_path);
+        passed = length > 0 && object_write_file(assembly, (const uint8_t*)oracle_source, length) == OBJECT_ERROR_NONE && oracle_epoch_file(assembly);
         char* arguments[] = {"as", "--64", "-o", theirs_path, assembly, 0};
-        passed = passed && object_test_run(arguments, output, errors) == 0;
+        passed = passed && asm_test_tool(arguments, theirs_path, output, errors) == 0;
     }
     if (passed)
     {
@@ -179,6 +196,7 @@ static bool asm_test_oracle(AsmTest* test, const char* source, const char* direc
     {
         asm_test_check(test, false, "GNU as fixture", result.error);
     }
+    unlink(assembly);
     return passed;
 }
 
@@ -189,11 +207,13 @@ static void asm_test_execution(AsmTest* test, const char* directory)
     {
         char object_path[PATH_MAX];
         char c_path[PATH_MAX];
+        char caller_path[PATH_MAX];
         char executable[PATH_MAX];
         char output[PATH_MAX];
         char errors[PATH_MAX];
         snprintf(object_path, sizeof(object_path), "%s/function.o", directory);
         snprintf(c_path, sizeof(c_path), "%s/caller.c", directory);
+        snprintf(caller_path, sizeof(caller_path), "%s/caller.o", directory);
         snprintf(executable, sizeof(executable), "%s/program", directory);
         snprintf(output, sizeof(output), "%s/output", directory);
         snprintf(errors, sizeof(errors), "%s/errors", directory);
@@ -203,9 +223,11 @@ static void asm_test_execution(AsmTest* test, const char* directory)
             "long external_twice(long value) { return value * 2; }\n"
             "int main(void) { const long values[] = {1, 2, 3, 4}; return assembly_sum(values, 4) == 423 && assembly_sum(values, 0) == 403 ? 0 : 1; }\n";
         bool okay = object.error == OBJECT_ERROR_NONE && object_write_file(object_path, object.bytes, object.size) == OBJECT_ERROR_NONE && object_write_file(c_path, (const uint8_t*)caller, sizeof(caller) - 1) == OBJECT_ERROR_NONE;
-        char* compile[] = {"clang", c_path, object_path, "-o", executable, 0};
+        char* compile[] = {"clang", "-c", c_path, "-o", caller_path, 0};
+        char* link[] = {"clang", caller_path, object_path, "-o", executable, 0};
         char* run[] = {executable, 0};
-        okay = okay && object_test_run(compile, output, errors) == 0 && object_test_run(run, output, errors) == 0;
+        okay = okay && asm_test_tool(compile, caller_path, output, errors) == 0 && object_test_run(link, output, errors) == 0 && object_test_run(run, output, errors) == 0;
+        unlink(caller_path);
         asm_test_check(test, okay, "link and execute external call/data fixture", 0);
     }
     static const char self_contained[] =
@@ -325,7 +347,7 @@ static void asm_test_preprocessing(AsmTest* test, const char* directory)
     char* vector[] = {"/proc/self/exe", "assemble", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", object, input, 0};
     char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", scalar_object, input, 0};
     char* clang[] = {"clang", "-E", "-P", "-x", "assembler-with-cpp", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", clang_source, input, 0};
-    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0 && object_test_run(clang, output, errors) == 0;
+    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0 && asm_test_tool(clang, clang_source, output, errors) == 0;
     Arena files = arena_reserve(1ull << 28);
     const String8 a = object_test_read_file(&files, object);
     const String8 b = object_test_read_file(&files, scalar_object);
@@ -978,7 +1000,8 @@ static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
     char* arguments[] = {"as", "--64", "-o", object, source, 0};
-    bool same = object_write_file(source, (const uint8_t*)probe, sizeof(probe) - 1) == OBJECT_ERROR_NONE && object_test_run(arguments, output, errors) == 0;
+    unlink(object);
+    bool same = object_write_file(source, (const uint8_t*)probe, sizeof(probe) - 1) == OBJECT_ERROR_NONE && oracle_epoch_file(source) && asm_test_tool(arguments, object, output, errors) == 0;
     const String8 bytes = same ? object_test_read_file(&test->vector, object) : (String8){0};
     ObjectView view;
     char error[256] = {0};
@@ -1082,7 +1105,8 @@ static void asm_test_preprocessed_spacing(AsmTest* test, const char* directory)
     {
         char* preprocess[] = {"/proc/self/exe", "-E", "-P", "-x", "assembler-with-cpp", "-o", printed, input, scalar ? "--scalar" : 0, 0};
         char* assemble[] = {"as", "--64", "-o", object, printed, 0};
-        bool okay = written && object_test_run(preprocess, output, errors) == 0 && object_test_run(assemble, output, errors) == 0;
+        unlink(object);
+        bool okay = written && object_test_run(preprocess, output, errors) == 0 && oracle_epoch_file(printed) && asm_test_tool(assemble, object, output, errors) == 0;
         const String8 bytes = okay ? object_test_read_file(&files, object) : (String8){0};
         ObjectView view;
         char difference[256] = {0};
@@ -1155,6 +1179,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
 
 static int run_assembler_tests(int count, char** arguments)
 {
+    const bool epoch = oracle_epoch_begin();
     uint64_t seed = 1;
     uint32_t fuzz = 2000;
     bool cross_check = false;
@@ -1424,5 +1449,7 @@ static int run_assembler_tests(int count, char** arguments)
     arena_release(&test.scalar);
     arena_release(&test.vector);
     arena_release(&arena);
+    oracle_cache_report(oracle_cache(), "test-assembler");
+    oracle_epoch_end(epoch);
     return valid && test.failures == 0 ? 0 : 1;
 }

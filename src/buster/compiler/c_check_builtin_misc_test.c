@@ -456,6 +456,7 @@ static void check_builtin_misc_test_clang(CheckBuiltinMiscTest* test, const char
 
 static __attribute__((unused)) int run_check_builtin_misc_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinMiscTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -487,5 +488,7 @@ static __attribute__((unused)) int run_check_builtin_misc_tests(int argc, char**
         check_builtin_misc_test_clang(&test, clang);
     }
     printf("test-check-builtins-misc: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-misc");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }
