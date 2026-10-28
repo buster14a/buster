@@ -17,6 +17,11 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`ir_rebuild.c` and the `ir_reduce*.c` test/tool family (#733) are original
+project C under Apache-2.0 WITH LLVM-exception. They use this repository's
+public IR, verifier, optimizer and interpreter interfaces; no external reducer,
+compiler implementation or upstream test fixture was imported.
+
 `c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
 associated declaration/ELF integration (#620) are original project material
 under the default terms. Clang is an external behavior and object-format oracle;

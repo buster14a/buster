@@ -524,6 +524,11 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
+#include "buster/compiler/ir_rebuild.c"
+#include "buster/compiler/ir_reduce.c"
+#include "buster/compiler/ir_reduce_oracle.c"
+#include "buster/compiler/ir_reduce_test.c"
+#include "buster/compiler/ir_reduce_driver.c"
 #include "buster/compiler/ir_optimize_inline.c"
 #include "buster/compiler/ir_optimize_inline_test.c"
 #include "buster/compiler/ir_optimize_test.c"
@@ -1242,6 +1247,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-parse") == 0)
     {
         result = run_ir_parse_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-reduce") == 0)
+    {
+        result = run_ir_reduce_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "reduce-ir") == 0)
+    {
+        result = run_ir_reduce(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-interpreter") == 0)
     {

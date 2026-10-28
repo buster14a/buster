@@ -197,6 +197,9 @@ designs and the compilers already built this way.
 
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
   paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
+  `test-ir-reduce` checks deterministic structural reduction, exact failure classes,
+  allocation rollback and canonical replay; `reduce-ir` writes a new reproducer
+  bundle without requiring the C frontend. See [IR reduction](docs/ir-reduce.md).
   `interpreter.c` and `ir_interpreter.c` execute typed streams and shared IR
   with explicit arena frames; `interpreter_native.c` supplies the SysV host
   boundary and `interpreter_link.c` materializes data atoms. Their commands are
