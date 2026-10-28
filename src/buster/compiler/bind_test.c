@@ -284,7 +284,7 @@ static bool bind_test_same_binds(const Bind* a, const Bind* b)
 {
     const uint32_t words = (a->runtime->member_count + 63) / 64;
     bool result = a->error == b->error && a->name == b->name && (a->error != BIND_ERROR_MEMBER_UNDEFINED || a->member == b->member) &&
-                  a->libraries_needed == b->libraries_needed && a->runtime_needed == b->runtime_needed &&
+                  a->libraries_needed == b->libraries_needed && a->runtime_needed == b->runtime_needed && a->gcc_s_needed == b->gcc_s_needed &&
                   a->import_count == b->import_count && a->export_count == b->export_count &&
                   memcmp(a->imports, b->imports, a->import_count * sizeof(SymbolId)) == 0 && memcmp(a->exports, b->exports, a->export_count * sizeof(SymbolId)) == 0;
     for (uint32_t w = 0; result && w < words; w += 1)

@@ -823,6 +823,28 @@ What the lowering covers past scalars (#145's programs):
   the same way, and so do initializer parts with a bit width. A field whose bits
   are spread over more than 8 bytes (a packed one) is refused.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The source reader's declaration handoff retains the half-open append range
+  of VLA records introduced by its specifiers and declarator. Only that range
+  is associated and given the declaration's scope; reusing a typedef creates
+  no new bound or capture. A suspended `typeof` specifier saves the range's
+  beginning across its source walk. A definition retains its header's range
+  until parameter activation, and deferred-body cuts save it for each lane,
+  whose private record table also contains other headers. The original
+  declaration-token/body filters still exclude nested prototypes. These ranges
+  use scalar indices, require no allocation or padded access, and are empty
+  for declarations without new bounds. One-bound declarations visit one record
+  each instead of all earlier records (#611); the small, ordered span updates
+  retain the existing scalar record layout and stable bound identities.
+  Empty ranges still validate variably modified declarations and retain their
+  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
+  34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
+  instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
+  The SQLite control adds 0.0112% instructions and shows mixed, small timing
+  changes within process/copy variability. The
+  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/b5a850b6171da718b16feb4db341109476e3db19/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
+  record exact sources and limits, five byte-identical baseline/head objects
+  and their stage receipts ([performance PR #27](https://github.com/buster14a/buster-performance/pull/27)).
   The control stream puts a `STACK_SAVE` before each block's first array, an
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
@@ -1284,6 +1306,46 @@ they do per token where little of it was per declaration or expression:
 - **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
   distinct identifier, refuses a name that doesn't start with `__` before it
   scans its catalog, whose names all do (`test-preprocessor` checks it).
+
+Both ordinary and declaration-time `_Generic` readers use the same association
+index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
+nominal struct or union use that tag as a necessary compatibility key. Other
+types share an ambiguous key: enums and integers, function prototypes,
+transparent-union parameters and the two vector kinds still receive exact
+source-position-aware compatibility checks. Qualifiers and alignment never
+replace those checks. The control's key also filters provably incompatible
+control matches.
+
+The producer appends associations in source order into scratch-owned key and
+type columns. Each hash probe compares sixteen owned keys at once; the scalar
+twin computes the same candidate and empty masks. Equal-key candidates stay in
+insertion order through collisions and wraparound, so the first failing
+association and expression/warning handling keep their existing order. Up to
+eight associations use local storage; larger lists reserve a bounded,
+at-most-half-full table from the token span. Allocation and sizing failures
+propagate as resource failures, and each reader restores its scratch mark.
+The index records exact duplicate and control compatibility-query counts.
+
+For A distinct nominal tags, including pointers to forward-declared tags,
+duplicate validation makes zero compatibility queries; a control with one of
+those keys needs one exact query. Hash probing and input reading remain. This
+is a bounded improvement for the nominal families in #602; a large family
+sharing an ambiguous key can still require quadratic compatibility work.
+`test-checker` compares the index with independent pairwise semantic queries,
+checks source-time transparent unions, guarded groups, collisions, exhaustion
+and the query-count bound, and checks both source readers against Clang.
+
+On the locked 9700X (CPU 2, one lane, six repeated fresh-process samples),
+10,000 pointer associations went from 738.960 to 12.474 ms in an ordinary
+expression and from 785.990 to 58.097 ms in a declaration-time constant.
+Duplicate compatibility queries fell from 49,995,000 to zero in both readers,
+and control queries from 10,000 to one. The complete constant-expression
+compile still grows faster than linearly; this removes its quadratic
+association-compatibility work, without claiming every other operation is
+linear. SQLite's control instructions were effectively unchanged. The
+[source pins, full scaling/RSS/instruction table, exact-query logs and validation](https://github.com/buster14a/buster-performance/blob/b6424ad152a7cdc49ee9d3ca89e66ac850c90dbb/docs/measurements/generic-association-index-602-2026-10-27/README.md)
+retain both record and pointer families, scalar/vector/native equivalence and
+the experiment's limits.
 
 `test-checker` checks every scan, count and syntax bit, by both paths,
 against its own reading of columns of every length to 200 that end at a

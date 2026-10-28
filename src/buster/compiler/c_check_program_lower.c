@@ -91,7 +91,8 @@ struct CheckProgramLowered
     uint32_t token;
     uint32_t backend_node;
     // What a failure was about, for its diagnostic: the feature CHECK_PROGRAM_UNSUPPORTED names, or the rule of
-    // tier0_validate's that a lowered function broke (CHECK_PROGRAM_INVALID). NULL when nothing names it.
+    // tier0_validate's that a lowered function broke (CHECK_PROGRAM_INVALID), or an exhausted capacity's name
+    // (CHECK_PROGRAM_RESOURCE). NULL when nothing names it.
     const char* reason;
     uint64_t entries;
     uint64_t output_bytes;
@@ -354,6 +355,16 @@ static void check_lower_fail(CheckLowerWriter* writer, CheckProgramStatus status
         writer->output->status = status;
         writer->output->token = writer->token;
     }
+}
+
+// Keep a hard limit distinct from the writer's allocated storage, and preserve the first failure through rollback.
+static void check_lower_resource(CheckLowerWriter* writer, const char* reason)
+{
+    if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        writer->output->reason = reason;
+    }
+    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
 }
 
 // A construct the backend doesn't take yet, named for the diagnostic (#145: a program outside the subset fails with
@@ -848,7 +859,7 @@ static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter*
         // reading or changing the pending value, and works for narrow, floating and pointer classes alike.
         if (writer->count + 2 >= writer->capacity || writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES)
         {
-            check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            check_lower_resource(writer, writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
         }
         else
         {
@@ -881,7 +892,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
     }
     else if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, count >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
     }
     else if (writer->track)
     {
@@ -1078,7 +1089,7 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
     }
     else
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, local >= BUSTER_TIER0_MAX_LOCALS ? "Tier 0 per-function local limit" : "lowering local storage");
     }
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
@@ -1111,7 +1122,7 @@ static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint
     }
     else
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, local >= BUSTER_TIER0_MAX_LOCALS ? "Tier 0 per-function local limit" : "lowering local storage");
     }
     return local;
 }
@@ -5170,8 +5181,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
     // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
-    valid = valid && abi_initialize_types(&shared->table, scratch, types, 16, types->types.count);
-    if (valid)
+    // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
+    // table, so a unit without a body needs neither its columns nor its classifications (#613).
+    valid = valid && (program->body_count == 0 || abi_initialize_types(&shared->table, scratch, types, 16, types->types.count));
+    if (valid && program->body_count != 0)
     {
         if (scalar)
         {
