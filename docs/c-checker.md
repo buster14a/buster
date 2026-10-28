@@ -1468,6 +1468,25 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+The source driver caps its published errors as Clang 23 does (#669): nineteen
+ordinary errors by default, followed, only if another error occurs, by the fatal
+`too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
+ordinary errors before that fatal diagnostic, and zero leaves them unlimited.
+Warnings do not consume the error budget; each accepted diagnostic keeps its
+macro notes, while the cutoff has neither a location nor notes. Suppressed
+warnings (`-w`) do not enter the counts. The final line gives the published
+warning and error totals with Clang's singular/plural spelling; clean units print
+no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
+does in Clang. Both output paths share the publication gate, including deferred
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
+graph's construction.
+
+Collection still has two pre-existing recovery boundaries: a preprocessing
+error prevents semantic collection of earlier source (#698), and an undeclared
+identifier can leave later independent expression warnings outside the safe
+graph prefix (#699). The publication limit does not supply those missing
+diagnostics or establish a combined source-order merge across stages.
+
 ### What the lowering costs (#531)
 
 On the 9700X, the lowering (`check_lower_prepare`, then the bodies'

@@ -2825,6 +2825,8 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+#include "c_checker_driver_limit_test.c"
+
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
 static void check_test_driver_reuse(CheckTest* test, const char* directory)
@@ -3296,6 +3298,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
