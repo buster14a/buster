@@ -19,6 +19,8 @@
 // A source-dialect extension may accept a foldable integer where a strict ICE is required. Keep this request
 // separate from the value's strict ICE flag; discarded operands must not make a nonconstant evaluated path valid.
 #define BUSTER_CHECK_CONTEXT_GNU_CONSTANT 0x08u
+// Source value evaluation without a new constraint report: initializer planning owns its diagnostics.
+#define BUSTER_CHECK_CONTEXT_VALUE 0x10u
 
 typedef struct CheckVarargsCall CheckVarargsCall;
 struct CheckVarargsCall
@@ -58,6 +60,12 @@ struct CheckBuiltinCall
 };
 
 typedef struct CheckGraph CheckGraph;
+typedef struct CheckConstWarning CheckConstWarning;
+struct CheckConstWarning
+{
+    uint32_t node;
+    CheckWarningEvent event;
+};
 typedef struct CheckX86Call CheckX86Call;
 struct CheckX86Call
 {
@@ -154,6 +162,10 @@ struct CheckGraph
     TypeId* types;
     uint32_t* members;
     uint8_t* contexts;
+    // Completed source initializer receipts. Null keeps ordinary graph checking free of receipt state.
+    const CheckConstValues* const_values;
+    const CheckConstWarning* const_warnings;
+    uint32_t const_warning_count;
     // Optional lexical FENV_ACCESS state. Zero/null means the translation environment; source constants remain
     // separate from the runtime dependence carried by BUSTER_CHECK_FP_ENVIRONMENT on checked values.
     uint8_t* fp_environments;
@@ -465,6 +477,10 @@ struct CheckOverloadAddressEffect
 struct CheckStream
 {
     const CheckGraph* graph;
+    CheckWarningEvents warning_events;
+    // Output-owned dependency closure of explicit ICE/assert/static contexts, only with const_values.
+    // The borrowed graph and its designator leaves are never rewritten to publish this proof.
+    uint8_t* constant_evaluated;
     // Node-indexed typed postorder output. The graph supplies operator, operand and source identity.
     CheckValue* values;
     CheckNodeConversions* conversions;
@@ -927,7 +943,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     }
     result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
     result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
-    result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)) == 0);
+    result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC |
+                                                                       BUSTER_CHECK_CONTEXT_GNU_CONSTANT | BUSTER_CHECK_CONTEXT_VALUE)) == 0);
     result = result && (graph->fp_environments == NULL || (graph->fp_environments[node] & ~BUSTER_CHECK_FP_ENV_ACCESS) == 0);
     result = result && (graph->warning_suppressed == NULL ||
                         (graph->warning_suppressed[node] & ~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
@@ -1121,7 +1138,8 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
     if (graph->contexts != 0)
     {
         const __m512i contexts = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->contexts + node)));
-        valid &= _mm512_testn_epi32_mask(contexts, _mm512_set1_epi32((int)~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)));
+        valid &= _mm512_testn_epi32_mask(contexts, _mm512_set1_epi32((int)~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC |
+                                                                       BUSTER_CHECK_CONTEXT_GNU_CONSTANT | BUSTER_CHECK_CONTEXT_VALUE)));
     }
     if (graph->fp_environments != NULL)
     {
@@ -1261,6 +1279,8 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         .source_position = graph->source_positions != 0 ? graph->source_positions[node] : BUSTER_CHECK_NONE,
         .extensions = graph->extensions | (check_graph_system_token(graph, graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0),
         .fp_environment = graph->fp_environments != NULL ? graph->fp_environments[node] : 0,
+        .const_values = graph->const_values,
+        .constant_evaluated = stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0,
     };
     if (action->op == CHECK_OP_MEMBER && graph->vector_member_count != 0)
     {
@@ -1311,6 +1331,47 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
         action->arguments = arguments;
         action->argument_conversions = action->argument_count != 0 ? stream->argument_conversions + offset : 0;
     }
+}
+
+// Context consumers use this converted copy; ordinary stream values remain address-bearing designators.
+// In particular a bare case/member/initializer lvalue needs a load even though its node has no consuming action.
+static CheckValue check_graph_context_value(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    CheckValue value = node < stream->count && stream->values != NULL ? stream->values[node] : (CheckValue){ 0 };
+    const TypeId plain = graph->const_values != NULL ? check_const_plain(types, value.type) : 0;
+    if (node < graph->count && value.category == CHECK_LVALUE && graph->const_values != NULL &&
+        stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0 && plain != 0 &&
+        !type_kind_is_array(type_kind(types, plain)))
+    {
+        const uint8_t kind = type_kind(types, type_strip_aligned(types, value.type));
+        const bool volatile_read = (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                                   (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+        CheckValue loaded = { 0 };
+        const bool known = !volatile_read && value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_INACTIVE_UNION_READ) == 0 &&
+                           (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
+                           check_const_load(types, graph->const_values, value.object, value.offset, value.object_bit_offset, value.bit_width,
+                                            value.type, graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE, &loaded);
+        if (known)
+        {
+            check_action_inherit(&loaded, &value);
+            loaded.flags |= value.flags & BUSTER_CHECK_BIT_FIELD;
+            loaded.bit_width = value.bit_width;
+            value = loaded;
+        }
+        else if (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_ICE) == 0)
+        {
+            value.constant_kind = CHECK_CONSTANT_NONE;
+        }
+        if (volatile_read || (kind == BUSTER_TYPE_KIND_ATOMIC && !known))
+        {
+            value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+            value.constant_kind = CHECK_CONSTANT_NONE;
+        }
+        value.type = plain;
+        value.category = CHECK_RVALUE;
+        value.flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
+    }
+    return value;
 }
 
 static void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
@@ -1607,6 +1668,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .tag_completion_count = action->tag_completion_count,
             .source_position = action->source_position,
             .extensions = action->extensions,
+            .const_values = action->const_values,
+            .constant_evaluated = action->constant_evaluated,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
@@ -1652,6 +1715,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .tag_completion_count = action->tag_completion_count,
                 .source_position = action->source_position,
                 .extensions = action->extensions,
+                .const_values = action->const_values,
+                .constant_evaluated = action->constant_evaluated,
             };
             CheckBuiltinMathResult checked;
             check_builtin_math(types, &input, &checked, 1);
@@ -1722,6 +1787,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .tag_completion_count = action->tag_completion_count,
                 .source_position = action->source_position,
                 .extensions = action->extensions,
+                .const_values = action->const_values,
+                .constant_evaluated = action->constant_evaluated,
                 .nan_payload = witness != NULL ? witness->nan_payload : NULL,
                 .nan_payload_length = witness != NULL ? witness->nan_payload_length : 0,
                 .nan_payload_known = witness != NULL && witness->nan_payload_known,
@@ -2355,13 +2422,14 @@ static bool check_graph_gnu_constant(uint32_t context, const CheckValue* value)
 }
 
 // Whether `node` has a warning or a GNU constant where an ICE is required, which check_graph_warning_contexts must place.
-static bool check_graph_warning_needed(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+static bool check_graph_warning_needed(TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
     const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
-    return stream->warnings[node] != 0 || check_graph_gnu_constant(context, stream->values + node);
+    const CheckValue value = context != 0 ? check_graph_context_value(types, graph, stream, node) : stream->values[node];
+    return stream->warnings[node] != 0 || check_graph_gnu_constant(context, &value);
 }
 
-static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
+static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
 {
     (void)scalar;
     stream->warning_count = 0;
@@ -2381,12 +2449,12 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
         }
         for (uint32_t lanes = candidates; !needed && lanes != 0; lanes &= lanes - 1)
         {
-            needed = check_graph_warning_needed(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+            needed = check_graph_warning_needed(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
         }
     }
     for (; !needed && node < graph->count; node += 1)
     {
-        needed = check_graph_warning_needed(graph, stream, node);
+        needed = check_graph_warning_needed(types, graph, stream, node);
     }
     if (!needed)
     {
@@ -2424,8 +2492,9 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
         const uint32_t required = CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE;
         stream->warnings[node] &= ~((states[node] & 2) == 0 ? unevaluated : (states[node] & 4) != 0 ? required : 0);
         stream->warnings[node] &= ~(graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
-        const CheckValue* value = stream->values + node;
-        if (check_graph_gnu_constant(context, value))
+        const CheckValue converted = context != 0 ? check_graph_context_value(types, graph, stream, node) : stream->values[node];
+        const CheckValue* value = &converted;
+        if (check_graph_gnu_constant(context, value) && (value->flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
         {
             stream->warnings[node] |= CHECK_WARNING_GNU_CONSTANT;
             stream->warning_ignored[node] |= CHECK_WARNING_GNU_CONSTANT;
@@ -2434,12 +2503,13 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
         const CheckOp op = graph->ops[node];
         uint32_t mask = UINT32_MAX;
         bool truth = false;
+        const bool selection = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+        const CheckValue condition = selection ? check_graph_context_value(types, graph, stream, graph->operand0[node]) : (CheckValue){ 0 };
         if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
         {
             mask = 0;
         }
-        else if ((op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR) &&
-                 check_action_truth(types, stream->values + graph->operand0[node], &truth))
+        else if (selection && check_action_truth(types, &condition, &truth))
         {
             mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3 : 5) :
                    ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1 : 3;
@@ -2464,10 +2534,44 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
 }
 
 // A node's report: its action's diagnostic, or in a context, its value's fault or what the context requires of it.
-static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream, uint32_t node)
+static bool check_graph_const_warnings(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, Arena* output)
 {
-    const CheckValue* value = stream->values + node;
-    const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
+    CheckWarningBuffer warnings = { .arena = output };
+    bool valid = graph->const_warning_count == 0 ||
+                 (graph->const_warnings != NULL && graph->contexts != NULL && graph->const_warning_count <= graph->count);
+    CheckStatus status = valid ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
+    for (uint32_t i = 0; valid && i < graph->const_warning_count; i += 1)
+    {
+        const CheckConstWarning* request = graph->const_warnings + i;
+        valid = request->node < graph->count;
+        status = valid ? status : CHECK_STATUS_INVALID_GRAPH;
+        if (valid && stream->diagnostics[request->node] == CHECK_DIAG_NONE)
+        {
+            const CheckValue value = check_graph_context_value(types, graph, stream, request->node);
+            if ((value.flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 && check_graph_gnu_constant(graph->contexts[request->node], &value))
+            {
+                valid = check_warning_append(&warnings, &request->event, NULL, 0);
+                status = valid ? status : CHECK_STATUS_RESOURCE;
+            }
+        }
+    }
+    if (valid)
+    {
+        stream->warning_events = check_warning_view(&warnings);
+    }
+    else
+    {
+        stream->status = status;
+    }
+    return valid;
+}
+
+static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+{
+    const uint8_t context = graph->contexts != 0 ? graph->contexts[node] & (uint8_t)~BUSTER_CHECK_CONTEXT_VALUE : 0;
+    const CheckValue converted = context != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE ?
+                                 check_graph_context_value(types, graph, stream, node) : stream->values[node];
+    const CheckValue* value = &converted;
     if (stream->diagnostics[node] != CHECK_DIAG_NONE)
     {
         // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
@@ -2502,7 +2606,7 @@ static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream
     }
 }
 
-static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
+static void check_graph_reports(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
 {
     (void)scalar;
 
@@ -2518,12 +2622,12 @@ static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, Ch
         }
         for (uint32_t lanes = reported; lanes != 0; lanes &= lanes - 1)
         {
-            check_graph_report_node(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+            check_graph_report_node(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
         }
     }
     for (; node < graph->count; node += 1)
     {
-        check_graph_report_node(graph, stream, node);
+        check_graph_report_node(types, graph, stream, node);
     }
     // Diagnostics are cold. Four stable radix passes restore source-token order without callbacks or recursion.
     CheckReport* source = stream->reports;
@@ -2576,6 +2680,37 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
         found = stream->diagnostics[node] == CHECK_DIAG_RESOURCE ? node : BUSTER_CHECK_NONE;
     }
     return found;
+}
+
+// Valid graphs are in postorder: one reverse pass marks each required context and all of its dependencies.
+// This proof changes no graph column and is retained with the output rather than in the scheduler's scratch.
+static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* marks)
+{
+    memset(marks, 0, graph->count);
+    for (uint32_t node = graph->count; node-- > 0;)
+    {
+        marks[node] |= graph->contexts != NULL && (graph->contexts[node] &
+            (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
+        if (marks[node] != 0)
+        {
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < 3; i += 1)
+            {
+                if (operands[i] != BUSTER_CHECK_NONE)
+                {
+                    marks[operands[i]] = 1;
+                }
+            }
+            if (check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
+            {
+                const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+                for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
+                {
+                    marks[graph->argument_nodes[first + i]] = 1;
+                }
+            }
+        }
+    }
 }
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
@@ -2633,6 +2768,11 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     const uint32_t maximum_effects = validation.maximum_effects;
     const uint32_t* maximum_builtins = validation.builtins;
     CheckValue* arguments = result && maximum_arguments != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, maximum_arguments) : 0;
+    bool constant_contexts = false;
+    for (uint32_t node = 0; result && graph->const_values != NULL && graph->contexts != NULL && !constant_contexts && node < count; node += 1)
+    {
+        constant_contexts = (graph->contexts[node] & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
+    }
     if (result && count != 0)
     {
         stream->values = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
@@ -2643,6 +2783,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
+        stream->constant_evaluated = constant_contexts ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : NULL;
         stream->argument_conversions = graph->argument_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckConversion, graph->argument_count) : 0;
         stream->effects = maximum_effects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckStoreEffect, maximum_effects) : 0;
         stream->varargs = graph->varargs_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckVarargsEffect, graph->varargs_count) : 0;
@@ -2659,6 +2800,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
                  stream->warnings != 0 &&
                  stream->warning_ignored != 0 && stream->reports != 0 &&
+                 (!constant_contexts || stream->constant_evaluated != NULL) &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&
                  (maximum_builtins[0] == 0 || stream->misc != 0) && (maximum_builtins[1] == 0 || stream->floating != 0) &&
@@ -2683,6 +2825,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->warning_ignored, 0, (size_t)count * sizeof(*stream->warning_ignored));
             memset(stream->diagnostic_operands, 0, (size_t)count * sizeof(*stream->diagnostic_operands));
+            if (constant_contexts)
+            {
+                check_graph_constant_contexts(graph, stream->constant_evaluated);
+            }
         }
         if (stream->argument_conversions != 0)
         {
@@ -2745,7 +2891,11 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
             {
                 check_graph_warning_contexts(types, graph, stream, pure, BUSTER_SCALAR_PATH(options->scalar));
             }
-            check_graph_reports(graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
+            result = check_graph_const_warnings(types, graph, stream, output);
+            if (result)
+            {
+                check_graph_reports(types, graph, stream, reports, BUSTER_SCALAR_PATH(options->scalar));
+            }
         }
     }
     if (!result)

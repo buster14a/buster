@@ -94,7 +94,7 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
 // *definition is the definition's keyword and *job the job, and the caller reads the definition
 // (check_input_tag_definition, or a tag frame of its own) before it calls this again for the bound, which goes on with
 // the job. Otherwise *definition is BUSTER_CHECK_NONE and *job 0.
-static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter, bool star,
+static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, uint32_t name, bool parameter, bool star,
                                   CheckConstantInput** job, uint32_t* definition, uint8_t* kind, uint64_t* extent)
 {
     const Parser* parser = reader->parser;
@@ -130,6 +130,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
+        valid = valid && (!evaluated || check_input_const_rvalue(reader, end, &value));
         valid = valid && (!evaluated || check_action_is_integer(reader->types, value.type));
         // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
         const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
@@ -142,7 +143,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *extent = (uint64_t)number;
             if (valid)
             {
-                check_input_constant_bound_warning(reader, first, end, &value);
+                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open);
             }
         }
         else if (valid && evaluated)

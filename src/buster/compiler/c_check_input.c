@@ -30,6 +30,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOOP_PARENTHESIS,
     CHECK_INPUT_NAKED_STATEMENT,
     CHECK_INPUT_NAKED_PARAMETER,
+    CHECK_INPUT_CONSTANT_INITIALIZER,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -51,6 +52,7 @@ static const char* const check_input_messages[] =
     "unroll pragma's count unclosed",
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
+    "initializer element is not a compile-time constant",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -200,6 +202,7 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     CheckWarningEvents warning_events;
+    CheckConstValues const_values;
     uint8_t* constant_warnings;
     uint32_t constant_warning_count;
     bool constant_warnings_prepared;
@@ -462,6 +465,8 @@ struct CheckInputReader
     Arena* scratch;
     // This reader's append-only warning suffix. Lanes reset it rather than append into the top level's buffer.
     CheckWarningBuffer warning_events;
+    CheckConstBuffer const_values;
+    uint32_t const_warning_capacity;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -652,6 +657,46 @@ static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* 
         reader->output->warning_events = check_warning_view(&reader->warning_events);
     }
     return valid;
+}
+
+static void check_input_const_warning(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t completion_kind, uint32_t completion)
+{
+    CheckGraph* graph = &reader->output->graph;
+    if (graph->const_warning_count == reader->const_warning_capacity)
+    {
+        const uint32_t capacity = reader->const_warning_capacity == 0 ? 8 : reader->const_warning_capacity <= UINT32_MAX / 2 ? reader->const_warning_capacity * 2 : 0;
+        CheckConstWarning* warnings = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckConstWarning, capacity) : NULL;
+        if (warnings == NULL)
+        {
+            reader->output->resource = true;
+        }
+        else
+        {
+            if (graph->const_warning_count != 0)
+            {
+                memcpy(warnings, graph->const_warnings, (uint64_t)graph->const_warning_count * sizeof(*warnings));
+            }
+            graph->const_warnings = warnings;
+            reader->const_warning_capacity = capacity;
+        }
+    }
+    if (!reader->output->resource)
+    {
+        CheckConstWarning* warnings = (CheckConstWarning*)graph->const_warnings;
+        warnings[graph->const_warning_count++] = (CheckConstWarning){
+            .node = node,
+            .event = {
+                .id = CHECK_WARNING_ID_GNU_CONSTANT,
+                .kind = CHECK_WARNING_EVENT_GNU_ICE_FOLD,
+                .token = token,
+                .source = BUSTER_CHECK_NONE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                .completion_kind = completion_kind,
+                .completion = completion,
+                .payload = { .token = BUSTER_CHECK_NONE },
+            },
+        };
+    }
 }
 
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
@@ -1656,6 +1701,22 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                 }
                 reader->declared_types[token] = type;
                 result = &reader->output->strings[index];
+                const CheckConstObject object = {
+                    .object = token + 1,
+                    .declaration = token,
+                    .completed = end,
+                    .type = type_qualify(reader->types, type, BUSTER_TYPE_CONST),
+                    .byte_size = literal.byte_count,
+                };
+                const CheckConstPart part = {
+                    .kind = CHECK_CONST_BYTES,
+                    .type = type,
+                    .bit_count = literal.byte_count * 8,
+                    .bytes = literal.bytes,
+                    .byte_count = literal.byte_count,
+                };
+                reader->output->resource |= !check_const_append(&reader->const_values, object, &part, 1, NULL, 0);
+                reader->output->const_values = check_const_view(&reader->const_values);
             }
             else
             {
@@ -2289,7 +2350,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 // A bound that defines a struct, union or enum stops the run at each definition, with its evaluation
                 // kept for the next step, which reads the bound again from here.
                 frame->star_array |= star;
-                valid = check_input_vla_bound(reader, i, bound, close, frame->parameter_context, star, &run->bound, &run->definition, &part.kind, &part.extent);
+                valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context, star, &run->bound, &run->definition, &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
             }
             if (valid && run->definition == BUSTER_CHECK_NONE)
@@ -4830,6 +4891,8 @@ static void check_input_expressions(CheckInputReader* reader)
             {
                 graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT;
                 graph->contexts[a] |= BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+                const uint32_t completion = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_SEMI ? token + 1 : token;
+                check_input_const_warning(reader, a, keyword + 2, CHECK_WARNING_COMPLETE_AFTER_DELIMITER, completion);
             }
         }
         else if (role == PARSE_ROLE_CLOSE_CONDITION)
@@ -4912,9 +4975,16 @@ static void check_input_expressions(CheckInputReader* reader)
                 reader->output->token_nodes[token] = a;
                 reader->output->case_ranges[token] = count == 2 ? b : BUSTER_CHECK_NONE;
                 graph->contexts[a] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+                check_input_const_warning(reader, a, keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
                 if (count == 2)
                 {
                     graph->contexts[b] |= BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_GNU_CONSTANT;
+                    uint32_t range = keyword + 1;
+                    while (range < token && parser->tokens.kinds[range] != PARSE_KIND_ELLIPSIS)
+                    {
+                        range += 1;
+                    }
+                    check_input_const_warning(reader, b, range < token ? range + 1 : keyword + 1, CHECK_WARNING_COMPLETE_AT_TOKEN, token);
                 }
             }
         }
@@ -5120,6 +5190,10 @@ static void check_input_expressions(CheckInputReader* reader)
                 if (reader->static_initializers[token] && op != CHECK_OP_INITIALIZE)
                 {
                     graph->contexts[node] |= BUSTER_CHECK_CONTEXT_STATIC;
+                }
+                if (reader->static_initializers[token] && op == CHECK_OP_INITIALIZE)
+                {
+                    graph->contexts[node] |= BUSTER_CHECK_CONTEXT_VALUE;
                 }
                 if (op == CHECK_OP_INITIALIZE)
                 {
@@ -5647,6 +5721,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .arena = arena,
         .scratch = scratch,
         .warning_events = { .arena = arena },
+        .const_values = { .arena = arena },
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
@@ -5756,6 +5831,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->graph.recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
     valid &= input->graph.recorded_pure != NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
+    input->graph.const_values = &input->const_values;
     input->graph.warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : 0;
     valid &= input->graph.warning_suppressed != 0;
     input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
