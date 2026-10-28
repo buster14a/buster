@@ -381,7 +381,9 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
         const CheckInputAttribute* record = attributes->records + i;
-        attribute = record->kind == CHECK_ATTRIBUTE_SECTION && !record->ignored ? record : attribute;
+        // Within one declaration Clang keeps the first source attribute's section; a later declaration can replace
+        // that section through the ordered pass's per-object attributed event below.
+        attribute = attribute == NULL && record->kind == CHECK_ATTRIBUTE_SECTION && !record->ignored ? record : attribute;
     }
     const bool recording = position >= reader->section_record_from;
     const bool event = attribute != NULL || (recording && (function ? body : static_storage));

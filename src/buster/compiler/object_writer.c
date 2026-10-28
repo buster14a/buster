@@ -754,6 +754,16 @@ static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t adde
     return !kept && !pool;
 }
 
+// An empty name is no descriptor; validate every nonempty descriptor before comparing or hashing its name.
+static bool object_section_valid(const ObjectAtomSection* section, uint8_t class)
+{
+    return section->name.length == 0 ||
+           (section->name.pointer != 0 && section->name.length < UINT32_MAX &&
+            memchr(section->name.pointer, 0, section->name.length) == 0 &&
+            (section->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && section->type == SHT_PROGBITS)) &&
+            ((section->flags & SHF_MERGE) == 0 || section->entry_size != 0));
+}
+
 // Whether `section` is no descriptor (an empty name) or `class`'s own section's, whose atoms share that section.
 static bool object_section_is_default(const ObjectAtomSection* section, uint8_t class)
 {
@@ -864,7 +874,11 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
         const uint32_t begin = units->atom_begin[key + class] - unit_begin;
         const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
         uint32_t groups = 1;
-        if (described)
+        for (uint32_t i = begin; result && described && i < end; i += 1)
+        {
+            result = object_section_valid(&builder->options.atom_sections[units->atoms[unit_begin + i]], class);
+        }
+        if (result && described)
         {
             memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, &groups, scratch);
             result = memory;
@@ -886,13 +900,6 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
                     .alignment = 1,
                     .explicit_section = explicit,
                 };
-                if (explicit != 0)
-                {
-                    result = explicit->name.pointer != 0 && explicit->name.length != 0 && explicit->name.length < UINT32_MAX &&
-                             memchr(explicit->name.pointer, 0, explicit->name.length) == 0 &&
-                             (explicit->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && explicit->type == SHT_PROGBITS)) &&
-                             ((explicit->flags & SHF_MERGE) == 0 || explicit->entry_size != 0);
-                }
                 uint64_t offset = 0;
                 for (uint32_t i = section->atom_begin; result && i < section->atom_end; i += 1)
                 {

@@ -2206,6 +2206,31 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
     const bool prepared = made && object_prepare(&units, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, arena) && object_map_symbols(&symbols, &hand, arena);
     object_test_expect(&tally, !made || (prepared && units.count == BUSTER_OBJECT_TEST_HAND_UNITS), "object_prepare on the link made by hand", 0);
     const ObjectAtomSection* hand_named = prepared ? object_test_named_descriptors(&hand, arena) : 0;
+    // Invalid names must reject before the grouping hashes or compares them. A huge count has only one byte behind
+    // it, so checking the declared limit after a name read would cross the slice (the null cases also reach .text's
+    // default-descriptor comparison or the custom-name hash). Empty names remain the documented absent descriptor.
+    if (hand_named != 0)
+    {
+        static char embedded[] = { '.', 'x', 0, 'y' };
+        static const String8 invalid[] = {
+            { .pointer = NULL, .length = 5 },
+            { .pointer = NULL, .length = 7 },
+            { .pointer = "x", .length = UINT32_MAX },
+            { .pointer = embedded, .length = sizeof(embedded) },
+        };
+        ObjectAtomSection* bad = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, hand.atoms.count);
+        object_test_expect(&tally, bad != 0, "room for invalid section descriptor controls", 0);
+        for (uint32_t i = 0; bad != 0 && i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+        {
+            memset(bad, 0, (uint64_t)hand.atoms.count * sizeof(ObjectAtomSection));
+            bad[1] = (ObjectAtomSection){ .name = invalid[i], .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_EXECINSTR };
+            const ObjectOptions object_options = { .atom_sections = bad, .atom_section_count = hand.atoms.count };
+            const uint64_t before = arena->length;
+            const Object rejected = object_build(&hand, &units, &symbols, 0, object_options, BUSTER_S8("invalid.c"), arena);
+            object_test_expect(&tally, rejected.error == OBJECT_ERROR_RANGE && rejected.bytes == 0 && arena->length == before,
+                               "a malformed section descriptor rejects before grouping and leaves no output", i);
+        }
+    }
     for (uint32_t sections = 0; hand_named != 0 && sections < 4; sections += 1)
     {
         const ObjectOptions object_options = {

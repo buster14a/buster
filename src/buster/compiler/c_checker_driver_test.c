@@ -3002,6 +3002,13 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "an attribute over a setting", "#pragma clang section text = \".t\"\n__attribute__((section(\".own\"))) int f(void) { return 1; }\nint g(void) { return f() + 1; }\n" },
         { "a function in another kind's section", "int f(void) __attribute__((section(\".data\")));\nint f(void) { return 1; }\nint g = 1;\nint main(void) { return f() + g - 2; }\n" },
         { "a variable's own section", "int g __attribute__((section(\".data.mine\"))) = 1;\nint main(void) { return g - 1; }\n" },
+        { "the first section in one attribute list", "int x __attribute__((section(\".a\"), section(\".b\"))) = 17;\nint main(void) { return x - 17; }\n" },
+        { "the first section across a declaration's groups", "__attribute__((section(\".a\"))) int x __attribute__((section(\".b\"))) = 17;\n"
+                                                                   "int main(void) { return x - 17; }\n" },
+        { "a later declaration replaces its section", "extern int x __attribute__((section(\".a\")));\nextern int x __attribute__((section(\".b\")));\n"
+                                                        "int x = 17;\nint main(void) { return x - 17; }\n" },
+        { "a function's first section in one list", "int f(void) __attribute__((section(\".a\"), section(\".b\")));\n"
+                                                    "int f(void) { return 17; }\nint main(void) { return f() - 17; }\n" },
         { "a zero-filled variable's section is data", "int z __attribute__((section(\".mine\"))) = 0;\nint main(void) { return z; }\n" },
         { "a zero-filled variable in a .bss", "int z __attribute__((section(\".bss.mine\")));\nint main(void) { return z; }\n" },
         { "a constant's section", "const int c __attribute__((section(\".rodata.mine\"))) = 1;\nint main(void) { return c - 1; }\n" },
