@@ -72,7 +72,7 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         "int x=1<<32\n#warning before_semicolon\n;\n#warning after_semicolon\nint first(void){return missing;}\n",
         "enum { A=2147483647+1\n#warning inside_enum\n};\nint first(void){return missing;}\n",
         "int array[1]={1,2}\n#error after_initializer\n;\n",
-        "struct P{int x;};\nint f(void){struct P p={.x=(int[1]){1,2}[0]\n#warning after_inner\n};return p.x;}\n",
+        "struct P{int x;};\nint f(void){struct P p={.x=(int[1]){1,2}[0]\n#warning after_inner\n};return p.x;}\nint bad(void){return missing;}\n",
     };
     static const char* const limits[] = { NULL, "-ferror-limit=0", "-ferror-limit=1", "-ferror-limit=2", "-ferror-limit=20" };
     static const char* const policies[] = { NULL, "error", "ignored", "-w" };
@@ -245,9 +245,11 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
                 text = NULL;
                 const int status = check_test_driver_spawn(checked, &text);
                 const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                char description[160];
+                snprintf(description, sizeof(description), "independent constraint=%u limit=%u route=%u keeps Clang counts, order and budget", constraint, limit, route);
                 check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
                                        actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
-                                       strcmp(actual.summary, expected.summary) == 0, "independent completed constraint keeps Clang counts, order and error budget");
+                                       strcmp(actual.summary, expected.summary) == 0, description);
                 free(text);
             }
         }
