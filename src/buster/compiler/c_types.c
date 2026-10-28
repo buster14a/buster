@@ -2704,6 +2704,9 @@ static uint32_t type_lookup_probe_scalar(const TypeLookupBucket* buckets, uint32
 // probe takes one bucket, or a few: never more than the index has.
 static uint32_t type_lookup_probe(const TypeLookupBucket* buckets, uint32_t first, uint32_t log2, uint32_t name)
 {
+#if !BUSTER_HOST_VECTOR
+    return type_lookup_probe_scalar(buckets, first, log2, name);
+#else
     const uint32_t mask = (1u << log2) - 1;
     const __m256i target = _mm256_set1_epi32((int)name);
     uint32_t bucket = type_lookup_bucket(name, log2);
@@ -2719,6 +2722,7 @@ static uint32_t type_lookup_probe(const TypeLookupBucket* buckets, uint32_t firs
         bucket = (bucket + 1) & mask;
     }
     return result;
+#endif
 }
 
 // Gives `name` the member `member` in an index, unless an earlier member has it already: the index keeps the first
@@ -3090,7 +3094,7 @@ static inline __attribute__((always_inline)) uint32_t type_lookup_member_with(co
 
 static uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
 {
-    return type_lookup_member_with(table, record, name, offset, qualifiers, false);
+    return type_lookup_member_with(table, record, name, offset, qualifiers, BUSTER_SCALAR_PATH(false));
 }
 
 static uint32_t type_lookup_member_scalar(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
