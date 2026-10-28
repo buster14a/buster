@@ -604,6 +604,48 @@ static void check_test_asm_capacity(CheckTest* test)
     intern_release(&identifiers);
 }
 
+static void check_test_asm_empty_column(CheckTest* test)
+{
+    static const char* const sources[] =
+    {
+        "int f(int x){return x+1;}",
+        "extern int f(int) __asm__(\"alias\");int g(int x){return f(x);}",
+        "int f(int x){__asm__(\"\" : \"+r\"(x));return x;}",
+    };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    for (uint32_t source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static Parser parser;
+            CheckCorpusPath path = { 0 };
+            const bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                               pp_run_source(&pp, "asm-column.c", (const uint8_t*)sources[source], strlen(sources[source])) &&
+                               check_corpus_check(&path, &parser, &pp, scalar != 0);
+            check_test_expect(test, ready, "empty and populated asm token-column sources are accepted");
+            if (ready)
+            {
+                const bool statements = source == 2;
+                check_test_expect(test, (path.input.asm_ids != NULL) == (scalar != 0 || statements) &&
+                                       path.input.asm_count == (uint32_t)statements && path.input.asm_capacity == (uint32_t)(source != 0),
+                                  "only statements require asm IDs; declaration labels keep original capacity and the scalar dense oracle");
+                uint32_t marked = 0;
+                for (uint32_t token = 0; token <= parser.tokens.count; token += 1)
+                {
+                    marked += check_input_asm_id(&path.input, token) != 0;
+                }
+                check_test_expect(test, (marked != 0) == statements, "asm ID lookups agree with zero or retained statement marks through the sentinel");
+            }
+            check_corpus_close(&path);
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+        }
+    }
+}
+
 static bool check_test_asm_fixture(CheckTest* test, CheckCorpusTally* tally, const CheckAsmFixture* source, const char* directory, const char* clang)
 {
     const PPOptions options =
@@ -837,6 +879,7 @@ static int run_checker_asm_tests(int argc, char** argv)
     }
     check_test_expect(&test, ready, "assembly fixture process and source accounting");
     check_test_asm_capacity(&test);
+    check_test_asm_empty_column(&test);
     check_test_asm_label_metadata(&test);
     oracle_cache_report(oracle, "test-checker-asm");
     printf("test-checker-asm: %" PRIu64 " checks, %" PRIu64 " failures; sources=%" PRIu64 " accepted=%" PRIu64 "\n",
