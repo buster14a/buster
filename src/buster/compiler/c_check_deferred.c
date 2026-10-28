@@ -1319,7 +1319,7 @@ static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_
         check_deferred_pass_events(pass, item);
     }
     // The items' tokens: from the end of body first - 1 to the end of body end - 1, or of the unit's last token.
-    const uint32_t begin = first == 0 ? 0 : deferred->cuts[first - 1].closing + 1;
+    const uint32_t begin = first == end || first == 0 ? 0 : deferred->cuts[first - 1].closing + 1;
     const uint32_t finish = end == first ? begin : end <= bodies ? deferred->cuts[end - 1].closing + 1 : count + 1;
     uint32_t* positions = pass->positions + begin;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pass->types); c += 1)
@@ -2155,6 +2155,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const bool hold_lanes = deferred->hold_lanes;
     const bool late_first = deferred->late_first;
     const bool every_lane = deferred->every_lane;
+    const bool scalar_merge = deferred->scalar_merge;
     const CheckDeferredMemory memory = deferred->memory;
     *deferred = (CheckDeferred){
         .memory = memory,
@@ -2163,6 +2164,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .timing = timing,
         .cpus = cpus,
         .every_lane = every_lane,
+        .scalar_merge = scalar_merge,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
         .late_first = late_first,

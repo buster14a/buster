@@ -483,6 +483,81 @@ static bool check_deferred_test_entries(void)
     return valid;
 }
 
+// A dominant trailing top-level item leaves the last lane an empty range past every item. It must not inspect the
+// unused cut after the real bodies, or form a position from it; the real cuts end at a protected page here.
+static bool check_deferred_test_empty_pass(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    if (valid)
+    {
+        enum { BODIES = 8 };
+        CheckDeferredCut* cuts = (CheckDeferredCut*)(mapping + page) - BODIES;
+        uint64_t costs[BODIES + 1];
+        for (uint32_t b = 0; b < BODIES; b += 1)
+        {
+            cuts[b] = (CheckDeferredCut){ .opening = b * 2, .closing = b * 2 + 1 };
+            costs[b] = cuts[b].closing + 1;
+        }
+        costs[BODIES] = 4097;
+        const Range64 range = range_part_by_cost(costs, BODIES + 1, 7, 8);
+        valid = range.begin == BODIES + 1 && range.end == range.begin;
+        Parser parser = { .tokens.count = 4096 };
+        CheckInput input = { 0 };
+        CheckInputReader reader = { .parser = &parser, .output = &input };
+        CheckDeferred deferred = { .cuts = cuts, .body_count = BODIES };
+        uint32_t position = UINT32_MAX;
+        CheckDeferredPass pass = { .deferred = &deferred, .reader = &reader, .positions = &position };
+        for (uint32_t vector = 0; valid && vector < 2; vector += 1)
+        {
+            pass.vector = vector != 0;
+            valid = check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    return valid;
+}
+
+// The merge's explicit scalar twin survives the state's reset, including alternation and poisoned reused storage.
+static bool check_deferred_test_merge_modes(void)
+{
+    static InternTable names;
+    static Preprocessor pp;
+    static Parser parser;
+    static CheckDeferred deferred;
+    static const char source[] = "int f(int n){return n+1;}int g(int n){return f(n)+2;}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { 0 };
+    bool valid = intern_initialize(&names) && pp_initialize(&pp, &options, &names) &&
+                 pp_run_source(&pp, "merge-modes.c", (const uint8_t*)source, sizeof(source) - 1) &&
+                 parse_initialize(&parser, &parsing, options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
+    const bool modes[] = { true, false, true };
+    for (uint32_t m = 0; valid && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        CheckTestTypes types = { 0 };
+        CheckInput input = { 0 };
+        Arena output = arena_reserve(UINT64_C(1) << 27);
+        Arena scratch = arena_reserve(UINT64_C(1) << 27);
+        deferred.scalar_merge = modes[m];
+        valid = output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
+                check_input_deferred(&deferred, &input, &parser, &pp, &types.table, &output, &scratch, 1, CHECK_INPUT_BINDINGS_DEFAULT) &&
+                !deferred.unsupported && deferred.scalar_merge == modes[m];
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        check_deferred_poison(&deferred, 0xa5);
+    }
+    check_deferred_release(&deferred);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&names);
+    return valid;
+}
+
 // The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
 // from the rule (docs/c-deferred-bodies.md, "How many lanes").
 static uint64_t check_deferred_test_lane_tokens(uint64_t top)
@@ -984,6 +1059,20 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!entries)
     {
         fprintf(stderr, "test-checker-deferred: the merge's scans of a column's tokens and their scalar twins differ\n");
+    }
+    const bool empty_pass = check_deferred_test_empty_pass();
+    checks += 1;
+    failures += !empty_pass;
+    if (!empty_pass)
+    {
+        fprintf(stderr, "test-checker-deferred: an empty merge share reads past the real cuts or writes positions\n");
+    }
+    const bool merge_modes = check_deferred_test_merge_modes();
+    checks += 1;
+    failures += !merge_modes;
+    if (!merge_modes)
+    {
+        fprintf(stderr, "test-checker-deferred: the requested scalar merge mode is lost across state reuse\n");
     }
     const bool memory = check_deferred_test_memory();
     checks += 1;
