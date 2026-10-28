@@ -568,7 +568,7 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     char message[256];
     if (code->status == CHECK_PROGRAM_RESOURCE)
     {
-        snprintf(message, sizeof(message), "code output capacity exhausted");
+        snprintf(message, sizeof(message), "code output capacity exhausted%s%s", code->reason != NULL ? ": " : "", code->reason != NULL ? code->reason : "");
     }
     else if (code->status == CHECK_PROGRAM_UNSUPPORTED)
     {
@@ -597,6 +597,19 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
 // With `debug` (-g), the object carries DWARF: the unit the executable's would (c_check_debug.c), relocated against the
 // functions' sections (ObjectOptions.debug); and with `unwind`, its functions' unwind tables (check_program_emit's). With
 // `stage_clock` (--time-stages), its passes' times.
+// The share is of evaluated expression occurrences, including repeated graph uses, rather than all checked nodes
+// (which include unused functions and unevaluated expressions). Only --time-stages asks for the report.
+static void check_driver_lower_report(const CheckProgramCode* code, const CheckClock* stage_clock)
+{
+    if (stage_clock != NULL && code->status == CHECK_PROGRAM_OK)
+    {
+        const uint64_t nodes = code->lowered.expression_nodes;
+        const uint64_t batch = code->lowered.batch_nodes;
+        fprintf(stderr, "lowering-nodes\tevaluated=%" PRIu64 "\tbatched=%" PRIu64 "\tshare=%.2f%%\tclassified=%" PRIu64 "\n", nodes, batch,
+                nodes != 0 ? 100.0 * (double)batch / (double)nodes : 0.0, code->lowered.classified_nodes);
+    }
+}
+
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
@@ -613,6 +626,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     bool valid = output.base != 0 && bytes.base != 0 &&
                  check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL,
                                           unwind, verify, lanes, stage_clock);
+    check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -897,6 +911,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 check_driver_emission_failed(parser, pp, &code);
             }
         }
+        check_driver_lower_report(&code, stage_clock);
         if (valid && debug)
         {
             valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);

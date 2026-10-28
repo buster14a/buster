@@ -166,6 +166,71 @@ a block-scope static, `.compoundliteral` for a file-scope compound literal, and
 source, an identifier or an asm label, as LLVM makes a name unique in its
 module), so that tools and the comparisons below read them alike.
 
+## Straight-line expression templates (#624)
+
+`c_check_program_batch.c` handles reached operation fragments before the general
+task loop expands them. The original
+scalar expression expansion remains the oracle (`--scalar`).
+
+Ordinary unary and binary operations can join their immediately preceding leaf
+operands when their consuming edges need no conversion. Bounded gathers and
+byte permutes classify the partial vector of operator/type records, up to 16
+rows per invocation. A fragment of at most four rows uses scalar type loads and
+a 256-bit two-table byte permute; larger vectors use bounded gathers. Each 32-bit result word carries kind, class and type
+facts in registers. Reached leaves supply their payloads. Occupied slots form
+a mask, whose prefix popcounts give output positions; register compression
+and masked stores expand the slots into the kind, class and value columns. A wrapper has no final slot.
+The join proves evaluation order, entry room and a conservative bound on the
+original task stack before publishing a bulk write. There is no graph-sized
+workspace, persistent plan or recursive traversal.
+
+Standalone `VALUE` nodes retain the original expression handler, including
+addresses, storage flags and VLA indirection. Proven integer constants use a
+scalar template and a packed type lookup. Casts, selections and truth tests
+with no constant annotation directly schedule their checked operand through
+the original conversion and truth helpers. These scalar paths retain tracked
+emission and are excluded from the reported vector share. Empty conversion
+queries use the packed class/fact lookup too; the separate columns remain its
+scalar twin.
+
+Other shapes keep the scalar task rules, including their conversions and
+resource failures. Constant proofs skip the same children. Calls, builtins,
+bit-fields, pointer arithmetic, short-circuit and conditional expressions,
+memory classes, floating constants and automatic compound initialization retain
+their existing handling. Operations in tracked functions and source-row
+emission for `-g` also keep scalar expression expansion.
+
+The pending stack uses two words per task instead of a padded 32-byte C record.
+The control word holds the full node identity, kind and flags, and an
+instruction's class. Instructions, address addends, copies and complex
+operations retain all 64 payload bits; other tasks keep their full TypeId and
+32-bit local identity. Dispatch reads those words directly, with expressions
+and instructions separated from the less common task kinds. Expression
+expansion takes its node and flags directly. The codec has an independent
+field-for-field boundary test. Up to 4080 bytes of padding keep the columns
+after the task stack at the same relative offset modulo 4 KB as 32-byte tasks,
+while each active task touches 16 bytes.
+
+Classification reads only immutable checked types and operators. A neighboring
+body's mutable local map is never inspected speculatively. Payloads belong only
+to reached expressions, and counters belong to each writer's part and are
+merged in source order, without shared counters.
+
+With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
+evaluated expression occurrences, those handled by vector operation fragments,
+their percentage, and records classified. This counts repeated graph uses and
+excludes unevaluated operands and unselected definitions. Scalar leaf templates
+are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
+the original expression rules available.
+
+`test-checker` compares every column, failure and diagnostic token with the
+original expression expansion. Guarded tests cover partial vectors, folds,
+promotions, shared and reordered uses, numeric and boolean conversion chains,
+missing optional workspace, addresses, VLA indirection, compound initialization
+and a neighboring body's local map. Guarded pending stacks check mixed tasks,
+labels, every entry-capacity limit, invalid classes and untouched
+output tails. Source fixtures also compare native effects with Clang.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an
