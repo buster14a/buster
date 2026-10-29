@@ -1436,8 +1436,6 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
     return type;
 }
 
-// Specifiers are retained in source order because their inherited base type precedes declarators semantically,
-// although the parser's ordinary postorder puts their nodes after those declarators.
 // GNU C's __auto_type, the type a declaration of one variable takes from its initializer. Until the walk has read the
 // initializer (check_input_auto_type_finish), the declaration's type is this placeholder with the specifiers' const and
 // volatile: no specifiers give it otherwise, as restrict on a type other than a pointer is an error.
@@ -1504,6 +1502,8 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
     return !complex && !atomic && restrict_token == BUSTER_CHECK_NONE;
 }
 
+// Specifiers are retained in source order because their inherited base type precedes declarators semantically,
+// although the parser's ordinary postorder puts their nodes after those declarators.
 static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline)
 {
     const Parser* parser = reader->parser;
@@ -4616,7 +4616,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 uint32_t name;
                 uint32_t parameters;
                 type = check_input_declarator(reader, type, &cursor, close, &name, &parameters);
-                // At the type name's `(`, unless its specifiers or declarator reported where, as clang does.
+                // At the type name's `(`, unless its specifiers or its declarator reported at a place of their own, as
+                // clang reports them.
                 if ((type == 0 || cursor != close || name != BUSTER_CHECK_NONE || is_typedef || storage != 0 || is_inline) && reader->output->report_count == reports)
                 {
                     check_input_report(reader, i, CHECK_INPUT_DECLARATION);
