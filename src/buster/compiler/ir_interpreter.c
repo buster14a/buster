@@ -252,7 +252,8 @@ static bool ir_interpreter_symbol_address(const IrInterpreterProgram* program, S
 
 // A variadic definition's incoming arguments (#148), named and unnamed, as its call passes them: each one's value (an
 // aggregate's the address of its bytes, its place's size nonzero), IR type and place, the bytes of the call's argument
-// area, and a result's hidden pointer, which rdi holds.
+// area and its alignment, rsp's at the call (2^stack_alignment_log2, which a va_arg of an argument aligned past 16 rounds
+// its address up to), and a result's hidden pointer, which rdi holds.
 typedef struct IrInterpreterIncoming IrInterpreterIncoming;
 struct IrInterpreterIncoming
 {
@@ -262,8 +263,13 @@ struct IrInterpreterIncoming
     uint32_t count;
     uint64_t stack_bytes;
     uint64_t hidden;
+    uint8_t stack_alignment_log2;
     bool has_hidden;
 };
+
+// The most a call's argument area is aligned to (AbiCall.stack_alignment_log2), Tier 0's and Tier 1's bound: a call
+// aligned past it is refused.
+#define BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2 30u
 
 // An object representation's copy (#131's aggregates by value): `size` bytes from `source` to `destination` and each
 // byte's definedness with them, both in registered memory where memory is checked, the destination writable.
@@ -400,14 +406,15 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         };
         for (uint32_t s = 0; s < function->slot_count && status == INTERPRETER_OK; s += 1)
         {
-            // The overflow area: the call's argument area, aligned as rsp is at the call, its anchor past the named
-            // arguments' bytes, which the frame doesn't hold.
+            // The overflow area: the call's argument area, aligned as rsp is at the call (an argument's offset there,
+            // its alignment's multiple, is so its address's), its anchor past the named arguments' bytes, which the
+            // frame doesn't hold.
             const IrSlot slot = function->slots[s];
             const bool save = (slot.flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0;
             const bool overflow = (slot.flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
             const uint64_t size = overflow ? incoming->stack_bytes : slot.size;
             const uint64_t named = overflow ? function->incoming.stack_bytes : 0;
-            uint8_t* bytes = arena_push(arena, size, overflow ? 16 : slot.alignment);
+            uint8_t* bytes = arena_push(arena, size, overflow ? UINT64_C(1) << incoming->stack_alignment_log2 : slot.alignment);
             uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, size);
             if (bytes == 0 || defined == 0)
             {
@@ -470,10 +477,11 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
 // aggregate's size alike in each (a callee's IGNOREd one, an empty record's, takes a fresh object of its own, whatever the
 // call passes, as no bytes pass), and a result's kind; a hidden pointer, the call's destination, as the callee's parameter
 // 0; a result in registers that the call has no room for dropped, as a call that doesn't use it drops it; each named
-// aggregate as the address of a copy its frame owns (`owner`); and for a variadic definition, which only takes the default
-// argument promotions' types past its named parameters, every argument's place, its records' or worked out as LLVM's
-// assignment places a scalar, whose register counts must be its incoming frame's. INTERPRETER_INVALID for a call its
-// callee can't take.
+// aggregate as the address of a copy its frame owns (`owner`), aligned as its place in the call's argument area is; and
+// for a variadic definition, which only takes the default argument promotions' types past its named parameters, every
+// argument's place, its records' or worked out as LLVM's assignment places a scalar, whose register counts must be its
+// incoming frame's, and the argument area's alignment. INTERPRETER_INVALID for a call its callee can't take, or whose
+// argument area is aligned past BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2.
 static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
 {
     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
@@ -482,7 +490,13 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
     const bool hidden = own != 0 && target->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool registers = own != 0 && target->result_size != 0;
     const uint32_t named = call.parameter_count;
-    bool valid = call.variadic == target->variadic && target->parameter_count == named + hidden && !(hidden && registers);
+    // The call's argument area's alignment, rsp's at the call: the records' (or 16 for a call without them, whose stack
+    // arguments are scalars), or the callee's incoming frame's where that says more. A stack argument lies there at a
+    // multiple of its alignment, which a copy of it must keep.
+    const uint8_t call_alignment = records != 0 ? records->call.stack_alignment_log2 : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    const uint8_t larger = call_alignment > target->incoming.stack_alignment_log2 ? call_alignment : target->incoming.stack_alignment_log2;
+    const uint8_t alignment_log2 = larger > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? larger : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    bool valid = call.variadic == target->variadic && target->parameter_count == named + hidden && !(hidden && registers) && alignment_log2 <= BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2;
     valid = valid && (hidden || registers ? call.result_type == IR_VOID && (result_size != 0 || !hidden) && (result_size == 0 || records->call.result.kind == target->result_abi.kind) &&
                                                 (!registers || target->result_type == IR_PTR)
                                           : result_size == 0 && call.result_type == target->result_type);
@@ -506,9 +520,10 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
         parameters[hidden + p] = passed[p];
         if (parameter.size != 0)
         {
-            // The callee's copy, aligned for any object a by-value aggregate is, of the call's bytes; an IGNOREd
-            // aggregate's undefined.
-            uint8_t* bytes = arena_push(arena, parameter.size, 64);
+            // The callee's copy of the call's bytes, aligned to 64 or as the call's argument area is (a register's
+            // aggregate is 16 bytes at most, a stack argument's offset its alignment's multiple); an IGNOREd aggregate's
+            // undefined.
+            uint8_t* bytes = arena_push(arena, parameter.size, UINT64_C(1) << (alignment_log2 > 6 ? alignment_log2 : 6));
             uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, parameter.size);
             status = bytes == 0 || defined == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
             if (status == INTERPRETER_OK)
@@ -543,6 +558,7 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
             .count = call.argument_count,
             .stack_bytes = records != 0 ? records->call.stack_bytes : (stack_bytes + 7) & ~7ull,
             .hidden = destination,
+            .stack_alignment_log2 = stack_alignment > alignment_log2 ? stack_alignment : alignment_log2,
             .has_hidden = hidden,
         };
         // The named arguments' registers are the incoming frame's, which va_start's offsets count, and every unnamed

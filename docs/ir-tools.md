@@ -171,24 +171,30 @@ about indeterminate values and padding discussed separately in
 
 ### Aggregates by value and variadic definitions
 
-A call with ABI records (#131, [#788](https://github.com/buster14a/buster/issues/788))
-runs as the IR's records say. Between interpreted functions, each named aggregate
-argument's bytes, definedness and all, are copied into an object the callee's frame
-owns (aligned to 64), whose address is the callee's parameter; an `IGNORE`d one, an
-empty record's 1-byte object, gets a fresh undefined object whatever the call
-passes. A callee that returns through a hidden pointer takes the call's destination
-as parameter 0; one that returns in registers returns its bytes' address, from which
+A call with ABI records (#131,
+[#788](https://github.com/buster14a/buster/issues/788)) runs as the IR's records say.
+Between interpreted functions, each named aggregate argument's bytes, definedness and
+all, are copied into an object the callee's frame owns, aligned to 64 or, where it
+says more, as the call's argument area is (its records' `stack_alignment_log2`, or
+the callee's incoming frame's), so that an aggregate aligned past 64 on the stack
+keeps its alignment; its address is the callee's parameter. An `IGNORE`d one, an
+empty record's 1-byte object, gets a fresh undefined object whatever the call passes.
+A callee that returns through a hidden pointer takes the call's destination as
+parameter 0; one that returns in registers returns its bytes' address, from which
 `ret` copies at most the call's room to the destination while the callee's memory
-still holds them. A call that doesn't use such a result has no room for it and
-drops it. The call's and the callee's records must agree (each named aggregate's
-size, the result's kind), and an entry can't have records of its own, since no call
-places them: either is `INTERPRETER_INVALID`.
+still holds them. A call that doesn't use such a result has no room for it and drops
+it. The call's and the callee's records must agree (each named aggregate's size, the
+result's kind), an entry can't have records of its own, since no call places them,
+and a call's argument area can't be aligned past 2^30, Tier 0's and Tier 1's bound:
+each is `INTERPRETER_INVALID`.
 
 A variadic definition (#148) is entered from a call, which lays out its anchors:
 the register save area holds the argument registers as the psABI saves them (rdi to
 r9 at 0 to 40, xmm0 to xmm7's low eightbytes from 48), and the overflow area is the
 call's argument area past the named arguments' bytes (its anchor at
-`incoming.stack_bytes`, the area aligned as rsp is at the call). Each argument's
+`incoming.stack_bytes`, the area aligned as rsp is at the call: to 2^`stack_alignment_log2`
+of the call's records, at least 16, so that `va_arg`'s rounding of an argument
+aligned past 16 finds its start). Each argument's
 place is the call's records' or, without records, LLVM's assignment of a scalar: the
 next register of its kind (two general ones for an `i128`), or else an 8-byte stack
 slot (16 bytes aligned to 16 for an `i128` and a long double). Only the bytes the
@@ -211,7 +217,10 @@ or larger than 4096 bytes, and a result in st1 or in parts of other sizes.
 records between interpreted functions (a struct in registers whose callee writes its
 copy, one through a hidden pointer, an empty record's), their refusals, and a result
 room smaller than its result; a variadic definition reading back eighteen unnamed
-scalars from its anchors, and another two unnamed structs placed by records; and six
+scalars from its anchors, and another two unnamed structs placed by records; an
+unnamed struct aligned to 32, read as `va_arg` reads it, and a named one aligned to
+128 whose callee's copy keeps that alignment, each from frames at every 16 bytes of
+128 in the arena, and calls aligned past 2^30; and six
 natives clang compiled, which take and return structs in general and vector
 registers, on the stack, through a hidden pointer and in st0, against calls of them
 from C, with what the bridge refuses. `test-ir-lowering` runs Tier 0's generated

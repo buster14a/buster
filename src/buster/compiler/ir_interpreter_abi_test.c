@@ -549,6 +549,124 @@ static void ir_interpreter_test_variadic(IrInterpreterTestTally* tally, Arena* m
     arena_pop_to(memory, mark);
 }
 
+// Arguments aligned past 16 (#833's review): void u(void* out, ...) reads an unnamed struct A { uint64_t w[4]; } aligned
+// to 32 as va_arg does, at its overflow area's address rounded up to 32, and long n(struct O s), O's 128 bytes aligned to
+// 128 on the stack, returns its parameter's address modulo 128; each called with records whose argument area is aligned
+// so (2^5 and 2^7), from frames at each 16 bytes of 128 in the arena, where an area aligned only to 16 or a copy only to
+// 64 would read A from past its start or give O's address a remainder. And n again with the call's records aligned to
+// 16 but its incoming frame to 128, and a call aligned past BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2, refused.
+static void ir_interpreter_test_aligned(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction reader = { 0 };
+    IrFunction caller = { 0 };
+    IrFunction remainder = { 0 };
+    IrFunction remainder_caller = { 0 };
+    IrInterpreterAbiBuilder u;
+    IrInterpreterAbiBuilder c;
+    IrInterpreterAbiBuilder n;
+    IrInterpreterAbiBuilder m;
+    bool created = ir_interpreter_abi_create(memory, &reader, (IrSizes){ .slot_count = 2, .parameter_count = 1 }, IR_VOID, &u);
+    created = created && ir_interpreter_abi_create(memory, &caller, (IrSizes){ .slot_count = 1, .extra_count = 2, .call_count = 1, .call_type_count = 1, .abi_call_count = 1, .passed_count = 2 }, IR_VOID, &c);
+    created = created && ir_interpreter_abi_create(memory, &remainder, (IrSizes){ .parameter_count = 1, .passed_count = 1 }, IR_I64, &n);
+    created = created && ir_interpreter_abi_create(memory, &remainder_caller, (IrSizes){ .slot_count = 1, .extra_count = 1, .call_count = 1, .call_type_count = 1, .abi_call_count = 1, .passed_count = 1 }, IR_I64, &m);
+    ir_interpreter_test_expect(tally, created, "aligned arguments fixture allocation");
+    if (created)
+    {
+        reader.parameter_types[0] = IR_PTR;
+        reader.variadic = true;
+        reader.incoming = (AbiCall){ .stack_alignment_log2 = 4, .integer_registers = 1 };
+        reader.slots[0] = ir_interpreter_abi_slot(BUSTER_ABI_SAVE_AREA_BYTES, BUSTER_IR_SLOT_REGISTER_SAVE_AREA);
+        reader.slots[1] = ir_interpreter_abi_slot(0, BUSTER_IR_SLOT_OVERFLOW_AREA);
+        const uint32_t out = ir_interpreter_abi_emit(&u, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t overflow = ir_interpreter_abi_emit(&u, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t start = ir_interpreter_abi_emit(&u, IR_PTRTOINT, IR_I64, overflow, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t up = ir_interpreter_abi_emit(&u, IR_ADD, IR_I64, start, ir_interpreter_abi_constant(&u, IR_I64, 31, 0), BUSTER_IR_NONE);
+        const uint32_t rounded = ir_interpreter_abi_emit(&u, IR_AND, IR_I64, up, ir_interpreter_abi_constant(&u, IR_I64, ~UINT64_C(31), 0), BUSTER_IR_NONE);
+        const uint32_t argument = ir_interpreter_abi_emit(&u, IR_INTTOPTR, IR_PTR, rounded, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < 4; k += 1)
+        {
+            ir_interpreter_abi_store(&u, out, 8 * k, ir_interpreter_abi_load(&u, IR_I64, argument, 8 * k));
+        }
+        ir_interpreter_abi_emit(&u, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&u);
+
+        const uint64_t words[4] = { UINT64_C(0x1111111111111111), UINT64_C(0x2222222222222222), UINT64_C(0x3333333333333333), UINT64_C(0x4444444444444444) };
+        // The callers' objects are aligned to 16 alone, as their bytes' copies don't depend on it: an object aligned more
+        // would align the arena past the shifts below, which then wouldn't reach the callee's frame.
+        caller.slots[0] = ir_interpreter_abi_slot(32, 0);
+        caller.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = 32, .stack_alignment_log2 = 5, .integer_registers = 1 }, .passed = 0 };
+        caller.passed[0] = (IrPassed){ .location = ir_interpreter_abi_registers(BUSTER_ABI_RDI, BUSTER_IR_INTERPRETER_ABI_NONE) };
+        caller.passed[1] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 32 };
+        const uint32_t into = ir_interpreter_abi_emit(&c, IR_SYMBOL_ADDR, IR_PTR, 40, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t a = ir_interpreter_abi_emit(&c, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < 4; k += 1)
+        {
+            ir_interpreter_abi_store(&c, a, 8 * k, ir_interpreter_abi_constant(&c, IR_I64, words[k], 0));
+        }
+        const uint32_t arguments[] = { into, a };
+        ir_interpreter_abi_call(&c, 0, 50, arguments, 2, 1, 0, IR_VOID, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&c, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&c);
+
+        remainder.parameter_types[0] = IR_PTR;
+        remainder.parameter_passed = 1;
+        remainder.passed[0] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 128 };
+        const uint32_t s = ir_interpreter_abi_emit(&n, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t bits = ir_interpreter_abi_emit(&n, IR_PTRTOINT, IR_I64, s, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t low = ir_interpreter_abi_emit(&n, IR_AND, IR_I64, bits, ir_interpreter_abi_constant(&n, IR_I64, 127, 0), BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&n, IR_RET, IR_VOID, low, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&n);
+
+        remainder_caller.slots[0] = ir_interpreter_abi_slot(128, 0);
+        remainder_caller.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = 128, .stack_alignment_log2 = 7 }, .passed = 0 };
+        remainder_caller.passed[0] = remainder.passed[0];
+        const uint32_t o = ir_interpreter_abi_emit(&m, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&m, o, 0, ir_interpreter_abi_constant(&m, IR_I64, words[0], 0));
+        const uint32_t passed[] = { o };
+        const uint32_t result = ir_interpreter_abi_call(&m, 0, 52, passed, 1, 1, 0, IR_I64, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&m, IR_RET, IR_VOID, result, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&m);
+
+        uint64_t bytes[4] = { 0 };
+        const InterpreterBinding binding = { .symbol = 40, .bytes = (uint8_t*)bytes, .size = sizeof(bytes), .writable = true };
+        const IrInterpreterFunction functions[] = {
+            { .symbol = 50, .function = &reader },
+            { .symbol = 51, .function = &caller },
+            { .symbol = 52, .function = &remainder },
+            { .symbol = 53, .function = &remainder_caller },
+        };
+        const IrInterpreterProgram program = { .functions = functions, .function_count = 4, .bindings = &binding, .binding_count = 1 };
+        for (uint32_t step = 0; step < 8; step += 1)
+        {
+            const uint64_t before = execution->length;
+            const bool shifted = arena_push(execution, 0, 128) != 0 && (step == 0 || arena_push(execution, 16 * step, 1) != 0);
+            ir_interpreter_test_expect(tally, shifted, "aligned arguments fixture shift");
+            memset(bytes, 0, sizeof(bytes));
+            ir_interpreter_test_run(tally, &program, 51, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ 0 }, "an unnamed argument aligned to 32 in an overflow area aligned so");
+            ir_interpreter_test_expect(tally, memcmp(bytes, words, sizeof(words)) == 0, "va_arg's address rounded up to 32 is the unnamed struct's");
+            ir_interpreter_test_run(tally, &program, 53, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 0 }, "a named aggregate aligned to 128 copied to an address aligned so");
+            arena_pop_to(execution, before);
+        }
+        remainder_caller.abi_calls[0].call.stack_alignment_log2 = 4;
+        remainder.incoming.stack_alignment_log2 = 7;
+        for (uint32_t step = 0; step < 8; step += 1)
+        {
+            const uint64_t before = execution->length;
+            const bool shifted = arena_push(execution, 0, 128) != 0 && (step == 0 || arena_push(execution, 16 * step, 1) != 0);
+            ir_interpreter_test_expect(tally, shifted, "aligned arguments fixture shift");
+            ir_interpreter_test_run(tally, &program, 53, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = 0 }, "a named aggregate aligned as its callee's incoming frame says");
+            arena_pop_to(execution, before);
+        }
+        remainder.incoming.stack_alignment_log2 = 0;
+        remainder_caller.abi_calls[0].call.stack_alignment_log2 = BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2 + 1;
+        ir_interpreter_test_run(tally, &program, 53, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "a call's argument area aligned past 2^30");
+        caller.abi_calls[0].call.stack_alignment_log2 = BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2 + 1;
+        ir_interpreter_test_run(tally, &program, 51, 0, 0, 0, execution, INTERPRETER_INVALID, (InterpreterValue){ 0 }, "a variadic call's argument area aligned past 2^30");
+    }
+    arena_pop_to(memory, mark);
+}
+
 typedef struct IrInterpreterAbiPair IrInterpreterAbiPair;
 struct IrInterpreterAbiPair
 {
