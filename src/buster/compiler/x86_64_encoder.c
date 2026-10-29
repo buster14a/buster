@@ -5178,8 +5178,20 @@ static uint8_t x86_legacy_map(const X86FormDescription* form)
 #define BUSTER_X86_LEGACY_IMPLICIT_ADDRESS 0x10
 #define BUSTER_X86_LEGACY_ADDRESS_16 0x20
 #define BUSTER_X86_LEGACY_ADDRESS_32 0x40
-static uint8_t x86_form_legacy[X86_FORM_COUNT];
-static bool x86_encoder_initialized_legacy;
+// The encoder's state that its initialization writes (these properties, and the templates below): main.c's units share
+// it, as they share lane.c's thread context, the driver's unit's, since a command's code runs in more than one of them
+// (main.c): test-ir-source's emission encodes in the checker's unit, and its IR adapter's tier0_validate reads the forms'
+// templates in the backend's (#784). A unit of its own, a benchmark's, has its own. x86_semantics.c's tables take the
+// same linkage.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+#define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
+#elif defined(BUSTER_UNIT)
+#define BUSTER_X86_SHARED __attribute__((visibility("hidden")))
+#else
+#define BUSTER_X86_SHARED static
+#endif
+BUSTER_X86_SHARED uint8_t x86_form_legacy[X86_FORM_COUNT];
+BUSTER_X86_SHARED bool x86_encoder_initialized_legacy;
 
 // Whether one of the form's operands is a vector, opmask, bound, MMX or tile register (a VSIB operand's index too),
 // which the operand size doesn't change.
@@ -5556,26 +5568,26 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
 // stay unmapped.
 #define BUSTER_X86_TEMPLATE_PADDING 1
-static X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
     __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
-static bool x86_encoder_initialized;
+BUSTER_X86_SHARED bool x86_encoder_initialized;
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
-static X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
     __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_PADDING;
-static bool x86_encoder_initialized_address32;
+BUSTER_X86_SHARED bool x86_encoder_initialized_address32;
 // The same for APX (x86_encode_apx): the templates of the legacy forms of maps 0 and 1 have REX2's positions.
-static X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_apx[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
     __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates_apx = x86_template_storage_apx + BUSTER_X86_TEMPLATE_PADDING;
-static bool x86_encoder_initialized_apx;
+BUSTER_X86_SHARED bool x86_encoder_initialized_apx;
 // The same for 32-bit and 16-bit modes (x86_encode_mode32 and x86_encode_mode16): the mode's prefixes, a position for
 // the decorations' segment override and one for BUSTER_X86_MODE_ADDRESS_SIZE's 67, and no REX (see build_template).
-static X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
     __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates_32 = x86_template_storage_32 + BUSTER_X86_TEMPLATE_PADDING;
-static X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+BUSTER_X86_SHARED X86TemplateEntry x86_template_storage_16[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
     __attribute__((aligned(64)));
 static X86TemplateEntry* const x86_templates_16 = x86_template_storage_16 + BUSTER_X86_TEMPLATE_PADDING;
 
@@ -6014,8 +6026,8 @@ static bool x86_encoder_initialize(void)
     return x86_encoder_initialized;
 }
 
-// Kept in every translation unit (used), so that its table is one it writes: in a unit that doesn't call it, clang
-// would otherwise make the table read-only zeros, megabytes of the executable file.
+// Kept in every translation unit (used), so that its table is one it writes: in a unit of its own that doesn't call it,
+// clang would otherwise make the table read-only zeros, megabytes of the executable file.
 __attribute__((used)) static bool x86_encoder_initialize_address32(void)
 {
     x86_encoder_initialized_address32 = build_mode_templates(X86_ENCODER_MODE_ADDRESS32, x86_templates_address32);

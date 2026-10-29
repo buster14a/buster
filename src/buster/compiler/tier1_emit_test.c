@@ -160,6 +160,13 @@ static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* funct
     }
     if (ready)
     {
+        // #221: every record of the frame and body has a form x86_semantics.c covers, which the effects' consumers need.
+        bool covered = true;
+        for (uint32_t r = 0; r < code->count; r += 1)
+        {
+            covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
+        }
+        tier1_emit_test_expect(test, covered, "every frame and body record has a covered form");
         ready = x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, executable, capacity, 0, 0) > 0;
         tier1_emit_test_expect(test, ready, "baseline encoder accepts complete frame and body");
         ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;

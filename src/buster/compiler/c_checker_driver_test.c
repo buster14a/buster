@@ -1942,7 +1942,7 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
         size_t length = 0;
         if (output != NULL)
         {
-            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+            check_driver_executable_failure(&link, &runtime, 1, "out", &cases[i].result, output);
         }
         const bool read = output != NULL && pp_test_read_output(output, &text, &length);
         check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");
@@ -2249,6 +2249,20 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     {
         printf("  --time-stages: status %d: %s\n", link_status, text != NULL ? text : "");
     }
+    // The write's phases after the stages (#778), each once, adding up to no more than the write's stage.
+    double write_phases = 0;
+    bool phases_once = text != NULL;
+    for (uint32_t p = 0; phases_once && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\ntime-write\t%s\t", check_clock_write_names[p]);
+        const char* found = strstr(text, needle);
+        double value = -1;
+        phases_once = found != NULL && strstr(found + 1, needle) == NULL && sscanf(found + strlen(needle), "%lf", &value) == 1 && value >= 0;
+        write_phases += value;
+    }
+    check_test_expect(test, link_report && phases_once && write_phases <= stages[CHECK_STAGE_WRITE] + 0.001 * BUSTER_CHECK_CLOCK_WRITE_PHASES,
+                      "--time-stages on the direct path gives the write's phases once each, within its stage");
     free(text);
     text = NULL;
     const int ran = link_status == 0 ? check_test_driver_spawn(run, &text) : -1;
@@ -3121,6 +3135,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_checker_driver_const_test.c"
+#include "c_checker_driver_gnu_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -4205,6 +4220,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)

@@ -694,12 +694,14 @@ jobs:
               before="$ab_dir/before/src/buster/compiler"
               new='branch_sizing_lengths(records, count, offsets, vector)'
               old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
+              interface='branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)'
               test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
               if grep -Fq "$old" "$before/branch_sizing.c"; then
                   sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
                   test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
                   echo 'Baseline harness adaptation: old lengths scratch argument only'
-              elif ! grep -Fq "$new" "$before/branch_sizing.c"; then
+              # Since the host-ISA adapter, the call reads BUSTER_VECTOR_PATH(vector), so check the definition instead.
+              elif ! grep -Fq "$interface" "$before/branch_sizing.c"; then
                   echo 'Unsupported baseline branch_sizing_lengths interface' >&2
                   exit 1
               fi

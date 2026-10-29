@@ -25,6 +25,8 @@
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
+//     arena_poison overwrites what pushes took, for tests of code that reuses an arena, and a thread's ArenaPool
+//     (arena_pool) keeps the arenas it releases for its next reservations.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
@@ -103,6 +105,10 @@ struct Arena
     uint64_t capacity;
     // Where base is in its mapping, which starts that much earlier (see arena_reserve).
     uint64_t mapping_offset;
+    // The most bytes from base that pushes have taken since the arena was reserved: no byte past it has been written.
+    uint64_t peak;
+    // The bytes at its start that are base pages (arena_reserve_small's `small`, with the floor).
+    uint64_t small;
 };
 
 // Reserves `capacity` bytes, which the kernel commits a page at a time as they are first touched: the first
@@ -111,15 +117,59 @@ struct Arena
 static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
 // arena_reserve with the first `small` bytes in base pages (a multiple of BUSTER_ARENA_PAGE_BYTES, at least
 // BUSTER_ARENA_SMALL_BYTES), for a table that usually stays below what a huge page is worth: the kernel clears a huge
-// page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X.
+// page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X. The thread's
+// arena_small_floor, if larger, takes the place of `small`.
 static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
+
+// The base pages every arena the thread reserves starts with, at least (0 for BUSTER_ARENA_SMALL_BYTES alone; a
+// multiple of BUSTER_ARENA_PAGE_BYTES). A thread whose arenas each hold a small and sparse part of its work, as a lane
+// of the C driver's translation units does for a small unit (#152: a few kilobytes of each of about 70 arenas per
+// unit, past their first 64 KB), sets it, so that such an arena's first touch past BUSTER_ARENA_SMALL_BYTES takes a
+// base page rather than a huge page the kernel clears whole. Only the thread sets and reads it. main.c's units share
+// it, as they share the thread context (below): an arena that one unit's code reserves is another's to use.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local uint64_t arena_small_floor;
+#elif defined(BUSTER_UNIT)
+_Thread_local uint64_t arena_small_floor;
+#else
+static _Thread_local uint64_t arena_small_floor;
+#endif
+// The arenas a thread keeps, emptied, for its next reservations (#152): a lane that compiles translation units one after
+// another reserves and releases the same arenas, about 70 for each unit, and each reservation's mmap, its madvise calls
+// and its munmap take the address space's lock for writing, which every other lane's page faults and reservations then
+// wait for. arena_release puts an arena in the thread's pool, its pages freed with MADV_DONTNEED, which takes the lock
+// for reading and leaves the mapping and its advice as they were, so that the next user finds zero pages as in a fresh
+// arena; a full pool unmaps the arena it took longest ago to make room. arena_reserve_small takes the pool's latest
+// arena of the capacity and base pages asked for.
+#define BUSTER_ARENA_POOL_SLOTS 256
+typedef struct ArenaPool ArenaPool;
+struct ArenaPool
+{
+    uint32_t count;
+    // The releases so far, and the one that put each arena here.
+    uint64_t clock;
+    uint64_t released[BUSTER_ARENA_POOL_SLOTS];
+    Arena arenas[BUSTER_ARENA_POOL_SLOTS];
+};
+// The thread's pool, or null for none: set by the code that owns the pool (a units lane), which unmaps what it holds with
+// arena_pool_release once it is done. Only the thread sets and reads it, and main.c's units share it, as
+// arena_small_floor.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local ArenaPool* arena_pool;
+#elif defined(BUSTER_UNIT)
+_Thread_local ArenaPool* arena_pool;
+#else
+static _Thread_local ArenaPool* arena_pool;
+#endif
+// Unmaps the arenas `pool` holds, and leaves it empty.
+static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
 // push returns faults: only code that pushes and writes nothing in what it pushes may run on it. Its addresses are in no
 // object, so compare or subtract them only as integers.
 static __attribute__((unused)) Arena arena_measure(void);
-// Unmaps the arena, and leaves it without capacity.
+// Unmaps the arena, or puts it in the thread's pool (arena_pool), and leaves it without capacity.
 static __attribute__((unused)) void arena_release(Arena* arena);
 // `size` bytes at the first address from base + length that is a multiple of `alignment`, a power of two. Returns 0 and
 // leaves the arena as it was if they don't fit or the alignment isn't a power of two. The bytes aren't cleared: they
@@ -130,6 +180,9 @@ static __attribute__((unused)) void* arena_push_array(Arena* arena, uint64_t cou
 #define BUSTER_ARENA_PUSH_ARRAY(arena, Type, count) ((Type*)arena_push_array((arena), (count), sizeof(Type), _Alignof(Type)))
 // Frees what was pushed since the arena's length was `length`. Its pages stay committed for the next pushes.
 static __attribute__((unused)) void arena_pop_to(Arena* arena, uint64_t length);
+// Sets every byte pushes have taken (to the arena's peak) to `value`, and empties the arena: a test's way to make what
+// reuses the arena find no byte it didn't write as a fresh arena's zero (#152's --poison-arenas).
+static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages.
@@ -144,7 +197,23 @@ static uint64_t arena_mapping_bytes(uint64_t capacity)
 static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
 {
     Arena result = { 0 };
-    if (capacity != 0 && capacity <= BUSTER_ARENA_MAX_CAPACITY)
+    small = arena_small_floor > small ? arena_small_floor : small;
+    // The pool's latest arena of this shape, if it has one.
+    ArenaPool* pool = arena_pool;
+    uint32_t slot = BUSTER_ARENA_POOL_SLOTS;
+    for (uint32_t i = 0; pool != 0 && i < pool->count; i += 1)
+    {
+        const bool match = pool->arenas[i].capacity == capacity && pool->arenas[i].small == small;
+        slot = match && (slot == BUSTER_ARENA_POOL_SLOTS || pool->released[i] > pool->released[slot]) ? i : slot;
+    }
+    if (slot != BUSTER_ARENA_POOL_SLOTS)
+    {
+        result = pool->arenas[slot];
+        pool->count -= 1;
+        pool->arenas[slot] = pool->arenas[pool->count];
+        pool->released[slot] = pool->released[pool->count];
+    }
+    else if (capacity != 0 && capacity <= BUSTER_ARENA_MAX_CAPACITY)
     {
         const uint64_t mapping_bytes = arena_mapping_bytes(capacity);
         bool allowed = true;
@@ -175,6 +244,7 @@ static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
             result.base = mapping + offset;
             result.capacity = capacity;
             result.mapping_offset = offset;
+            result.small = small;
         }
     }
     return result;
@@ -197,9 +267,52 @@ static void arena_release(Arena* arena)
 {
     if (arena->base != 0)
     {
-        munmap(arena->base - arena->mapping_offset, arena_mapping_bytes(arena->capacity));
+        ArenaPool* pool = arena_pool;
+        uint8_t* mapping = arena->base - arena->mapping_offset;
+        const uint64_t bytes = arena_mapping_bytes(arena->capacity);
+        const bool pooled = pool != 0 && madvise(mapping, bytes, MADV_DONTNEED) == 0;
+        if (pooled)
+        {
+            // A free slot, or else the one whose arena was released longest ago, which is unmapped.
+            uint32_t slot = pool->count;
+            if (pool->count == BUSTER_ARENA_POOL_SLOTS)
+            {
+                slot = 0;
+                for (uint32_t i = 1; i < pool->count; i += 1)
+                {
+                    slot = pool->released[i] < pool->released[slot] ? i : slot;
+                }
+                const Arena* old = pool->arenas + slot;
+                munmap(old->base - old->mapping_offset, arena_mapping_bytes(old->capacity));
+            }
+            else
+            {
+                pool->count += 1;
+            }
+            pool->clock += 1;
+            pool->released[slot] = pool->clock;
+            pool->arenas[slot] = (Arena){
+                .base = arena->base,
+                .capacity = arena->capacity,
+                .mapping_offset = arena->mapping_offset,
+                .small = arena->small,
+            };
+        }
+        else
+        {
+            munmap(mapping, bytes);
+        }
     }
     *arena = (Arena){ 0 };
+}
+
+static void arena_pool_release(ArenaPool* pool)
+{
+    for (uint32_t i = 0; i < pool->count; i += 1)
+    {
+        munmap(pool->arenas[i].base - pool->arenas[i].mapping_offset, arena_mapping_bytes(pool->arenas[i].capacity));
+    }
+    pool->count = 0;
 }
 
 static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
@@ -213,6 +326,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
     {
         result = (void*)aligned;
         arena->length = begin + size;
+        arena->peak = arena->length > arena->peak ? arena->length : arena->peak;
     }
     return result;
 }
@@ -232,6 +346,16 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 {
     assert(length <= arena->length);
     arena->length = length;
+}
+
+static void arena_poison(Arena* arena, uint8_t value)
+{
+    const uint64_t written = arena->peak > arena->length ? arena->peak : arena->length;
+    if (arena->base != 0)
+    {
+        memset(arena->base, value, written < arena->capacity ? written : arena->capacity);
+    }
+    arena->length = 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
