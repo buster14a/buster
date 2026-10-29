@@ -3469,6 +3469,74 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test, source, "values-past-the-depth-tables", clang);
     }
     {
+        // Values past the depth tables beside long double and __int128 values (#780, tier0_memory_uses): calls of 16 int
+        // arguments that return one of each, calls of 16 int arguments and one of each, whose arithmetic and compares run
+        // past the integer table, and additions nested 18 deep beside each. Run against clang's.
+        static const char* const types[2] = { "long double", "__int128" };
+        static const char* const names[2] = { "wide_ld", "wide_ti" };
+        static const char* const arguments[2] = { "x*2-a15+a0", "x*3+a0-a15" };
+        char source[8192];
+        char sum[512];
+        char sixteen[512];
+        char nested[512];
+        uint32_t sum_length = 0;
+        uint32_t sixteen_length = 0;
+        uint32_t nested_length = 0;
+        for (uint32_t i = 0; i < 16; i += 1)
+        {
+            sum_length += (uint32_t)snprintf(sum + sum_length, sizeof(sum) - sum_length, "+a%u*%u", i, i + 1);
+            sixteen_length += (uint32_t)snprintf(sixteen + sixteen_length, sizeof(sixteen) - sixteen_length, "%sn+%u", i == 0 ? "" : ",", i);
+        }
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            nested_length += (uint32_t)snprintf(nested + nested_length, sizeof(nested) - nested_length, "n+%u+(", i);
+        }
+        nested_length += (uint32_t)snprintf(nested + nested_length, sizeof(nested) - nested_length, "n");
+        for (uint32_t i = 0; i < 18; i += 1)
+        {
+            nested_length += (uint32_t)snprintf(nested + nested_length, sizeof(nested) - nested_length, ")");
+        }
+        uint32_t length = 0;
+        for (uint32_t t = 0; t < 2; t += 1)
+        {
+            char result[600];
+            if (t == 0)
+            {
+                snprintf(result, sizeof(result), "(long double)(0%s)/3.0L+a15", sum);
+            }
+            else
+            {
+                snprintf(result, sizeof(result), "(__int128)(0%s)*((__int128)1<<70)+a15", sum);
+            }
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s %s_result(", types[t], names[t]);
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "int a%u,", i);
+            }
+            source[length - 1] = ')';
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "{return %s;}%s %s_argument(", result, types[t], names[t]);
+            for (uint32_t i = 0; i < 16; i += 1)
+            {
+                length += (uint32_t)snprintf(source + length, sizeof(source) - length, "int a%u,", i);
+            }
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s x){return %s;}", types[t], arguments[t]);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, "int wide_compares(");
+        for (uint32_t i = 0; i < 16; i += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "int a%u,", i);
+        }
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length,
+                                     "int p,int q,int r,int s,int t){return a0*64+p+q*2+r*4+s*8+t*16;}"
+                                     "int tested(int n){long double r=wide_ld_result(%s);__int128 w=wide_ti_result(%s);"
+                                     "long double s=wide_ld_argument(%s,(long double)n*1.5L+r*r);__int128 u=wide_ti_argument(%s,w*(__int128)(n+3)+(w>>3));"
+                                     "int c=wide_compares(%s,r<s,w<u,s==r,(long double)n+r>=s,u!=w);long double nested=r+(%s);__int128 nested2=w+(%s);",
+                                     sixteen, sixteen, sixteen, sixteen, sixteen, nested, nested);
+        snprintf(source + length, sizeof(source) - length,
+                 "long long x=(long long)(s*16)^(long long)(nested*4)^(long long)(u%%100003)^(long long)(nested2%%99991)^c;return (int)(x%%100003);}");
+        check_test_program_source(test, source, "memory-classes-past-the-depth-tables", clang);
+    }
+    {
         // Indirect variadic calls past the depth tables (#434's review), to the harness's functions, which clang compiles:
         // after a variable-length array, which gives the function its frame pointer (an integer table of 14) and moves
         // rsp, one of 20 unsigned long and 20 double arguments in turn, past both tables, whose al the callee's prologue

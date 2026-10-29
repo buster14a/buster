@@ -409,9 +409,10 @@ half at 8, so that calls and the arms of `?:` need nothing of their own for it.
   deferred entries' emitter that look for their entries (`tier0_memory_function`), so that other code compiles as it
   did: on the 9700X, `benchmark-backend`'s vector path took 169.82 instructions per entry against main's 169.81, and the
   scalar path 571.32 against 573.73 (#464's job).
-- **The slots' limit,** which long double's leaves already reached: both selections refuse a memory class's value at a
-  depth past the 15 slots (`slot_top`, `TIER0_ERROR_DEPTH`). Before, a stack of 15 long double constants wrote past
-  the slot area.
+- **Past the slots,** a memory class's value at a depth past the integer table's 15 (`slot_top`) takes a function to
+  `tier0_select_deep`, which gives the slots as many depths as its stack reaches ("Deep values", below). Before #780,
+  both selections refused such a function (`TIER0_ERROR_DEPTH`); before that, a stack of 15 long double constants wrote
+  past the slot area.
 
 `tier0_validate` refuses a local of the classes that isn't an object, a `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of them
 of anything but an object of at least 16 bytes (a value's local, a smaller object, a `va_list`), a global read as a
@@ -459,8 +460,8 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
   whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others are free. The
   VECTOR registers are the floating stack's free ones from its depth on (one further past a floating result's where no
   floating operand takes its place), so a VEX form (which names registers below 16) reaches them where the floating
-  stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 is refused at its depth
-  (`TIER0_ERROR_DEPTH`), as an integer depth past the table is. The selections count the registers the operands' loads
+  stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 takes the deep slots, as
+  an integer depth past the table does ("Deep values", below). The selections count the registers the operands' loads
   write and the result's store reads among a row's, whatever its records name, so that no floating home is kept in one;
 - `FLOATING(j)` and `FLOATING_RESULT`, a floating operand's XMM register and the floating result's;
 - `INTEGER(j)`, `INTEGER_RESULT` and `SCRATCH(k)`, an integer operand's register (an address among them), the integer
@@ -580,10 +581,25 @@ past their tables, through both encoders, including hidden results and an indire
 A deep function's deep code takes the depth registers below the tables, which its depths reach anyway: no other
 register, and never a frame pointer's rbp.
 
-**Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a function with values of the memory classes (long double's and the
-128-bit integers') whose stacks pass the tables, since such a value's slot is its integer depth's; and a stack deeper
-than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
-past (a stack rises by one entry at a time at most, so it shows there first).
+**The memory classes and vectors** (#780). Their values take integer depths but live in slots of their own, which keep
+a value at its true depth whatever the deep slots hold: as many depths of them as a deep function's stack reaches
+(`Tier0Frame.memory_depths`, `tier0_select_deep`'s), and the table's 15 otherwise. An entry of theirs
+(`tier0_memory_uses`) uses a stack's registers where it reads an integer or a floating operand from its register, or
+writes a register (the tops `tier0_memory_tops` and `tier0_vector_tops` give at its depths). One that uses none, as long
+double's arithmetic and a vector's constant do, runs past the tables where it is, naming its slots by its own depths. A
+deep one's window is every operand it has on the stack, those in slots among them: its records run at the window's
+depths, which keep their distances to its values' slots, with a frame whose memory and vector areas start the window's
+base (its true depth less its window's) slots on (`tier0_emit_deep_deferred`). Its window loads the operands in slots
+into registers too, which reads nothing it uses and costs a record each. A deep call copies a long double argument from
+its slot at its true depth into its place by `fld` and `fstp`, and stores a long double result from st0 into its
+depth's slot; the 128-bit integers and vectors pass as aggregates, their addresses deep values like any other. A deep
+entry of theirs whose own registers would still pass the tables at its window's depths is refused
+(`TIER0_ERROR_DEPTH`) rather than placed past them.
+
+**Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth
+columns' bytes would wrap past (a stack rises by one entry at a time at most, so it shows there first). Before #780, a
+function with values of the memory classes or vectors whose stacks passed the tables was refused too: stb_image's
+`_mm_set1_epi8`, whose call of `_mm_set_epi8` has 16 arguments and returns a vector, among them.
 
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
 crosses the line. `test-tier0`'s deep shape (below) has about 2% of its entries deep, and its cross-check's code is 1.33
@@ -1177,7 +1193,8 @@ Before the programs, checks of their own:
     through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions both ways (unsigned 64-bit ones past
     2^63 too), calls of C functions through their addresses and frame objects (four, of 16 to 32 bytes aligned to 8 or
     16, given values first, read by `LOCAL`, written by `STORE_LOCAL` and `SET_LOCAL` and copied out at the end), against
-    the check's own stack machine over the stream. A program past the depth tables is counted, not compiled. The programs
+    the check's own stack machine over the stream. A program past the depth tables compiles through the deep slots
+    (#780); one that both paths refuse (`TIER0_ERROR_DEPTH`) would be counted, not compiled. The programs
     compiled, run and checked must execute every kind and conversion of the class and both arms of a `?:`. Separate
     bitmaps record kinds and conversions, and the interpreter marks only entries and arms it runs. Any refusal except
     a random program's excess depth fails the check with its error and entry.
@@ -1185,8 +1202,10 @@ Before the programs, checks of their own:
   encoders into the same bytes and run natively in a child, called from C through function pointers, so that the file's
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
   - **rules:** each break of the classes' rules (above) refused at its entry by `tier0_validate`;
-  - **slots:** a stack of a memory class's values up to the last slot, which runs, and one past it, which both paths
-    refuse, for the 128-bit integers and for long double;
+  - **slots:** for the 128-bit integers and for long double, stacks of a memory class's values to the integer table's
+    last slot, one and two past it and 40, each of which both paths compile to the same code and runs (past the table
+    through the deep slots, #780); of 238, which both compile; and of 239, whose stack with the output's address below
+    it reaches `BUSTER_TIER0_MAX_DEPTH`, which both refuse;
   - **boundaries:** for each class, its six compares, `SHR` by 0, 1, 63, 64, 65 and 127, and `SHR` and `SHL` by variable
     counts, on every pair of ten boundary values (0, 1, -1, the extremes, 2^63, 2^64 and their neighbours), against the
     check's stack machine and against C's own operators;
@@ -1201,8 +1220,8 @@ Before the programs, checks of their own:
     the entries the stack machine ran: those must reach, for each class apart (their signed and unsigned code differs),
     every kind, every conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
 
-  Every function must compile: an error of both paths alike fails the check, but a depth past the slots in a random
-  program, which is counted.
+  Every function must compile: an error of both paths alike fails the check, but a depth refusal in a random program
+  (`TIER0_ERROR_DEPTH`, past the deep slots since #780), which is counted.
 - **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
   the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
   and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
@@ -1570,10 +1589,10 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
 ## Follow-ups
 
-- **Deep values' refusals:** a function with values of the memory classes past the depth tables (`TIER0_ERROR_DEPTH`).
-  The memory classes would take their slots by true depth in the deep emitters. Deep code that hovers around the tables' edge stores
-  and loads every register at each crossing: a stack of 15 integer values that takes and drops one a few times pays
-  about 30 records each time, where storing and loading the one register the entry needs would do.
+- **Deep values' cost:** deep code that hovers around the tables' edge stores and loads every register at each
+  crossing: a stack of 15 integer values that takes and drops one a few times pays about 30 records each time, where
+  storing and loading the one register the entry needs would do. A deep entry of the memory classes or vectors also
+  loads the deep slots of its operands in their own slots, which it doesn't read.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field

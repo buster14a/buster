@@ -1432,9 +1432,11 @@ static void tier0_test_int128_run_slots(const void* code, Tier0TestInt128Shared*
 }
 
 // A stack of `values` constants of `class` (I128, or F80 with its constant 1.0) above the output's address, summed and
-// stored: their slots run to depth `values`, which the slots hold up to 14 (BUSTER_TIER0_INTEGER_DEPTHS of them, from
-// 0). Up to the last slot, both paths compile it and it stores the sum; past it, both refuse it (TIER0_ERROR_DEPTH),
-// where a slot past the area would be written.
+// stored: their slots run to depth `values`, past the integer table from 15 (BUSTER_TIER0_INTEGER_DEPTHS) on, where the
+// values below take the deep slots and theirs stay in the memory classes' slots at their true depths (#780). Both paths
+// compile it to the same code, which stores the sum, at the table's last slot, one and two past it and 40; and refuse it
+// (TIER0_ERROR_DEPTH) past BUSTER_TIER0_MAX_DEPTH alone: 239 constants and the address make a stack of 240 at the first
+// addition, where 238 compile.
 static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128Abi* abi, Tier0TestInt128Shared* shared)
 {
     uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
@@ -1443,14 +1445,17 @@ static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128
     static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
     static const uint8_t local_flags[1] = { 0 };
     const uint64_t one[2] = { 1ull << 63, 0x3fff };
+    static const uint32_t stacks[] = { BUSTER_TIER0_INTEGER_DEPTHS - 1, BUSTER_TIER0_INTEGER_DEPTHS, BUSTER_TIER0_INTEGER_DEPTHS + 1, 40, BUSTER_TIER0_MAX_DEPTH - 2,
+                                       BUSTER_TIER0_MAX_DEPTH - 1 };
     for (uint32_t c = 0; c < 2 && ready; c += 1)
     {
         const uint32_t class = c == 0 ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_F80;
-        for (uint32_t values = BUSTER_TIER0_INTEGER_DEPTHS - 1; values <= BUSTER_TIER0_INTEGER_DEPTHS; values += 1)
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(stacks); s += 1)
         {
-            uint8_t kinds[64];
-            uint8_t classes[64];
-            uint64_t constants[64];
+            const uint32_t values = stacks[s];
+            uint8_t kinds[2 * BUSTER_TIER0_MAX_DEPTH + 4];
+            uint8_t classes[2 * BUSTER_TIER0_MAX_DEPTH + 4];
+            uint64_t constants[2 * BUSTER_TIER0_MAX_DEPTH + 4];
             uint32_t count = 0;
             kinds[count] = BUSTER_TYPED_LOCAL;
             classes[count] = BUSTER_TYPED_CLASS_U64;
@@ -1494,11 +1499,14 @@ static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128
             arena_pop_to(&arena, 0);
             const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            const bool fits = values < BUSTER_TIER0_INTEGER_DEPTHS;
+            const bool fits = values + 1 < BUSTER_TIER0_MAX_DEPTH;
             tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector) && (fits ? scalar.error == TIER0_OK : scalar.error == TIER0_ERROR_DEPTH), "int128",
                               "%s: the paths give %d and %d", name, scalar.error, vector.error);
+            tier0_test_expect(tally, !fits || values <= BUSTER_TIER0_INTEGER_DEPTHS - 1 || scalar.deep != 0, "int128", "%s: no deep entries", name);
+            // The deepest stacks' code is past the image's pages: they are compiled alone.
+            const bool run = values <= 40;
             Tier0Error error = TIER0_OK;
-            const uint32_t length = fits ? tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error) : 0;
+            const uint32_t length = run ? tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error) : 0;
             memset(shared->out, 0xa5, sizeof(shared->out));
             const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_int128_native(image, length, tier0_test_int128_run_slots, shared), "int128",
                                                               "%s: the native run failed", name);
