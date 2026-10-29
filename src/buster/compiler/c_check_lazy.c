@@ -207,7 +207,8 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
     ParseBindings bindings = { 0 };
     Parser replay = valid ? *parser : (Parser){ 0 };
     replay.scratch = *scratch;
-    valid = valid && parse_bindings_build(&bindings, &replay, output) && parse_bindings_resolve(&bindings, BUSTER_SCALAR_PATH(scalar), scratch);
+    valid = valid && parse_bindings_build(&bindings, &replay, output) && bindings.body_count == body_count &&
+            parse_bindings_resolve(&bindings, BUSTER_SCALAR_PATH(scalar), scratch);
     uint32_t* owners = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* firsts = owners != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* targets = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, names) : 0;
@@ -235,7 +236,7 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
                 {
                     .begin = ranges[body].begin,
                     .end = ranges[body].end,
-                    .declaration = BUSTER_PARSE_NONE,
+                    .declaration = bindings.body_declarations[body],
                 };
                 active = body + 1;
             }
@@ -253,27 +254,23 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
                 first = token + 1;
             }
         }
-        for (uint32_t event = 0; event < bindings.events.count; event += 1)
+        for (uint32_t body = 0; valid && body < body_count; body += 1)
         {
-            const CBindings* events = &bindings.events;
-            if (events->operation[event] == C_BINDING_DECLARE && events->kind[event] == C_BINDING_FUNCTION && events->depth[event] == 0 &&
-                events->key[event] < names && events->point[event] < count && owners[events->point[event]] != 0)
+            CheckLazyBody* row = candidate.bodies + body;
+            const uint32_t declaration = row->declaration;
+            valid = declaration < count && bindings.kinds[declaration] == C_BINDING_FUNCTION && parser->tokens.names[declaration] < names;
+            if (valid)
             {
-                const uint32_t slot = owners[events->point[event]] - 1;
-                CheckLazyBody* row = candidate.bodies + slot;
-                if (events->point[event] == row->begin)
+                const uint32_t name = parser->tokens.names[declaration];
+                row->flags = check_lazy_header(parser, pp, firsts[declaration], row->begin, &bindings);
+                const bool system = check_lazy_system(pp, parser->tokens.sources[declaration]) && check_lazy_system(pp, parser->tokens.sources[row->begin]);
+                row->flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
+                if (targets[name] != 0)
                 {
-                    row->declaration = events->declaration[event];
-                    row->flags = check_lazy_header(parser, pp, firsts[row->declaration], row->begin, &bindings);
-                    const bool system = check_lazy_system(pp, parser->tokens.sources[row->declaration]) && check_lazy_system(pp, parser->tokens.sources[row->begin]);
-                    row->flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
-                    if (targets[events->key[event]] != 0)
-                    {
-                        candidate.bodies[targets[events->key[event]] - 1].flags |= BUSTER_CHECK_LAZY_RETAIN;
-                        row->flags |= BUSTER_CHECK_LAZY_RETAIN;
-                    }
-                    targets[events->key[event]] = slot + 1;
+                    candidate.bodies[targets[name] - 1].flags |= BUSTER_CHECK_LAZY_RETAIN;
+                    row->flags |= BUSTER_CHECK_LAZY_RETAIN;
                 }
+                targets[name] = body + 1;
             }
         }
         bool opaque = pp->options.no_history;

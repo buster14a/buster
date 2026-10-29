@@ -508,24 +508,59 @@ definition's parameters, in the list's order, without a prototype
 (`CheckDeclaratorPart.identifier_list`), and its scan ends before the
 declaration list, since no specifier follows a group in a declarator. The
 declaration list (`check_input_kr_declarations`) gives each name its type,
-adjusted as a parameter's, under C17 6.9.1p6's constraints, each refused where
-clang reports it:
+adjusted as a parameter's, under C17 6.9.1p6's constraints:
 - no storage class but `register`, no function specifier or typedef;
 - only the list's names, each declared once, and none with an initializer;
-- every listed name declared (clang refuses the implicit `int`).
+- every listed name declared in C99 and later; a name left undeclared in C89
+  receives `int`.
 
-A struct, union or enum defined in the list, and a variably modified
-parameter there, are refused by name. The definition's type is the prototype of
-its parameters' default argument promotions, as clang types it (`float a`
-makes `float (double)`). So a later prototype must agree with them, and its
-calls convert their arguments as a prototype's do. Where clang only warns about
-a call with the wrong number of arguments, the checker refuses it.
+The list's struct, union and enum definitions use the ordinary tag reader.
+Their tags and enumerators remain visible throughout the declaration list,
+then their header scope ends before the function body, as Clang treats an
+old-style definition. The completed parameter types remain; an outer tag or
+ordinary name becomes visible again in the body and following file scope.
+These declarations are not republished into the body as prototype-definition
+tags are. The extra visibility/redefinition warning sequence is not reproduced.
+Variably modified parameters remain refused by name. An identifier list
+outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
+as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,
+including typedefs and nested type queries; invalid atomic inner types retain
+the ordinary constraint checks. Statement-expression type specifiers that
+need the ordered declaration reader remain outside this list reader.
 
-An identifier list outside a definition is refused, as C17 6.7.6.3p3 has it.
-The producer lowers a K&R definition whose parameters' types the promotions
-leave alone. It refuses by name one with a `char`, `short`, `_Bool` or `float`
-parameter, which would convert from its promoted type on entry
-(`CHECK_INPUT_FUNCTION_KR`).
+The definition retains a prototype of its parameters' default argument
+promotions for compatibility checking and ABI lowering, as clang types it
+(`float f(a) float a; { ... }` has that internal signature `float (double)`).
+As in clang, `_Atomic` parameters retain their declared ABI types instead:
+`_Atomic float` is not promoted to double, and an atomic aggregate keeps its
+storage padding. Known calls retain these ABI types as well as their value conversions.
+At expression uses its designator instead has a no-prototype type. Known
+direct calls, including an addressed function, retain the definition's
+argument conversions, but a wrong argument count is a warning rather than
+a hard constraint failure. A later prototype or a pointer declared with a
+prototype still checks its own argument count. Other no-prototype calls use
+default argument promotions. The call graph carries the known signature and
+source token explicitly; the type table does not grow a new function kind.
+
+The producer receives all incoming parameters in their promoted ABI types,
+then converts changed ones into separate locals of their declared types.
+That two-pass layout keeps the incoming ABI-local prefix contiguous, including
+a hidden aggregate-result pointer, while body accesses and address-taking
+use the declared local's type, alignment and volatile semantics. The reader's
+`kr_parameter_count` bounds extra locals and entry instructions, including
+unused parameters and `_Bool` truncation. Ordinary units reserve none of
+this extra room. No throughput improvement is claimed by this correctness fix.
+
+Definitions and no-prototype calls carry `-Wdeprecated-non-prototype`;
+known direct calls with a wrong count have a separate arity warning.
+Source-ordered diagnostic pragmas control them, including promotion to errors,
+and quiet mode suppresses warnings. Calls in source-only `sizeof`/`typeof`
+queries publish sparse source diagnostics; their deferred-lane path retries
+in source order rather than mutating another lane's diagnostic storage. Executable oracle fixtures cover signed
+and unsigned narrowing, float rounding, register and stack arguments, aligned
+and volatile locals, hidden result pointers and prototype transitions. Source
+fixtures check C89, C99, C17 and C23 against the matching Clang language mode.
 
 Where clang takes a construct C's constraints exclude, the checker takes it
 too:
