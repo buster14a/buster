@@ -507,6 +507,12 @@ struct CheckLowerWriter
     uint32_t* label_entries;
     uint32_t label_entry_count;
     uint32_t label_symbol_capacity;
+    // Each label's jump table (Tier0Function.label_tables, #785): 1 + t for the function's table t's, numbered as its
+    // dispatches come, and 0 for a label whose address the program takes; and each table's JUMP_INDIRECT's entry
+    // (Tier0Function.table_jumps), `table_jump_count` of them, with room for the program's tables.
+    uint32_t* label_tables;
+    uint32_t* table_jumps;
+    uint32_t table_jump_count;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -6811,6 +6817,7 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     {
         if (status->label_symbol_count < writer->label_symbol_capacity && writer->label_entry_count <= writer->program->control_count)
         {
+            writer->label_tables[writer->label_entry_count] = writer->table_jump_count + 1;
             writer->label_entries[writer->label_entry_count++] = item->labels[j];
             status->label_symbols[status->label_symbol_count++] = BUSTER_CHECK_LOWER_CASE_SYMBOL | (item->first_label + j);
         }
@@ -6838,6 +6845,14 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
     check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
     check_lower_emit(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
+    if (writer->table_jump_count < writer->table_count)
+    {
+        writer->table_jumps[writer->table_jump_count++] = writer->count - 1;
+    }
+    else
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
 }
 
 // A return of a struct or a union (`node` its value, the bytes' address; or none, for the end of the function): through
@@ -7142,6 +7157,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         const SymbolId symbol = program->object_symbols[control.token + 1];
         if (symbol != 0 && writer->output->label_symbol_count < writer->label_symbol_capacity)
         {
+            writer->label_tables[writer->label_entry_count] = 0;
             writer->label_entries[writer->label_entry_count++] = index;
             writer->output->label_symbols[writer->output->label_symbol_count++] = symbol;
         }
@@ -7517,6 +7533,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+    // Each lowered function's validation (tier0_validate) reads the effects tables (its X86 entries' forms, #760), which
+    // a lowering of bodies without the emission's setup (check_program_emit's), a test's, builds here: a unit of data
+    // alone leaves the backend cold, as the emission does.
+    if (valid && program->body_count != 0 && !(x86_semantics_initialized || x86_semantics_initialize()))
+    {
+        lowered->status = CHECK_PROGRAM_BACKEND;
+        valid = false;
+    }
     if (valid && !check_program_helpers(&lowered->helpers, program, output, scratch))
     {
         lowered->status = lowered->helpers.status;
@@ -7826,6 +7850,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -7929,6 +7955,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         *function = (Tier0Function){ 0 };
         writer->count = 0;
         writer->label_entry_count = 0;
+        writer->table_jump_count = 0;
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
@@ -8370,6 +8397,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->vector_constant_count = writer->vector_constant_count;
         BUSTER_CHECK_LOWER_COPY(label_entries, label_entries, uint32_t, writer->label_entry_count);
         function->label_count = writer->label_entry_count;
+        BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
+        BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
+        function->table_count = writer->table_jump_count;
 #undef BUSTER_CHECK_LOWER_COPY
         if (sources && status->status == CHECK_PROGRAM_OK)
         {
