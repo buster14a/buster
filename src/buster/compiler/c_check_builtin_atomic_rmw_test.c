@@ -443,8 +443,8 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
             cursor += fixed;
             check_builtin_atomic_rmw_one(table, actions + i, expected + i);
         }
-        uint8_t action_copy[BUSTER_CHECK_ATOMIC_RMW_TEST_BATCH * sizeof(CheckBuiltinAtomicRmwAction)];
-        uint8_t argument_copy[6 * BUSTER_CHECK_ATOMIC_RMW_TEST_BATCH * sizeof(CheckValue)];
+        CheckBuiltinAtomicRmwAction action_copy[BUSTER_CHECK_ATOMIC_RMW_TEST_BATCH];
+        CheckValue argument_copy[6 * BUSTER_CHECK_ATOMIC_RMW_TEST_BATCH];
         memcpy(action_copy, actions, count * sizeof(*actions));
         memcpy(argument_copy, arguments, total * sizeof(*arguments));
         for (uint32_t partition = 1; partition <= 7; partition += 1)
@@ -464,8 +464,22 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
         {
             check_builtin_atomic_rmw_test_expect(test, check_builtin_atomic_rmw_test_equal(expected + i, results + i), "guarded complete batch equals independent individual actions", i);
         }
-        check_builtin_atomic_rmw_test_expect(test, memcmp(action_copy, actions, count * sizeof(*actions)) == 0 && memcmp(argument_copy, arguments, total * sizeof(*arguments)) == 0,
-            "borrowed action and fixed-argument bytes remain unchanged", count);
+        // By field: the actions' and the values' padding is no part of them.
+        bool unchanged = true;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const CheckBuiltinAtomicAction* x = &action_copy[i].source;
+            const CheckBuiltinAtomicAction* y = &actions[i].source;
+            unchanged &= x->id == y->id && x->arguments == y->arguments && x->argument_count == y->argument_count && x->node == y->node &&
+                x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count && x->source_position == y->source_position &&
+                x->extensions == y->extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known &&
+                action_copy[i].order_ice_arguments == actions[i].order_ice_arguments;
+        }
+        for (uint32_t i = 0; i < total; i += 1)
+        {
+            unchanged &= check_test_value_equal(argument_copy + i, arguments + i);
+        }
+        check_builtin_atomic_rmw_test_expect(test, unchanged, "borrowed action and fixed-argument bytes remain unchanged", count);
         for (uint32_t b = 1; b <= 16; b += 1)
         {
             check_builtin_atomic_rmw_test_expect(test, *((uint8_t*)actions - b) == 0xa5 && *((uint8_t*)results - b) == 0xa5 && *((uint8_t*)arguments - b) == 0xa5,

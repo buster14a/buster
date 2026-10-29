@@ -1949,7 +1949,13 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         }
         const String8 text = foreign_test_read(arena, counted);
         char expected[32];
-        snprintf(expected, sizeof(expected), "%u\n", lanes - 1);
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
+        const uint32_t detector = lanes > 1 ? 1 : 0;
+#else
+        const uint32_t detector = 0;
+#endif
+        snprintf(expected, sizeof(expected), "%u\n", lanes - 1 + detector);
         const bool started = text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0;
         char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
         snprintf(detail, sizeof(detail), "%s: %.*s thread(s) for %u lane(s)", executable, text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",

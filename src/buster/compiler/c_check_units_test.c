@@ -1051,7 +1051,7 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
 // Every reservation and mapping of two units' -c by one lane failed in turn (see the file's comment), in a directory of
 // its own under `directory`. The command runs once in this process first, as the children's runs do, so that what only
 // a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's already.
-static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
+static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
 {
     static const char header[] = "int limits_square(int value);\n";
     static const char caller[] = "#include \"square.h\"\nint main(void)\n{\n    return limits_square(3) == 9 ? 0 : 1;\n}\n";
@@ -1576,7 +1576,13 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer maps shadow for each mapping a run makes and keeps it, so a run neither returns the address space
+        // to its base nor fails at a limit of its own reservations. The other detectors' builds and plain ones check them.
+        printf("  reservations: not failed in turn under ThreadSanitizer, whose shadow grows the address space\n");
+#else
         check_units_test_limits(&tally, directory);
+#endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
     }

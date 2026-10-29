@@ -125,8 +125,8 @@ in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0
 call of a program with thread-locals, which switches FS by system calls of its own)
 takes no sanitizer instrumentation. Outside that window the fixtures stay fully
 instrumented.
-Under TSan alone, the parser driver's walk that fails each reservation in turn is
-not run: TSan maps shadow for each new mapping and keeps it, so the address space
+Under TSan alone, the parser driver's and the units driver's walks that fail each
+reservation in turn are not run: TSan maps shadow for each new mapping and keeps it, so the address space
 neither returns to its base nor bounds the run's own reservations. ASan, MSan,
 UBSan and ordinary builds still run it.
 
