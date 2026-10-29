@@ -268,6 +268,12 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
+            "vector-bf16-arithmetic",
+            "typedef __bf16 v8bf __attribute__((vector_size(16)));void tested(v8bf*p,v8bf*q){*p=*p+*q;}",
+            "vector operations on elements of this type",
+            0,
+        },
+        {
             "vector-integer-cast",
             "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n};__int128 x=(__int128)a;return (int)x;}",
             "casts between vectors and integers or vectors of other sizes",

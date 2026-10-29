@@ -19,13 +19,13 @@ static bool x86_target_test_cpuid(void)
         }
     }
     const uint64_t all = (UINT64_C(1) << X86_FEATURE_COUNT) - 1;
-    bool passed = x86_target_from_cpuid(&cpu).features == all;
+    bool passed = x86_target_from_cpuid(&cpu).features == all && x86_target_from_cpuid(&cpu).extensions == BUSTER_X86_EXTENSION(AVX512FP16);
     const uint64_t disabled[] = { 0, 2, 4, 6, 0x26, 0x66, 0xa6 };
     for (uint32_t i = 0; i < sizeof(disabled) / sizeof(disabled[0]); i += 1)
     {
         cpu.xcr0 = disabled[i];
         const X86Target target = x86_target_from_cpuid(&cpu);
-        passed &= (target.features & BUSTER_X86_FEATURE(AVX512F)) == 0;
+        passed &= (target.features & BUSTER_X86_FEATURE(AVX512F)) == 0 && target.extensions == 0;
         passed &= ((target.features & BUSTER_X86_FEATURE(AVX)) != 0) == ((disabled[i] & 6) == 6);
         passed &= ((target.features & BUSTER_X86_FEATURE(XSAVE)) != 0) == ((disabled[i] & 6) == 6);
         passed &= (target.features & (BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2))) == (BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2));
@@ -36,9 +36,13 @@ static bool x86_target_test_cpuid(void)
         cpu.words[0][2] = UINT32_MAX ^ (1u << bit);
         const X86Target target = x86_target_from_cpuid(&cpu);
         passed &= (target.features & (BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(XSAVE) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) | BUSTER_X86_FEATURE(XSAVES))) == 0;
+        passed &= target.extensions == 0;
     }
+    cpu.words[0][2] = UINT32_MAX;
+    cpu.words[1][3] = UINT32_MAX ^ (1u << 23);
+    passed &= x86_target_from_cpuid(&cpu).extensions == 0 && x86_target_from_cpuid(&cpu).features == all;
     cpu = (X86CpuId){0};
-    passed &= x86_target_from_cpuid(&cpu).features == 0;
+    passed &= x86_target_from_cpuid(&cpu).features == 0 && x86_target_from_cpuid(&cpu).extensions == 0;
     cpu.words[6][0] = 1u << 20;
     passed &= x86_target_from_cpuid(&cpu).features == BUSTER_X86_FEATURE(PREFETCHI);
     cpu.words[6][0] = 0;
@@ -50,7 +54,8 @@ static bool x86_target_test_cpuid(void)
     passed &= !x86_target_parse("znver5-extra", 12, &unchanged) && unchanged.features == 123;
     passed &= x86_target_parse("znver5-extra", 6, &unchanged) && unchanged.architecture == X86_ARCH_ZNVER5;
     const X86Target live = x86_target_native();
-    printf("target live native: features=%#llx, znver5=%u (CPUID with OS-enabled XCR0 state)\n", (unsigned long long)live.features, live.native_znver5);
+    printf("target live native: features=%#llx, extensions=%#llx, znver5=%u (CPUID with OS-enabled XCR0 state)\n", (unsigned long long)live.features,
+           (unsigned long long)live.extensions, live.native_znver5);
     printf("target CPUID, XCR0 and bounded names: %s\n", passed ? "pass" : "FAIL");
     return passed;
 }

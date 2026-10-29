@@ -4544,13 +4544,19 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_pragma_test.c"
 #include "c_check_diagnostic_test.c"
 #include "c_check_warning_events_test.c"
+#include "c_check_const_values_test.c"
 #include "c_check_warning_deferred_test.c"
+#include "c_check_warning_policy_test.c"
+#include "c_check_warning_render_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_const_source_test.c"
+#include "c_check_const_alias_test.c"
+#include "c_check_comma_input_test.c"
 #include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
@@ -4629,6 +4635,7 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool const_values = false;
     bool program_vectors = false;
     bool embed_initializers = false;
     bool options = true;
@@ -4645,6 +4652,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-initializers") == 0)
         {
             program_initializers = true;
+        }
+        else if (strcmp(argv[i], "--const-values") == 0)
+        {
+            const_values = true;
         }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
@@ -4665,14 +4676,21 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && embed_initializers)
+        if (initialized && const_values)
+        {
+            check_test_const_values(&test);
+            check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
+            check_test_const_programs(&test, clang);
+        }
+        else if (initialized && embed_initializers)
         {
             check_test_embed_initializers(&test, clang);
         }
@@ -4684,6 +4702,8 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_vectors(&test, clang);
             check_test_program_x86(&test, clang);
+            check_test_program_vector_builtins(&test, clang);
+            check_test_program_fp16(&test, clang);
         }
         else if (initialized)
         {
@@ -4695,7 +4715,13 @@ static int run_checker_tests(int argc, char** argv)
             check_test_action_oracles(&test, clang);
             check_test_actions_batch(&test, &types.table);
             check_test_warning_events(&test);
+            check_test_const_values(&test);
             check_test_warning_deferred(&test);
+            check_test_warning_policy(&test);
+            check_test_warning_render(&test);
+            check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
+            check_test_const_programs(&test, clang);
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
@@ -4732,6 +4758,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_expression_commas(&test);
             check_test_warning_ranges(&test);
             check_test_selection_roots(&test);
             check_test_varargs_graph(&test, &types.table);
