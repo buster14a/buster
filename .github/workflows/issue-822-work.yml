@@ -1,0 +1,21 @@
+name: Issue 822 isolated workspace
+on:
+  push:
+    branches: [codex/issue-822-work]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Export source for issue 822 development
+        run: git archive HEAD --output=source.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-822-source
+          path: source.tar
+          retention-days: 1
