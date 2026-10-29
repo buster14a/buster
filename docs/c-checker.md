@@ -1065,10 +1065,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
 stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
 constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
-The standalone source bridge refuses a referenced overloadable symbol until
-its ABI symbol name is available, before publishing any Link state. An unused
-overloadable declaration needs no symbol; the lower-level emitter can consume
-an explicitly supplied object-to-symbol map.
+The standalone source bridge and the program emitter share `c_check_mangle.c`
+for selected overloadable symbols (#821). Calls and contextual addresses retain
+the checker's selected object, and each emitted object receives its Itanium ABI
+name once; explicit asm labels override it. Static inline overloads, including
+Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
+Unmarked overload candidates retain C names, and unused declarations need none.
+
+The mangler uses an explicit worklist and canonical type substitutions, with
+scalar/vector substitution lookup. It covers builtin and complex arithmetic,
+qualified pointers, fixed/incomplete arrays, function pointers, vectors,
+atomics, bit-precise integers and file-scope named tags. Signatures requiring
+local/anonymous tag naming, variable array bounds, or an unsupported calling
+convention still fail before publication unless an asm label supplies the ABI
+name. These refusals do not select a different overload or publish an unmangled
+fallback. The focused `test-checker --program-overloads` suite checks independently
+stated encodings, deep signatures, allocation failures, deterministic emission,
+cross-compiler linkage in both directions and the installed `<tgmath.h>` through
+both object and direct-executable driver paths; the full checker suite runs it too.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are

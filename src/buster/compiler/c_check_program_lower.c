@@ -1694,10 +1694,6 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
         }
-        else if ((selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
-        {
-            check_lower_unsupported(writer, "addresses of overloadable functions");
-        }
         else
         {
             if (!address)
@@ -4781,13 +4777,11 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     check_lower_source(writer, graph->tokens[callee]);
     CheckValue value = stream->values[callee];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
-    bool mangled = false;
     if (overload != BUSTER_CHECK_NONE)
     {
         const CheckOverloadResult* selected = &stream->overloads[overload].selected;
         value = (CheckValue){ .type = selected->type, .category = CHECK_FUNCTION, .constant_kind = CHECK_CONSTANT_ADDRESS,
                               .object = selected->object, .flags = BUSTER_CHECK_STATIC_OBJECT };
-        mangled = (selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
     }
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
@@ -4825,9 +4819,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const bool direct = value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
-    if (mangled || passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
+    if (passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
-        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" : count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
+        check_lower_unsupported(writer, count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
                                         passed != NULL ? passed : returned);
     }
     else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
@@ -8111,10 +8105,6 @@ static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart
             write->value.object != candidate->object || write->value.object == 0 || write->value.object >= program->object_count)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
-        }
-        else if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
-        {
-            check_lower_unsupported(writer, "addresses of overloadable functions");
         }
         else
         {

@@ -2123,6 +2123,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 }
 
 #include "c_check_program_select_test.c"
+#include "c_check_program_overload_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
@@ -2846,6 +2847,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_refused(test);
     check_test_program_type_facts(test);
     check_test_program_selection(test, clang);
+    check_test_program_overloads(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
