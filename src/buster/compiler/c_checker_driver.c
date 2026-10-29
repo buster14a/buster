@@ -1507,6 +1507,39 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     return result;
 }
 
+// --id-order N, #153's test option: the unit's identifiers get their ids in another order, on which nothing the command
+// writes may depend (test-check-lanes and test-c-testsuite compare what it writes with the plain command's, and
+// test-checker-deferred checks its paths so). The unit is preprocessed first, printing nothing, into a table of its own,
+// whose names then prime `table` by N (intern_prime_reordered): the command's own run finds every other one of them in
+// another order, and gives the rest ids after them.
+static bool check_driver_id_order(InternTable* table, const PPOptions* options, const char* path, uint64_t seed)
+{
+    PPOptions silent = *options;
+    silent.quiet = true;
+    silent.timing = false;
+    silent.defer_history = false;
+    silent.no_history = true;
+    // The preparatory table owns its IDs; a caller's cache belongs to the table the real compile uses.
+    silent.files = NULL;
+    InternTable names = { 0 };
+    Arena arena = arena_reserve(sizeof(Preprocessor) + 64);
+    Preprocessor* pp = arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&arena, Preprocessor, 1) : NULL;
+    bool result = pp != NULL && intern_initialize(&names) && pp_initialize(pp, &silent, &names);
+    if (result)
+    {
+        // The names it found, whether or not the unit preprocesses without errors: the command's own run reports them.
+        pp_run(pp, path);
+    }
+    if (pp != NULL)
+    {
+        pp_release(pp);
+    }
+    result = result && intern_prime_reordered(table, &names, seed);
+    intern_release(&names);
+    arena_release(&arena);
+    return result;
+}
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
@@ -1551,6 +1584,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     // --lower-all lowers every definition that may be emitted, referenced or not: #129's test option, to measure what
     // lowering only the referenced ones saves.
     bool lower_all = false;
+    // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
+    bool id_ordered = false;
+    bool invalid_id_order = false;
+    uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
     // error after the command (#518).
     // The direct path's -l libraries and -L directories, which every other mode leaves alone.
@@ -1648,6 +1685,14 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         {
             lower_all = true;
         }
+        else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
+        {
+            const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
+            char* end = NULL;
+            id_order = value != NULL ? strtoull(value, &end, 10) : 0;
+            invalid_id_order |= value == NULL || end == value || *end != 0;
+            id_ordered = true;
+        }
         else if (strcmp(arguments[i], "--time-stages") == 0)
         {
             time_stages = true;
@@ -1684,7 +1729,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -1706,7 +1751,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1720,7 +1765,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
         // alone: the reader derives the traversal it reads into those pages (check_input_run).
         const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = &scratch };
-        bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
+        bool ready = intern_initialize(&identifiers) && (!id_ordered || check_driver_id_order(&identifiers, &options, path, id_order)) &&
+                     pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
         if (!ready || scratch.base == 0 || output_arena.base == 0)
         {
             fprintf(stderr, "fatal error: can't reserve checker memory\n");
@@ -1972,7 +2018,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
                             .scalar = scalar,
-                            .target_features = options.target.features,
+                            .target = options.target,
+                            .predefines = &options.predefines,
                         };
                         const bool program_diagnostics = result == 0 ||
                             (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp.errors != 0 &&

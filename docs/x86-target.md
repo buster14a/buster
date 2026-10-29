@@ -24,7 +24,10 @@ resolves them by `c_predefines.c` (see "The predefined macros" in
 fills the `X86Target` from the result (`predefines_target`): the features this
 file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
 from the profile where `-march` names one of the six above, and that profile's
-architecture (`X86_ARCH_OTHER` for clang's other CPUs). An unknown name or
+architecture (`X86_ARCH_OTHER` for clang's other CPUs). Its `extensions` are
+the features past those (`X86Extension`: AVX512-FP16 so far), which form
+eligibility doesn't classify and only the lowering's rows read (the x86
+builtins' and half-precision vectors': [the checker's guide](c-checker.md)). An unknown name or
 switch is an error, as in clang (the preprocessor takes only the `-m` options
 clang 23 uses for x86-64 Linux), so no option silently leaves baseline macros
 active. `-mtune=` accepts clang's names and `generic`, independently of the
@@ -37,7 +40,8 @@ replacement of the entire macro preamble.
 `X86Target` means baseline. The v2/v3/v4 profiles are cumulative; the named Zen 5
 profile includes its optional extensions. `native` reads CPUID at option parsing
 time. It requires XSAVE/OSXSAVE and XCR0's XMM/YMM bits before exposing AVX,
-and the opmask/ZMM state bits before exposing AVX-512. Missing CPUID leaves
+and the opmask/ZMM state bits before exposing AVX-512 and AVX512-FP16's
+extension, which tests read to run its code. Missing CPUID leaves
 remain zero. Its feature catalogue covers the supported Zen 5 host; this is not
 a CPU-dispatch mechanism or a promise of support for other compiler hosts.
 
@@ -119,8 +123,10 @@ The requirement table is explicit. It covers the current Tier 0 templates and
 generated deferred/ABI/frame records, including scalar SSE compares, XMM integer
 moves and exchanges; baseline locked arithmetic/bit/atomic operations; x87
 arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
-SSE4 operations; scalar AVX moves, arithmetic and conversions; and the FMA
-families in VEX and EVEX. `FISTTP` requires SSE3 even though its encoding uses
+SSE4 operations; scalar AVX moves, arithmetic and conversions; the FMA
+families in VEX and EVEX; and Tier 0's vector values' 128- and 256-bit
+`vmovdqu64` moves and `vpxord` (AVX512F and AVX512VL, #221: their slots' moves
+through zmm16, and its zeroing). `FISTTP` requires SSE3 even though its encoding uses
 x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that
@@ -255,9 +261,42 @@ with #136/#133; the existing interface and handoff are recorded on
 
 Selectors must choose legal alternative sequences when they adopt optional
 instructions, and extend the explicit requirements with independent negative
-tests. Full target-sensitive builtin lowering remains #148, and per-function
-target attributes remain #147. Complete c-testsuite and SQLite acceptance at
-baseline/v3/v4 remains #145/#146. The bounded policy work does not close #180.
+tests. Full target-sensitive builtin lowering remains #148. Complete c-testsuite
+and SQLite acceptance at baseline/v3/v4 remains #145/#146. The bounded policy
+work does not close #180.
+
+## A function's target attribute
+
+GNU's `__attribute__((target("...")))` gives a function an instruction set of
+its own, which the lowering's x86 rows and leaves and the vector builtins' and
+operators' rows use (`c_check_program.c`'s `check_program_targets`). The
+features follow clang's rule (`ASTContext::getFunctionFeatureMap`): the
+attribute's `arch=` CPU (or the unit's), the command line's features as written
+(`-march=native`'s host features, read once for the unit, then the `-m` flags),
+then the attribute's items in their order, then the soft rules, which leave a
+feature any of them turned off as it is (`c_predefines.c`'s `predefines_apply`).
+`predefines_target_attribute` reads the string as clang does: items between
+commas, trimmed; `no-NAME` turns a feature off; `tune=` changes no feature. A
+string clang ignores, with a warning, leaves the function the unit's: an item
+that names no feature with a flag (an unknown one, `cmov`, `64bit`, an empty
+one), an `arch=` or `tune=` of no x86-64 CPU or after another, `fpmath=`
+anywhere, and `branch-protection=`. So does `"default"`.
+
+The attribute applies as clang merges it: from the definition or a declaration
+before it; one after the definition is dropped where none came before. A
+function of several versions (two strings, or `target_clones`) is GNU's
+function multiversioning, whose symbols and resolver this compiler doesn't
+make: it is refused by name. The calling convention stays the unit's, as
+clang's x86-64 ABI level is the unit's, and so a function has vector values only
+where both the unit's target and its own have AVX-512F and AVX-512VL.
+
+`test-preprocessor --clang` checks the features against clang's IR
+(`"target-features"`) for 298 attributes in units of eight command lines:
+clang's headers' strings, `arch=`, `tune=`, the soft rules in each order, APX's,
+what clang ignores, and every flagged feature on and off.
+`test-checker --program-vectors` runs a baseline unit's BMI, BMI2 and CRC32
+functions, each by an attribute of its own, inherited, `arch=`, trimmed and
+`"default"`, against clang -O0's code, and checks each refusal by name.
 
 ## Sources and reproduction
 

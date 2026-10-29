@@ -3,11 +3,14 @@
 //
 // External operands to selected encoder records (#221/#222). This is deliberately separate from X86Instruction:
 // a mathematical immediate is not the same thing as bits in an encoding field. The catalogue supplies encodings,
-// operand roles and widths; this consumer admits a documented subset whose immediate interpretation is known here.
-// Initialize one caller-owned index for one X86Target, then probe a mnemonic bucket, never the whole catalogue
-// per instruction. Target-ineligible forms are excluded at initialization, including from the scalar path.
-// Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact scalar twin.
-// Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
+// operand roles and widths; this consumer admits a documented subset. An immediate that is a value (an integer
+// operand) takes the forms #221's rule gives it (x86_immediate_encodes): a value of the operation's width whose
+// pattern the field's sign extension gives back, so that `add eax, 0xffffffff` takes the imm8 (-1), as GNU as has it.
+// Any other immediate (a count, a control byte) takes the field's bits, signed or unsigned, as GNU as takes them.
+// Initialize one caller-owned index for one X86Target, after x86_semantics_initialize, then probe a mnemonic bucket,
+// never the whole catalogue per instruction. Target-ineligible forms are excluded at initialization, including from
+// the scalar path. Candidate operand templates and immediate ranges are compared sixteen at a time, with an exact
+// scalar twin. Both paths run x86_validate at the frontend boundary. No compiler expression optimization is done here.
 
 #define BUSTER_X86_MATCH_BUCKETS 512
 #define BUSTER_X86_MATCH_OPERANDS 4
@@ -63,8 +66,12 @@ struct X86MatchIndex
     uint32_t broadcast[X86_FORM_COUNT];
     // Width (including implicit qword) in bits 0..7; spelling, family and EVEX predicates above it.
     uint32_t attributes[X86_FORM_COUNT];
+    // The values an immediate takes (x86_match_immediate's, as intervals): from immediate_min (signed) to immediate_max
+    // (unsigned), and for a value whose field is narrower than its width, the unsigned spellings of its negative
+    // values at the width too, from immediate_spelling to immediate_spelling + immediate_max (0 without them).
     int64_t immediate_min[X86_FORM_COUNT];
     uint64_t immediate_max[X86_FORM_COUNT];
+    uint64_t immediate_spelling[X86_FORM_COUNT];
 };
 
 #define BUSTER_X86_MATCH_MOVABS (1u << 8)
@@ -295,7 +302,8 @@ static bool x86_match_supported(const X86FormDescription* form)
             "loopne",
             "jrcxz",
             // What C's inline assembly reaches the processor's state with (#147): the CPU's identity and XCR0, the x87's
-            // control and status words, MXCSR, and the exchange that cpuid.h's rbx saving takes; the byte swap of
+            // control and status words, MXCSR, the x87's, MMX's and SSE's state of 512 bytes (main.c's test of DAZ
+            // reads MXCSR's mask from fxsave's), and the exchange that cpuid.h's rbx saving takes; the byte swap of
             // <linux/swab.h>'s helpers; and SSE2's compare, in its legacy forms alone.
             "xchg",
             "bswap",
@@ -307,6 +315,10 @@ static bool x86_match_supported(const X86FormDescription* form)
             "fnclex",
             "stmxcsr",
             "ldmxcsr",
+            "fxsave",
+            "fxrstor",
+            "fxsave64",
+            "fxrstor64",
             "pcmpeqd",
             // And naked functions' (#147): the flags pushed and popped, SSE2's movq to and from an XMM register (which
             // the AT&T parser chooses over mov's suffix by its operands), and the x87's loads and stores.
@@ -414,13 +426,51 @@ static bool x86_match_supported(const X86FormDescription* form)
     return allowed;
 }
 
-// Whether a form sign-extends its immediate into a wider operand: the imm8 of 83, 6B and 6A, and an imm32 into 64 bits
-// (REX.W, or PUSH's default operand size). Such a field holds a signed value, which its range and its relocation (32S)
-// follow.
+// Whether a form sign-extends its immediate into a wider operand: the imm8 of 83, 6B and 6A (one-byte opcodes: 0F 83 is
+// jae rel32), and an imm32 into 64 bits (REX.W, or PUSH's default operand size). Such a field holds a signed value,
+// which its range and its relocation (32S) follow.
 static bool x86_match_sign_extends(const X86FormDescription* form)
 {
     const uint32_t opcode = form->opcode & 0xff;
-    return form->family == BUSTER_X86_FAMILY_LEGACY && (opcode == 0x83 || opcode == 0x6b || opcode == 0x6a || (form->immediate_bytes == 4 && (form->w || strcmp(form->mnemonic, "push") == 0)));
+    const bool group = form->opcode_bytes == 1 && (opcode == 0x83 || opcode == 0x6b || opcode == 0x6a);
+    return form->family == BUSTER_X86_FAMILY_LEGACY && (group || (form->immediate_bytes == 4 && (form->w || strcmp(form->mnemonic, "push") == 0)));
+}
+
+// Whether a form's immediate is a value, which #221's rule (x86_immediate_encodes) takes or refuses at the operation's
+// width: an integer operand of the effects table's covered forms.
+static bool x86_match_value(uint32_t form)
+{
+    return x86_form_descriptions[form].immediate_bytes != 0 && x86_effects_immediate_kind(x86_effects(form)) == BUSTER_X86_IMMEDIATE_VALUE;
+}
+
+// The values a form's immediate takes, as the vector path's intervals (X86MatchIndex.immediate_min and the rest):
+//   - a value of the operation's width w (x86_match_value), in a field of b bytes: from -2^(8b-1) to 2^(8b) - 1 when
+//     the field is as wide as the operation; from -2^(8b-1) to 2^(8b-1) - 1 when it is narrower and sign-extended, and
+//     the unsigned spellings of those negative values at the width, from 2^(8w) - 2^(8b-1) to 2^(8w) - 1;
+//   - any other immediate: the field's bits, signed or unsigned, but signed alone where the field is sign-extended
+//     (x86_match_sign_extends; the test checks that every such form is a value's).
+typedef struct X86MatchRange X86MatchRange;
+struct X86MatchRange
+{
+    int64_t min;
+    uint64_t max;
+    uint64_t spelling;
+};
+
+static X86MatchRange x86_match_range(uint32_t form)
+{
+    const X86FormDescription* description = &x86_form_descriptions[form];
+    const uint32_t bytes = description->immediate_bytes;
+    const uint32_t width = x86_match_value(form) ? x86_effects(form)->width : bytes;
+    const bool narrower = bytes < width || (!x86_match_value(form) && x86_match_sign_extends(description));
+    X86MatchRange range = { 0, 0, 0 };
+    if (bytes != 0)
+    {
+        range.min = (int64_t)(-((__int128)1 << (8 * bytes - 1)));
+        range.max = (uint64_t)(((__int128)1 << (8 * bytes - (narrower ? 1 : 0))) - 1);
+        range.spelling = bytes < width ? (uint64_t)(((__int128)1 << (8 * width)) - ((__int128)1 << (8 * bytes - 1))) : 0;
+    }
+    return range;
 }
 
 static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
@@ -481,10 +531,10 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 (form->family == BUSTER_X86_FAMILY_EVEX ? BUSTER_X86_MATCH_EVEX : 0) |
                 ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0 ? BUSTER_X86_MATCH_ROUNDING : 0) |
                 ((form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) != 0 ? BUSTER_X86_MATCH_FORBIDDEN : 0);
-            const uint32_t bytes = form->immediate_bytes;
-            const bool extended = x86_match_sign_extends(form);
-            index->immediate_min[at] = bytes != 0 ? (int64_t)(-((__int128)1 << (8 * bytes - 1))) : 0;
-            index->immediate_max[at] = bytes != 0 ? (uint64_t)(((__int128)1 << (8 * bytes - (extended ? 1 : 0))) - 1) : 0;
+            const X86MatchRange range = x86_match_range(f);
+            index->immediate_min[at] = range.min;
+            index->immediate_max[at] = range.max;
+            index->immediate_spelling[at] = range.spelling;
             for (uint32_t operand = 0; operand < count; operand += 1)
             {
                 const uint32_t role = roles[operand];
@@ -514,13 +564,50 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     }
 }
 
+// An immediate operand's field in a record of the form: a value's bits as #221's rule writes them (x86_immediate_field:
+// signed as wide as the field, so that pushw 0xffc8's imm8 holds -56), and any other immediate's low bits; a symbol's
+// zero (its fixup writes it). A 64-bit field's high half is the displacement's.
+static void x86_match_field(uint32_t form, const X86Operand* operand, X86Instruction* instruction)
+{
+    int32_t immediate = operand->symbolic ? 0 : (int32_t)(uint64_t)operand->value;
+    int32_t high = operand->symbolic ? 0 : (int32_t)((uint64_t)operand->value >> 32);
+    if (!operand->symbolic && x86_match_value(form))
+    {
+        x86_immediate_field(form, (int64_t)operand->value, &immediate, &high);
+    }
+    instruction->immediate = immediate;
+    if (x86_form_descriptions[form].immediate_bytes == 8)
+    {
+        instruction->displacement = high;
+    }
+}
+
+// Whether an immediate operand fits a form's immediate (the scalar path's rule, the vector path's oracle): a symbol in a
+// field of 4 bytes or more; a value as #221's rule takes it (x86_immediate_encodes), once it is a value of the
+// operation's width (an __int128 past it is none, though its low 64 bits might be); any other immediate's bits in the
+// field, as x86_match_range says.
 static bool x86_match_immediate(const X86FormDescription* form, const X86Operand* operand)
 {
+    const uint32_t number = (uint32_t)(form - x86_form_descriptions);
     const uint32_t bytes = form->immediate_bytes;
-    const bool extended = x86_match_sign_extends(form);
-    const __int128 low = bytes != 0 ? -((__int128)1 << (bytes * 8 - 1)) : 0;
-    const __int128 high = bytes != 0 ? (((__int128)1 << (bytes * 8 - (extended ? 1 : 0))) - 1) : 0;
-    return operand->kind == X86_OPERAND_IMMEDIATE && bytes != 0 && (operand->symbolic ? bytes >= 4 : operand->value >= low && operand->value <= high);
+    bool fits = false;
+    if (operand->symbolic)
+    {
+        fits = bytes >= 4;
+    }
+    else if (x86_match_value(number))
+    {
+        const uint32_t width = x86_effects(number)->width;
+        const __int128 low = -((__int128)1 << (8 * width - 1));
+        const __int128 high = ((__int128)1 << (8 * width)) - 1;
+        fits = operand->value >= low && operand->value <= high && x86_immediate_encodes(number, (int64_t)operand->value);
+    }
+    else if (bytes != 0)
+    {
+        const X86MatchRange range = x86_match_range(number);
+        fits = operand->value >= range.min && operand->value <= (__int128)range.max;
+    }
+    return operand->kind == X86_OPERAND_IMMEDIATE && bytes != 0 && fits;
 }
 
 static bool x86_match_operand(const X86Operand* operand, uint16_t descriptor, uint8_t width, X86Instruction* instruction, uint8_t role)
@@ -590,15 +677,9 @@ static bool x86_match_candidate(const X86MatchRequest* request, uint32_t f, X86I
             result = x86_match_operand(operand, form->vvvv, form->operand_bytes, instruction, role);
             break;
         case X86_MATCH_IMM:
-        {
             result = x86_match_immediate(form, operand);
-            instruction->immediate = operand->symbolic ? 0 : (int32_t)(uint64_t)operand->value;
-            if (form->immediate_bytes == 8)
-            {
-                instruction->displacement = operand->symbolic ? 0 : (int32_t)((uint64_t)operand->value >> 32);
-            }
-        }
-        break;
+            x86_match_field(f, operand, instruction);
+            break;
         case X86_MATCH_REL:
         {
             result = operand->kind == X86_OPERAND_IMMEDIATE && operand->symbolic;
@@ -690,9 +771,13 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
                 const __mmask8 lanes = valid >> (half * 8);
                 const __m512i low = _mm512_maskz_loadu_epi64(lanes, index->immediate_min + first + half * 8);
                 const __m512i high = _mm512_maskz_loadu_epi64(lanes, index->immediate_max + first + half * 8);
+                const __m512i spelling = _mm512_maskz_loadu_epi64(lanes, index->immediate_spelling + first + half * 8);
                 const __m512i bits = _mm512_set1_epi64((uint64_t)value->value);
+                // A nonnegative value: in the first interval, or past the spellings' start by no more than its length
+                // (bits - spelling wraps to past it below the start).
+                const __mmask8 unsigned_fit = _mm512_cmple_epu64_mask(bits, high) | _mm512_cmple_epu64_mask(_mm512_sub_epi64(bits, spelling), high);
                 const __mmask8 accepted = value->symbolic ? _mm512_cmpge_epu64_mask(high, _mm512_set1_epi64(INT32_MAX)) : value->value < 0 ? _mm512_cmpge_epi64_mask(bits, low)
-                                                                                                                                           : _mm512_cmple_epu64_mask(bits, high);
+                                                                                                                                           : unsigned_fit;
                 fits |= (uint32_t)(accepted & lanes) << (half * 8);
             }
             fits &= ~(relative | one);
@@ -740,11 +825,7 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
         }
         else if (role == X86_MATCH_IMM)
         {
-            instruction->immediate = operand->symbolic ? 0 : (int32_t)(uint64_t)operand->value;
-            if (x86_form_descriptions[f].immediate_bytes == 8)
-            {
-                instruction->displacement = operand->symbolic ? 0 : (int32_t)((uint64_t)operand->value >> 32);
-            }
+            x86_match_field(f, operand, instruction);
         }
     }
     return x86_validate(instruction, 1) == 1;

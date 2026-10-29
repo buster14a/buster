@@ -2905,33 +2905,88 @@ static __attribute__((unused)) uint32_t predefines_sanitizer_feature(const Prede
 // ---------------------------------------------------------------------------------------------------------------------
 // The macros
 
-// The CPU and features the options give: -march's CPU (or x86-64), with -march=native's host features before the -m
-// flags, the flags (each feature's last), and the soft rules. *cpu gets the CPU's index in predefines_cpus. Returns
-// false after an error (an unknown host for -march=native, or -mfpmath against the features).
-static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatures* features, int32_t* cpu)
+// What the features rest on besides the options: the CPU (an index in predefines_cpus, or -1 for an unknown one) and,
+// with -march=native, the host's features (predefines_host's): read once for a unit, for its own features and its
+// functions' target attributes (predefines_function_target).
+typedef struct PredefinesHost PredefinesHost;
+struct PredefinesHost
 {
-    bool result = true;
-    PredefinesFeatures listed = { 0 };
-    PredefinesFeatures detected = { 0 };
-    const bool native = options->march != 0 && strcmp(options->march, "native") == 0;
-    const char* name = options->march != 0 ? options->march : "x86-64";
-    if (native)
+    PredefinesFeatures listed;
+    PredefinesFeatures detected;
+    // The CPU's name: -march's (x86-64 without one), or with -march=native the host's (x86-64 where it is unknown, as the
+    // driver falls back to its default CPU).
+    const char* name;
+    int32_t cpu;
+    bool native;
+};
+
+static PredefinesHost predefines_host_of(const PredefinesOptions* options)
+{
+    PredefinesHost result = { .native = options->march != 0 && strcmp(options->march, "native") == 0 };
+    result.name = options->march != 0 ? options->march : "x86-64";
+    if (result.native)
     {
-        const char* host = predefines_host(&listed, &detected);
-        // The driver falls back to its default CPU when the host is unknown.
-        name = strcmp(host, "generic") != 0 ? host : "x86-64";
+        const char* host = predefines_host(&result.listed, &result.detected);
+        result.name = strcmp(host, "generic") != 0 ? host : "x86-64";
     }
-    *cpu = predefines_cpu_index(name);
-    if (*cpu < 0)
+    result.cpu = predefines_cpu_index(result.name);
+    return result;
+}
+
+// Whether `c` is whitespace, as StringRef::trim takes it.
+static bool predefines_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+// The next item of a target attribute's text from *cursor: between commas, trimmed of whitespace, as clang splits it
+// (TargetInfo::parseTargetAttr), an empty one included. False past the last.
+static bool predefines_attribute_item(const char* text, uint32_t length, uint32_t* cursor, const char** item, uint32_t* item_length)
+{
+    const bool result = *cursor <= length;
+    if (result)
     {
-        fprintf(stderr, "error: unknown target CPU '%s'\n", name);
-        result = false;
+        uint32_t end = *cursor;
+        while (end < length && text[end] != ',')
+        {
+            end += 1;
+        }
+        uint32_t first = *cursor;
+        uint32_t last = end;
+        while (first < last && predefines_space(text[first]))
+        {
+            first += 1;
+        }
+        while (last > first && predefines_space(text[last - 1]))
+        {
+            last -= 1;
+        }
+        *item = text + first;
+        *item_length = last - first;
+        *cursor = end + 1;
     }
+    return result;
+}
+
+// Whether [item, item + length) starts with `prefix`.
+static bool predefines_item_starts(const char* item, uint32_t length, const char* prefix)
+{
+    const uint32_t prefix_length = (uint32_t)strlen(prefix);
+    return length >= prefix_length && memcmp(item, prefix, prefix_length) == 0;
+}
+
+// The features of CPU `cpu` (an index in predefines_cpus, or -1 for none) as the options give them: x86-64's sse2, the
+// CPU's, -march=native's host features (`host`'s, but for the features a flag names), the -m flags (each feature's
+// last), and `extra`, a function's target attribute (its features, all of them in order: clang appends them to the
+// command line's as written, ASTContext::getFunctionFeatureMap), then the soft rules, which leave a feature that any of
+// them turned off as it is.
+static PredefinesFeatures predefines_apply(const PredefinesOptions* options, const PredefinesHost* host, int32_t cpu, const char* extra, uint32_t extra_length)
+{
     // x86-64 always has sse2, then the CPU's features.
-    *features = predefines_features[predefines_feature("sse2")].implies;
-    if (*cpu >= 0)
+    PredefinesFeatures features = predefines_features[predefines_feature("sse2")].implies;
+    if (cpu >= 0)
     {
-        predefines_add(features, predefines_cpus[*cpu].features);
+        predefines_add(&features, predefines_cpus[cpu].features);
     }
     // Each feature's last flag: the driver keeps only that one (a later flag for a feature drops the earlier ones,
     // native's among them). last[f] is the index of f's last flag, plus 1, or 0.
@@ -2943,17 +2998,17 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
     PredefinesFeatures explicitly_off = { 0 };
     // Native's list first (in table order: the host's features are consistent, so the order doesn't matter), but for
     // the features a flag names.
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(predefines_features) && native; f += 1)
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(predefines_features) && host->native; f += 1)
     {
-        if (predefines_has(listed, f) && last[f] == 0)
+        if (predefines_has(host->listed, f) && last[f] == 0)
         {
-            if (predefines_has(detected, f))
+            if (predefines_has(host->detected, f))
             {
-                predefines_add(features, predefines_features[f].implies);
+                predefines_add(&features, predefines_features[f].implies);
             }
             else
             {
-                predefines_remove(features, predefines_features[f].implied_by);
+                predefines_remove(&features, predefines_features[f].implied_by);
                 explicitly_off.words[f / 64] |= 1ull << (f % 64);
             }
         }
@@ -2966,18 +3021,39 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
         {
             if ((options->features[i] & 1) != 0)
             {
-                predefines_add(features, predefines_features[feature].implies);
+                predefines_add(&features, predefines_features[feature].implies);
             }
             else
             {
-                predefines_remove(features, predefines_features[feature].implied_by);
+                predefines_remove(&features, predefines_features[feature].implied_by);
                 explicitly_off.words[feature / 64] |= 1ull << (feature % 64);
             }
         }
     }
     if (options->inline_asm_use_gpr32)
     {
-        predefines_add(features, predefines_features[predefines_feature("inline-asm-use-gpr32")].implies);
+        predefines_add(&features, predefines_features[predefines_feature("inline-asm-use-gpr32")].implies);
+    }
+    // The target attribute's features: every item but its CPUs (which predefines_target_attribute found valid), in order.
+    uint32_t cursor = 0;
+    const char* item = 0;
+    uint32_t item_length = 0;
+    while (extra != 0 && predefines_attribute_item(extra, extra_length, &cursor, &item, &item_length))
+    {
+        if (!predefines_item_starts(item, item_length, "arch=") && !predefines_item_starts(item, item_length, "tune="))
+        {
+            const bool on = !predefines_item_starts(item, item_length, "no-");
+            const int32_t feature = on ? predefines_feature_index(item, item_length) : predefines_feature_index(item + 3, item_length - 3);
+            if (feature >= 0 && on)
+            {
+                predefines_add(&features, predefines_features[feature].implies);
+            }
+            else if (feature >= 0)
+            {
+                predefines_remove(&features, predefines_features[feature].implied_by);
+                explicitly_off.words[feature / 64] |= 1ull << (feature % 64);
+            }
+        }
     }
     // The soft rules: popcnt and crc32 come with sse4.2, mmx with sse and xsave with avx, unless turned off explicitly.
     static const char* const soft[4][2] = { { "sse4.2", "popcnt" }, { "sse", "mmx" }, { "avx", "xsave" }, { "sse4.2", "crc32" } };
@@ -2985,11 +3061,28 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
     {
         const uint32_t trigger = predefines_feature(soft[s][0]);
         const uint32_t added = predefines_feature(soft[s][1]);
-        if (predefines_has(*features, trigger) && !predefines_has(explicitly_off, added))
+        if (predefines_has(features, trigger) && !predefines_has(explicitly_off, added))
         {
-            features->words[added / 64] |= 1ull << (added % 64);
+            features.words[added / 64] |= 1ull << (added % 64);
         }
     }
+    return features;
+}
+
+// The CPU and features the options give: -march's CPU (or x86-64), with -march=native's host features before the -m
+// flags, the flags (each feature's last), and the soft rules. *cpu gets the CPU's index in predefines_cpus. Returns
+// false after an error (an unknown host for -march=native, or -mfpmath against the features).
+static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatures* features, int32_t* cpu)
+{
+    bool result = true;
+    const PredefinesHost host = predefines_host_of(options);
+    *cpu = host.cpu;
+    if (*cpu < 0)
+    {
+        fprintf(stderr, "error: unknown target CPU '%s'\n", host.name);
+        result = false;
+    }
+    *features = predefines_apply(options, &host, *cpu, 0, 0);
     // -mfpmath must agree with the features: 387 without SSE, sse with it.
     const bool sse = predefines_has(*features, predefines_feature("sse"));
     if ((options->fpmath == BUSTER_PREDEFINES_FPMATH_387 && sse) || (options->fpmath == BUSTER_PREDEFINES_FPMATH_SSE && !sse))
@@ -3077,10 +3170,30 @@ static X86Architecture predefines_x86_architecture(const char* name)
     return result;
 }
 
-// The generated code's instruction set for the options (#180): x86_target.c's features that the resolved ones have, as
-// predefines_x86_features names them, with RDTSCP and CLFLUSH from x86_target_parse's profile where -march names one
-// (native's from CPUID), and that profile's architecture (X86_ARCH_OTHER for clang's other CPUs). `tune` gets
-// -mtune's architecture (the baseline's without one). Returns false if the options don't resolve (reported on stderr).
+// The clang feature behind each of x86_target.c's extensions (X86Extension).
+static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
+    [X86_EXTENSION_AVX512FP16] = "avx512fp16",
+};
+
+// Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and
+// predefines_x86_extensions name them.
+static void predefines_x86_bits(PredefinesFeatures features, X86Target* target)
+{
+    for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
+    {
+        const char* name = predefines_x86_features[f];
+        target->features |= (uint64_t)(name != 0 && predefines_has(features, predefines_feature(name))) << f;
+    }
+    for (uint32_t e = 0; e < X86_EXTENSION_COUNT; e += 1)
+    {
+        target->extensions |= (uint64_t)predefines_has(features, predefines_feature(predefines_x86_extensions[e])) << e;
+    }
+}
+
+// The generated code's instruction set for the options (#180): x86_target.c's features and extensions that the resolved
+// ones have (predefines_x86_bits), with RDTSCP and CLFLUSH from x86_target_parse's profile where -march names one
+// (native's from CPUID), and that profile's architecture (X86_ARCH_OTHER for clang's other CPUs). `tune` gets -mtune's
+// architecture (the baseline's without one). Returns false if the options don't resolve (reported on stderr).
 static bool predefines_target(const PredefinesOptions* options, X86Target* target, X86Architecture* tune)
 {
     PredefinesFeatures features;
@@ -3097,12 +3210,109 @@ static bool predefines_target(const PredefinesOptions* options, X86Target* targe
         .architecture = profile.architecture,
         .native_znver5 = profile.native_znver5,
     };
-    for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
-    {
-        const char* name = predefines_x86_features[f];
-        target->features |= (uint64_t)(name != 0 && predefines_has(features, predefines_feature(name))) << f;
-    }
+    predefines_x86_bits(features, target);
     *tune = options->mtune != 0 ? predefines_x86_architecture(options->mtune) : X86_ARCH_BASELINE;
+    return result;
+}
+
+// How clang takes a function's target attribute (TargetInfo::parseTargetAttr and Sema::checkTargetAttr).
+typedef enum PredefinesTargetAttribute
+{
+    // A version of the function, of features of its own (predefines_function_target).
+    PREDEFINES_TARGET_ATTRIBUTE_VERSION,
+    // "default", exactly: a multiversioned function's default version, of the unit's features.
+    PREDEFINES_TARGET_ATTRIBUTE_DEFAULT,
+    // What clang ignores, with a warning: an item that names no feature with a flag (an unknown one, a capitalized one,
+    // cmov, 64bit or an empty one), an arch= or tune= that names no x86-64 CPU or comes after another that did,
+    // fpmath= anywhere, and branch-protection=.
+    PREDEFINES_TARGET_ATTRIBUTE_IGNORED,
+} PredefinesTargetAttribute;
+
+// The index in predefines_cpus of the CPU named [name, name + length), or -1.
+static int32_t predefines_cpu_index_of(const char* name, uint32_t length)
+{
+    int32_t result = -1;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(predefines_cpus) && result < 0; c += 1)
+    {
+        result = strlen(predefines_cpus[c].name) == length && memcmp(predefines_cpus[c].name, name, length) == 0 ? (int32_t)c : -1;
+    }
+    return result;
+}
+
+// How clang takes a function's target attribute `text`, and for a VERSION its arch= CPU (*cpu, an index in
+// predefines_cpus), or -1 for the unit's: items between commas, trimmed; "arch=" and "tune=" a CPU (trimmed, an empty one
+// none), "no-NAME" a feature off and "NAME" one on.
+static __attribute__((unused)) PredefinesTargetAttribute predefines_target_attribute(const char* text, uint32_t length, int32_t* cpu)
+{
+    PredefinesTargetAttribute result = length == 7 && memcmp(text, "default", 7) == 0 ? PREDEFINES_TARGET_ATTRIBUTE_DEFAULT : PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+    *cpu = -1;
+    for (uint32_t i = 0; i + 7 <= length && result == PREDEFINES_TARGET_ATTRIBUTE_VERSION; i += 1)
+    {
+        result = memcmp(text + i, "fpmath=", 7) == 0 ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+    }
+    // The CPUs of arch= (0) and tune= (1).
+    const char* names[2] = { 0, 0 };
+    uint32_t name_lengths[2] = { 0, 0 };
+    uint32_t cursor = 0;
+    const char* item = 0;
+    uint32_t item_length = 0;
+    while (result == PREDEFINES_TARGET_ATTRIBUTE_VERSION && predefines_attribute_item(text, length, &cursor, &item, &item_length))
+    {
+        const bool arch = predefines_item_starts(item, item_length, "arch=");
+        if (arch || predefines_item_starts(item, item_length, "tune="))
+        {
+            uint32_t first = 5;
+            uint32_t last = item_length;
+            while (first < last && predefines_space(item[first]))
+            {
+                first += 1;
+            }
+            while (last > first && predefines_space(item[last - 1]))
+            {
+                last -= 1;
+            }
+            const uint32_t which = arch ? 0 : 1;
+            result = name_lengths[which] != 0 ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+            names[which] = item + first;
+            name_lengths[which] = name_lengths[which] != 0 ? name_lengths[which] : last - first;
+        }
+        else if (predefines_item_starts(item, item_length, "branch-protection="))
+        {
+            result = PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+        }
+        else
+        {
+            const bool off = predefines_item_starts(item, item_length, "no-");
+            const int32_t feature = off ? predefines_feature_index(item + 3, item_length - 3) : predefines_feature_index(item, item_length);
+            result = feature < 0 || predefines_features[feature].flag == PREDEFINES_FLAG_NONE ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+        }
+    }
+    if (result == PREDEFINES_TARGET_ATTRIBUTE_VERSION && name_lengths[0] != 0)
+    {
+        *cpu = predefines_cpu_index_of(names[0], name_lengths[0]);
+        result = *cpu < 0 ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+    }
+    if (result == PREDEFINES_TARGET_ATTRIBUTE_VERSION && name_lengths[1] != 0)
+    {
+        result = predefines_cpu_index_of(names[1], name_lengths[1]) < 0 ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+    }
+    *cpu = result == PREDEFINES_TARGET_ATTRIBUTE_VERSION ? *cpu : -1;
+    return result;
+}
+
+// The instruction set (#180) clang gives a function whose target attribute is the VERSION `text` (of arch= CPU `cpu`,
+// predefines_target_attribute's, or -1) in a unit of `options`, `host` (predefines_host_of's) and `unit`
+// (predefines_target's): that CPU's features (or the unit's CPU's), the command line's, then the attribute's
+// (ASTContext::getFunctionFeatureMap). RDTSCP and CLFLUSH, which clang has no feature for, and the architecture stay the
+// unit's.
+static __attribute__((unused)) X86Target predefines_function_target(const PredefinesOptions* options, const PredefinesHost* host, X86Target unit,
+                                                                    const char* text, uint32_t length, int32_t cpu)
+{
+    const PredefinesFeatures features = predefines_apply(options, host, cpu >= 0 ? cpu : host->cpu, text, length);
+    X86Target result = unit;
+    result.features &= BUSTER_X86_FEATURE(RDTSCP) | BUSTER_X86_FEATURE(CLFLUSH);
+    result.extensions = 0;
+    predefines_x86_bits(features, &result);
     return result;
 }
 
