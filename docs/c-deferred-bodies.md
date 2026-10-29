@@ -1090,7 +1090,7 @@ read a fault at a time where nothing wrote them: units whose lanes didn't race
 for huge pages read up to 8.6% slower than main by the rule. Huge pages that
 the lanes don't race for (each 2 MB region faulted by the first lane to write
 it, the others waiting for it), or a pass that reads only the blocks the walks
-wrote (above), would take that back. With the race gone, a state's later
+wrote (above), would take that back (#847). With the race gone, a state's later
 readings can have a rule of their own (#697's item 3), fitted on a grid like
 campaign W5's, once a caller reads several units with one state.
 
