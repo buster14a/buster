@@ -5,7 +5,8 @@
 // direct aliases replace a removed value only with a retained value of the same type. Rebuild every sparse slice
 // by occurrence, compact used stack slots and remap phi predecessors. Symbols and the function ABI stay stable.
 // Input, output and scratch are disjoint. Both verifier paths, including reachable SSA dominance, must approve
-// before a new view is published. Unknown operations and new vector/mask types fail closed.
+// before a new view is published. Unknown operations and new vector/mask types fail closed, and so does metadata the
+// rebuild doesn't remap (labels, by-value aggregates' ABI records, a variadic definition's incoming frame).
 #ifndef BUSTER_IR_REBUILD_INCLUDED
 #define BUSTER_IR_REBUILD_INCLUDED
 
@@ -59,6 +60,19 @@ static uint32_t ir_rebuild_value(const IrFunction* source, const IrRebuildPlan* 
         }
     }
     return result;
+}
+
+// The function-level metadata a rebuild carries over is its signature and symbol bound alone: a function with labels,
+// ABI records or a variadic frame is refused (IR_ERROR_METADATA) rather than copied without them.
+static bool ir_rebuild_plain(const IrFunction* source)
+{
+    bool plain = source->label_count == 0 && source->abi_call_count == 0 && source->passed_count == 0 &&
+                 source->parameter_passed == 0 && source->result_size == 0 && !source->variadic;
+    for (uint32_t i = 0; plain && i < source->call_count; i += 1)
+    {
+        plain = source->calls[i].abi == 0;
+    }
+    return plain;
 }
 
 static bool ir_rebuild_overlap(const void* first, uint64_t first_bytes, const void* second, uint64_t second_bytes)
@@ -165,6 +179,10 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
         if (!paired || blocks > source->block_count || rows > source->instruction_count || source->result_type > IR_PTR)
         {
             check.error = IR_ERROR_STRUCTURE;
+        }
+        else if (!ir_rebuild_plain(source))
+        {
+            check.error = IR_ERROR_METADATA;
         }
         for (uint32_t i = 0; check.error == IR_OK && i < source->parameter_count; i += 1)
         {

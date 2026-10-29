@@ -633,7 +633,10 @@ static __attribute__((unused)) IrReduceStatus ir_reduce(const IrFunction* source
         {
             status = IR_REDUCE_RESOURCE;
         }
-        bool supported = vector.error == IR_OK && scalar.error == IR_OK && source->block_count != 0 && source->result_type <= IR_PTR;
+        // ir_reduce_copy and ir_rebuild carry no labels, ABI records or variadic frame: such a function is invalid
+        // input here, never reduced without them.
+        bool supported = vector.error == IR_OK && scalar.error == IR_OK && source->block_count != 0 && source->result_type <= IR_PTR &&
+                         ir_rebuild_plain(source);
         for (uint32_t i = 0; supported && i < source->instruction_count; i += 1)
         {
             supported = ir_rebuild_values(source->op[i]) != BUSTER_IR_NONE && source->type[i] <= IR_PTR;

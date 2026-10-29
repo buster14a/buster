@@ -84,5 +84,11 @@ a digit first and reject signs, leading whitespace and overflow.
 This additive test tool does not change IR, verifier, optimizer or interpreter
 implementations. Its first structural subset is scalar IR; unfamiliar opcodes,
 vector/mask values and unsupported signatures refuse before candidate changes.
+So does function metadata the rebuild doesn't remap: labels, by-value
+aggregates' ABI records (the function's own and its calls') and a variadic
+definition's incoming frame. `ir_rebuild` returns `IR_ERROR_METADATA` and
+`ir_reduce` `IR_REDUCE_INVALID` for such a function, before the predicate
+sees it, rather than copying it without them; `test-ir-reduce` checks a
+fixture of each that both verifiers accept.
 The later #731 adapter and native/backend process predicates remain separate
 integration work under #733.

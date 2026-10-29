@@ -66,6 +66,44 @@ static const char ir_reduce_test_call[] =
     "  %2 = ret.void %1\n"
     "}\n";
 
+// Function metadata the rebuild doesn't remap, each of which a function may carry with only rows it takes: a label
+// (in a function without br_indirect), a variadic definition's incoming frame, and by-value aggregates' ABI records.
+static const char* const ir_reduce_test_metadata_inputs[] = {
+    "function () -> i32 {\n"
+    "  label #0 b1\n"
+    "b0:\n"
+    "  %0 = br.void b1\n"
+    "b1:\n"
+    "  %1 = const.i32 0x0000000000000000000000000000000a\n"
+    "  %2 = ret.void %1\n"
+    "}\n",
+    "function (ptr, i64) -> ptr {\n"
+    "  variadic call(8,4,2,0,ret(1,0,8,0,2,255,255))\n"
+    "  slot $0 size=176 align=16 type=void flags=0x09\n"
+    "  slot $1 size=0 align=16 type=void flags=0x11\n"
+    "b0:\n"
+    "  %0 = param.ptr 0\n"
+    "  %1 = param.i64 1\n"
+    "  %2 = stack_addr.ptr $0\n"
+    "  %3 = stack_addr.ptr $1\n"
+    "  %4 = ret.void %0\n"
+    "}\n",
+    "function (ptr, i64) -> ptr {\n"
+    "  result size=12 ret(1,0,8,0,2,255,255) passed=#0\n"
+    "  passed #0 size=12 loc(1,7,6,0,0)\n"
+    "  passed #1 size=0 loc(1,2,255,0,0)\n"
+    "  passed #2 size=16 loc(2,255,255,0,0)\n"
+    "  abi #0 call(16,4,0,0,ret(1,0,8,0,2,255,255)) passed=#2 result=12\n"
+    "  slot $0 size=12 align=4 type=void flags=0x01\n"
+    "b0:\n"
+    "  %0 = param.ptr 0\n"
+    "  %1 = param.i64 1\n"
+    "  %2 = stack_addr.ptr $0\n"
+    "  %3 = call.void @1(%0) fixed=(ptr) variadic=0 abi=#0 into=%2\n"
+    "  %4 = ret.void %2\n"
+    "}\n",
+};
+
 typedef struct IrReduceTest IrReduceTest;
 struct IrReduceTest
 {
@@ -350,6 +388,57 @@ static void ir_reduce_test_rebuild(IrReduceTest* test)
     arena_release(&input);
 }
 
+static IrReduceObservation ir_reduce_test_counting(const IrFunction* function, const IrReduceLimits* limits, void* context, Arena* scratch)
+{
+    (void)function;
+    (void)limits;
+    (void)scratch;
+    *(uint32_t*)context += 1;
+    return (IrReduceObservation){ .status = IR_REDUCE_OBSERVED, .failure = { .kind = 71, .pass = 3, .detail = 5 } };
+}
+
+// #733's review: a function carrying labels, a variadic frame or ABI records verifies, but the rebuild and the reducer
+// must refuse it, publishing nothing, rather than hand back (or show the predicate) a function without them.
+static void ir_reduce_test_metadata(IrReduceTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(1) << 20);
+    Arena output = arena_reserve(UINT64_C(1) << 22);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(ir_reduce_test_metadata_inputs); k += 1)
+    {
+        IrFunction source = { 0 };
+        const bool parsed = ir_reduce_test_parse(ir_reduce_test_metadata_inputs[k], &input, &scratch, &source);
+        arena_pop_to(&scratch, 0);
+        const bool verified = parsed && ir_verify_complete(&source, &scratch, true).error == IR_OK &&
+                              ir_verify_complete(&source, &scratch, false).error == IR_OK;
+        arena_pop_to(&scratch, 0);
+        const bool carried = k == 0 ? source.label_count == 1 : k == 1 ? source.variadic : source.parameter_passed != 0 &&
+                             source.result_size == 12 && source.abi_call_count == 1 && source.calls[0].abi == 1;
+        ir_reduce_test_expect(test, verified && carried, "metadata fixture parses and passes both verifiers with its metadata");
+        IrFunction untouched;
+        memset(&untouched, 0x3c, sizeof(untouched));
+        const IrFunction before = untouched;
+        const IrCheck rebuilt = verified ? ir_rebuild(&source, NULL, &output, &scratch, &untouched) : (IrCheck){ .error = IR_OK };
+        ir_reduce_test_expect(test, rebuilt.error == IR_ERROR_METADATA && output.length == 0 && scratch.length == 0 &&
+                              memcmp(&untouched, &before, sizeof(before)) == 0,
+                              "identity rebuild refuses labels, a variadic frame or ABI records instead of dropping them");
+        uint32_t calls = 0;
+        IrReduceResult unpublished;
+        memset(&unpublished, 0x3c, sizeof(unpublished));
+        const IrReduceResult unchanged = unpublished;
+        const IrReduceLimits limits = ir_reduce_limits();
+        const IrReduceStatus status = verified ? ir_reduce(&source, ir_reduce_test_counting, &calls, &limits, &output, &scratch, &unpublished) :
+                                                 IR_REDUCE_COMPLETE;
+        ir_reduce_test_expect(test, status == IR_REDUCE_INVALID && calls == 0 && output.length == 0 && scratch.length == 0 &&
+                              memcmp(&unpublished, &unchanged, sizeof(unchanged)) == 0,
+                              "reducer refuses unremapped metadata before the predicate sees a function without it");
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void ir_reduce_test_cache(IrReduceTest* test)
 {
     Arena input = arena_reserve(UINT64_C(1) << 20);
@@ -489,6 +578,7 @@ static int run_ir_reduce_tests(int argc, char** argv)
     {
         IrReduceTest test = { .random = seed != 0 ? seed : UINT64_C(0xd153e733) };
         ir_reduce_test_rebuild(&test);
+        ir_reduce_test_metadata(&test);
         ir_reduce_test_ownership(&test);
         ir_reduce_test_cache(&test);
         ir_reduce_test_contracts(&test);
