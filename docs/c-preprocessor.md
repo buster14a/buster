@@ -1287,10 +1287,10 @@ decisions in #154 and on #117's configuration):
 - **By default, what buster implements** (`pp_implemented_*`, #806). GNU
   attributes advertise verified declaration/type, control and native consumers:
   `aligned`, `ext_vector_type`, `fallthrough`, `gnu_inline`, `mode`, `naked`,
-  `overloadable`, `packed`, `section`, `target`, `transparent_union`, `used`,
+  `packed`, `section`, `target`, `transparent_union`, `used`,
   `vector_size` and `visibility`. Paired underscores are normalized. C attribute
-  queries accept the corresponding `gnu::` names (Clang-specific type/overload
-  attributes use `clang::`) and return **201910** for standard `fallthrough`.
+  queries accept the corresponding `gnu::` names (the Clang-specific vector
+  attribute uses `clang::`) and return **201910** for standard `fallthrough`.
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
   `__has_extension` also exposes these implemented constructs in older modes.
@@ -1313,6 +1313,7 @@ lowering still refuses unsupported cases. `__has_constexpr_builtin` has its
 own narrower source-evaluation qualification, not the standalone fold bit.
 
 Accepted but unimplemented attributes remain zero, including `cleanup`,
+`overloadable` (native calls and mangled-symbol emission are explicitly refused),
 `always_inline`, `noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
 `maybe_unused` and `deprecated`. The last three have parsed records but no
 implemented diagnostic consumer; reporting their C23 date codes would falsely

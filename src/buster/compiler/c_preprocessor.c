@@ -16690,7 +16690,6 @@ static const PPFeature pp_implemented_attribute[] = {
     { "gnu_inline", 1 },
     { "mode", 1 },
     { "naked", 1 },
-    { "overloadable", 1 },
     { "packed", 1 },
     { "section", 1 },
     { "target", 1 },
@@ -16701,7 +16700,6 @@ static const PPFeature pp_implemented_attribute[] = {
 };
 static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::ext_vector_type", 1 },
-    { "clang::overloadable", 1 },
     { "fallthrough", 201910 },
     { "gnu::aligned", 1 },
     { "gnu::fallthrough", 1 },
