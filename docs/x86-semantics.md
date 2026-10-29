@@ -627,35 +627,84 @@ forms.
 
 ## Measurements
 
-On the 9700X (CPU 2, under the lock), with `benchmark-x86-semantics`'s
+On the 9700X (CPU 2, a hold of the lock per run), with `benchmark-x86-semantics`'s
 defaults: 65,536 requests, and 2,048 functions of 96 records shaped like
-clang's code.
+clang's code. Main is `9bb5060e` and the head `cff7bc98`, each built by
+`build.sh` with `BUSTER_DEBUG_INFO=0`, five rounds in an order alternating by
+round ([the record](https://github.com/buster14a/buster-performance/tree/a74e2a6ee49e31ea9f948f597ecefc9c02f3e835/docs/measurements/x86-semantics-221-2026-10-28)). The final head (`ecb3fcfd`) takes the scalar
+twin's x87 and vzeroupper resources from a table, measured below as a variant.
 
 **Tables:**
 
-- the records take 9,808 bytes (613 of 16);
-- the index takes 16,704 bytes (a u16 per form, of 8,352), of which the
-  compiler touches the lines of the forms it emits;
+- the records take 11,408 bytes (713 of 16: the 712 covered forms' and the
+  conservative one), against main's 9,808 (613);
+- the index takes 16,704 bytes (a u16 per form, of 8,352), and the lookup by
+  form number (`x86_effects_by_form`, the index with its FS and GS copies)
+  65,536; the compiler touches the lines of the forms it emits;
 - the choice's tables take 2,176 bytes, and the scalar twin's rows 2,304 more;
-- `x86_semantics_initialize` takes 36,000 cycles (9.6 µs from a process's
-  start), 3,700 more since the shift rows' candidates for the value 1 are
-  worked out at that count (`x86_instruction_flags_substitutable`).
+- `x86_semantics_initialize` takes 45,900 cycles (8.3 µs) against main's 37,600
+  (6.8 µs): the hundred rows more and the lookup's three copies.
 
-**Choice and effects**, per request or record, both states, at the PR's head
-after the review's fixes:
+**Choice and effects**, per request or record, medians of the five rounds (the
+effects on -O0's shape; -O2's within 1%):
 
-| Path | Interleaved | Back to back (`--only`) | After 200 ms of the scalar twin |
-| --- | --- | --- | --- |
-| choose, scalar | 48.3 cycles, 8.72 ns | 48.5 cycles | 48.3 cycles |
-| choose, AVX-512 | 3.32 cycles, 0.60 ns | 3.32 cycles, 0.60 ns | 3.44 cycles, 0.62 ns |
-| effects (-O0's shape), scalar | 49.7 cycles, 8.96 ns | 49.6 cycles | 49.7 cycles |
-| effects (-O0's shape), AVX-512 | 5.86 cycles, 1.06 ns | 5.88 cycles, 1.07 ns | 5.88 cycles, 1.06 ns |
-| x86_encode of the same records | 3.22 cycles, 0.58 ns | 3.01 cycles, 0.56 ns | 3.23 cycles |
+| Path | Main | Head | Head alone (`--only`) | Head after 200 ms of the scalar twin |
+| --- | --- | --- | --- | --- |
+| choose, scalar | 48.75 cycles | 49.30 cycles | | |
+| choose, AVX-512 | 3.32 cycles, 0.60 ns | 3.32 cycles, 0.60 ns | 3.32 cycles | 3.33 cycles |
+| effects, scalar | 49.63 cycles | 49.04 cycles | | |
+| effects, AVX-512 | 5.84 cycles, 1.05 ns | 5.45 cycles, 0.98 ns | 5.44 cycles | 5.45 cycles |
+| `x86_encode` of the same records | 3.25 cycles | 3.26 cycles | | |
 
-Choice is 15 times the scalar twin's speed and effects 8.5 times; -O2's shape
-measures the same (5.91, 5.88 and 5.86 cycles for effects). Both loops are
-light enough that the power cap hardly takes them: choice is 4% slower after
-the scalar twin, effects unchanged (#199's method).
+Choice is 15 times its scalar twin's speed and effects 9 times. The scalar
+choice runs main's code and instructions: its 1% is placement. Both loops are light
+enough that the power cap hardly takes them (#199's method).
+
+**The effects loop's lookup and rare lanes.** Each loop built alone in
+`benchmark-x86-semantics`'s unit, `--only effects-avx512`, five processes of
+each in a rotating order, the medians of their medians in cycles per record on
+-O0's shape and -O2's:
+
+| Loop | Back to back | After 200 ms of the scalar twin | Instructions | IPC |
+| --- | --- | --- | --- | --- |
+| main: each lane's record by `x86_semantics_row`'s row | 5.85, 5.90 | 5.83, 5.88 | 31.38 | 5.36 |
+| main by form number (`x86_effects_by_form`) | 5.24, 5.30 | 5.24, 5.32 | 23.25 | 4.43 |
+| the first head (`c2885004`): rare lanes, EVEX forms among them, counted in a general register | 7.11, 7.12 | 7.03, 7.10 | 35.66 | 5.02 |
+| the head by form number, its rare lanes counted in a general register | 5.53, 5.61 | 5.55, 5.63 | 23.88 | 4.32 |
+| the head: its rare lanes ORed in a vector register | 5.44, 5.49 | 5.44, 5.52 | 23.63 | 4.35 |
+| the same with an opmask's records rare lanes too (`known` without its `vptestnmq`), a second series | 5.45, 5.54 | 5.47, 5.52 | 24.13 | 4.42 |
+
+- `x86_semantics_row`'s arithmetic, a compare and two subtractions in every
+  lane, was a quarter of main's instructions: by form number, its loop takes 10%
+  fewer cycles.
+- The head's rare lanes (an x87 record, vzeroupper's, a vvvv operand) and its
+  opmask records' conservative effects cost three vector instructions per eight
+  records, 0.2 cycles per record over main by form number; the loop runs at 4.4
+  instructions per cycle. Folding the opmask's test into the rare lanes measured
+  no better (5.45 against the final head's 5.42 in that series).
+- A count of the rare lanes in a general register cost 0.1 cycles more: the
+  lanes' lookups take every general register the loop has. Sending EVEX records
+  to the scalar twin (the first head) cost 20%: clang -O2's AVX-512 code has
+  many, and so has the benchmark's mix.
+
+**The scalar twin** (`--only effects-scalar`, the same five processes): main
+48.81 and 48.28 cycles per record at 164.6 instructions; the head, with a test per
+x87 or vzeroupper property, 47.97 and 47.51 at 189.9; with what they add from a
+table of their bits, as the final head takes it, 46.74 and 46.27 at 179.0. It resolves
+more of the benchmark's records whole than main (99.0% against 98.4%), with
+their x87 state, vzeroupper's registers and three-operand zero idioms, in fewer
+cycles: the lookup by form number serves it too.
+
+**On real functions** (`benchmark-backend-source` on the frozen `sqlite3.c`,
+whose 2,602 functions make 396,872 typed entries): Tier 0 asks the choice 71,198
+times, 0.179 requests per entry, and the choice takes 1.79 cycles per entry
+(10 per request, a function's 27 at a time from the copies that
+`Tier0Function.choice_requests` keeps), 1.50 after 200 ms of its scalar twin,
+which takes 7.70. Of the requests, 3.3% kept their template's form, 44.0% took
+another encoding of the instruction and 52.7% another instruction (xor for
+mov 0, test r, r for cmp r, 0, a narrower test): their records' 450,190 bytes
+became 234,542, 15% of the code the functions would make with each template's
+widest form (`docs/tier0.md`).
 
 **The upper-lane read** (the read of the vector registers a legacy SSE form
 writes, from #239's review) costs about 2% of the effects loop. Cycles per
@@ -699,8 +748,30 @@ blocks of 64 over 8 registers:
 | `mov r32, imm32` (for it) | 0.170 | 5.6 |
 
 The smaller encodings cost nothing, and the zero idiom and `mov r32` over
-movabs are faster too. Whole-program run time waits for the code generators
-(#136, #141) and #142's programs.
+movabs are faster too.
+
+**Whole programs:** SQLite's speedtest1 (its `test/speedtest.tcl` options at
+`--size 5`, `sqlite3.c` 3.53.2 and `speedtest1.c` each `-c`'d by Tier 0 and
+linked by cc, from a database on tmpfs), built by the head and by the head
+without the substitutions (the choice's candidates of another instruction
+removed: xor, test r, r, the narrower test, inc and dec; `nosub`). Both give
+the same verification hash.
+
+| | Head | Without the substitutions |
+| --- | --- | --- |
+| `sqlite3.o`'s `.text` | 1,559,506 bytes | 1,625,410 bytes |
+| the executable's `.text` | 1,689,765 bytes | 1,756,917 bytes |
+| run time, the second run of each round (7 and 8 rounds) | 256.67 ms | 257.80 ms |
+| fastest of 15 runs | 256.03 ms | 257.02 ms |
+| user-space instructions | 5,685.89 M | 5,685.94 M |
+| user-space cycles | 1,320.0 M | 1,329.0 M |
+
+The substitutions take 4.1% out of `sqlite3.o`'s code, in as many
+instructions, and the program runs 0.4% to 0.7% faster with them. Each of the
+15 rounds ran both builds in an order alternating by round; the run that opens
+a round, after the lock's other holders, is slower whichever build it is, so
+the table compares the second ones. The instructions and cycles are one
+`perf stat` run of each.
 
 ## Next steps
 
