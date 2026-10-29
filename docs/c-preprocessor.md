@@ -1284,19 +1284,51 @@ is an identifier.
 The feature queries about the compiler have two sets of answers (the owner's
 decisions in #154 and on #117's configuration):
 
-- **By default, what buster implements** (`pp_implemented_*`). Until the
-  compiler implements everything clang supports, they say exactly what it does:
-  `__has_attribute(packed)` and `__has_c_attribute(gnu::packed)` answer 1,
-  including the `__packed__` spelling. Builtin answers use the shared catalog's
-  source and constant-expression capabilities as well as the preprocessor's own
-  `__is_target_*`. No feature or extension is advertised yet. Other attributes
-  remain unadvertised until their checker and lowering support is verified.
+- **By default, what buster implements** (`pp_implemented_*`, #806). GNU
+  attributes advertise verified declaration/type, control and native consumers:
+  `aligned`, `ext_vector_type`, `fallthrough`, `gnu_inline`, `mode`, `naked`,
+  `overloadable`, `packed`, `section`, `target`, `transparent_union`, `used`,
+  `vector_size` and `visibility`. Paired underscores are normalized. C attribute
+  queries accept the corresponding `gnu::` names (Clang-specific type/overload
+  attributes use `clang::`) and return **201910** for standard `fallthrough`.
+  `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
+  and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
+  `__has_extension` also exposes these implemented constructs in older modes.
+  Builtins use the shared catalog's explicit source and constant-expression
+  capabilities, plus the preprocessor's four `__is_target_*` builtins. Native
+  intrinsic names come from the actual x86 lowering rows/leaves, intersected
+  with the checker's frozen source scope; the full Clang recognition catalog
+  is not an implementation list.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.
   `test-preprocessor` turns it on for every case and file it compares with
   clang, and `benchmark-preprocessor` for its runs, so that they do the work
   `clang -E` does on the same headers.
+
+Source capability means a checked implementation through the shipped Tier 0
+source pipeline, not the experimental Tier 1 action API. It does not enable
+instruction-set features or waive argument/type/ABI restrictions: native
+lowering still refuses unsupported cases. `__has_constexpr_builtin` has its
+own narrower source-evaluation qualification, not the standalone fold bit.
+
+Accepted but unimplemented attributes remain zero, including `cleanup`,
+`always_inline`, `noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
+`maybe_unused` and `deprecated`. The last three have parsed records but no
+implemented diagnostic consumer; reporting their C23 date codes would falsely
+advertise that consumer. Unpublished alias/weak/constructor/retention effects
+also remain zero. Generic GNU atomic load/store/exchange/compare-exchange,
+GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
+unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
+The query fix does not implement these outstanding semantics.
+
+`test-preprocessor` checks an independent 180-name builtin inventory, old and
+new language modes, scoped/underscore/macro spellings, oracle isolation and
+protected input tails. `test-checker` compares intrinsic answers against the
+actual source-scope/lowering intersection, and compiles, links and executes
+query-selected layout, constant, memory, atomic, TLS and arithmetic behavior
+against Clang. Adding source lowering must update its explicit capability;
+adding an x86 row or leaf automatically updates the shared inventory.
 
 `__has_warning` and `__has_declspec_attribute` answer as clang does in both
 modes, and so do the queries that aren't about the compiler (`__has_include`,

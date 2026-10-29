@@ -7104,6 +7104,8 @@ static bool pp_test_asm_flag_predefine(const char* directory)
     return result;
 }
 
+#include "c_preprocessor_feature_test.c"
+
 static bool pp_test_implemented_features(const char* directory)
 {
     static const char source[] =
@@ -7113,11 +7115,14 @@ static bool pp_test_implemented_features(const char* directory)
         "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n"
         "#define OWN_BUILTIN __is_target_arch\nC __has_builtin(OWN_BUILTIN) __has_builtin(__is_target_arch)\n"
         "#define __builtin_expect 0\nD __has_builtin(__builtin_expect) __has_builtin(__builtin_expect_typo)\n"
-        "E __has_attribute(packed_typo) __has_c_attribute(other::packed) __has_c_attribute(packed) __has_c_attribute(gnu::__packed__)\n";
+        "E __has_attribute(packed_typo) __has_c_attribute(other::packed) __has_c_attribute(packed) __has_c_attribute(gnu::__packed__)\n"
+        "F __has_attribute(__aligned__) __has_c_attribute(gnu::__aligned__) __has_feature(__c_static_assert__) __has_c_attribute(__fallthrough__)\n"
+        "G __has_attribute(cleanup) __has_builtin(__atomic_load) __has_c_attribute(nodiscard)\n"
+        "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
     static const char* const expected[2] =
     {
-        "A 0 0 0 0 1 1 1 1 0 1 B 0 0 C 0 1 D 0 0 E 0 0 0 1\n",
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910 G 0 0 0 H 1 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910 G 1 1 202003 H 1 0\n",
     };
     static const uint32_t standards[] =
     {
@@ -7127,7 +7132,7 @@ static bool pp_test_implemented_features(const char* directory)
     char path[4200];
     snprintf(path, sizeof(path), "%s/case.c", directory);
     pp_test_write_file(path, source);
-    bool result = true;
+    bool result = pp_test_source_feature_matrix();
     for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
     {
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
@@ -7160,202 +7165,207 @@ static bool pp_test_implemented_features(const char* directory)
             }
         }
     }
-    // This explicit acceptance inventory is independent of the catalog's generation macros. Recognized special
-    // identities have no source capability; only the existing integer actions have standalone folding capability.
+    // This explicit acceptance inventory is independent of the catalog's generation macros. A source entry needs
+    // checking and native lowering, never the experimental Tier 1 path. Standalone folding is a separate fact.
     static const struct
     {
         CBuiltinId id;
         const char* name;
         bool fold;
+        bool source;
+        bool constant;
     } inventory[] =
     {
-        { CBUILTIN_BSWAP16, "__builtin_bswap16", true },
-        { CBUILTIN_BSWAP32, "__builtin_bswap32", true },
-        { CBUILTIN_BSWAP64, "__builtin_bswap64", true },
-        { CBUILTIN_CLZ, "__builtin_clz", true },
-        { CBUILTIN_CLZL, "__builtin_clzl", true },
-        { CBUILTIN_CLZLL, "__builtin_clzll", true },
-        { CBUILTIN_CTZ, "__builtin_ctz", true },
-        { CBUILTIN_CTZL, "__builtin_ctzl", true },
-        { CBUILTIN_CTZLL, "__builtin_ctzll", true },
-        { CBUILTIN_POPCOUNT, "__builtin_popcount", true },
-        { CBUILTIN_POPCOUNTL, "__builtin_popcountl", true },
-        { CBUILTIN_POPCOUNTLL, "__builtin_popcountll", true },
-        { CBUILTIN_PARITY, "__builtin_parity", true },
-        { CBUILTIN_PARITYL, "__builtin_parityl", true },
-        { CBUILTIN_PARITYLL, "__builtin_parityll", true },
-        { CBUILTIN_FFS, "__builtin_ffs", true },
-        { CBUILTIN_FFSL, "__builtin_ffsl", true },
-        { CBUILTIN_FFSLL, "__builtin_ffsll", true },
-        { CBUILTIN_ADD_OVERFLOW, "__builtin_add_overflow", true },
-        { CBUILTIN_SUB_OVERFLOW, "__builtin_sub_overflow", true },
-        { CBUILTIN_MUL_OVERFLOW, "__builtin_mul_overflow", true },
-        { CBUILTIN_VA_START, "__builtin_va_start", false },
-        { CBUILTIN_C23_VA_START, "__builtin_c23_va_start", false },
-        { CBUILTIN_VA_ARG, "__builtin_va_arg", false },
-        { CBUILTIN_VA_COPY, "__builtin_va_copy", false },
-        { CBUILTIN_VA_END, "__builtin_va_end", false },
-        { CBUILTIN_OFFSETOF, "__builtin_offsetof", false },
-        { CBUILTIN_EXPECT, "__builtin_expect", false },
-        { CBUILTIN_UNREACHABLE, "__builtin_unreachable", false },
-        { CBUILTIN_TRAP, "__builtin_trap", false },
-        { CBUILTIN_ASSUME_ALIGNED, "__builtin_assume_aligned", false },
-        { CBUILTIN_PREFETCH, "__builtin_prefetch", false },
-        { CBUILTIN_CONSTANT_P, "__builtin_constant_p", false },
-        { CBUILTIN_TYPES_COMPATIBLE_P, "__builtin_types_compatible_p", false },
-        { CBUILTIN_CHOOSE_EXPR, "__builtin_choose_expr", false },
-        { CBUILTIN_OBJECT_SIZE, "__builtin_object_size", false },
-        { CBUILTIN_HUGE_VAL, "__builtin_huge_val", false },
-        { CBUILTIN_HUGE_VALF, "__builtin_huge_valf", false },
-        { CBUILTIN_HUGE_VALL, "__builtin_huge_vall", false },
-        { CBUILTIN_INF, "__builtin_inf", false },
-        { CBUILTIN_INFF, "__builtin_inff", false },
-        { CBUILTIN_INFL, "__builtin_infl", false },
-        { CBUILTIN_NAN, "__builtin_nan", false },
-        { CBUILTIN_NANF, "__builtin_nanf", false },
-        { CBUILTIN_NANL, "__builtin_nanl", false },
-        { CBUILTIN_ISNAN, "__builtin_isnan", false },
-        { CBUILTIN_ISINF, "__builtin_isinf", false },
-        { CBUILTIN_ISFINITE, "__builtin_isfinite", false },
-        { CBUILTIN_SIGNBIT, "__builtin_signbit", false },
-        { CBUILTIN_FPCLASSIFY, "__builtin_fpclassify", false },
-        { CBUILTIN_ISINF_SIGN, "__builtin_isinf_sign", false },
-        { CBUILTIN_FABS, "__builtin_fabs", false },
-        { CBUILTIN_FABSF, "__builtin_fabsf", false },
-        { CBUILTIN_FABSL, "__builtin_fabsl", false },
-        { CBUILTIN_FLT_ROUNDS, "__builtin_flt_rounds", false },
-        { CBUILTIN_CREAL, "__builtin_creal", false },
-        { CBUILTIN_CREALF, "__builtin_crealf", false },
-        { CBUILTIN_CREALL, "__builtin_creall", false },
-        { CBUILTIN_CIMAG, "__builtin_cimag", false },
-        { CBUILTIN_CIMAGF, "__builtin_cimagf", false },
-        { CBUILTIN_CIMAGL, "__builtin_cimagl", false },
-        { CBUILTIN_ISGREATER, "__builtin_isgreater", false },
-        { CBUILTIN_ISGREATEREQUAL, "__builtin_isgreaterequal", false },
-        { CBUILTIN_ISLESS, "__builtin_isless", false },
-        { CBUILTIN_ISLESSEQUAL, "__builtin_islessequal", false },
-        { CBUILTIN_ISLESSGREATER, "__builtin_islessgreater", false },
-        { CBUILTIN_ISUNORDERED, "__builtin_isunordered", false },
-        { CBUILTIN_SQRT, "__builtin_sqrt", false },
-        { CBUILTIN_SQRTF, "__builtin_sqrtf", false },
-        { CBUILTIN_COPYSIGN, "__builtin_copysign", false },
-        { CBUILTIN_COPYSIGNF, "__builtin_copysignf", false },
-        { CBUILTIN_CEIL, "__builtin_ceil", false },
-        { CBUILTIN_CEILF, "__builtin_ceilf", false },
-        { CBUILTIN_FLOOR, "__builtin_floor", false },
-        { CBUILTIN_FLOORF, "__builtin_floorf", false },
-        { CBUILTIN_TRUNC, "__builtin_trunc", false },
-        { CBUILTIN_TRUNCF, "__builtin_truncf", false },
-        { CBUILTIN_NEARBYINT, "__builtin_nearbyint", false },
-        { CBUILTIN_NEARBYINTF, "__builtin_nearbyintf", false },
-        { CBUILTIN_RINT, "__builtin_rint", false },
-        { CBUILTIN_RINTF, "__builtin_rintf", false },
-        { CBUILTIN_MEMCPY, "__builtin_memcpy", false },
-        { CBUILTIN_MEMSET, "__builtin_memset", false },
-        { CBUILTIN_MEMMOVE, "__builtin_memmove", false },
-        { CBUILTIN_MEMCMP, "__builtin_memcmp", false },
-        { CBUILTIN_STRLEN, "__builtin_strlen", false },
-        { CBUILTIN_ALLOCA, "__builtin_alloca", false },
-        { CBUILTIN_UMULL_OVERFLOW, "__builtin_umull_overflow", false },
-        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false },
-        { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false },
-        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false },
-        { CBUILTIN_ATOMIC_STORE_N, "__atomic_store_n", false },
-        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false },
-        { CBUILTIN_ATOMIC_EXCHANGE_N, "__atomic_exchange_n", false },
-        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false },
-        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, "__atomic_compare_exchange_n", false },
-        { CBUILTIN_ATOMIC_FETCH_ADD, "__atomic_fetch_add", false },
-        { CBUILTIN_ATOMIC_FETCH_SUB, "__atomic_fetch_sub", false },
-        { CBUILTIN_ATOMIC_FETCH_AND, "__atomic_fetch_and", false },
-        { CBUILTIN_ATOMIC_FETCH_XOR, "__atomic_fetch_xor", false },
-        { CBUILTIN_ATOMIC_FETCH_OR, "__atomic_fetch_or", false },
-        { CBUILTIN_ATOMIC_FETCH_NAND, "__atomic_fetch_nand", false },
-        { CBUILTIN_ATOMIC_ADD_FETCH, "__atomic_add_fetch", false },
-        { CBUILTIN_ATOMIC_SUB_FETCH, "__atomic_sub_fetch", false },
-        { CBUILTIN_ATOMIC_AND_FETCH, "__atomic_and_fetch", false },
-        { CBUILTIN_ATOMIC_XOR_FETCH, "__atomic_xor_fetch", false },
-        { CBUILTIN_ATOMIC_OR_FETCH, "__atomic_or_fetch", false },
-        { CBUILTIN_ATOMIC_NAND_FETCH, "__atomic_nand_fetch", false },
-        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false },
-        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false },
-        { CBUILTIN_ATOMIC_THREAD_FENCE, "__atomic_thread_fence", false },
-        { CBUILTIN_ATOMIC_SIGNAL_FENCE, "__atomic_signal_fence", false },
-        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false },
-        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false },
-        { CBUILTIN_ATOMIC_FETCH_MIN, "__atomic_fetch_min", false },
-        { CBUILTIN_ATOMIC_FETCH_MAX, "__atomic_fetch_max", false },
-        { CBUILTIN_ATOMIC_MIN_FETCH, "__atomic_min_fetch", false },
-        { CBUILTIN_ATOMIC_MAX_FETCH, "__atomic_max_fetch", false },
-        { CBUILTIN_C11_ATOMIC_INIT, "__c11_atomic_init", false },
-        { CBUILTIN_C11_ATOMIC_LOAD, "__c11_atomic_load", false },
-        { CBUILTIN_C11_ATOMIC_STORE, "__c11_atomic_store", false },
-        { CBUILTIN_C11_ATOMIC_EXCHANGE, "__c11_atomic_exchange", false },
-        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG, "__c11_atomic_compare_exchange_strong", false },
-        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK, "__c11_atomic_compare_exchange_weak", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_ADD, "__c11_atomic_fetch_add", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_SUB, "__c11_atomic_fetch_sub", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_AND, "__c11_atomic_fetch_and", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_OR, "__c11_atomic_fetch_or", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_XOR, "__c11_atomic_fetch_xor", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_NAND, "__c11_atomic_fetch_nand", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_MIN, "__c11_atomic_fetch_min", false },
-        { CBUILTIN_C11_ATOMIC_FETCH_MAX, "__c11_atomic_fetch_max", false },
-        { CBUILTIN_C11_ATOMIC_THREAD_FENCE, "__c11_atomic_thread_fence", false },
-        { CBUILTIN_C11_ATOMIC_SIGNAL_FENCE, "__c11_atomic_signal_fence", false },
-        { CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, "__c11_atomic_is_lock_free", false },
-        { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false },
-        { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false },
-        { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false },
-        { CBUILTIN_SYNC_FETCH_AND_AND, "__sync_fetch_and_and", false },
-        { CBUILTIN_SYNC_FETCH_AND_XOR, "__sync_fetch_and_xor", false },
-        { CBUILTIN_SYNC_FETCH_AND_NAND, "__sync_fetch_and_nand", false },
-        { CBUILTIN_SYNC_ADD_AND_FETCH, "__sync_add_and_fetch", false },
-        { CBUILTIN_SYNC_SUB_AND_FETCH, "__sync_sub_and_fetch", false },
-        { CBUILTIN_SYNC_OR_AND_FETCH, "__sync_or_and_fetch", false },
-        { CBUILTIN_SYNC_AND_AND_FETCH, "__sync_and_and_fetch", false },
-        { CBUILTIN_SYNC_XOR_AND_FETCH, "__sync_xor_and_fetch", false },
-        { CBUILTIN_SYNC_NAND_AND_FETCH, "__sync_nand_and_fetch", false },
-        { CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, "__sync_bool_compare_and_swap", false },
-        { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, "__sync_val_compare_and_swap", false },
-        { CBUILTIN_SYNC_SYNCHRONIZE, "__sync_synchronize", false },
-        { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set", false },
-        { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release", false },
-        { CBUILTIN_FRAME_ADDRESS, "__builtin_frame_address", false },
-        { CBUILTIN_RETURN_ADDRESS, "__builtin_return_address", false },
-        { CBUILTIN_EXTRACT_RETURN_ADDR, "__builtin_extract_return_addr", false },
-        { CBUILTIN_FROB_RETURN_ADDR, "__builtin_frob_return_addr", false },
-        { CBUILTIN_ELEMENTWISE_ABS, "__builtin_elementwise_abs", false },
-        { CBUILTIN_ELEMENTWISE_ADD_SAT, "__builtin_elementwise_add_sat", false },
-        { CBUILTIN_ELEMENTWISE_BITREVERSE, "__builtin_elementwise_bitreverse", false },
-        { CBUILTIN_ELEMENTWISE_CLZG, "__builtin_elementwise_clzg", false },
-        { CBUILTIN_ELEMENTWISE_FMA, "__builtin_elementwise_fma", false },
-        { CBUILTIN_ELEMENTWISE_FSHL, "__builtin_elementwise_fshl", false },
-        { CBUILTIN_ELEMENTWISE_FSHR, "__builtin_elementwise_fshr", false },
-        { CBUILTIN_ELEMENTWISE_MAX, "__builtin_elementwise_max", false },
-        { CBUILTIN_ELEMENTWISE_MIN, "__builtin_elementwise_min", false },
-        { CBUILTIN_ELEMENTWISE_POPCOUNT, "__builtin_elementwise_popcount", false },
-        { CBUILTIN_ELEMENTWISE_SQRT, "__builtin_elementwise_sqrt", false },
-        { CBUILTIN_ELEMENTWISE_SUB_SAT, "__builtin_elementwise_sub_sat", false },
-        { CBUILTIN_REDUCE_ADD, "__builtin_reduce_add", false },
-        { CBUILTIN_REDUCE_AND, "__builtin_reduce_and", false },
-        { CBUILTIN_REDUCE_MAX, "__builtin_reduce_max", false },
-        { CBUILTIN_REDUCE_MIN, "__builtin_reduce_min", false },
-        { CBUILTIN_REDUCE_MUL, "__builtin_reduce_mul", false },
-        { CBUILTIN_REDUCE_OR, "__builtin_reduce_or", false },
-        { CBUILTIN_SHUFFLEVECTOR, "__builtin_shufflevector", false },
-        { CBUILTIN_CONVERTVECTOR, "__builtin_convertvector", false },
-        { CBUILTIN_NONDETERMINISTIC_VALUE, "__builtin_nondeterministic_value", false },
-        { CBUILTIN_NONTEMPORAL_LOAD, "__builtin_nontemporal_load", false },
-        { CBUILTIN_NONTEMPORAL_STORE, "__builtin_nontemporal_store", false },
-        { CBUILTIN_BIT_CAST, "__builtin_bit_cast", false },
+        { CBUILTIN_BSWAP16, "__builtin_bswap16", true, true, true },
+        { CBUILTIN_BSWAP32, "__builtin_bswap32", true, true, true },
+        { CBUILTIN_BSWAP64, "__builtin_bswap64", true, true, true },
+        { CBUILTIN_CLZ, "__builtin_clz", true, true, true },
+        { CBUILTIN_CLZL, "__builtin_clzl", true, true, true },
+        { CBUILTIN_CLZLL, "__builtin_clzll", true, true, true },
+        { CBUILTIN_CTZ, "__builtin_ctz", true, true, true },
+        { CBUILTIN_CTZL, "__builtin_ctzl", true, true, true },
+        { CBUILTIN_CTZLL, "__builtin_ctzll", true, true, true },
+        { CBUILTIN_POPCOUNT, "__builtin_popcount", true, true, true },
+        { CBUILTIN_POPCOUNTL, "__builtin_popcountl", true, true, true },
+        { CBUILTIN_POPCOUNTLL, "__builtin_popcountll", true, true, true },
+        { CBUILTIN_PARITY, "__builtin_parity", true, true, true },
+        { CBUILTIN_PARITYL, "__builtin_parityl", true, true, true },
+        { CBUILTIN_PARITYLL, "__builtin_parityll", true, true, true },
+        { CBUILTIN_FFS, "__builtin_ffs", true, true, true },
+        { CBUILTIN_FFSL, "__builtin_ffsl", true, true, true },
+        { CBUILTIN_FFSLL, "__builtin_ffsll", true, true, true },
+        { CBUILTIN_ADD_OVERFLOW, "__builtin_add_overflow", true, true, false },
+        { CBUILTIN_SUB_OVERFLOW, "__builtin_sub_overflow", true, true, false },
+        { CBUILTIN_MUL_OVERFLOW, "__builtin_mul_overflow", true, true, false },
+        { CBUILTIN_VA_START, "__builtin_va_start", false, true, false },
+        { CBUILTIN_C23_VA_START, "__builtin_c23_va_start", false, true, false },
+        { CBUILTIN_VA_ARG, "__builtin_va_arg", false, true, false },
+        { CBUILTIN_VA_COPY, "__builtin_va_copy", false, true, false },
+        { CBUILTIN_VA_END, "__builtin_va_end", false, true, false },
+        { CBUILTIN_OFFSETOF, "__builtin_offsetof", false, true, true },
+        { CBUILTIN_EXPECT, "__builtin_expect", false, true, true },
+        { CBUILTIN_UNREACHABLE, "__builtin_unreachable", false, true, false },
+        { CBUILTIN_TRAP, "__builtin_trap", false, true, false },
+        { CBUILTIN_ASSUME_ALIGNED, "__builtin_assume_aligned", false, true, false },
+        { CBUILTIN_PREFETCH, "__builtin_prefetch", false, true, false },
+        { CBUILTIN_CONSTANT_P, "__builtin_constant_p", false, true, true },
+        { CBUILTIN_TYPES_COMPATIBLE_P, "__builtin_types_compatible_p", false, true, true },
+        { CBUILTIN_CHOOSE_EXPR, "__builtin_choose_expr", false, true, true },
+        { CBUILTIN_OBJECT_SIZE, "__builtin_object_size", false, true, false },
+        { CBUILTIN_HUGE_VAL, "__builtin_huge_val", false, true, false },
+        { CBUILTIN_HUGE_VALF, "__builtin_huge_valf", false, true, false },
+        { CBUILTIN_HUGE_VALL, "__builtin_huge_vall", false, true, false },
+        { CBUILTIN_INF, "__builtin_inf", false, true, false },
+        { CBUILTIN_INFF, "__builtin_inff", false, true, false },
+        { CBUILTIN_INFL, "__builtin_infl", false, true, false },
+        { CBUILTIN_NAN, "__builtin_nan", false, true, false },
+        { CBUILTIN_NANF, "__builtin_nanf", false, true, false },
+        { CBUILTIN_NANL, "__builtin_nanl", false, true, false },
+        { CBUILTIN_ISNAN, "__builtin_isnan", false, true, false },
+        { CBUILTIN_ISINF, "__builtin_isinf", false, true, false },
+        { CBUILTIN_ISFINITE, "__builtin_isfinite", false, true, false },
+        { CBUILTIN_SIGNBIT, "__builtin_signbit", false, true, false },
+        { CBUILTIN_FPCLASSIFY, "__builtin_fpclassify", false, true, false },
+        { CBUILTIN_ISINF_SIGN, "__builtin_isinf_sign", false, true, false },
+        { CBUILTIN_FABS, "__builtin_fabs", false, true, false },
+        { CBUILTIN_FABSF, "__builtin_fabsf", false, true, false },
+        { CBUILTIN_FABSL, "__builtin_fabsl", false, true, false },
+        { CBUILTIN_FLT_ROUNDS, "__builtin_flt_rounds", false, true, false },
+        { CBUILTIN_CREAL, "__builtin_creal", false, true, false },
+        { CBUILTIN_CREALF, "__builtin_crealf", false, true, false },
+        { CBUILTIN_CREALL, "__builtin_creall", false, true, false },
+        { CBUILTIN_CIMAG, "__builtin_cimag", false, true, false },
+        { CBUILTIN_CIMAGF, "__builtin_cimagf", false, true, false },
+        { CBUILTIN_CIMAGL, "__builtin_cimagl", false, true, false },
+        { CBUILTIN_ISGREATER, "__builtin_isgreater", false, true, false },
+        { CBUILTIN_ISGREATEREQUAL, "__builtin_isgreaterequal", false, true, false },
+        { CBUILTIN_ISLESS, "__builtin_isless", false, true, false },
+        { CBUILTIN_ISLESSEQUAL, "__builtin_islessequal", false, true, false },
+        { CBUILTIN_ISLESSGREATER, "__builtin_islessgreater", false, true, false },
+        { CBUILTIN_ISUNORDERED, "__builtin_isunordered", false, true, false },
+        { CBUILTIN_SQRT, "__builtin_sqrt", false, true, false },
+        { CBUILTIN_SQRTF, "__builtin_sqrtf", false, true, false },
+        { CBUILTIN_COPYSIGN, "__builtin_copysign", false, true, false },
+        { CBUILTIN_COPYSIGNF, "__builtin_copysignf", false, true, false },
+        { CBUILTIN_CEIL, "__builtin_ceil", false, true, false },
+        { CBUILTIN_CEILF, "__builtin_ceilf", false, true, false },
+        { CBUILTIN_FLOOR, "__builtin_floor", false, true, false },
+        { CBUILTIN_FLOORF, "__builtin_floorf", false, true, false },
+        { CBUILTIN_TRUNC, "__builtin_trunc", false, true, false },
+        { CBUILTIN_TRUNCF, "__builtin_truncf", false, true, false },
+        { CBUILTIN_NEARBYINT, "__builtin_nearbyint", false, true, false },
+        { CBUILTIN_NEARBYINTF, "__builtin_nearbyintf", false, true, false },
+        { CBUILTIN_RINT, "__builtin_rint", false, true, false },
+        { CBUILTIN_RINTF, "__builtin_rintf", false, true, false },
+        { CBUILTIN_MEMCPY, "__builtin_memcpy", false, true, false },
+        { CBUILTIN_MEMSET, "__builtin_memset", false, true, false },
+        { CBUILTIN_MEMMOVE, "__builtin_memmove", false, true, false },
+        { CBUILTIN_MEMCMP, "__builtin_memcmp", false, true, false },
+        { CBUILTIN_STRLEN, "__builtin_strlen", false, true, false },
+        { CBUILTIN_ALLOCA, "__builtin_alloca", false, true, false },
+        { CBUILTIN_UMULL_OVERFLOW, "__builtin_umull_overflow", false, true, false },
+        { CBUILTIN_ATOMIC_LOAD, "__atomic_load", false, false, false },
+        { CBUILTIN_ATOMIC_LOAD_N, "__atomic_load_n", false, true, false },
+        { CBUILTIN_ATOMIC_STORE, "__atomic_store", false, false, false },
+        { CBUILTIN_ATOMIC_STORE_N, "__atomic_store_n", false, true, false },
+        { CBUILTIN_ATOMIC_EXCHANGE, "__atomic_exchange", false, false, false },
+        { CBUILTIN_ATOMIC_EXCHANGE_N, "__atomic_exchange_n", false, true, false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE, "__atomic_compare_exchange", false, false, false },
+        { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, "__atomic_compare_exchange_n", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_ADD, "__atomic_fetch_add", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_SUB, "__atomic_fetch_sub", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_AND, "__atomic_fetch_and", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_XOR, "__atomic_fetch_xor", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_OR, "__atomic_fetch_or", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_NAND, "__atomic_fetch_nand", false, true, false },
+        { CBUILTIN_ATOMIC_ADD_FETCH, "__atomic_add_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_SUB_FETCH, "__atomic_sub_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_AND_FETCH, "__atomic_and_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_XOR_FETCH, "__atomic_xor_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_OR_FETCH, "__atomic_or_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_NAND_FETCH, "__atomic_nand_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_TEST_AND_SET, "__atomic_test_and_set", false, false, false },
+        { CBUILTIN_ATOMIC_CLEAR, "__atomic_clear", false, false, false },
+        { CBUILTIN_ATOMIC_THREAD_FENCE, "__atomic_thread_fence", false, true, false },
+        { CBUILTIN_ATOMIC_SIGNAL_FENCE, "__atomic_signal_fence", false, true, false },
+        { CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, "__atomic_always_lock_free", false, false, false },
+        { CBUILTIN_ATOMIC_IS_LOCK_FREE, "__atomic_is_lock_free", false, false, false },
+        { CBUILTIN_ATOMIC_FETCH_MIN, "__atomic_fetch_min", false, true, false },
+        { CBUILTIN_ATOMIC_FETCH_MAX, "__atomic_fetch_max", false, true, false },
+        { CBUILTIN_ATOMIC_MIN_FETCH, "__atomic_min_fetch", false, true, false },
+        { CBUILTIN_ATOMIC_MAX_FETCH, "__atomic_max_fetch", false, true, false },
+        { CBUILTIN_C11_ATOMIC_INIT, "__c11_atomic_init", false, true, false },
+        { CBUILTIN_C11_ATOMIC_LOAD, "__c11_atomic_load", false, true, false },
+        { CBUILTIN_C11_ATOMIC_STORE, "__c11_atomic_store", false, true, false },
+        { CBUILTIN_C11_ATOMIC_EXCHANGE, "__c11_atomic_exchange", false, true, false },
+        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG, "__c11_atomic_compare_exchange_strong", false, true, false },
+        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK, "__c11_atomic_compare_exchange_weak", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_ADD, "__c11_atomic_fetch_add", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_SUB, "__c11_atomic_fetch_sub", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_AND, "__c11_atomic_fetch_and", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_OR, "__c11_atomic_fetch_or", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_XOR, "__c11_atomic_fetch_xor", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_NAND, "__c11_atomic_fetch_nand", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_MIN, "__c11_atomic_fetch_min", false, true, false },
+        { CBUILTIN_C11_ATOMIC_FETCH_MAX, "__c11_atomic_fetch_max", false, true, false },
+        { CBUILTIN_C11_ATOMIC_THREAD_FENCE, "__c11_atomic_thread_fence", false, true, false },
+        { CBUILTIN_C11_ATOMIC_SIGNAL_FENCE, "__c11_atomic_signal_fence", false, true, false },
+        { CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, "__c11_atomic_is_lock_free", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_AND, "__sync_fetch_and_and", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_XOR, "__sync_fetch_and_xor", false, true, false },
+        { CBUILTIN_SYNC_FETCH_AND_NAND, "__sync_fetch_and_nand", false, true, false },
+        { CBUILTIN_SYNC_ADD_AND_FETCH, "__sync_add_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_SUB_AND_FETCH, "__sync_sub_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_OR_AND_FETCH, "__sync_or_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_AND_AND_FETCH, "__sync_and_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_XOR_AND_FETCH, "__sync_xor_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_NAND_AND_FETCH, "__sync_nand_and_fetch", false, true, false },
+        { CBUILTIN_SYNC_BOOL_COMPARE_AND_SWAP, "__sync_bool_compare_and_swap", false, true, false },
+        { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, "__sync_val_compare_and_swap", false, true, false },
+        { CBUILTIN_SYNC_SYNCHRONIZE, "__sync_synchronize", false, true, false },
+        { CBUILTIN_SYNC_LOCK_TEST_AND_SET, "__sync_lock_test_and_set", false, true, false },
+        { CBUILTIN_SYNC_LOCK_RELEASE, "__sync_lock_release", false, true, false },
+        { CBUILTIN_FRAME_ADDRESS, "__builtin_frame_address", false, true, false },
+        { CBUILTIN_RETURN_ADDRESS, "__builtin_return_address", false, true, false },
+        { CBUILTIN_EXTRACT_RETURN_ADDR, "__builtin_extract_return_addr", false, true, false },
+        { CBUILTIN_FROB_RETURN_ADDR, "__builtin_frob_return_addr", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ABS, "__builtin_elementwise_abs", false, true, false },
+        { CBUILTIN_ELEMENTWISE_ADD_SAT, "__builtin_elementwise_add_sat", false, true, false },
+        { CBUILTIN_ELEMENTWISE_BITREVERSE, "__builtin_elementwise_bitreverse", false, false, false },
+        { CBUILTIN_ELEMENTWISE_CLZG, "__builtin_elementwise_clzg", false, true, false },
+        { CBUILTIN_ELEMENTWISE_FMA, "__builtin_elementwise_fma", false, true, false },
+        { CBUILTIN_ELEMENTWISE_FSHL, "__builtin_elementwise_fshl", false, true, false },
+        { CBUILTIN_ELEMENTWISE_FSHR, "__builtin_elementwise_fshr", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MAX, "__builtin_elementwise_max", false, true, false },
+        { CBUILTIN_ELEMENTWISE_MIN, "__builtin_elementwise_min", false, true, false },
+        { CBUILTIN_ELEMENTWISE_POPCOUNT, "__builtin_elementwise_popcount", false, true, false },
+        { CBUILTIN_ELEMENTWISE_SQRT, "__builtin_elementwise_sqrt", false, true, false },
+        { CBUILTIN_ELEMENTWISE_SUB_SAT, "__builtin_elementwise_sub_sat", false, true, false },
+        { CBUILTIN_REDUCE_ADD, "__builtin_reduce_add", false, true, false },
+        { CBUILTIN_REDUCE_AND, "__builtin_reduce_and", false, true, false },
+        { CBUILTIN_REDUCE_MAX, "__builtin_reduce_max", false, true, false },
+        { CBUILTIN_REDUCE_MIN, "__builtin_reduce_min", false, true, false },
+        { CBUILTIN_REDUCE_MUL, "__builtin_reduce_mul", false, true, false },
+        { CBUILTIN_REDUCE_OR, "__builtin_reduce_or", false, true, false },
+        { CBUILTIN_SHUFFLEVECTOR, "__builtin_shufflevector", false, true, false },
+        { CBUILTIN_CONVERTVECTOR, "__builtin_convertvector", false, true, false },
+        { CBUILTIN_NONDETERMINISTIC_VALUE, "__builtin_nondeterministic_value", false, true, false },
+        { CBUILTIN_NONTEMPORAL_LOAD, "__builtin_nontemporal_load", false, true, false },
+        { CBUILTIN_NONTEMPORAL_STORE, "__builtin_nontemporal_store", false, true, false },
+        { CBUILTIN_BIT_CAST, "__builtin_bit_cast", false, true, false },
     };
     result &= BUSTER_ARRAY_LENGTH(inventory) == BUSTER_ARRAY_LENGTH(cbuiltin_catalog);
     const uint32_t compile_capabilities = BUSTER_CBUILTIN_CAP_SOURCE | BUSTER_CBUILTIN_CAP_CONSTEXPR |
                                           BUSTER_CBUILTIN_CAP_CHECKER | BUSTER_CBUILTIN_CAP_TIER0 | BUSTER_CBUILTIN_CAP_TIER1;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cbuiltin_catalog); i += 1)
     {
-        result &= (cbuiltin_catalog[i].capabilities & compile_capabilities) == 0;
+        const uint32_t capabilities = cbuiltin_catalog[i].capabilities;
+        result &= (capabilities & BUSTER_CBUILTIN_CAP_TIER1) == 0;
+        result &= (capabilities & BUSTER_CBUILTIN_CAP_SOURCE) == 0 || (capabilities & BUSTER_CBUILTIN_SOURCE) == BUSTER_CBUILTIN_SOURCE;
+        result &= (capabilities & BUSTER_CBUILTIN_CAP_CONSTEXPR) == 0 || (capabilities & BUSTER_CBUILTIN_SOURCE) == BUSTER_CBUILTIN_SOURCE;
         // cbuiltin_resolve refuses a name that doesn't start with "__" before it looks at the catalog.
         result &= cbuiltin_catalog[i].length >= 2 && cbuiltin_catalog[i].name[0] == '_' && cbuiltin_catalog[i].name[1] == '_';
     }
@@ -7365,10 +7375,10 @@ static bool pp_test_implemented_features(const char* directory)
         const uint32_t length = (uint32_t)strlen(name);
         result &= cbuiltin_resolve(name, length) == inventory[i].id;
         result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
-        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_SOURCE);
-        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+        result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_SOURCE) == inventory[i].source;
+        result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
         result &= !cbuiltin_has_capability((const uint8_t*)name, length, compile_capabilities);
-        result &= !cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD | BUSTER_CBUILTIN_CAP_SOURCE);
+        result &= cbuiltin_has_capability((const uint8_t*)name, length, BUSTER_CBUILTIN_CAP_FOLD | BUSTER_CBUILTIN_CAP_SOURCE) == (inventory[i].fold && inventory[i].source);
         result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0);
         result &= !cbuiltin_has_capability((const uint8_t*)name, length, 0x80);
         for (uint32_t previous = 0; previous < i; previous += 1)
@@ -7378,8 +7388,8 @@ static bool pp_test_implemented_features(const char* directory)
         for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
         {
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == 0;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == 0;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == inventory[i].source;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == inventory[i].constant;
         }
     }
     static const char* const own[] =
@@ -7451,10 +7461,10 @@ static bool pp_test_implemented_features(const char* directory)
                 memcpy(name, inventory[i].name, length);
                 result &= cbuiltin_resolve((const char*)name, length) == inventory[i].id;
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
-                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
-                result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == 0;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
+                result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) == inventory[i].source;
+                result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == inventory[i].source;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == inventory[i].constant;
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
                 result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD);

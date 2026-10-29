@@ -493,3 +493,14 @@ license and notice files as described in [LICENSING.md](LICENSING.md).
 Excluding something from the first-party grant would not by itself authorize
 redistributing it. Any later discovery of other incorporated material must be
 resolved before claiming coverage for it.
+
+### Feature-query integration (#806)
+
+`c_builtin_source_intrinsics.c`, `c_builtin_x86_rows.inc`,
+`c_builtin_x86_leaves.inc` and `c_preprocessor_feature_test.c` under
+`src/buster/compiler/` are original project material under the default license.
+The two `.inc` inventories relocate the existing first-party native lowering
+and helper records without importing implementation. The intrinsic query also
+instantiates the already-reviewed
+`generated/clang_builtin_own_main_23_1_1.inc` name inventory; that file's LLVM
+provenance and license remain unchanged. No new upstream data was imported.
