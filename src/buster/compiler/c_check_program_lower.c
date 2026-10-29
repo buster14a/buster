@@ -10292,7 +10292,8 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
     }
     bool valid = lowered->status == CHECK_PROGRAM_OK;
     uint32_t written = 0;
-    uint64_t runtimes = 0;
+    // Whether any part calls one: past 64 of them, a bit each wouldn't fit a word.
+    bool runtimes = false;
     for (uint32_t p = 0; valid && p < count; p += 1)
     {
         if (parts[p].label_symbol_count != 0)
@@ -10312,12 +10313,12 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
                 lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
                 lowered->runtime_order[lowered->runtime_symbol_count++] = (uint8_t)runtime;
             }
-            runtimes |= UINT64_C(1) << runtime;
+            runtimes = true;
         }
     }
     lowered->label_symbol_count = valid ? written : 0;
     // Every call of a runtime function takes its symbol (check_lower_runtime's provisional one until now).
-    for (uint32_t b = 0; valid && runtimes != 0 && b < program->body_count; b += 1)
+    for (uint32_t b = 0; valid && runtimes && b < program->body_count; b += 1)
     {
         Tier0Function* function = &lowered->functions[b];
         SymbolId* targets = (SymbolId*)function->call_targets;
