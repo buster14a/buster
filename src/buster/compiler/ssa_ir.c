@@ -560,7 +560,7 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
 // ssa_rename_vector), where the scalar twin's work follows the instructions, so past this many the twin is faster. On
 // the 9700X, each of the frozen sqlite3.c's 2,602 functions timed by both paths (benchmark-ir-source --functions): the
 // vector path alone 40.15 ms, the twin alone 37.01, the vector path to 16,384 cells and the twin past them 35.96 (each
-// function's faster path 35.32); every bound from 8,192 to 32,768 cells came within 0.2% of it.
+// function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
 #define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
 
 static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector)

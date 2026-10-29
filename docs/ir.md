@@ -655,7 +655,7 @@ scalar constructor (`BUSTER_SSA_IR_VECTOR_CELLS`, docs/ssa.md): on the 9700X
 `promote` then takes 148.6 ns per entry against 160.5 (−7.4%, and −7.7% after
 scalar work), under its twin's 151.1, with 2,208 instructions per entry against
 2,535 and 13.4 throttled dispatch slots per instruction against 31.5 ([the
-record](https://github.com/buster14a/buster-performance/tree/39d19074c368b2b58e623d0c773c612734a77828/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
+record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
 
 Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the
 same instructions but 0.0004% and writes the same object. The checker's unit
