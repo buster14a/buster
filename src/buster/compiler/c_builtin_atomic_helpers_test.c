@@ -153,7 +153,8 @@ static bool cbuiltin_atomic_test_wait(CBuiltinAtomicTestExchange* exchange, cons
     return result;
 }
 
-static void* cbuiltin_atomic_test_sender(void* opaque)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void* cbuiltin_atomic_test_sender(void* opaque)
 {
     CBuiltinAtomicTestExchange* exchange = opaque;
     bool running = true;
