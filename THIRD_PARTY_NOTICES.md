@@ -17,6 +17,11 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`ir_rebuild.c` and the `ir_reduce*.c` test/tool family (#733) are original
+project C under Apache-2.0 WITH LLVM-exception. They use this repository's
+public IR, verifier, optimizer and interpreter interfaces; no external reducer,
+compiler implementation or upstream test fixture was imported.
+
 The canonical foreign-name permutation and its original C/assembly/property
 fixtures in `foreign_order.c` and `foreign_order_test.c` (#734) use the project
 default terms. The radix kernel follows this project's original
