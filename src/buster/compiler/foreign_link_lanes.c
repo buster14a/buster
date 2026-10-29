@@ -82,14 +82,15 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
     uint64_t bytes = 0;
     uint32_t failed_at = UINT32_MAX;
     ForeignLinkError failure = FOREIGN_LINK_ERROR_NONE;
-    for (uint64_t name = range.begin; failed_at == UINT32_MAX && name < range.end; name += 1)
+    for (uint64_t at = range.begin; failed_at == UINT32_MAX && at < range.end; at += 1)
     {
+        const uint32_t name = (uint32_t)names->order[at];
         const ForeignLinkName decision = foreign_link_decide_name(output, foreign, build->required, &build->bounds, build->kind, build->defer_undefined, (uint32_t)name);
         state->decisions[name] = decision;
         kept += decision.kept ? 1 : 0;
         commons += decision.kept && decision.common_class != 0 ? 1 : 0;
         bytes += decision.kept ? (uint64_t)names->length[name] + 1 : 0;
-        failed_at = decision.error != FOREIGN_LINK_ERROR_NONE ? (uint32_t)name : failed_at;
+        failed_at = decision.error != FOREIGN_LINK_ERROR_NONE ? (uint32_t)at : failed_at;
         failure = decision.error;
     }
     state->kept[lane] = kept;
@@ -113,8 +114,9 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
             {
                 first = state->failed_at[other];
                 build->result.error = state->failure[other];
-                build->result.name = first + 1;
-                build->result.object = state->decisions[first].object;
+                const uint32_t name = (uint32_t)names->order[first];
+                build->result.name = name + 1;
+                build->result.object = state->decisions[name].object;
             }
             state->name_base[other] = name_at;
             state->symbol_base[other] = symbol_at;
@@ -145,11 +147,12 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
         view.atoms.count = (uint32_t)state->atom_base[lane];
         view.atoms.capacity = (uint32_t)(state->atom_base[lane] + state->commons[lane]);
         failed_at = UINT32_MAX;
-        for (uint64_t name = range.begin; name < range.end; name += 1)
+        for (uint64_t at = range.begin; at < range.end; at += 1)
         {
+            const uint32_t name = (uint32_t)names->order[at];
             const ForeignLinkName* decision = &state->decisions[name];
             const bool added = !decision->kept || foreign_link_add_name(&view, output, foreign, (uint32_t)name, decision) == FOREIGN_LINK_ERROR_NONE;
-            failed_at = !added && failed_at == UINT32_MAX ? (uint32_t)name : failed_at;
+            failed_at = !added && failed_at == UINT32_MAX ? (uint32_t)at : failed_at;
         }
         const bool placed = view.names.count == view.names.capacity && view.symbols.count == view.symbols.capacity && view.atoms.count == view.atoms.capacity;
         state->failed_at[lane] = failed_at == UINT32_MAX && !placed ? (uint32_t)range.begin : failed_at;
@@ -165,8 +168,9 @@ static void foreign_link_names_lanes(ForeignLinkLanes* state)
         if (first != UINT32_MAX)
         {
             build->result.error = FOREIGN_LINK_ERROR_LINK;
-            build->result.name = first + 1;
-            build->result.object = state->decisions[first].object;
+            const uint32_t name = (uint32_t)names->order[first];
+            build->result.name = name + 1;
+            build->result.object = state->decisions[name].object;
         }
         else
         {
