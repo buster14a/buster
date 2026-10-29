@@ -112,6 +112,13 @@ struct InterpreterNativeRequest
     uint16_t result_type;
     bool variadic;
     InterpreterRuntime* runtime;
+    // A call with ABI records (#131): its totals and result, each argument's place and size (an aggregate's, whose bytes
+    // are at its value's address), and an aggregate result's bytes, result_size of them, which go to `destination`; or
+    // none (abi 0), each scalar placed as LLVM's assignment places it.
+    const AbiCall* abi;
+    const IrPassed* passed;
+    uint64_t destination;
+    uint32_t result_size;
 };
 
 typedef struct InterpreterProgram InterpreterProgram;

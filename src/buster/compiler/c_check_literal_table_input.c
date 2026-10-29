@@ -95,7 +95,8 @@ static bool check_literal_table_value(CheckInputReader* reader, const uint8_t* s
 {
     CheckLiteral literal = { 0 };
     check_literal_integer(spelling, length, &literal);
-    bool valid = literal.valid;
+    // A bit-precise constant, whose type the table makes (check_input_literal), takes the ordinary path.
+    bool valid = literal.valid && literal.bit_width == 0;
     CheckValue value = { .type = literal.type, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE,
                          .constant_kind = CHECK_CONSTANT_INTEGER, .integer = literal.integer };
     if (valid && negative)

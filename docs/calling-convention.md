@@ -73,6 +73,13 @@ generator's: it classifies after the front end has made the types, and a tag
 once it is complete (the type table's columns never change once written, but
 a tag's at its completion). Lanes may read the table while none writes it.
 
+A transparent union passes as its first member: clang classifies an argument,
+a parameter and `va_arg`'s type that is one as the member
+(`useFirstFieldIfTransparentUnion`), but a result as the union, as it does a
+struct that holds one. The table keeps the union's own row, which those take,
+and the code generator gives `abi_assign` and `abi_va_arg` the member's type
+(`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
+
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's
 `AVXLevel` (`getNativeVectorSizeForAVXABI`). It decides how vectors of 32 and
@@ -1125,7 +1132,7 @@ and has a fixture:
 
 GCC 16.2 lays out or passes these otherwise than clang 23. The module follows
 clang in every one, and the cross-check's GCC worlds leave them out, each
-named in the test where it is. Five are GCC bugs, which crash GCC or make it
+named in the test where it is. Six are GCC bugs, which crash GCC or make it
 disagree with itself.
 
 **Classification:**
@@ -1159,6 +1166,14 @@ disagree with itself.
 - **`_Complex _Float16` in an aggregate (a GCC bug):** GCC 16 classifies one
   at any offset but an eightbyte's start as two classes, the second the next
   eightbyte's (`classify_argument`'s `HCmode`).
+- **Arrays of complex chars and shorts (a GCC bug):** GCC classifies an array
+  member by its first element and repeats that element's classes, and a
+  `_Complex char` or `_Complex short` element that crosses an eightbyte gives
+  the next one GCC's INTEGERSI class, of which it passes 4 bytes once the
+  record is 16: in `struct { char c[6]; _Complex short s[2]; }` aligned to 4,
+  `s[1]`'s imaginary part, at bytes 12 and 13, reaches neither GCC's callee
+  nor, from GCC's caller, clang's. GCC's worlds pass no type that holds an
+  array of a type holding one (`abi_test_holds`).
 
 **Passing:**
 
@@ -1434,9 +1449,11 @@ fifth of the results `void`:
   every signature both ways and fails if a value differs where its mask says
   it means something, or a hidden pointer comes back wrong.
 
-The signatures leave out `_Atomic` types themselves (the fixtures check them;
-records of `_Atomic` members and aligned typedefs of `_Atomic` types are in).
-The clang worlds' `_Atomic`s of structs of no size reach them that way: at
+clang's signatures pass `_Atomic` types themselves as named arguments and
+results, as well as records of `_Atomic` members and aligned typedefs of
+`_Atomic` types (at seed 1, 82 to 117 `_Atomic` arguments and 9 to 19 `_Atomic`
+results a run; GCC's worlds make no `_Atomic`, which GCC classifies as its
+value). The clang worlds' `_Atomic`s of structs of no size reach them: at
 seeds 1 to 20, 330 `LARGER` arguments, 167 of them `GROWN`, for which our side
 copies a stack argument's own bytes, fewer than its slot's. clang's worlds
 leave out a type passed in registers that holds an array of elements of no
@@ -1482,18 +1499,28 @@ and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
 bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
-(#133's lowering, as aggregates of their two parts), at 64 bytes the vectors
+(#133's lowering, as aggregates of their two parts), GNU's complex integer
+types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
+`__int128` spelled as the usual arithmetic conversions make them, #137) and,
+in clang's runs, complex `_BitInt`s of 13 to 128 bits, spelled so too,
+`__float128` (an aggregate's value in this compiler's C, whose arithmetic and
+conversions are libgcc's, #137), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
 `char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
 clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
-and the structs, unions, arrays and aligned typedefs made of
+in clang's runs `_Atomic`s of integers of up to 8 bytes, enums, pointers,
+`float`, `double`, structs and unions (#720's lowering of C11's atomics,
+`abi_test_compiled_atomic`), which the signatures pass as the record runs' do:
+themselves, as named arguments and results, records holding them and aligned
+typedefs of them, and the structs, unions, arrays and aligned typedefs made of
 them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
-no `_BitInt` past 128 bits, vector of another size or of `bool`, complex integer
-or `_Atomic` type, and none of the record runs' directed records, whose
-bit-fields span more than 8 bytes, but a directed record of their own (above). C23's enums of a fixed underlying type, structs
+no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
+`_BitInt` past 128 bits, `_Atomic` of another type, and none of the
+record runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
+of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
 clang and GCC write them. Tier 0 holds a call's arguments on its stacks at once (15
@@ -1513,7 +1540,10 @@ and the others pass their 21 named and 6 unnamed arguments as drawn. A
 `_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
 as it loads (the convention leaves the bits past it unspecified), through
 128-bit shifts whose count takes the depth above it, one more than a
-128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
+128-bit integer's value takes. An `_Atomic`, or an aligned typedef of one, is
+never past the 8th: it loads atomically as it passes, an exchange of 16 bytes
+in rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which takes
+up to four depths more. Our side is C (`abi_test_write_ours`): per signature, a callee
 that stores each named parameter's bytes as it arrived (its incoming copy's,
 which the C caller checks against the data), its unnamed ones read with
 `va_arg`, then writes each named parameter's bytes from the signature's data,
