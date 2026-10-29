@@ -1963,6 +1963,17 @@ static void check_test_driver_identification(CheckTest* test, const char* execut
     check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
                       "named commands take precedence over compiler identification");
     free(text);
+    char* const assembly_version[] = { compiler, "-c", "--version", "missing.s", NULL };
+    char* const assembly_machine[] = { compiler, "-c", "-dumpmachine", "missing.s", NULL };
+    char* const* assembly_queries[] = { assembly_version, assembly_machine };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(assembly_queries); i += 1)
+    {
+        text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(assembly_queries[i], &text, true) : -1;
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, i == 0 ? "buster (development build)" : "x86_64-") != NULL,
+                          "information actions take precedence over implicit assembly compilation");
+        free(text);
+    }
     unlink(object);
     unlink(source);
 }

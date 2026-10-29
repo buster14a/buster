@@ -598,7 +598,8 @@ int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
 // Driver information actions may follow other options, but a value such as `-o --version` is not an action.
-// Explicit command names are dispatched before this is called. -dumpmachine wins when both actions are present.
+// A null status only tests for an action, so implicit assembly dispatch can leave information actions to the driver.
+// Explicit command names are dispatched first. -dumpmachine wins when both actions are present.
 static bool main_information(int count, char** arguments, int* status)
 {
     const char* target = NULL;
@@ -638,7 +639,7 @@ static bool main_information(int count, char** arguments, int* status)
         }
     }
     const bool found = version || machine;
-    if (found)
+    if (found && status != NULL)
     {
         if (missing_target || (target != NULL && !predefines_target_valid(target)))
         {
@@ -728,7 +729,7 @@ static bool main_assembly_source(int count, char** arguments)
             assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
         }
     }
-    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments);
+    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments) && !main_information(count, arguments, NULL);
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
