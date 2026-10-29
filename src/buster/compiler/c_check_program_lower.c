@@ -2817,14 +2817,23 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             abi->variadic[abi->count++] = 0;
             for (uint32_t a = 0; a < parameters; a += 1)
             {
+                // A vector leaf's vector (c_builtin_x86_helpers.c) is an object of its bytes, whose address the entry
+                // passes, as a call's is (check_lower_call).
                 const TypeId type = helper->parameter_types[a];
+                const uint32_t vector = check_lower_vector_of(writer, type);
                 abi->arguments[abi->argument_count++] = type;
-                writer->argument_sizes[writer->argument_count] = 0;
-                writer->argument_classes[writer->argument_count++] = check_lower_class(writer, type);
+                writer->argument_sizes[writer->argument_count] = vector;
+                writer->argument_classes[writer->argument_count++] = vector != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+                writer->aggregates |= vector != 0;
             }
             // A floating value crosses an atomic helper's integer registers as its bits, through a frame temporary, as the
-            // math helpers' do: the helpers move bits, so a numeric conversion would change the value.
+            // math helpers' do: the helpers move bits, so a numeric conversion would change the value. A vector leaf's
+            // result lands in a frame object of the call's own, which LOCAL then reads.
             const uint8_t result_class = check_lower_class(writer, stream->values[node].type);
+            const bool vector_result = check_lower_vector_of(writer, helper->result_type) != 0;
+            const uint32_t object = vector_result ? check_lower_temporary_of(writer, helper->result_type) : BUSTER_CHECK_NONE;
+            writer->call_result_objects[call] = vector_result ? object + 1 : 0;
+            writer->aggregates |= vector_result;
             if (helper->terminates)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
@@ -2836,11 +2845,15 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, result);
             }
+            else if (vector_result)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, result_class, object);
+            }
             else
             {
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
-            check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, helper->result_type), call);
+            check_lower_instruction(writer, BUSTER_TYPED_CALL, vector_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, helper->result_type), call);
             for (uint32_t a = parameters; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
                 const bool inserted = (compare && a == 3) || (init && a == 2);
@@ -2855,6 +2868,13 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
                     }
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else if (check_lower_vector_of(writer, helper->parameter_types[a]) != 0)
+                {
+                    // The object of a vector leaf's argument, its value set into it after it is made.
+                    const uint32_t local = check_lower_temporary_of(writer, checked);
                     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
                 }
@@ -4204,7 +4224,7 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     }
 }
 
-// A TypeId of an integer class, for a row's result's conversion to its builtin's type.
+// A TypeId of an integer or floating class, for a row's result's conversion to its builtin's type.
 static TypeId check_lower_class_type(uint8_t class)
 {
     static const TypeId types[] = {
@@ -4216,6 +4236,8 @@ static TypeId check_lower_class_type(uint8_t class)
         [BUSTER_TYPED_CLASS_U32] = BUSTER_TYPE_UINT,
         [BUSTER_TYPED_CLASS_I64] = BUSTER_TYPE_LONG,
         [BUSTER_TYPED_CLASS_U64] = BUSTER_TYPE_ULONG,
+        [BUSTER_TYPED_CLASS_F32] = BUSTER_TYPE_FLOAT,
+        [BUSTER_TYPED_CLASS_F64] = BUSTER_TYPE_DOUBLE,
     };
     return class < BUSTER_ARRAY_LENGTH(types) ? types[class] : 0;
 }
@@ -4240,7 +4262,8 @@ static bool check_lower_x86_named(const BuiltinIntrinsicInfo* info, const char* 
 // An x86 builtin's row (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
 // (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
-// bits (check_lower_x86_operand_class).
+// bits (check_lower_x86_operand_class). A reduction's is two rows (check_x86_lower_reduce_row): the first of its vector,
+// the last argument, to 16 bytes, the second of those and its floating start, the first, where it has one.
 static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -4291,6 +4314,12 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row_of(program->target_features, rule, (uint64_t)immediates[0].integer,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
+    Tier0Operation tail;
+    const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
+    if (reduce)
+    {
+        check_x86_lower_reduce_row(rule, &tail);
+    }
     // The row's operands, the arguments but the immediates, each integer one of its argument's class, widened.
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
@@ -4303,7 +4332,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         }
         operand += taken;
     }
-    if (reason == NULL && operand != row.operand_count)
+    if (reason == NULL && operand != (reduce ? row.operand_count + tail.operand_count - 1 : row.operand_count))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
@@ -4314,16 +4343,22 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     else
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
+        const uint8_t result_class = reduce ? tail.result_class : row.result_class;
         const TypeId result = stream->values[node].type;
         // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
         const bool zero_test = rule->zero_test;
-        if (row.result_class != BUSTER_TYPED_CLASS_VOID && row.result_class != BUSTER_TYPED_CLASS_VECTOR)
+        if (result_class != BUSTER_TYPED_CLASS_VOID && result_class != BUSTER_TYPED_CLASS_VECTOR)
         {
-            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(row.result_class), result);
+            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(result_class), result);
         }
         if (zero_test)
         {
             check_lower_truth(writer, check_lower_class_type(row.result_class), true);
+        }
+        if (reduce)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_X86, tail.result_class, last);
         }
         check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, index);
         // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
@@ -4359,12 +4394,12 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
-        const bool xgetbv = check_lower_x86_named(info, "__builtin_ia32_xgetbv");
-        const bool waits = check_lower_x86_named(info, "__builtin_ia32_monitorx") || check_lower_x86_named(info, "__builtin_ia32_mwaitx");
-        const uint64_t needed = xgetbv ? BUSTER_X86_FEATURE(XSAVE) : waits ? BUSTER_X86_FEATURE(MWAITX) : 0;
+        // The leaf's instructions' features (c_builtin_x86_helpers.c), which the target must have.
+        const CBuiltinX86HelperKind leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;
+        const uint64_t needed = cbuiltin_x86_helper_infos[leaf].features;
         if ((program->target_features & needed) != needed)
         {
-            check_lower_unsupported(writer, xgetbv ? "xgetbv without XSAVE" : "monitorx or mwaitx without MWAITX");
+            check_lower_unsupported(writer, cbuiltin_x86_helper_infos[leaf].refusal);
         }
         else
         {
