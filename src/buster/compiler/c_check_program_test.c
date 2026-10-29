@@ -3141,6 +3141,52 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
         "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
         "kr-definitions", clang);
+    // #659: the ABI receives promoted values; reads, writes and addresses in the body use the declared objects.
+    // The integer and SSE banks both overflow onto the stack, and the aggregate result reserves the hidden prefix.
+    check_test_program_source(test,
+        "int narrow(a,b,c,d,e,f,g,h) signed char a;unsigned char b;short c;unsigned short d;_Bool e;int f;char g;short h;"
+        "{signed char *pa=&a;short *ph=&h;*pa+=1;*ph-=2;return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){unsigned u=(unsigned)n;return narrow((int)(u&255),513,(int)(u&65535),65539,n,7,130,32769);}",
+        "kr-promoted-integers-addressed-and-stack", clang);
+    check_test_program_source_char(test,
+        "int f(x,y)char x;volatile unsigned char y;{char *p=&x;*p+=1;y+=2;return x+y;}"
+        "int tested(int n){return f(128+(n&127),257);}", "kr-promoted-unsigned-char", clang, true);
+    check_test_program_source(test,
+        "double f(a,b,c,d,e,f,g,h,i,j)float a,b,c,d,e,f,g,h,i,j;"
+        "{float *p=&j;*p+=1;return a+b+c+d+e+f+g+h+i+j;}"
+        "int roundtrip(x)float x;{float *p=&x;return (int)(*p-16777216.0f);}"
+        "int tested(int n){return (int)f(0.1,1.2,2.3,3.4,4.5,5.6,6.7,7.8,8.9,(double)(n&255)+0.1)+roundtrip(16777217.0);}",
+        "kr-float-entry-rounding-and-stack", clang);
+    check_test_program_source(test,
+        "struct R{long a,b,c;};struct R f(a,b,c,d,e,f,g)char a;float b;short c;_Bool d;int e;float f;short g;"
+        "{struct R r={a+c+g,(long)(b+f),d+e};return r;}"
+        "int tested(int n){struct R r=f(257,3.7,65539,n,5,7.9,32769);return (int)(r.a+r.b+r.c);}",
+        "kr-promoted-parameters-hidden-result", clang);
+    check_test_program_source(test,
+        "int f(x,y)volatile float x;short y __attribute__((aligned(32)));"
+        "{float a=x;short *p=&y;*p+=1;return (int)(a*10)+y+((unsigned long)p&31);}"
+        "int tested(int n){return f((double)(n&255)+0.125,65539);}", "kr-promoted-aligned-and-volatile", clang);
+    check_test_program_source(test,
+        "int f(int,double);int f(x,y)char x;float y;{return x+(int)(y*10);}"
+        "int before(int n){return f(n,3.7);}int f(int,double);"
+        "int tested(int n){int (*p)(int,double)=f;int (*q)()=f;return before(n&255)+p(n&255,3.7)+q((char)(n&255),3.7);}",
+        "kr-prior-later-prototypes-and-pointers", clang);
+    check_test_program_source(test,
+        "int f(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t)"
+        "_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}"
+        "int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}",
+        "kr-unused-promoted-parameter-capacity", clang);
+    check_test_program_source(test,
+        "int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}"
+        "int tested(int n){return f(n&127,(short)(n&63));}", "kr-promoted-atomic-parameter-objects", clang);
+    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+    check_test_program_source(test,
+        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+        "kr-atomic-and-promoted-parameters", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
@@ -3868,10 +3914,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
     // C; __float128 is its spelling).
     check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
-    // A K&R definition (#154's decision: as clang): its callers pass its parameters' promoted types, which a parameter of a
-    // type the promotions change would convert from on entry, not lowered yet.
-    check_test_program_boundary_reason(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true,
-                                       false, 1, 0, "K&R parameters the default argument promotions change");
+    // A promoted K&R parameter now converts from double to its declared float on entry.
+    check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,

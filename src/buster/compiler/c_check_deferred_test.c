@@ -46,6 +46,11 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
+    { "kr-call-arity", "int f(a)int a;{return a;}\nint g(void){return f(1,2); }\n", true },
+    { "kr-source-only-call", "int f(a)int a;{return a;}\nint g(void){return sizeof((&f)(1,2));}\n", true },
+    { "kr-source-only-promoted-warning", "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+      "#pragma clang diagnostic error \"-Weverything\"\nint g(void){return sizeof(f(1,2));}\n", true },
     { "const-initializer-receipt-type-replay",
       "const int top=3;\n"
       "int f(void){struct S{int x;char a[3];};const struct S s={top,{1,2,3}};const struct S t=s;"
