@@ -49,10 +49,20 @@ static void ir_simd_typed_test(IrTestTally* tally)
                 ir_test_expect(tally, ir_simd_typed_operation(&row, 0, &decoded) == IR_SIMD_TYPED_TARGET &&
                                memcmp(&decoded, &before, sizeof(decoded)) == 0,
                                "a capable compiler host cannot authorize an unsupported baseline output target");
-                const uint64_t missing = compare ? target & ~BUSTER_X86_FEATURE(AVX512DQ) : target & ~BUSTER_X86_FEATURE(AVX512VL);
-                ir_test_expect(tally, ir_simd_typed_operation(&row, missing, &decoded) == IR_SIMD_TYPED_TARGET &&
-                               memcmp(&decoded, &before, sizeof(decoded)) == 0,
-                               "each operation's exact producer feature requirement is checked before publication");
+                // The forms' requirements, written out from the Intel SDM rather than from the decoder: AVX512F for EVEX,
+                // AVX512VL for its 128- and 256-bit forms, and AVX512DQ for VPMOVM2D. Without each feature the
+                // operation must refuse, and without any other (BW, or VL at 512 bits) it must still decode.
+                const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (compare ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
+                const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512DQ), BUSTER_X86_FEATURE(AVX512BW) };
+                for (uint32_t feature = 0; feature < BUSTER_ARRAY_LENGTH(features); feature += 1)
+                {
+                    IrSimdTypedOperation without = before;
+                    const IrSimdTypedStatus status = ir_simd_typed_operation(&row, target & ~features[feature], &without);
+                    const bool needed = (expected & features[feature]) != 0;
+                    ir_test_expect(tally, needed ? status == IR_SIMD_TYPED_TARGET && memcmp(&without, &before, sizeof(without)) == 0 :
+                                                   status == IR_SIMD_TYPED_OK && without.required_features == expected,
+                                   "each operation's exact producer feature requirement is checked before publication");
+                }
                 Tier0Operation altered = row;
                 altered.records[0].decorations = 1;
                 ir_test_expect(tally, ir_simd_typed_operation(&altered, target, &decoded) == IR_SIMD_TYPED_UNSUPPORTED &&

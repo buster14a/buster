@@ -61,7 +61,9 @@ static IrSimdTypedStatus ir_simd_typed_operation(const Tier0Operation* source, u
     {
         width = source->result_bytes == 16 ? 0 : source->result_bytes == 32 ? 1 : 2;
         candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
-        candidate.required_features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+        // Every form here is EVEX's: AVX512F, and AVX512VL for its 128- and 256-bit forms alone; VPMOVM2D adds AVX512DQ
+        // (below).
+        candidate.required_features = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
         bool operands = true;
         for (uint32_t operand = 0; operand < source->operand_count; operand += 1)
         {

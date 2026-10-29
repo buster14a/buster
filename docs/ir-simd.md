@@ -9,8 +9,8 @@ integration work; this checkpoint alone does not complete the issue.
 The disjoint typed-operation decoder reads #717's real `Tier0Operation` rows.
 It recognizes exact EVEX i32 arithmetic/bitwise forms and compare-mask plus
 mask-to-0/-1 expansion at all three widths, retaining operand classes and byte
-widths. Output-target AVX-512F/VL, and DQ for compare expansion, are explicit
-requirements. Lane arithmetic/comparisons on floating or non-i32 elements,
+widths. The forms' output-target requirements are explicit: AVX512F, AVX512VL for
+the 128- and 256-bit forms, and AVX512DQ for compare expansion (`VPMOVM2D`). Lane arithmetic/comparisons on floating or non-i32 elements,
 unmodeled predicates, changed register roles, addresses and predicated record decorations refuse before
 publishing a semantic action. Tests use the actual producer to make rows;
 baseline and native compiler-host modes must make identical admission decisions.
