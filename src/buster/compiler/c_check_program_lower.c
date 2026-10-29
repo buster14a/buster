@@ -1011,7 +1011,7 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     }
     uint32_t pop = 0;
     bool push = false;
-    if (kind <= BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_STACK_SAVE)
+    if (kind <= BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_FRAME_ADDRESS)
     {
         push = true;
     }
@@ -3993,19 +3993,30 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     const uint32_t selected = check_program_builtin_index(stream->misc, stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
+    // A frame builtin's level is a constant of its own, which nothing evaluates (CheckBuiltinMiscEffect.frame_level): its
+    // recipe takes no arguments. Every other builtin's operands are evaluated in order, each into a temporary.
+    const CBuiltinId runtime = selected != BUSTER_CHECK_NONE ? stream->misc[selected].runtime_builtin : CBUILTIN_NONE;
+    const bool frame = runtime == CBUILTIN_FRAME_ADDRESS || runtime == CBUILTIN_RETURN_ADDRESS;
+    const uint32_t evaluated = frame ? 0 : count;
     if (selected == BUSTER_CHECK_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (count > 3 || stream->misc[selected].evaluated_operands != (1u << count) - 1)
+    else if (count > 3 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
     {
         check_lower_unsupported(writer, "this builtin");
+    }
+    else if (frame && stream->misc[selected].frame_level != 0)
+    {
+        // A caller's frame, which clang -O0's code finds through the frame pointers' chain: Tier 0's functions keep no
+        // frame pointer but where they need one.
+        check_lower_unsupported(writer, "__builtin_frame_address and __builtin_return_address of a caller's frame");
     }
     else
     {
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
-        *call = (CBuiltinMiscLowerCall){ .id = stream->misc[selected].runtime_builtin, .argument_count = count };
+        *call = (CBuiltinMiscLowerCall){ .id = runtime, .argument_count = evaluated };
         if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
@@ -4021,7 +4032,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
                 call->constant_size = (uint32_t)(uint64_t)size->integer;
             }
         }
-        for (uint32_t i = 0; i < count; i += 1)
+        for (uint32_t i = 0; i < evaluated; i += 1)
         {
             const TypeId type = stream->argument_conversions[first + i].type;
             if (check_lower_memory(writer, type))
@@ -4031,7 +4042,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             call->arguments[i] = check_lower_temporary(writer, check_lower_class(writer, type));
         }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = stream->values[node].type });
-        for (uint32_t i = count; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const uint32_t local = call->arguments[i];
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[local], local);

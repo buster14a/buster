@@ -2897,6 +2897,8 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
 // ---------------------------------------------------------------------------------------------------------------------
 // The drivers
 
+#include "buster/compiler/calling_convention_builtins.c"
+
 static uint64_t abi_capacity_bytes(uint32_t types)
 {
     const uint64_t count = types;
@@ -2922,23 +2924,26 @@ static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* t
                         types <= table->types.capacity;
     if (result)
     {
-        memset(abi->pass, 0, (uint64_t)capacity * sizeof(uint32_t));
-        memset(abi->storage, 0, capacity);
-        memset(abi->layout, 0, (uint64_t)capacity * sizeof(uint64_t));
-        for (uint32_t accumulated = 0; accumulated < BUSTER_ABI_CLASS_COUNT; accumulated += 1)
+        // TypeTable's builtin prefix is immutable, apart from plain-char mode. Reuse its complete ABI facts;
+        // derived rows still belong to this table and are classified through the existing dependency scheduler.
+        // A bounded caller may expose only a prefix, or reserve more rows than the current logical type count.
+        const uint32_t builtins = table->types.count < BUSTER_TYPE_BUILTIN_COUNT ? table->types.count : BUSTER_TYPE_BUILTIN_COUNT;
+        memcpy(abi->rows, abi_builtin_rows.rows, (uint64_t)builtins * BUSTER_ABI_ROW_BYTES);
+        memcpy(abi->pass, abi_builtin_rows.pass, (uint64_t)builtins * sizeof(*abi->pass));
+        memcpy(abi->stack_bytes, abi_builtin_rows.stack_bytes, (uint64_t)builtins * sizeof(*abi->stack_bytes));
+        memcpy(abi->alignment_log2, abi_builtin_rows.alignment_log2, builtins);
+        memcpy(abi->storage, abi_builtin_rows.storage, builtins);
+        memcpy(abi->layout, abi_builtin_rows.layout, (uint64_t)builtins * sizeof(*abi->layout));
+        memcpy(abi->results, abi_builtin_rows.results, (uint64_t)builtins * sizeof(*abi->results));
+        memcpy(abi->merge, abi_builtin_rows.merge, sizeof(abi->merge));
+        memset(abi->pass + builtins, 0, (uint64_t)(capacity - builtins) * sizeof(*abi->pass));
+        memset(abi->storage + builtins, 0, capacity - builtins);
+        memset(abi->layout + builtins, 0, (uint64_t)(capacity - builtins) * sizeof(*abi->layout));
+        const uint32_t character = BUSTER_TYPE_CHAR >> BUSTER_TYPE_INDEX_SHIFT;
+        if (table->char_unsigned && character < builtins)
         {
-            for (uint32_t field = 0; field < BUSTER_ABI_CLASS_COUNT; field += 1)
-            {
-                abi->merge[accumulated << 3 | field] = abi_merge_class((uint8_t)accumulated, (uint8_t)field);
-            }
-        }
-        for (uint32_t index = 1; index < BUSTER_TYPE_BUILTIN_COUNT && index < table->types.count; index += 1)
-        {
-            if (table->types.kind[index] != BUSTER_TYPE_KIND_NONE)
-            {
-                abi_store_row(abi, index, abi_simple_row(abi_simple(abi, table, index)));
-                abi_finish(abi, table, index);
-            }
+            abi->pass[character] = (abi->pass[character] & ~(BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO)) | BUSTER_ABI_PASS_ZERO;
+            abi->results[character].flags = (uint8_t)((abi->results[character].flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) | BUSTER_ABI_FLAG_ZERO);
         }
     }
     else
