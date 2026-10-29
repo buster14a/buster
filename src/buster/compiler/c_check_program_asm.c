@@ -37,9 +37,10 @@
 //
 // What the lowering refuses, by name (CheckProgramAsm.reason): asm goto, flag outputs, the x87, MMX, mask and vector
 // register classes and the other letters it doesn't place (A, p, Y, the floating constants), symbolic immediates and
-// constants outside their letter's range, operands of types no general or XMM register holds by value, bit-fields,
-// explicit register variables, clobbers of an operand's register, APX's registers, templates the assembler refuses, a
-// label two templates define, and a `.L` name no template defines; and of naked functions (CheckProgramNaked.reason)
+// constants outside their letter's range, operands of types no general or XMM register holds by value (but a vector in
+// a template of no instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables, clobbers of an
+// operand's register, APX's registers, templates the assembler refuses, a label two templates define, and a `.L` name no
+// template defines; and of naked functions (CheckProgramNaked.reason)
 // statements other than asm statements, operands other than integer constants, and bodies of no instructions.
 // Include after c_check_program_helpers.c, assembler.c, x86_target.c and tier0.c.
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
@@ -50,6 +51,13 @@
 #define BUSTER_CHECK_ASM_VECTOR 2
 #define BUSTER_CHECK_ASM_MEMORY 3
 #define BUSTER_CHECK_ASM_CONSTANT 4
+// A vector in a vector register's constraint ("+v"(x) of an __m512i), which the helper doesn't load or store yet: held
+// while its statement is planned, and refused where the template refers to it or has instructions. In a template of none
+// (a compiler barrier's, as main.c's `__asm__("" : "+v"(x))`), whose operands the lowering evaluates alone, it is planned
+// at last as an output's object (BUSTER_CHECK_ASM_MEMORY: its address, which the template leaves as it was) or as an
+// input's value (BUSTER_CHECK_ASM_VECTOR: evaluated and dropped). A volatile output isn't held: clang's code loads and
+// stores it.
+#define BUSTER_CHECK_ASM_HELD 5
 
 // The general registers but rsp, the ones the helper may take, and the callee-saved ones among them.
 #define BUSTER_CHECK_ASM_GENERAL_ALL (0xffffu & ~(1u << X86_REGISTER_RSP))
@@ -455,6 +463,11 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
         {
             refused = "this inline assembly operand modifier";
         }
+    }
+    else if (place->kind == BUSTER_CHECK_ASM_HELD)
+    {
+        // Its register, which it hasn't.
+        refused = "inline assembly operands of this type in their constraint's registers";
     }
     else if (place->kind == BUSTER_CHECK_ASM_MEMORY)
     {
@@ -900,6 +913,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             place->kind = BUSTER_CHECK_ASM_MEMORY;
         }
+        else if (constraint->vector && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) &&
+                 (!output || (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0))
+        {
+            place->kind = BUSTER_CHECK_ASM_HELD;
+        }
         else
         {
             reason = constraint->immediate && !constraint->memory && constraint->general == 0 && !constraint->vector ?
@@ -987,8 +1005,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         // A matching input of a narrower register class than its output's (the checker matched their kinds).
-        reason = places[k].kind != BUSTER_CHECK_ASM_CONSTANT && places[k].kind != BUSTER_CHECK_ASM_MEMORY && places[k].size == 0 ?
-                 "inline assembly operands of this type in their constraint's registers" : NULL;
+        reason = places[k].kind != BUSTER_CHECK_ASM_CONSTANT && places[k].kind != BUSTER_CHECK_ASM_MEMORY && places[k].kind != BUSTER_CHECK_ASM_HELD &&
+                 places[k].size == 0 ? "inline assembly operands of this type in their constraint's registers" : NULL;
     }
     // The operand block: each register output's address (and a `+` one's value), each memory operand's address and each
     // input's value, 8 bytes each.
@@ -996,12 +1014,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         CheckAsmPlace* place = places + k;
-        if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+        if (place->kind != BUSTER_CHECK_ASM_CONSTANT && place->kind != BUSTER_CHECK_ASM_HELD)
         {
             place->slot = block;
             block += BUSTER_CHECK_ASM_SLOT_BYTES;
         }
-        if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+        if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY && place->kind != BUSTER_CHECK_ASM_HELD)
         {
             place->value = block;
             block += BUSTER_CHECK_ASM_SLOT_BYTES;
@@ -1038,6 +1056,14 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // A label with no instruction to follow in its template would be a place in the statement's function, which its
         // code (Tier 0's) doesn't mark.
         reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
+    }
+    // The held operands (BUSTER_CHECK_ASM_HELD): refused by a template of instructions, which would read or write their
+    // registers, and in one of none an output's object or an input's value, which the lowering evaluates alone.
+    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
+    {
+        CheckAsmPlace* place = places + k;
+        reason = place->kind == BUSTER_CHECK_ASM_HELD && code.count != 0 ? "inline assembly operands of this type in their constraint's registers" : NULL;
+        place->kind = place->kind != BUSTER_CHECK_ASM_HELD ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
     }
     if (valid && reason == NULL && code.count != 0)
     {

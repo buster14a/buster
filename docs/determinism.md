@@ -76,6 +76,29 @@ place and fill canonical ranges before those records reach the writer. The
 existing generated-program tests cover string-pool bytes and their fixups;
 they do not stand in for an unimplemented C literal-pooling frontend.
 
+Foreign resolution keeps hash-partition name IDs for lookup. Its separate
+publication permutation orders each name by its first ordinary object symbol:
+round, then item in that round's symbol columns (objects in input order and
+symbols in symbol-table order). Command-line `-u` records precede the objects.
+A name seen only in shared-library references follows all ordinary object
+records, in its own first-record order. Unloaded archive index entries do not
+publish names or choose output positions.
+
+The winners pass retains the minimum key while it reads each record. The
+already checked cumulative global-symbol ordinal represents `(round, item)`
+without truncation; ordinary and library-only keys form separate ranges, so
+the class does not consume an ordinal bit. A four-byte stable radix sort of
+each range has exact scalar and vector paths. The resulting immutable
+permutation lives with `Foreign`; temporary sorting storage is released before
+conversion, and an allocation failure rejects the resolution.
+
+Scalar conversion walks that permutation. Lane conversion counts and fills
+consecutive ranges of it, retaining hash IDs only for maps and translating a
+failure position back to its name. Common atoms, copy-relocation groups and
+representatives, linker-generated section-bound groups, and executable/shared
+library export lists likewise follow canonical order. This includes placement
+that occurs after the initial global symbols have been created.
+
 ## Property tests
 
 - `test-diagnostics`: radix against stable insertion sort on counts 0–319
@@ -108,6 +131,15 @@ they do not stand in for an unimplemented C literal-pooling frontend.
   adds must have changed IDs. This covers the tree, the generated spellings,
   the contexts and special paths, and in the workflow the repository's units
   and `--flat src`.
+- `test-foreign`: dedicated `foreign_order_test.c` coverage varies
+  `partition_records` and adds thousands of unused archive-index symbols.
+  Original C objects, an assembly entry and a DSO exercise scalar/vector
+  conversion at 1/2/3/8 lanes. Complete static/PIE bytes, `.symtab`, `.dynsym`,
+  GOT slots and execution must agree. Independent symbol-table walks require
+  first-record order, and the real driver repeats unused-index/lane changes
+  without an environment override. Guarded radix tails, high ordinal bits,
+  unsigned IDs above `INT32_MAX` and allocation refusals cover the ordering
+  kernel's bounds.
 - `test-check-lanes`: #151's per-function emission. Each generated and failing
   program is compiled again by the same path with its identifiers' IDs in
   another order (the driver's `--id-order`, below) and emitted on one lane and
@@ -210,6 +242,10 @@ independent dependencies each add their own integration check:
 - #152's multi-file driver must route jobs' diagnostic groups through the
   merge, finish the earlier jobs before applying fatal cutoff, and compare
   its final objects, executable, `-E` text and diagnostic stream.
+- #86/#594's foreign-input conversion has its own first-record publication
+  order and partition/ID perturbation property checks in `test-foreign`
+  ([#734](https://github.com/buster14a/buster/issues/734)). Hash partitioning
+  and lookup IDs do not determine emitted globals, GOT slots or export order.
 
 The others' integration checks belong in each stage's test command as it lands.
 Passing the current tests is not proof of those future pipelines, and #153
