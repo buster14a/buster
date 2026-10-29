@@ -244,8 +244,26 @@ in freestanding and no-builtin modes; the existing policy for recognizing
 ordinary function names is unchanged. The compiler's masked vector publication
 and scalar publication produce the same typed columns. Hints and baseline x86
 return-address extraction use the documented identity/no-op behavior.
-Dynamic stack allocation and genuine frame addresses remain explicit refusals
-in this adapter. Terminal helpers require a separate terminal source-graph
+
+The stack's and the frame's builtins are clang -O0's code (#148):
+
+- `__builtin_alloca`, which glibc's `<alloca.h>` makes of `alloca`, is Tier 0's
+  `ALLOCA` of its size: rounded up to 16 bytes and taken from the stack. A
+  variable-length array's scope releases it at its end exactly where clang's
+  `stackrestore` would: an allocation after the block's first array goes with
+  the arrays, one before it stays until the function returns.
+- `__builtin_frame_address(0)` is Tier 0's `FRAME_ADDRESS`, the frame pointer,
+  which the entry gives its function as the stack's kinds do. The address
+  points at the caller's saved rbp, 16 bytes below the incoming arguments.
+  `__builtin_return_address(0)` is the word 8 bytes above it. Their level is a
+  constant of their own, which nothing evaluates, so the recipes take no
+  arguments.
+- A level past 0 is a caller's frame, which clang -O0 reaches through the frame
+  pointers' chain. Tier 0's functions keep a frame pointer only where they need
+  one, so the lowering refuses those levels by name: "unsupported:
+  `__builtin_frame_address` and `__builtin_return_address` of a caller's frame".
+
+Terminal helpers require a separate terminal source-graph
 path. The native recipe tests retain independent libc comparisons, exact
 guarded tails, every small size across the expansion cutoffs, close overlap in
 both directions, high-bit bytes, and operations through 1 MiB. The checker

@@ -260,7 +260,7 @@ as long as it. #113's deferred reader sizes its lanes the same way
 ## Tests and measurements
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
-[--programs N] [--keep]` (`c_check_lanes_test.c`):
+[--programs N] [--id-order N] [--keep]` (`c_check_lanes_test.c`):
 
 - the external ownership protocol, against independent pipe/FIFO byte contents:
   empty and partial supplies, exact exceptional bytes, caps, malformed and
@@ -282,6 +282,13 @@ as long as it. #113's deferred reader sizes its lanes the same way
 - the lane rule on programs of 1 to 1,200 functions;
 - failing programs whose bodies fail at different steps in both orders: one
   lane's failure at every lane count;
+- the identifiers' IDs in another order ([#153](https://github.com/buster14a/buster/issues/153)):
+  each generated and failing program compiled again by the same path with
+  the driver's `--id-order` table (`check_driver_id_order`, from `--id-order
+  N` on, 153 by default), which must have every name of the first compile,
+  most of them at other IDs, then emitted on one lane and on 8, with `-g`'s
+  rows and unwind tables and without: the first compile's object or failure
+  on one lane, byte for byte;
 - a lane short of room (`CheckProgramLanes.squeeze_body`, the tests' alone):
   the lane that takes a body's part has only so many bytes to spare in one of
   its arenas while it makes its writer and works on the part. In a generated
@@ -295,10 +302,12 @@ as long as it. #113's deferred reader sizes its lanes the same way
   (`RLIMIT_NPROC`, which doesn't limit root), under an alarm that ends it if
   its lanes hang: one lane's object or failure;
 - the driver's objects and executables by `--lanes 1`, `2`, `3`, `8` and by
-  default, by each path: the same bytes, and executables that exit alike; with
-  lanes that start no thread, by `--lanes 8`, `--lanes 1`'s objects and
-  executables; and the failing programs' exit statuses and diagnostics by
-  `--lanes 8`, with lanes and without, `--lanes 1`'s.
+  default, and by `--lanes 8 --id-order N`, by each path: the same bytes, and
+  executables that exit alike; with lanes that start no thread, by `--lanes 8`,
+  `--lanes 1`'s objects and executables; the failing programs' exit statuses
+  and diagnostics by `--lanes 8`, with lanes, with the IDs in another order and
+  without lanes, `--lanes 1`'s; and the values of `--lanes`, `--worker-budget`
+  and `--id-order` it refuses.
 
 The lanes' serial retry, which the last three exercise, was otherwise untested
 ([#538's review](https://github.com/buster14a/buster/pull/538#pullrequestreview-5664568010)).

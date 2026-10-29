@@ -920,6 +920,36 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
     arena_release(&arena);
 }
 
+// #221: every record of a function's code must have a covered form (x86_effects), which the effects' consumers (the
+// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, but an X86 entry's: the front end's row, any
+// VEX or EVEX form. A function with X86 entries needs its code's entries' first records (Tier0Function.entry_records)
+// to tell those apart; without them, its records go unchecked.
+static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, const Tier0Code* code)
+{
+    bool rows = false;
+    for (uint32_t e = 0; e < function->count; e += 1)
+    {
+        rows |= function->kinds[e] == BUSTER_TYPED_X86;
+    }
+    const bool entries = code->entry_records != 0 && code->entry_count == function->count;
+    bool result = true;
+    // The first entry whose first record is past record r: r is that entry's predecessor's (the prologue's before entry
+    // 0's first record, the epilogue's from the last entry's end).
+    uint32_t next = 0;
+    for (uint32_t r = 0; result && (!rows || entries) && r < code->count; r += 1)
+    {
+        while (entries && next <= function->count && code->entry_records[next] <= r)
+        {
+            next += 1;
+        }
+        const bool row = entries && next >= 1 && next <= function->count && function->kinds[next - 1] == BUSTER_TYPED_X86;
+        result = row || tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
+                                          "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r,
+                                          x86_semantics_test_name(code->records[r].form));
+    }
+    return result;
+}
+
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
@@ -971,6 +1001,9 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
             result = tier0_test_expect(tally, valid == scalar.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
                                        scalar.count);
+            char name[64];
+            snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
+            result = result && tier0_test_covered(tally, "effects", name, function, &scalar);
         }
         if (result)
         {
@@ -5388,7 +5421,7 @@ static Tier0Function tier0_test_stack_function(const Tier0TestEntry* entries, ui
     return function;
 }
 
-// The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE and STACK_RESTORE; a frame pointer's depths
+// The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS; a frame pointer's depths
 // (rbp's taken from the table); then the program above, compiled by both paths, its frame pointer in its prologue, run
 // natively on 8 inputs, and against the interpreter and this file's own count.
 static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
@@ -5410,6 +5443,8 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
         { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 } },
         { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
         { { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_I64, 0 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0 } },
+        { { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 1 }, { BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0 } },
         { { BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0 } },
     };
     for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(breaks); b += 1)
@@ -5547,6 +5582,157 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
             tier0_test_expect(tally, !fault && interpreted == expected && native[r].result == expected, "stack",
                               "input %u: %016" PRIx64 " natively, %016" PRIx64 " interpreted (%s), %016" PRIx64 " expected", r, native[r].result, interpreted,
                               fault ? "a fault" : "no fault", expected);
+        }
+    }
+    arena_release(&program_arena);
+    free(functions);
+    free(program);
+}
+
+// A frame's address (#148's __builtin_frame_address(0)): f0(a) returns the word its frame address points at, the rbp
+// its prologue's push saved, which is its caller's frame address; entry(n, m, x) takes its own (fa), allocates m * 8 + 64
+// bytes (p), which move rsp but not the frame pointer, and returns (f0(n) == fa) + 2 * (its frame address again == fa)
+// + 4 * (p < fa) + 8 * (fa & 15) + 16 * n: 7 + 16 * n.
+enum
+{
+    TIER0_TEST_FRAME_N,
+    TIER0_TEST_FRAME_M,
+    TIER0_TEST_FRAME_X,
+    TIER0_TEST_FRAME_FA,
+    TIER0_TEST_FRAME_P,
+    TIER0_TEST_FRAME_LOCALS,
+};
+static const Tier0TestEntry tier0_test_frame_callee[] = {
+    { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
+};
+static const Tier0TestEntry tier0_test_frame_entry[] = {
+    { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_FA },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_M }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 64 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_P },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_N }, { BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_FA }, { BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0 }, { BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_FA },
+    { BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0 }, { BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 2 },
+    { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_P }, { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_FA },
+    { BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0 }, { BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4 },
+    { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_FA }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 15 }, { BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 8 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, TIER0_TEST_FRAME_N }, { BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 16 }, { BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0 },
+    { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
+};
+
+// The frame's address: a function of it alone, compiled by both paths alike with a frame pointer and its record (mov
+// from rbp at its depth), then the program above, both of its functions with frame pointers, run natively on 8 inputs.
+static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
+{
+    static const uint8_t local_classes[1] = { BUSTER_TYPED_CLASS_U64 };
+    static const uint8_t local_flags[1];
+    static const Tier0TestEntry alone[] = {
+        { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
+    };
+    uint8_t kinds[2];
+    uint8_t classes[2];
+    uint64_t values[2];
+    Arena arena = arena_reserve(1ull << 26);
+    const Tier0Function function = tier0_test_stack_function(alone, 2, kinds, classes, values, local_classes, local_flags, 0);
+    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+    const Tier0Code vector = tier0_compile(&function, &arena);
+    bool read = false;
+    for (uint32_t r = 0; vector.error == TIER0_OK && r < vector.count; r += 1)
+    {
+        read |= vector.records[r].form == X86_FORM_MOV_R64_RM64 && vector.records[r].reg == X86_REGISTER_RAX && vector.records[r].rm == X86_REGISTER_RBP;
+    }
+    const bool pointer = vector.error == TIER0_OK && vector.count >= 2 && vector.records[0].form == X86_FORM_PUSH_R64 && vector.records[0].rm == X86_REGISTER_RBP &&
+                         vector.records[1].form == X86_FORM_MOV_RM64_R64 && vector.records[1].rm == X86_REGISTER_RBP && vector.records[1].reg == X86_REGISTER_RSP;
+    tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
+                                 tier0_test_same_code(&scalar, &vector) && pointer && read,
+                      "frame address", "alone: errors %d and %d, paths %s, frame pointer %s, rbp %s", scalar.error, vector.error,
+                      tier0_test_same_code(&scalar, &vector) ? "alike" : "different", pointer ? "there" : "missing", read ? "read" : "unread");
+    arena_release(&arena);
+    enum
+    {
+        callee_count = BUSTER_ARRAY_LENGTH(tier0_test_frame_callee),
+        entry_count = BUSTER_ARRAY_LENGTH(tier0_test_frame_entry),
+    };
+    uint8_t program_kinds[callee_count + entry_count];
+    uint8_t program_classes[callee_count + entry_count];
+    uint64_t program_values[callee_count + entry_count];
+    uint8_t program_local_classes[1 + TIER0_TEST_FRAME_LOCALS];
+    uint8_t program_local_flags[1 + TIER0_TEST_FRAME_LOCALS] = { 0 };
+    uint32_t call_callees[1] = { 0 };
+    uint32_t call_first[1] = { 0 };
+    uint32_t call_argument_counts[1] = { 1 };
+    uint8_t call_indirect[1] = { 0 };
+    uint8_t argument_classes[1] = { BUSTER_TYPED_CLASS_U64 };
+    for (uint32_t e = 0; e < callee_count + entry_count; e += 1)
+    {
+        const Tier0TestEntry* entry = e < callee_count ? &tier0_test_frame_callee[e] : &tier0_test_frame_entry[e - callee_count];
+        program_kinds[e] = entry->kind;
+        program_classes[e] = entry->class;
+        program_values[e] = entry->value;
+    }
+    memset(program_local_classes, BUSTER_TYPED_CLASS_U64, sizeof(program_local_classes));
+    Tier0Program* program = calloc(1, sizeof(Tier0Program));
+    Tier0Functions* functions = calloc(1, sizeof(Tier0Functions));
+    Arena program_arena = arena_reserve(1ull << 30);
+    Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&program_arena, Tier0TestCode, 1);
+    uint8_t* code_bytes = BUSTER_ARENA_PUSH_ARRAY(&program_arena, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES);
+    bool ok = tier0_test_expect(tally, program != 0 && functions != 0 && code != 0 && code_bytes != 0, "frame address", "no memory");
+    if (ok)
+    {
+        program->kinds = program_kinds;
+        program->classes = program_classes;
+        program->values = program_values;
+        program->entry_count = callee_count + entry_count;
+        program->local_classes = program_local_classes;
+        program->local_flags = program_local_flags;
+        program->local_count = 1 + TIER0_TEST_FRAME_LOCALS;
+        program->call_callees = call_callees;
+        program->call_first = call_first;
+        program->call_argument_counts = call_argument_counts;
+        program->call_indirect = call_indirect;
+        program->call_count = 1;
+        program->argument_classes = argument_classes;
+        program->argument_count = 1;
+        program->sink = UINT32_MAX;
+        program->function_count = 2;
+        program->functions[0] = (Tier0GeneratedFunction){ .first_entry = 0, .entry_count = callee_count, .first_local = 0, .local_count = 1, .parameter_count = 1,
+                                                          .result_class = BUSTER_TYPED_CLASS_U64 };
+        program->functions[1] = (Tier0GeneratedFunction){ .first_entry = callee_count, .entry_count = entry_count, .first_local = 1, .local_count = TIER0_TEST_FRAME_LOCALS,
+                                                          .parameter_count = 3, .first_call = 0, .call_count = 1, .result_class = BUSTER_TYPED_CLASS_U64 };
+        code->code = code_bytes;
+        ok = tier0_test_expect(tally, tier0_program_functions(program, tables, &program_arena, functions), "frame address", "no room for the signatures");
+        ok = ok && tier0_test_build(tally, functions, &program_arena, code, 0);
+    }
+    if (ok)
+    {
+        bool pointers = true;
+        for (uint32_t f = 0; f < 2; f += 1)
+        {
+            const Tier0Code compiled = tier0_compile(&functions->functions[f], &program_arena);
+            pointers &= compiled.error == TIER0_OK && compiled.count >= 2 && compiled.records[0].form == X86_FORM_PUSH_R64 && compiled.records[0].rm == X86_REGISTER_RBP;
+        }
+        tier0_test_expect(tally, pointers, "frame address", "a function with a frame address has no frame pointer");
+        uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3];
+        for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+        {
+            inputs[r][0] = r;
+            inputs[r][1] = r + 1;
+            inputs[r][2] = 0;
+        }
+        const Tier0TestData data = tier0_test_layout(program);
+        Tier0TestOutcome native[BUSTER_TIER0_TEST_INPUTS];
+        int status = 0;
+        const bool ran = tier0_test_run(program, code, &data, inputs, native, &status);
+        tier0_test_expect(tally, ran, "frame address", "the program didn't exit normally (status %d, signal %d)", status, WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+        for (uint32_t r = 0; ran && r < BUSTER_TIER0_TEST_INPUTS; r += 1)
+        {
+            const uint64_t expected = 7 + 16 * inputs[r][0];
+            tier0_test_expect(tally, native[r].result == expected, "frame address", "input %u: %016" PRIx64 " natively, %016" PRIx64 " expected", r,
+                              native[r].result, expected);
         }
     }
     arena_release(&program_arena);
@@ -5707,6 +5893,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_stack(&tally, &tables);
                 tier0_test_report("stack", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_frame_address(&tally, &tables);
+                tier0_test_report("frame address", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

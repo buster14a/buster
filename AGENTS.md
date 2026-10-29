@@ -277,7 +277,10 @@ designs and the compilers already built this way.
   per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
   clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
   #126); `test-checker` runs them against clang's code and checks that a
-  misaligned one is refused exactly where clang calls libatomic.
+  misaligned one is refused exactly where clang calls libatomic. The x86
+  builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
+  `monitorx`, `mwaitx`, `tzcnt`) are per-unit leaves too
+  (`c_builtin_x86_helpers.c`).
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -298,7 +301,8 @@ designs and the compilers already built this way.
   selector/corpus acceptance still pending for #180.
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
-  AVX-512 and scalar paths and shared form matching in `x86_match.c`.
+  AVX-512 and scalar paths and shared form matching in `x86_match.c`, whose
+  value immediates follow #221's rule (`x86_immediate_encodes`).
   `./build/compiler assemble -o output.o input.s` uses it through the existing
   executable. `test-assembler --cross-check` compares both paths and GNU as,
   and links/runs fixtures; `benchmark-assembler [--external]` reports phases,
@@ -330,12 +334,14 @@ designs and the compilers already built this way.
   what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
-  [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
-  single-exec programs by the direct path, by both paths into the same bytes,
-  and runs it against its expected output; `--cross-check` also links its `-c`
-  object with `cc`, and compares the functions and objects it defines with
-  `clang -O0 -c`'s (#129, `c_lowering_symbols.c`). `--self-test` checks the
-  harness with a stand-in compiler.
+  [--clang PATH] [--id-order N] [--cross-check] [--keep] DIR` compiles each of
+  c-testsuite's single-exec programs by the direct path, by both paths, the
+  scalar one with its identifiers' ids in another order (#153's `--id-order`),
+  into the same bytes, and runs it against its expected output;
+  `--cross-check` also links its `-c` object with `cc`, and compares the
+  functions and objects it defines with `clang -O0 -c`'s (#129,
+  `c_lowering_symbols.c`). `--self-test` checks the harness with a stand-in
+  compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
   and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
@@ -352,8 +358,10 @@ designs and the compilers already built this way.
   checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`), and `-g` attaching DWARF of its functions' source
-  lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
+  `check_program_select`), `--id-order N` handing the unit's identifiers their
+  ids in another order, on which nothing it writes may depend (#153's test
+  option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
+  source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
   `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
@@ -904,14 +912,17 @@ designs and the compilers already built this way.
   - each covered form's effects (`x86_effects`): its operands' reads and
     writes by encoding role (tied ones both), its fixed registers, what a
     narrower write does to the rest of a register, its flags read, defined
-    and left undefined, its memory, control, faults and MXCSR, and how its
-    immediate's bits become a value. An uncovered form gets a conservative
-    record, and a call has only its architectural effects (its callee's
-    clobbers are #137's);
+    and left undefined, its memory, control, faults and MXCSR, the x87's
+    state and control word, and how its immediate's bits become a value.
+    Every form Tier 0's emitter writes is covered (its x87, `shld`/`shrd`
+    and AVX forms among them), but the front end's X86 rows' (any VEX or
+    EVEX form). An uncovered form gets a conservative record, and a call has
+    only its architectural effects (its callee's clobbers are #137's);
   - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
     and `x86_immediate_value`): a selector's value against a field's bits;
   - each record's resources read and written, its operands resolved
-    (`x86_instructions_effects`, AVX-512, and its scalar twin);
+    (`x86_instructions_effects`, AVX-512, which leaves the rare records, the
+    x87's, vzeroupper's and a vvvv operand's, to its scalar twin);
   - value-preserving form choice for an operation with an immediate
     (`x86_choice_row`, `x86_choose_forms`, AVX-512, its scalar twin
     `x86_choose_forms_scalar`, and `x86_choice_instruction`): the
@@ -920,6 +931,13 @@ designs and the compilers already built this way.
     only where the live flags allow, which initialization works out from the
     effects.
 
+  Its consumers read it rather than keep copies of its rules: Tier 0 chooses
+  its immediates' forms by it (its emitter's computed constants by
+  `x86_immediate_encodes`), Tier 1's selector by its rows, the scheduler and
+  the unwind analyzer by the resolved effects, and the assembler's matcher
+  (`x86_match.c`) takes value immediates by `x86_immediate_encodes`: so
+  `main.c` includes `x86_semantics.c` before it, and `x86_match_initialize`
+  needs `x86_semantics_initialize` first (`x86_semantics_initialized`).
   `x86_semantics_test.c` holds its tests (`main.c` includes it after the
   assembler's, taking the encoder tests' printer and branch sizing tests'
   runner; `./build/compiler test-x86-semantics` runs them) and
@@ -969,7 +987,8 @@ designs and the compilers already built this way.
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector and x86 builtin programs alone (`c_check_program_vector_test.c`,
-  `c_check_program_x86_test.c`), run against clang -O0's code where the host has their features.
+  `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`), run against clang -O0's code where the
+  host has their features.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -1044,19 +1063,29 @@ designs and the compilers already built this way.
   9700X measurements.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
-  (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
-  all-in-memory form for SSA promotion, frame objects as address-taken slots of
-  their size and alignment and `COPY` as integer load/store pieces; it refuses
-  variable-length arrays' stack entries (`ALLOCA`, `STACK_SAVE`,
-  `STACK_RESTORE`). `test-ir`
-  checks independent fixtures, guarded columns, malformed inputs and allocation
-  rollback; `test-ir-lowering` also executes generated IR, with and without
-  objects, against the typed-stream interpreter and Tier 0's native code,
-  including calls and global-memory effects. `benchmark-ir` measures verification and
-  derived-array rebuilding on synthetic functions. `benchmark-ir-lowering`
-  measures the available typed-stream producer through output verification.
-  [The IR guide](docs/ir.md) records the producer/consumer contract and the
-  source-corpus, SSA/Tier 1 and SQLite bytes/token acceptance still pending.
+  (#131), with labels (`br_indirect`), by-value aggregates' ABI records (the
+  producer's locations, which the IR's types can't give) and a variadic
+  definition's frame and anchors. `ir_lower.c` lowers the `Tier0Function` stream
+  into the all-in-memory form for SSA promotion: frame objects as address-taken
+  slots of their size and alignment, `COPY` as integer load/store pieces, the
+  dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
+  jump through the function's one dispatch block, as clang's indirect gotos go,
+  which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
+  long double and `__int128`; it refuses vectors, `X86` rows and the frame
+  address (`FRAME_ADDRESS`), which no corpus function has. `test-ir` checks
+  independent fixtures, guarded columns, malformed inputs and allocation
+  rollback; `test-ir-lowering` also executes generated IR (values, objects,
+  indirect calls, records by value, the dynamic stack) against the typed-stream
+  interpreter and Tier 0's native code, and Tier 0's long double and `__int128`
+  programs through the shared IR's interpreter against their stack machines.
+  `test-ir-source` lowers, compares and promotes every function `-c` compiles of
+  real C files (`ir_source_test.c`), and `benchmark-ir-source` reports their IR's
+  bytes per source token and the largest functions' shares, and times lowering,
+  verification and promotion on them (`ir_source_benchmark.c`). `benchmark-ir`
+  measures verification and derived-array rebuilding on synthetic functions.
+  `benchmark-ir-lowering` measures the typed-stream producer through output
+  verification on generated programs. [The IR guide](docs/ir.md) records the
+  producer/consumer contract and the corpora's results.
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -2414,20 +2443,25 @@ report completeness and matching workload identities are checked.
 ## x86 semantics tests
 
 `./build/compiler test-x86-semantics [--seed N] [--runs N] [--cross-check]
-[--keep]` (about 0.2 s on the 9700X) checks `x86_semantics.c`. The processor is
+[--keep]` (about 0.3 s on the 9700X) checks `x86_semantics.c`. The processor is
 the oracle: a harness runs records in the test's process, loading every
-general register, the flags and ZMM0 to ZMM15 from a state, then storing them
-back. Memory operands are RIP-relative into a data page, RSP is its own stack,
-and a fault names the record. The checks:
+general register, the flags, ZMM0 to ZMM15 and the x87's state (FXRSTOR64 of a
+random one, every exception masked; the C code's saved around the run) from a
+state, then storing them back. Memory operands are RIP-relative into a data
+page, RSP is its own stack, and a fault names the record. The checks:
 
 - the effects table: every covered form but those that branch or trap, from
   `--runs` random states (12), with register and memory operands in turn.
   Each run checks that:
   - what the form doesn't write stays as it was: registers, vector registers
-    to bit 511, flags, and the memory around its operand and below the stack;
-  - a narrower write keeps or zeroes the rest as its record says;
+    to bit 511, flags, the x87's state and control word, and the memory around
+    its operand and below the stack;
+  - a narrower write keeps or zeroes the rest as its record says (a VEX or
+    EVEX one zeroes it to bit 511), and vzeroupper zeroes ZMM0 to ZMM15 above
+    bit 127;
   - defined flags and results don't change when everything it doesn't read
-    changes, every register compared whole (vector ones to bit 511);
+    changes, every register compared whole (vector ones to bit 511, the x87's
+    state too);
   - a destination that only merges doesn't read the bytes it defines;
   - every write shows a change in some run: one that no run showed gets up
     to 256 more runs, with register operands, and one that never shows is
@@ -2446,7 +2480,9 @@ and a fault names the record. The checks:
     shifts' CL, partial writes and 32-bit zero extension, inc's CF, the SSE
     merges and legacy SSE's upper lanes;
   - a call's architectural effects, register and memory operands, zero
-    idioms, shift counts;
+    idioms (vpxord's of its sources), shift counts (shld's and shrd's), the
+    x87's state and control word, vzeroupper, a masked EVEX record (every
+    resource) and AVX moves;
   - the substitutions' legality for every set of live flags;
   - uncovered forms, which must get the conservative record;
 - the immediate's contract on every covered form with an immediate and about
@@ -2468,14 +2504,26 @@ and a fault names the record. The checks:
 - #180's check: every row's forms allowed at the baseline target
   (`x86_target_forms`), every chosen record valid there
   (`x86_target_validate`);
-- `x86_match.c`'s immediate ranges against the shared rule on the forms the
-  assembler's syntax supports. It refuses the unsigned spellings of sign-extended
-  patterns, which the shared rule takes; those are counted, not failed.
+- `x86_match.c`'s immediates against the shared rule on the forms the
+  assembler's syntax supports with a value immediate: its scalar rule
+  (`x86_match_immediate`) and its vector path's intervals (`x86_match_range`)
+  must take exactly the values `x86_immediate_encodes` takes, the unsigned
+  spellings of sign-extended patterns among them (`add eax, 0xffffffff` is an
+  imm8's −1), and no `__int128` past the width; and every form it reads as
+  sign-extending must be such a form.
 
 `--cross-check` also prints every chosen record with the encoder tests'
 printer: GNU as must assemble them to the chosen forms' bytes. `--keep` leaves
 its directory under `$TMPDIR` (or `/tmp`). The 9700X job's test step runs it
 with `--cross-check`.
+
+Its consumers' tests check them against it: `test-tier0` that every record Tier 0
+emits but an X86 entry's has a covered form, `test-assembler --cross-check` the
+matcher's value immediates against GNU as (the unsigned spellings among them),
+and test-checker's folds section (`c_check_program_folds_test.c`) where Tier 0
+folds loads, from its records' resolved effects: a volatile object read as often
+as the source reads it, a load through a pointer kept on its side of a store, an
+atomic increment's write locked.
 
 ## x86 semantics benchmark
 
@@ -2566,14 +2614,21 @@ allocation failures. Jobs run in forward and reverse order with delayed
 completion at 1, 2, 3 and 8 lanes; the bytes must agree.
 
 `test-preprocessor` (without files), `test-object-writer`, `test-executable`,
-`test-dynamic`, `test-static` and `test-files` also check output after changing
+`test-dynamic`, `test-static`, `test-files`, `test-check-lanes`,
+`test-checker-deferred` and `test-c-testsuite` also check output after changing
 opaque identifier assignments. Each accepts `--id-order N` (default 153). The
 object test covers both section modes at every lane count; the preprocessor
 compares both `-E` text modes and diagnostics through both kernels and both job
 orders; the per-file jobs' test primes the shared table before the walk fills
 the cache, and compares every translation unit's `-E` text, diagnostics and
-locations and every cached file's tokens at every lane count. The 9700X workflow
-runs these checks as part of the stage commands.
+locations and every cached file's tokens at every lane count. The C compile's
+tests use the driver's `--id-order N` (`check_driver_id_order`, which primes
+the unit's table with its own names in another order): `test-check-lanes`
+compares objects, executables and diagnostics at 1 and 8 lanes with one lane's
+of the plain compile, `test-checker-deferred` the deferred reader with source
+order's, and `test-c-testsuite` each scalar build with its vector one;
+`test-checker-corpus --id-order N` checks a corpus so. The 9700X workflow runs
+these checks as part of the stage commands.
 
 `./build/compiler benchmark-diagnostics [--only scalar|selected]
 [--after-scalar MS]` compares the
@@ -4926,10 +4981,16 @@ bodies, take the rest in the remaining cost order from the counter
 and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
+A lane copies the top level's table but none of its per-name columns, which are
+the lane's own at places they keep from one reading to the next
+(`check_deferred_lane_names`), each set for the names a body spells before its
+walk, nor its binding events: a body's stream starts with proxies of the file
+scope's events its heads reach (`check_deferred_proxy`).
 
-`./build/compiler test-checker-deferred [--keep]` checks 86 fixtures of the
-issue's cases through the scalar path, the vector path and the deferred reader
-on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
+`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 96
+fixtures of the issue's cases through the scalar path, the vector path and the
+deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
+resolution, and on 8 with the identifiers' ids in another order (#153):
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
 and by the lanes' rule, its reader copied only by lanes that take a part, in
@@ -4941,13 +5002,19 @@ first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
 that lane delayed under the reader's rule and with all lanes forced. Each that
 merges must give source
 order's result again with its merge failing after the replay and when a state
-that read it before reads it again (its memory poisoned or as left, and kept),
+that read it before reads it again (its memory poisoned or as left, and kept,
+or its lanes' stamps then at their last, which its bodies wrap),
 and count as a resource failure with its state's allocation failing; timed, one
 lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+A lane's per-name columns must be laid out with their names' entries
+committed, kept, cleared after a poisoned reading and laid out again for more
+names, cleared where the kernel keeps their old pages
+(`check_deferred_test_lane_names`), and the lanes' mappings and the
+state's own arenas must be base pages (`check_deferred_test_memory`).
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
 opening must be selected. The merge's scans of the token columns
@@ -5020,14 +5087,16 @@ bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 
 `./build/compiler test-check-lanes [--executable PATH] [--seed N]
-[--programs N] [--keep]` emits generated programs of up to 600 functions (of
-libgcc's functions in random first-use orders, computed gotos through static
-tables of labels' addresses, switches, structs by value, long doubles,
-variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
+[--programs N] [--id-order N] [--keep]` emits generated programs of up to 600
+functions (of libgcc's functions in random first-use orders, computed gotos
+through static tables of labels' addresses, switches, structs by value, long
+doubles, variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
 8 with a slow lane, and on 8 that can't be pinned (which `lane_run` runs, then
 counts as lanes that didn't start), by both paths, with `-g`'s rows and unwind
 tables and without: each must be the one lane's object or failure, run again
-on one lane only when its lanes didn't start. Then the serial retry's other
+on one lane only when its lanes didn't start, and each compiled again with its
+identifiers' ids in another order (#153, the driver's `--id-order`) and emitted
+on one lane and on 8, the first compile's. Then the serial retry's other
 causes, each emission one lane's: a lane short of room
 (`CheckProgramLanes.squeeze_body`: the lane that takes a body's part left only
 so many bytes in one of its arenas, from none up, doubling, until the part
@@ -5041,9 +5110,10 @@ reservation; the 8 lanes' other arenas not reserved), each one lane's; then
 emissions with the least room of the caller's scratch they take, found by
 halving, which must be less than lane 0's columns take, each one lane's; then
 the lane rule, and the driver's
-objects and executables by `--lanes` and by default, each one lane's, the
-executables exiting alike, and with lanes that don't start, and the failing
-programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
+objects and executables by `--lanes`, by default and by `--lanes 8
+--id-order N`, each one lane's, the executables exiting alike, and with lanes
+that don't start, and the failing programs' exit statuses and diagnostics by
+`--lanes 8`, with the ids in another order too, each `--lanes 1`'s.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
@@ -5175,7 +5245,8 @@ others, its measurements are informational.
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
 [--symbols] [--symbols-minimum N] [--seed N] [--deferred N [--deferred-bindings
-stacks|batch|direct]] [--keep] [preprocessor options] file-or-directory...`
+stacks|batch|direct]] [--id-order N] [--keep] [preprocessor options]
+file-or-directory...`
 checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's
 presumed file and line, and the scalar and vector paths, column by column.
@@ -5189,7 +5260,10 @@ dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
-directories so, with the count they compare. `--semantic-mutations N` then checks N
+directories so, with the count they compare. `--id-order N` checks each file
+with its identifiers' ids in another order (#153, as the driver's `--id-order`
+gives them), which the 9700X job does for c-testsuite's programs with
+`--deferred 8`. `--semantic-mutations N` then checks N
 mutants of the units it found no difference in (#133's last "Done when" item,
 `c_check_mutation.c`):
 
@@ -5443,9 +5517,11 @@ operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
-`ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
+`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`, a frame pointer's 14 integer
 depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
-scope of its own, around calls with stack arguments, run natively; and the
+scope of its own, around calls with stack arguments, run natively; the frame's
+address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
+allocation, run natively; and the
 aggregates at locations written by hand, 13 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
 SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
@@ -5461,7 +5537,10 @@ the convention's, among them), and a function of value parameters in one
 register or outside the convention's. Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
-`branch_sizing_validate`. Each program is then sized, encoded, loaded into
+`branch_sizing_validate`, and every record but an X86 entry's must have a form
+`x86_semantics.c` covers (#221: what the effects' consumers need of Tier 0's
+code), here and in the x87, 128-bit, vector and deep checks below. Each program
+is then sized, encoded, loaded into
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
@@ -5534,7 +5613,7 @@ Every kind (NONE, X86 and one past the kinds among them) of every class after
 no operand, one or two of every class, with values at its kind's bounds and
 past them, in a function of every kind of local, direct and indirect calls,
 a result object, a long double result, the access column and a label, with
-and without the memory classes (559,200 streams); joins of `?:` and `&&` at
+and without the memory classes (562,944 streams); joins of `?:` and `&&` at
 depths and across blocks, loops, values at the end; values carried across
 64-entry blocks at every depth to 40, calls spanning blocks, the limits, and
 more than 128 locals and calls (the gathers); each stream with its columns
@@ -5566,23 +5645,29 @@ files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|scalar|sizing|encode|validate|validate-scalar] [--after-scalar MS]`
-(about 4 s) generates programs
+vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+[--after-scalar MS]` (about 4 s) generates programs
 until their functions hold `--entries` typed entries (262,144), checks that both
 of Tier 0's paths give every function the same code, then reports 21-pass
 medians, per typed entry and per record, of `tier0_compile`,
 `tier0_compile_scalar`, `size_branches` on their records, `x86_encode` of the
-sized records, and `tier0_validate` and `tier0_validate_scalar` (#569):
-nanoseconds, cycles, instructions, IPC and the throttle
-(PMCx1A0's umask 0x08, #199), with the share of entries deferred and the
-functions the validation's vector path takes alone. `--only` runs
-one variant alone, and `--after-scalar MS` runs the scalar twin for MS ms before
-each pass of the vector path and of the validation. Run it under the 9700X's lock with `taskset -c 2`.
+sized records, `tier0_validate` and `tier0_validate_scalar` (#569), and the
+immediates' form choice on each function's own requests as Tier 0 makes them
+(`x86_choose_forms` and `x86_choose_forms_scalar`, #221, from
+`Tier0Function.choice_requests`, which copies them into the code: read from
+there, colder than in `tier0_compile`'s own call): nanoseconds, cycles,
+instructions, IPC and the throttle (PMCx1A0's umask 0x08, #199), with the share
+of entries deferred, the functions the validation's vector path takes alone,
+and the choice's requests (per entry, the share whose form it kept, gave another
+encoding of the instruction or another instruction, and the bytes it saved
+against each template's imm32 form). `--only` runs one variant alone, and
+`--after-scalar MS` runs the scalar twin for MS ms before each pass of the vector
+path, of the validation and of the choice. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
 `./build/compiler benchmark-backend-source [--only
-vector|scalar|sizing|encode|validate|validate-scalar]
+vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted, outside the time;
@@ -5666,6 +5751,16 @@ when it is closed on btrfs and ext4.
 
 ## IR tests and benchmarks
 
+`./build/compiler test-ir-metamorphic [--seed N] [--first N] [--count N]`
+checks bounded scalar IR programs against an independent arithmetic/memory
+model after ID renaming, pure-value reordering/insertion, CFG edge splitting,
+unreachable-block insertion and commutative operand exchange. Both complete
+verifiers, both text parsers and every admitted scalar/vector optimizer must
+preserve checked execution. The default six-case seed is in shared correctness
+CI; longer runs accept explicit time/step budgets and failure-artifact/replay
+options. `docs/ir-tools.md` records the precise subset, categories and source
+revision requirement. This command performs correctness work, not a timing claim.
+
 `./build/compiler test-ir [--seed N] [--count N]` checks the arena-backed
 representation, both verifier paths, compact CFG/use arrays and stable printer.
 Independent fixtures cover operand roles, conversions, phi edges and dominance;
@@ -5679,12 +5774,43 @@ typed programs through both paths, compares every column and verifies each
 function. A test-only executor with explicit call frames compares results and
 global-memory effects with the existing typed-stream interpreter and with Tier
 0's native code of the same streams, run in a child process. It runs `--count`
-programs of values and as many with frame objects and copies. Targeted
-fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
-pointer scales, objects' slots, `COPY` of every size from 1 to 256, guarded
-source tails and transactional failures. Every lowered function is also
-promoted by both SSA paths, verified, and must keep its objects' slots. The
-default count is 32 programs. It does not supply the production interpreter of #176.
+programs of values and as many each with frame objects and copies, with calls
+through pointers to functions and with records passed and returned by value,
+whose IR the executor runs as its ABI records say. Targeted fixtures exercise
+conditional joins, entry-zero backedges, narrow shifts, wide pointer scales,
+objects' slots, `COPY` of every size from 1 to 256, labels and computed gotos
+(one, and two through the dispatch block), a variadic definition's frame, a struct by value's records, guarded source tails
+and transactional failures. Every lowered function is also promoted by both SSA
+paths, verified, and must keep its objects' slots. Tier 0's random long double
+and `__int128` programs (four times the count) run through the shared IR's
+interpreter (#176) against their stack machines. The default count is 32
+programs.
+
+`./build/compiler test-ir-source [--print NAME] [preprocessor options] file...`
+(`ir_source_test.c`) is #131's acceptance on real C: each file checked, selected
+and emitted as `-c` compiles it (`ir_source_prepare`, as benchmark-backend-source
+prepares its files), then every function's typed stream lowered by both paths,
+which must agree column for column and verify, and promoted by both of
+`ssa_ir.c`'s paths, whose results verify with dominance. A function's semantic
+result type is its RETURNs' class, or its declared result's
+(`ir_source_result`). A file the checker rejects, or whose program or emission
+refuses a feature by name, is left out with its reason; any other failure, and
+any function refused, lowered apart or unpromoted, fails the command, naming the
+function and the first error. `--print NAME` prints that function's IR as lowered
+and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
+`sqlite3.c` and the frozen musl's units.
+
+`./build/compiler benchmark-ir-source [--only lower|lower-scalar|verify|
+verify-scalar|promote|promote-scalar] [--after-scalar MS] [preprocessor options]
+file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
+does, lowers and promotes each once outside the time, and reports the IR's bytes
+(each function's arena, alignment gaps and all, as an arena of its own) per
+source token (the parser's), per typed entry and per instruction, lowered and
+promoted, and the ten largest functions with their shares; then 21-pass medians
+per typed entry and per IR instruction of each variant over every function, each
+pair's paths taking turns first. Any file or function that fails fails it. Run it
+under the 9700X's lock with `taskset -c 2`; the 9700X job runs it on the frozen
+`sqlite3.c` where the IR or its lowering changes.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
@@ -5698,4 +5824,4 @@ labeled separately from core cycles. The 9700X workflow runs the tests and
 pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar
 work before each vector sample where the pull request changes the module
 ("Sharing the 9700X"). [The guide](docs/ir.md) records
-interfaces, measurement scope and outstanding source-corpus acceptance.
+interfaces, measurement scope and the corpora's results.

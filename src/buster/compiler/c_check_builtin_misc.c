@@ -414,8 +414,11 @@ static void check_builtin_misc_frame(TypeTable* table, const CheckBuiltinMiscAct
             }
             else
             {
+                // The level, an integer constant expression without effects, is the builtin's own: clang's code computes
+                // nothing for it.
                 output->frame_level = level;
                 output->reads_memory = true;
+                output->evaluated_operands = 0;
                 if (level != 0)
                 {
                     output->warnings |= BUSTER_CHECK_BUILTIN_MISC_WARN_FRAME_LEVEL;

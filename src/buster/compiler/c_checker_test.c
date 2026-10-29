@@ -4553,6 +4553,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_comma_input_test.c"
 #include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
@@ -4686,6 +4687,8 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_vectors(&test, clang);
             check_test_program_x86(&test, clang);
+            check_test_program_vector_builtins(&test, clang);
+            check_test_program_fp16(&test, clang);
         }
         else if (initialized)
         {
@@ -4736,6 +4739,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_expression_commas(&test);
             check_test_warning_ranges(&test);
             check_test_selection_roots(&test);
             check_test_varargs_graph(&test, &types.table);

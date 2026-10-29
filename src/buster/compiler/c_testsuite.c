@@ -4,14 +4,15 @@
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
 //   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH]
-//                                   [--cross-check] [--keep] DIR
+//                                   [--id-order N] [--cross-check] [--keep] DIR
 //   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
 // NAME.c there is a program that must exit with status 0 having written NAME.c.expected's bytes to its standard output
 // and errors. The harness compiles and links each with this executable (or --compiler's), `compiler --verify NAME.c -o
 // NAME` (the direct path, its vector paths, every function's records checked by x86_validate), and again with --scalar
-// (the scalar twins): the two executables must be the same bytes, or the two failures the same diagnostics. Then it runs
+// (the scalar twins) and its identifiers' ids in another order (#153's --id-order, the Nth test's from --id-order N on,
+// 153 by default): the two executables must be the same bytes, or the two failures the same diagnostics. Then it runs
 // the program in a directory of its own (some tests write files), with standard input from /dev/null and a timeout.
 //
 // A test passes when its status and output are the expected ones. One that the compiler refuses with a diagnostic that
@@ -103,6 +104,8 @@ struct CTestsuite
     uint32_t timeout;
     uint32_t compile_timeout;
     bool cross_check;
+    // The scalar path's compiles' --id-order, test i's this plus i.
+    uint64_t id_order;
     CTestsuiteResult* results;
 };
 
@@ -476,8 +479,10 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     snprintf(log, sizeof(log), "%s/compile.txt", directory);
     snprintf(scalar_log, sizeof(scalar_log), "%s/compile-scalar.txt", directory);
     snprintf(output, sizeof(output), "%s/output.txt", directory);
+    char order[48];
+    snprintf(order, sizeof(order), "--id-order=%llu", (unsigned long long)(suite->id_order + index));
     char* const vector_arguments[] = { (char*)suite->compiler, "--verify", source, "-o", program, "-lm", 0 };
-    char* const scalar_arguments[] = { (char*)suite->compiler, "--verify", "--scalar", source, "-o", scalar, "-lm", 0 };
+    char* const scalar_arguments[] = { (char*)suite->compiler, "--verify", "--scalar", order, source, "-o", scalar, "-lm", 0 };
     result->outcome = C_TESTSUITE_FAILED;
     bool valid = mkdir(directory, 0755) == 0;
     if (!valid)
@@ -500,12 +505,12 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     }
     else if (valid && compiled && !c_testsuite_same(program, scalar))
     {
-        snprintf(result->detail, sizeof(result->detail), "the vector and scalar paths write different executables");
+        snprintf(result->detail, sizeof(result->detail), "the vector path, and the scalar path with the ids in another order, write different executables");
         valid = false;
     }
     else if (valid && !compiled && !c_testsuite_same(log, scalar_log))
     {
-        snprintf(result->detail, sizeof(result->detail), "the vector and scalar paths give different diagnostics");
+        snprintf(result->detail, sizeof(result->detail), "the vector path, and the scalar path with the ids in another order, give different diagnostics");
         valid = false;
     }
     if (valid && compiled)
@@ -994,6 +999,7 @@ static int run_c_testsuite_tests(int argc, char** argv)
     bool valid = true;
     suite.timeout = 10;
     suite.compile_timeout = BUSTER_C_TESTSUITE_COMPILE_SECONDS;
+    suite.id_order = 153;
     snprintf(suite.clang, sizeof(suite.clang), "clang");
     for (int i = 0; valid && i < argc; i += 1)
     {
@@ -1022,6 +1028,11 @@ static int run_c_testsuite_tests(int argc, char** argv)
             const int length = snprintf(suite.clang, sizeof(suite.clang), "%s", argv[++i]);
             valid = length > 0 && length < (int)sizeof(suite.clang);
         }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            suite.id_order = strtoull(argv[++i], &end, 10);
+            valid = end != argv[i] && *end == 0;
+        }
         else if (strcmp(argv[i], "--cross-check") == 0)
         {
             suite.cross_check = true;
@@ -1047,7 +1058,7 @@ static int run_c_testsuite_tests(int argc, char** argv)
     if (!valid || (self_test ? root != 0 : root == 0))
     {
         fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] "
-                        "[--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
+                        "[--id-order N] [--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {
