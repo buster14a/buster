@@ -3869,21 +3869,6 @@ static bool check_lower_complex_parts(const CheckLowerWriter* writer, TypeId typ
     return element != 0 && check_lower_aggregate(writer, element);
 }
 
-// A frame object of `size` bytes of zeros (a multiple of 8), aligned to 2^`alignment_log2`: a real operand's imaginary
-// part.
-static uint32_t check_lower_complex_zero(CheckLowerWriter* writer, uint64_t size, uint32_t alignment_log2)
-{
-    const uint32_t zero = check_lower_object(writer, size, alignment_log2);
-    for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += 8)
-    {
-        check_lower_complex_place(writer, zero, 0, 0);
-        check_lower_offset(writer, offset);
-        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
-        check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
-    }
-    return zero;
-}
-
 // The address of part `part` of `operand`, whose parts (or whose value, a real one's) are aggregates of `size` bytes, onto
 // the stack: a complex one's part's, a real one's own for its real part and frame object `zero`'s for its imaginary one.
 static void check_lower_complex_aggregate_part(CheckLowerWriter* writer, CheckLowerComplexOperand operand, uint32_t part, uint64_t size, uint32_t zero)
@@ -3943,7 +3928,7 @@ static uint32_t check_lower_complex_parts_compute(CheckLowerWriter* writer, Chec
     const uint32_t y = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     const uint32_t t = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     const uint32_t u = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-    const uint32_t zero = !a.complex || !b.complex ? check_lower_complex_zero(writer, size, alignment) : BUSTER_CHECK_NONE;
+    const uint32_t zero = !a.complex || !b.complex ? check_lower_aggregate_zero(writer, element) : BUSTER_CHECK_NONE;
     uint32_t result = BUSTER_CHECK_NONE;
     if (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL)
     {
