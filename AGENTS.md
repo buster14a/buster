@@ -1257,6 +1257,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
 ./build/compiler test-check-lanes
+./build/compiler test-check-units
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -5087,25 +5088,35 @@ from preprocessing to its code through `check_driver_unit`, the pipeline a
 command of one file runs, its functions on that lane alone. Each lane keeps an
 intern table and a file cache that its units share; no lane shares anything a
 unit writes. Each unit's diagnostics go to a stream of its own, printed in the
-command line's order after every unit has run. A link keeps each unit's link
+command line's order after every unit has run. A lane keeps its three big
+arenas from one unit to the next, emptied; it pools the other arenas its units
+release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
+mappings kept for the next reservations of their shapes); and the arenas of a
+unit of less than 1 MB of source start with 16 MB of base pages
+(`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
+which every reservation took for writing, were what limited the lanes.
+`--poison-arenas`, a test option, overwrites what a unit left in its lane's
+three arenas (`arena_poison`), so that a compile that read a byte it didn't
+write would show. A link keeps each unit's link
 (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes
-it as it does one unit's. `-c -o`, the dumps, `-g` for an executable and two
-units of one object's name are refused.
+it as it does one unit's. `-c -o`, the dumps, `--id-order`, `-g` for an
+executable and two units of one object's name are refused.
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
 [--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
 [--generate DIR [--units N] [--functions N]]` runs the driver as a process:
 generated programs of 2 to 7 units and one of synth's shape (12 units of 30
-functions), each of whose executables, by `--lanes` 1, 2, 3 and 8 and by
-default and by each path, is the same bytes, runs as `clang -O0`'s build does,
-and defines the symbols `cc`'s link of the units' objects defines, and each of
-whose units' `-c` objects is the unit's alone; diagnostics, each unit's alone
-in the command line's order; refusals; and lanes that don't start. With
-`--corpus DIR` it compiles DIR's `.c` files at once with `-c` against each
-alone, and with `--generate DIR` it writes a program of synth's shape (512
-units of 200 functions by default) for measurements, and tests nothing.
+functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
+and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
+`clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
+objects defines, and each of whose units' `-c` objects is the unit's alone;
+diagnostics, each unit's alone in the command line's order; refusals; and
+lanes that don't start. With `--corpus DIR` it compiles DIR's `.c` files at
+once with `-c`, plainly and poisoned, against each alone, and with
+`--generate DIR` it writes a program of synth's shape (512 units of 200
+functions by default) for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
 measurements.
 

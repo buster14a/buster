@@ -8,7 +8,11 @@ foreign symbols, enable a command-line mode, or establish corpus equivalence.
 The [raw command adapter](foreign-driver.md) selects named semantic symbols
 from its final transformed link by default, with `-s`/`--strip-all` omitting
 that attachment. Its selection and whole-command qualification remain
-distinct from the writer evidence below.
+distinct from the writer evidence below. The C driver's direct path
+(`check_driver_executable`, #152) selects the program's named symbols but the
+compiler's `.L` labels and thread-local variables of no size, unless `-g`'s
+DWARF unit gives the functions' symbols instead ([translation
+units](translation-units.md), "The symbol table").
 
 ## Producer and consumer contract
 

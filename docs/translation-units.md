@@ -89,8 +89,9 @@ computed includes probe, and a file the walk didn't prepare (pp_run's
 cache for units running at once on several lanes needs those writes made
 safe for readers on other lanes: a lock for the writers and tables that never
 move while lanes read them, or each lane's writes into an overlay of its own.
-Each lane's cache prepares a header at most once per lane instead; what that
-costs against preparing it once is measured below.
+Each lane's cache prepares a header at most once per lane instead: on 8
+lanes, a header that every unit includes is prepared 8 times rather than
+once.
 
 ### Diagnostics
 
@@ -98,14 +99,92 @@ Each unit writes its diagnostics, the preprocessor's (`PPOptions.diagnostics`)
 and the driver's own, to a stream of its own (`open_memstream`). Once every
 unit has run, the calling thread prints them in the command line's order.
 
+### Memory
+
+A unit's compile reserves about 70 arenas and releases them (2,263 `munmap`,
+2,282 `mmap` and 4,190 `madvise` calls for Lua's 33 units): the preprocessor's
+alone reserves about 50, a column or a table each, and the parser, the type
+table and the emission theirs. A command of one file pays for that once. A
+lane that compiles units one after another pays for it per unit, and that is
+what limited the lanes, as measured on the 9700X with synth's 512 units and
+musl's 1,006 (`-c`, CPUs 0 to 7):
+
+- **Huge pages.** Past an arena's first 64 KB, its pages are huge
+  (`lane.c`'s `BUSTER_ARENA_SMALL_BYTES`), and the kernel clears a huge page
+  whole when it is first touched: a small unit's array that goes a few
+  kilobytes past 64 KB clears 2 MB. On 8 lanes those clears took 23% of the
+  samples (`clear_page_erms`, under `pp_run_contexts`, `check_input_bind`,
+  `check_program` and others), and their memory traffic tripled the user
+  time: 1 lane took 1.63 s, 8 lanes 0.97 s. With transparent huge pages off
+  for the process (an `LD_PRELOAD` of `prctl(PR_SET_THP_DISABLE)`), 8 lanes
+  took 0.62 s and 1 lane the same 1.63 s.
+- **The address space.** Every `munmap` flushes the TLBs of every CPU the
+  process's other lanes run on, and `mmap`, `madvise` and `munmap` take the
+  address space's lock for writing, which the other lanes' page faults and
+  reservations then wait for. For synth, `osq_lock` and
+  `rwsem_down_write_slowpath` took 4.4% of the samples, and eight processes of
+  64 units each, which share nothing, took 0.46 s with huge pages off, where
+  one process of 8 lanes took 0.62 s. musl's units are smaller (0.74 ms each
+  on one lane), and their reservations come closer together: on 8 lanes 83%
+  of the samples were the kernel's, 45% `osq_lock` under
+  `rwsem_down_write_slowpath` (18% from `madvise`, 16% from `munmap` and 10%
+  from `mmap`), and 8 lanes took 429 ms, more than 4 (413 ms), with 2.2 s of
+  system time against one lane's 0.3 s.
+- **The machine.** Even those eight independent processes reach 3.5 times one
+  lane's throughput, not 8: their user time is 2.3 times one lane's, the
+  compile's memory traffic (#151's measurements: 8 one-lane compiles of
+  `sqlite3.c` reach 2.9 times one's, at 268.73 bytes of DRAM traffic per
+  source byte).
+
+So a units lane does three things:
+
+- **It keeps its three big arenas** (the driver's arena, scratch and output,
+  which the checker and the emission fill) from one unit to the next, emptied
+  after each unit with their pages kept. Reserving them again for each unit,
+  as a command of one file does, made the 8 lanes take 0.83 s rather than
+  0.62 s (with huge pages off), and clearing what each unit pushed into them
+  (`memset` to their peak) was slower still: a unit's pushes there reach far
+  past the bytes it writes. The next unit finds the bytes the last one left,
+  and the compile reads nothing in them it didn't write: `--poison-arenas`, a
+  test option, overwrites them with a pattern between units (`arena_poison`),
+  and `test-check-units` requires every object and executable it makes so to
+  be the one each unit makes alone.
+- **It pools the arenas its units release** (`arena_pool`, which only the
+  units' lanes set): `arena_release` frees an arena's pages with
+  `MADV_DONTNEED`, which takes the address space's lock for reading and leaves
+  the mapping and its advice in place, and keeps the arena; the next
+  reservation of its capacity and base pages takes it, its pages zero again as
+  in a fresh arena, so that nothing depends on what the units before left. A
+  full pool (256 arenas) unmaps the one released longest ago: some arenas'
+  capacities follow their unit's size, and no later reservation takes them.
+  On the laptop (Zen 4), c-testsuite's programs five times over (1,100 units,
+  `-c`) took 0.81 s on one lane and 0.65 s on 8 without the pool, and 0.51 s
+  and 0.33 s with it; on 8 lanes, its `mmap` calls fell from 74,446 to 12,686
+  and its context switches from about 100,000 to 43,000. Pooling the three big
+  arenas too, rather than keeping them, made the same units take 0.64 s and
+  0.38 s: their pages are cleared again for each unit.
+- **A small unit's other arenas start with base pages** (`arena_small_floor`,
+  which only the units' lanes set): the first 16 MB of each arena that a unit
+  of less than 1 MB of source reserves (`BUSTER_CHECK_UNITS_SMALL_BYTES` and
+  `BUSTER_CHECK_UNITS_LARGE_SOURCE`), so that its small arrays take base pages
+  where each took a huge page. With 1, 4 and 16 MB of base pages, synth's 512
+  units (174 KB of source each) took 0.80, 0.73 and 0.65 s with `-c` on 8
+  lanes, and 1.60 to 1.63 s on one, whatever the floor (the medians of three
+  runs). A large unit's arrays fill their huge pages, and base pages only
+  give it more faults: `sqlite3.c` (9 MB) with a tiny second unit took 0.127,
+  0.131 and 0.136 s on one lane with those floors, and 0.124 s alone. So a
+  unit of 1 MB of source or more reserves its arenas as a command of one file
+  does.
+
 ## The link
 
 A unit that links keeps its link (`check_units_keep`): its code and data as
 `-c` would write them (its emission without binding, its static data
-published, `link_check` passed), copied into its lane's arenas with every
-record's id as it was, and which of its undefined global symbols a system
-header declared, for the error that names their library. Its other memory goes
-back to the lane for the next unit.
+published, its definitions in named sections given their classes, #619's
+`check_program_sections`, and `link_check` passed), copied into its lane's
+arenas with every record's id as it was, and which of its undefined global
+symbols a system header declared, for the error that names their library. Its
+other memory goes back to the lane for the next unit.
 
 Once every unit has run, `check_units_merge` joins the units' links into one,
 in the command line's order, as the emission builds one unit's
@@ -150,6 +229,67 @@ they were. So `nm` and `perf` name an executable's functions, and
 `test-check-units` compares the symbols an executable of several units
 defines with those of the units' objects linked by `cc`.
 
+## Measurements
+
+On the 9700X, at `ae5fb51e`, built as the 9700X job builds
+(`BUSTER_DEBUG_INFO=0`), each command a whole process on CPUs 0 to 7 (one
+per core), the median of 5 runs after a warm-up, in an order that rotates by
+run (`time-runs`); [the record](https://github.com/buster14a/buster-performance/tree/5dbccd1e1f5ce39235835328d020aed730d937ba/docs/measurements/units-152-2026-10-29) has the commands, the logs and the
+host's receipts. Buster's commands compile the units with `--lanes N`; make's
+compile the same units, a process for each, and link as buster does (Lua and
+synth). Lua 5.4.8's interpreter is its 33 units but `luac.c`; synth's shape
+is `test-check-units --generate`'s 512 units of 200 functions (89 MB); musl
+1.2.5's units are the 1,006 of its library's 1,309 that the driver compiles
+(it refuses the other 303 as unsupported).
+
+| milliseconds | buster, 1 lane | 2 | 4 | 8 | `make -j8`, clang -O0 | `make -j8`, tcc | `make -j1`, tcc |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Lua, linked | 76.1 | 45.8 | 32.4 | 30.9 | 141.2 | 18.6 | 86.4 |
+| synth, linked | 1,546.6 | 884.9 | 607.5 | 532.7 | 2,482.9 | 507.6 | 1,503.5 |
+| musl, `-c` | 625.5 | 381.7 | 260.4 | 232.7 | 1,675.7 | 149.4 | 979.3 |
+
+8 lanes are 2.5 (Lua), 2.9 (synth) and 2.7 (musl) times as fast as one.
+clang -O0 on 8 processes takes 4.6, 4.7 and 7.2 times as long as the 8 lanes,
+and tcc on 8 processes 0.60, 0.95 and 0.64 times as long; on one lane, the
+driver takes 0.88, 1.03 and 0.64 times as long as tcc's processes one at a
+time.
+
+What the 8 lanes are short of:
+
+- **The serial tail.** Synth's link spends 485 ms of 533 on the units' lanes
+  (`--time-stages`' `lanes`; 1,510 ms on one lane), then 19 ms merging the
+  units' links (`code-atoms`) and 25 ms binding them and writing the
+  executable, as on one lane: 8% of 8 lanes' time. The merge stays scalar, a
+  hash table of the global names, 3.6% of it.
+- **The memory.** Synth's user time is 1.27 s on one lane and 3.13 s on 8, as
+  eight independent processes' grew (above), and its system time 0.27 s and
+  0.68 s (0.35 s and 1.33 s before the pool).
+
+Before the arenas' pool (`965ec185`), the same commands took 34.6, 687.7 and
+429.3 ms on 8 lanes (80.3, 1,635.9 and 741.7 on one), musl's 8 lanes more than
+its 4 (413.4 ms).
+
+A command of one file runs as on main (`9bb5060e`), against an A/A copy of
+main's executable: `perf stat -r 11` on CPU 2, the medians of three rounds in
+a rotating order, of the frozen `sqlite3.c` (9 MB) and of a c-testsuite
+program linked by the direct path.
+
+| | main | main's copy | head | head against main |
+| --- | ---: | ---: | ---: | ---: |
+| `-c`, user instructions | 1,243,623,074 | 1,243,623,098 | 1,244,367,336 | +744,262 (+0.06%) |
+| `-c`, user cycles | 574.39 M | 575.12 M | 573.80 M | -0.10% (copy +0.13%) |
+| `-c`, task clock | 121.32 ms | 121.27 ms | 120.86 ms | -0.4% |
+| `-fsyntax-only`, user instructions | 946,882,976 | 946,883,627 | 947,056,569 | +173,593 (+0.02%) |
+| `-fsyntax-only`, user cycles | 439.45 M | 437.81 M | 440.02 M | +0.13% (copy -0.37%) |
+| `-fsyntax-only`, task clock | 95.50 ms | 95.19 ms | 95.50 ms | 0 |
+| executable of `00220.c`, user instructions | 21,413,378 | 21,413,398 | 21,434,532 | +21,154 (+0.10%: `.symtab`) |
+
+The object is main's, byte for byte. Placement moves these instruction
+counts by as much as they differ: on the laptop (Zen 4), whose head's counts
+are main's +157,000 and +727,000, a build of the head without `arena_push`'s
+peak, its one addition to every push, ran 1.1 and 0.6 million more
+instructions than the head, not fewer.
+
 ## Tests
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
@@ -159,14 +299,16 @@ driver as a process, in a directory of its own:
 - **Programs:** generated programs of 2 to 7 units, whose functions call
   other units', read and write their globals (initialized, zero-filled and
   thread-local), take their functions' and globals' addresses into tables and
-  pointers, pass structs by value, call `printf`, and have statics and static
-  functions of the same names as the other units'. Each program's executable
-  of all its units, by `--lanes` 1, 2, 3 and 8 and by default and by each
-  path, is the same bytes, runs as `clang -O0`'s build of the program does,
-  and defines the symbols (by name, binding and kind) that `cc`'s link of the
-  units' objects compiled one at a time defines; that link runs as clang's
+  pointers, pass structs by value, call `printf`, have statics and static
+  functions of the same names as the other units', and a function and a
+  zero-filled global in sections of their own names (#619); and one of synth's
+  shape (12 units of 30 functions). Each program's executable of all its units, by
+  `--lanes` 1, 2, 3 and 8, by default and by 8 with `--poison-arenas`, and by
+  each path, is the same bytes, runs as `clang -O0`'s build of the program
+  does, and defines the symbols (by name, binding and kind) that `cc`'s link of
+  the units' objects compiled one at a time defines; that link runs as clang's
   too. Each unit's object of `-c` of all the units is its object alone, at
-  every lane count.
+  every lane count and poisoned.
 - **Diagnostics:** a unit with a warning, one with an error and a clean one,
   with `-c`, `-fsyntax-only` and into an executable, at every lane count:
   standard error is each unit's alone, in the command line's order; `-c`
@@ -177,4 +319,8 @@ driver as a process, in a directory of its own:
 - **Lanes that don't start**, in a child limited to the processes it has:
   one lane's outputs.
 - **`--corpus DIR`:** every `.c` file in DIR at once with `-c`, by 8 lanes,
-  against each file alone: the same statuses, diagnostics and objects.
+  plainly and with `--poison-arenas`, against each file alone: the same
+  statuses, diagnostics and objects. The 9700X job runs it on c-testsuite's
+  programs.
+- **`--generate DIR`** writes a program of synth's shape (`--units`, 512 by
+  default, of `--functions`, 200) for measurements, and tests nothing.

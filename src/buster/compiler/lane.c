@@ -25,7 +25,8 @@
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
-//     arena_poison overwrites what pushes took, for tests of code that reuses an arena.
+//     arena_poison overwrites what pushes took, for tests of code that reuses an arena, and a thread's ArenaPool
+//     (arena_pool) keeps the arenas it releases for its next reservations.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
