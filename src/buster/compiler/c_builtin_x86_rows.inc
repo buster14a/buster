@@ -168,10 +168,10 @@
 // those of 64 bytes); the headers' unmasked ones of 16 and 32 bytes are macros of the builtins.
 #define BUSTER_CHECK_X86_VNNI_INT(name, form) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name "128", sizeof("__builtin_ia32_" name "128") - 1, CHECK_X86_LOWER_TERNARY, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
-      X86_FORM_##form##_X_X_XM128_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2) }, \
-    { "__builtin_ia32_" name "256", sizeof("__builtin_ia32_" name "256") - 1, CHECK_X86_LOWER_TERNARY, 4, 32, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
-      X86_FORM_##form##_Y_Y_YM256_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2) }, \
-    { "__builtin_ia32_" name "512", sizeof("__builtin_ia32_" name "512") - 1, CHECK_X86_LOWER_TERNARY, 4, 64, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form##_X_X_XM128_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2)) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name "256", sizeof("__builtin_ia32_" name "256") - 1, CHECK_X86_LOWER_TERNARY, 4, 32, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form##_Y_Y_YM256_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2)) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name "512", sizeof("__builtin_ia32_" name "512") - 1, CHECK_X86_LOWER_TERNARY, 4, 64, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form##_Z_Z_ZM512, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2))
 // A rule of an extension's (`extensions`, X86Extension's bits), of `family`'s row of the form, with its last vector of
 // `other` bytes where they aren't the others'.
