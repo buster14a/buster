@@ -2725,6 +2725,18 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_batch(test);
     check_test_program_many_arguments(test, clang);
     check_test_program_many_aggregate_returns(test, clang);
+    // A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
+    check_test_program_source(test,
+        "#if __has_attribute(packed) && __has_attribute(__packed__)\n"
+        "#define PACKED __attribute__((packed))\n#else\n#define PACKED\n#endif\n"
+        "#if __has_c_attribute(gnu::packed)\n#define CPACKED [[gnu::packed]]\n#else\n#define CPACKED\n#endif\n"
+        "struct PACKED A{char c;int i;short s;};struct CPACKED B{char c;int i;};"
+        "enum PACKED E{X=1,Y=2};"
+        "_Static_assert(sizeof(struct A)==7 && _Alignof(struct A)==1,\"GNU packed query\");"
+        "_Static_assert(sizeof(struct B)==5 && _Alignof(struct B)==1,\"scoped packed query\");"
+        "_Static_assert(sizeof(enum E)==1,\"packed enum\");"
+        "int tested(int n){struct A a={1,n,3};struct B b={2,n};return sizeof(a)*100+sizeof(b)*10+sizeof(enum E)+a.i+b.i;}",
+        "packed-attribute-feature-query", clang);
     check_test_program_source(test,
         "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
         "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
