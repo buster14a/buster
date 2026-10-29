@@ -16870,7 +16870,6 @@ static const char pp_predefines_base[] =
     "#define __FPCLASS_POSZERO 0x0040\n"
     "#define __FPCLASS_QNAN 0x0002\n"
     "#define __FPCLASS_SNAN 0x0001\n"
-    "#define __GCC_ASM_FLAG_OUTPUTS__ 1\n"
     "#define __GCC_CONSTRUCTIVE_SIZE 64\n"
     "#define __GCC_DESTRUCTIVE_SIZE 64\n"
     "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1\n"
