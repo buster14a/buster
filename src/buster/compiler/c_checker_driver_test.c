@@ -1959,7 +1959,7 @@ static void check_test_driver_identification(CheckTest* test, const char* execut
     free(text);
     char* const command[] = { compiler, "parallel", "--version", NULL };
     text = NULL;
-    const int command_status = check_test_driver_spawn(command, &text);
+    const int command_status = made ? check_test_driver_spawn(command, &text) : -1;
     check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
                       "named commands take precedence over compiler identification");
     free(text);
