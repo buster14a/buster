@@ -1721,7 +1721,7 @@ most of its 213 s, since most of its commands are single-threaded. Now each
 command holds one CPU, or the `[N CPUs]` its heading declares:
 
 - all 8 for the call-graph check's eight compiler captures, the calling
-  convention's ten runs, and the tests whose lanes wait for each other in
+  convention's twelve runs, and the tests whose lanes wait for each other in
   loops, which lose their time slices on CPUs they share: test-lanes, the
   executable writers' 8-lane groups, test-foreign's resolutions,
   `link-foreign --lanes=8` in test-foreign-corpus, test-link's checks and the
@@ -5410,22 +5410,31 @@ result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
 `link_add_code_fixups` and the object writer. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
-`al` and `va_arg` value against the bytes, both ways. Two compiled runs
-(#137), against clang and against GCC at 16 bytes, put this compiler on our
-side: a world of what its C passes (integers to 64 bits, `__int128` and
-`unsigned __int128`, enums, pointers, `float`, `double`, `long double`, their
-complex types and the
+`al` and `va_arg` value against the bytes, both ways. Four compiled runs
+(#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
+this compiler on our side: a world of what its C passes (integers to 64 bits,
+`_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
+`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
+at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
+AVX-512, and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
-signatures within Tier 0's depths (12 integer arguments, long doubles and
-128-bit integers among them, a realigned frame's rbp past them, and 15
-floating ones); our
-caller and callee per signature as C, which this executable (or `--buster
-PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
-and the C side checks every argument and result both ways (the al and the
-hidden pointer, which C doesn't name, are the record runs' checks). Two
+signatures with long doubles, 128-bit integers or vectors within Tier 0's
+depths (12 integer arguments, a `_BitInt` of 65 to 127 bits never the 12th,
+a realigned frame's rbp past them, and 15 floating ones), and the others past
+them, in its deep slots (#712), the
+first against clang `(nullptr_t, long × 5, U, long)` for a union U whose high
+eightbyte is padding, which passes in one 8-byte stack slot before the last
+`long`; our caller and callee per signature as C, which this executable (or
+`--buster PATH`) compiles for the run's target with `--verify -c` and with
+`--scalar` into the same bytes, our callee storing each named parameter as it
+arrived, then writing each back from the data, the last first, and storing it
+again, and the C side checks both stores and every argument and result both
+ways (the al and the hidden pointer, which C doesn't
+name, are the record runs' checks); the 64-byte runs execute where the host has x86-64-v4's
+features, and elsewhere compile and link. Two
 extension runs (#475's review), with plain char signed and with it unsigned
 (`-funsigned-char`, `TypeTable.char_unsigned`), pass and return the types clang
 extends (the character types, enums of a fixed underlying char and signed char,
@@ -5436,7 +5445,7 @@ makes), that extend as the flags say before calling clang's callee, which takes
 the 32 bits as they come, and the other way round (the control), and C that
 this executable compiles with each signedness by both paths. clang's callee
 returns a narrow result unextended, though its IR says `signext` or `zeroext`,
-so a caller extends it itself, as Tier 0 does. The ten runs (clang's, then
+so a caller extends it itself, as Tier 0 does. The twelve runs (clang's, then
 GCC's, each at 16, 32 and 64 bytes, then the compiled ones, then the extension
 ones) go at once, a child process each, and the test prints their lines in that
 order; a run that fails keeps its files.
@@ -5559,14 +5568,14 @@ depths (the 15th value in its deep slot), and a function that allocates 64 KB an
 scope of its own, around calls with stack arguments, run natively; the frame's
 address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
 allocation, run natively; and the
-aggregates at locations written by hand, 13 fixtures (each kind of general and
+aggregates at locations written by hand, 14 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
-SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
+the low eightbyte alone of a larger one on the stack, SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
 misaligned, and results in each kind and order of register, short ones, a
 vector and through a hidden pointer), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 57 breaks of their
+copy their parameters out; and `tier0_validate` refusing 61 breaks of their
 rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, and registers outside

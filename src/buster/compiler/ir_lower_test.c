@@ -2357,6 +2357,77 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == (p != 0 ? 10 : 20), "the promoted computed gotos go to the same labels", 0, (uint32_t)p);
         }
     }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    arena_pop_to(&promoted, 0);
+    arena_pop_to(&twin_promoted, 0);
+    // The same two jumps as jump tables' (#785): each a br_indirect of its own table's label, without a dispatch block;
+    // and the first a goto * with the second a table's, the dispatch block's br_indirect listing only the label of no
+    // table. Each runs as before, and promoted needs no phi for the jumps' addresses.
+    static const uint32_t table_jumps[2] =
+    {
+        3,
+        5
+    };
+    static const uint32_t two_tables[2] =
+    {
+        1,
+        2
+    };
+    static const uint32_t one_table[2] =
+    {
+        0,
+        1
+    };
+    for (uint32_t mixed = 0; ready && mixed < 2; mixed += 1)
+    {
+        Tier0Function tabled = twice;
+        tabled.label_tables = mixed != 0 ? one_table : two_tables;
+        tabled.table_jumps = mixed != 0 ? table_jumps + 1 : table_jumps;
+        tabled.table_count = mixed != 0 ? 1 : 2;
+        ir_lower_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK, "Tier 0 takes the jump tables' columns", 0, 3 + mixed);
+        if (ir_lower_test_lower(tally, &tabled, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 3 + mixed))
+        {
+            // Each br_indirect lists one label, its one successor: label 0 the goto *'s (mixed) or table 0's, label 1
+            // the last table's.
+            uint32_t jumps = 0;
+            uint32_t listed = 0;
+            uint32_t dispatches = 0;
+            for (uint32_t i = 0; i < function.instruction_count; i += 1)
+            {
+                if (function.op[i] == IR_BR_INDIRECT && function.b[i] != BUSTER_IR_NONE && function.c[i] == 1 && function.extra[function.b[i]] < 2)
+                {
+                    const uint32_t label = function.extra[function.b[i]];
+                    listed |= ir_successor_count(&function, i) == 1 && ir_successor(&function, i, 0) == function.labels[label] ? 1u << label : 0;
+                }
+                jumps += function.op[i] == IR_BR_INDIRECT;
+                dispatches += function.op[i] == IR_BR && function.a[i] == function.block_count - 1;
+            }
+            ir_lower_test_expect(tally, jumps == 2 && listed == 3 && dispatches == mixed, "a jump table's jump is a br_indirect of its own table's labels", 0, 3 + mixed);
+            for (uint64_t p = 0; p < 2; p += 1)
+            {
+                bool fault = false;
+                const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
+                ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "jump tables' jumps go to their labels", 0, 3 + mixed);
+            }
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 3 + mixed);
+            IrFunction promoted_function =
+            {
+                0
+            };
+            const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
+            uint32_t phis = 0;
+            for (uint32_t i = 0; check.error == IR_OK && i < promoted_function.instruction_count; i += 1)
+            {
+                phis += promoted_function.op[i] == IR_PHI;
+            }
+            ir_lower_test_expect(tally, check.error == IR_OK && phis == 0, "jump tables' jumps need no phi of their addresses", 0, 3 + mixed);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        arena_pop_to(&promoted, 0);
+        arena_pop_to(&twin_promoted, 0);
+    }
     // #148's frame address, which the adapter doesn't lower: refused at its entry, as X86 rows are, before anything is
     // allocated (from nonzero marks, so that a rollback to zero would show).
     static const uint8_t frame_kinds[3] =

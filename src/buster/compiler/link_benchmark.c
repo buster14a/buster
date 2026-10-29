@@ -257,6 +257,7 @@ struct LinkBenchmarkSettings
     // The directory of the outputs and the objects, and the snapshot's.
     const char* directory;
     const char* cache;
+    bool cache_bounded;
     // The direct path's lanes' CPUs, the first of which the linkers' runs on one thread take, and how many.
     uint32_t cpus[BUSTER_LANE_MAX_COUNT];
     uint32_t lanes;
@@ -650,6 +651,7 @@ struct LinkBenchmarkDirect
     const LinkBenchmarkMark* begun;
     // The snapshot's directory, and the output.
     const char* cache;
+    bool cache_bounded;
     const char* path;
     // The runs after each warm-up, or 0 for the appendix's.
     uint64_t runs;
@@ -696,10 +698,14 @@ struct LinkBenchmarkDirect
 
 // The kind's runtime from its snapshot in `cache`: runtime_open, runtime_open_static, runtime_open_static_pie or
 // runtime_open_shared.
-static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, RuntimeKind kind)
+static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, RuntimeKind kind, bool bounded)
 {
     SnapshotResult result;
-    if (kind == RUNTIME_KIND_STATIC)
+    if (bounded)
+    {
+        result = runtime_open_cache(runtime, cache, kind);
+    }
+    else if (kind == RUNTIME_KIND_STATIC)
     {
         result = runtime_open_static(runtime, cache);
     }
@@ -742,7 +748,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         const bool counted = run == 1;
         const uint64_t faulted = counted ? link_benchmark_faults() : 0;
         const uint64_t start = executable_now();
-        const SnapshotResult opened = link_benchmark_open(&runtime, direct->cache, direct->kind);
+        const SnapshotResult opened = link_benchmark_open(&runtime, direct->cache, direct->kind, direct->cache_bounded);
         const uint64_t opened_at = executable_now();
         const uint64_t opened_faults = counted ? link_benchmark_faults() : 0;
         const bool loaded = opened.status == SNAPSHOT_STATUS_LOADED;
@@ -770,7 +776,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
     link_benchmark_restore(direct->begun, link, &program->bytes);
     arena_pop_to(direct->arena, length);
     direct->opened = result;
-    const SnapshotStatus status = result ? link_benchmark_open(&direct->runtime, direct->cache, direct->kind).status : SNAPSHOT_STATUS_MISSING;
+    const SnapshotStatus status = result ? link_benchmark_open(&direct->runtime, direct->cache, direct->kind, direct->cache_bounded).status : SNAPSHOT_STATUS_MISSING;
     result = result && status == SNAPSHOT_STATUS_LOADED;
     result = result && bind_begin(&direct->bind, link, &direct->runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
     result = result && link_program_generate_atoms(program);
@@ -951,6 +957,7 @@ static bool link_benchmark_direct_attempt(const LinkBenchmarkSettings* settings,
         direct->program = &program;
         direct->begun = &begun;
         direct->cache = settings->cache;
+        direct->cache_bounded = settings->cache_bounded;
         direct->path = path;
         direct->runs = settings->runs;
         direct->arena = &arena;
@@ -1039,7 +1046,7 @@ static bool link_benchmark_direct(const LinkBenchmarkSettings* settings, Runtime
     {
         Runtime runtime;
         const bool discarded = snapshot_discard(settings->cache, kind);
-        const SnapshotResult reopened = discarded ? link_benchmark_open(&runtime, settings->cache, kind) : (SnapshotResult){ .status = SNAPSHOT_STATUS_MISSING };
+        const SnapshotResult reopened = discarded ? link_benchmark_open(&runtime, settings->cache, kind, settings->cache_bounded) : (SnapshotResult){ .status = SNAPSHOT_STATUS_MISSING };
         if (discarded)
         {
             runtime_release(&runtime);
@@ -1759,8 +1766,6 @@ int run_link_benchmark(int argc, char** argv)
     uint32_t function_count = 0;
     uint64_t filler = link_program_default_options().filler;
     char cache[BUSTER_LINK_BENCHMARK_PATH_BYTES];
-    const bool cached = snapshot_directory(cache, sizeof(cache));
-    settings.cache = cached ? cache : 0;
     const bool helper = argc >= 2 && strcmp(argv[1], "--rusage") == 0;
     bool valid = !helper;
     for (int i = 1; valid && i < argc; i += 1)
@@ -1790,6 +1795,7 @@ int run_link_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--cache") == 0 && has_value)
         {
             settings.cache = argv[i + 1];
+            settings.cache_bounded = false;
             i += 1;
         }
         else if (strcmp(argv[i], "--cpus") == 0 && has_value)
@@ -1826,6 +1832,11 @@ int run_link_benchmark(int argc, char** argv)
             settings.keep = settings.keep || strcmp(argv[i], "--keep") == 0;
             valid = strcmp(argv[i], "--keep") == 0;
         }
+    }
+    if (valid && settings.cache == 0)
+    {
+        settings.cache = snapshot_directory(cache, sizeof(cache)) ? cache : 0;
+        settings.cache_bounded = true;
     }
     // With --functions, each program has --filler's.
     for (uint32_t i = 0; i < function_count; i += 1)
@@ -1866,7 +1877,7 @@ int run_link_benchmark(int argc, char** argv)
     for (uint32_t kind = 0; kind < RUNTIME_KINDS; kind += 1)
     {
         const bool wanted = made && settings.kinds[kind];
-        opened[kind] = wanted ? link_benchmark_open(&runtimes[kind], settings.cache, (RuntimeKind)kind) : (SnapshotResult){ .error = RUNTIME_ERROR_NONE };
+        opened[kind] = wanted ? link_benchmark_open(&runtimes[kind], settings.cache, (RuntimeKind)kind, settings.cache_bounded) : (SnapshotResult){ .error = RUNTIME_ERROR_NONE };
         result = result && opened[kind].error == RUNTIME_ERROR_NONE;
         failed = failed == RUNTIME_KINDS && opened[kind].error != RUNTIME_ERROR_NONE ? kind : failed;
         settings.runtimes[kind] = wanted ? &runtimes[kind] : 0;

@@ -180,7 +180,13 @@ table. The kinds are:
   entry indices, each a statement's start or the count). Tier 0 reports each one's first record
   (`Tier0Code.label_records`); the front end defines the label's symbol there, after branch sizing, and an address of
   a label is a `GLOBAL_ADDRESS` of it. Each label is a target in the fusion's windows, reached with nothing on the
-  stacks.
+  stacks. A switch's jump table (#785) is a `JUMP_INDIRECT` that reaches only its own table's labels, which two
+  more optional columns say, `table_count` tables of them: `label_tables` gives each label its table (1 + t for
+  table t's, 0 for a label whose address the code takes, table t's labels after table t − 1's) and `table_jumps`
+  each table's `JUMP_INDIRECT`, its entry's index, in increasing order. Any other `JUMP_INDIRECT` is a `goto *`,
+  which reaches only the labels of no table. `tier0_validate` checks the columns in one pass over the tables and
+  one over the labels, by both of its paths; Tier 0's code is the same with them as without, taking every label for
+  a target of every `JUMP_INDIRECT` all the same.
 
 The producer lowers conditions to jumps, the short-circuit operators straight to their targets. Wherever control
 arrives at a target, the stacks hold the same values; `tier0_validate` checks that, as WebAssembly's validator does.
@@ -262,7 +268,7 @@ without aggregates:
 - **Parameters:** a parameter that is an object is an aggregate passed by value. The prologue stores its register
   parts into its home. One on the stack whole keeps its incoming bytes as its home when its slot is a multiple of its
   alignment, to 16 (the incoming area starts at a multiple of 16); the prologue copies the others' slots into homes of
-  their own: a misaligned whole one, the high eightbyte alone in a slot, a SPLIT one's slot, and one aligned past 16,
+  their own: a misaligned whole one, the high or the low eightbyte alone in a slot, a SPLIT one's slot, and one aligned past 16,
   into the realigned frame, since its caller aligns its slot only as far as its type's own alignment goes (an aligned
   typedef passes as its base).
 - **Calls' results:** `call_result_objects[c]`, 1 + the local index of the object that receives call c's aggregate
@@ -277,7 +283,9 @@ without aggregates:
 
 **Parts.** The registers come from `abi_assign`'s locations alone: eightbyte k (at 0 and 8, or the high one alone with
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
-register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A part loads only the
+register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A STACK location with
+`BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
+slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:
 
 | Part | Its load |
@@ -1136,9 +1144,10 @@ Before the programs, checks of their own:
     values below make of the result, which must come back right.
 
   Both paths must compile each alike, and each encoder's bytes run in a child.
-- **aggregates** (#137), at locations written by hand: 13 fixtures of what `abi_assign` makes rarely or never on its
+- **aggregates** (#137), at locations written by hand: 14 fixtures of what `abi_assign` makes rarely or never on its
   own and of the parts' edges (each kind of general and XMM part, both kinds in one aggregate, the high eightbyte alone
-  in each kind of register and on the stack, SPLIT both ways in both kinds, an ignored aggregate, aggregates on the stack
+  in each kind of register and on the stack, the low eightbyte alone of a larger aggregate on the stack (`LOW`) before
+  a value in the next slot, SPLIT both ways in both kinds, an ignored aggregate, aggregates on the stack
   whole, in place and in a slot misaligned for them, and results in rax and rdx, xmm0 and xmm1, both mixed orders, the
   high eightbyte alone in each kind, a vector, 5 and 6 bytes, and through a hidden pointer), each run natively both
   ways:
@@ -1148,12 +1157,12 @@ Before the programs, checks of their own:
   - **aggregate functions:** Tier 0's function, by both paths, whose parameters a driver passes from the same bytes,
     copies each parameter's bytes out, each aggregate's address after them (a multiple of its alignment), and returns
     the result in its registers or through the hidden pointer, which must come back in rax;
-  - **aggregate errors:** 57 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
+  - **aggregate errors:** 61 breaks of the fixtures' metadata, each refused by `tier0_validate` with its rule, or as
     malformed metadata by both compile paths too: among them a function with a result size that reaches its end by
     falling off it, by a jump and by a branch, a jump that takes a value to the end, a function with a hidden result
     that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
-    take, and a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
-    as a parameter.
+    take, a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
+    as a parameter, and a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area.
 - **parameter errors:** a function of values alone, which no optional part makes the compile paths check: two
   parameters in rdi, one in rbx and one in xmm8, which `tier0_validate` must refuse, and an F64 in rdx, which doesn't
   fit its class.

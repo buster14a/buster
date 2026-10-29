@@ -769,6 +769,11 @@ static const char check_test_program_harness[] =
     "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
     "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
     "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
+    // _BitInt values (#148) taken and returned in their classes' registers, as clang extends them, one stored through a
+    // pointer, and a function of the program's called with them.
+    "unsigned _BitInt(5) external_bit_int(_BitInt(5) a,unsigned _BitInt(13) b,_BitInt(40) c,unsigned _BitInt(5)*p){*p=(unsigned _BitInt(5))b;"
+    "return (unsigned _BitInt(5))a+(unsigned _BitInt(5))(c>>35);}\n"
+    "int external_bit_apply(unsigned _BitInt(13)(*f)(_BitInt(5),unsigned _BitInt(27)),int n){return (int)f((_BitInt(5))(n%16),(unsigned _BitInt(27))(n*1000003));}\n"
     // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
     // (clang -O0 returns in place), and a misaligned one shows in the first byte.
     "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
@@ -942,7 +947,8 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
     return valid;
 }
 
-// Removes the build's directory and forgets what it held: run after the last program of a section.
+// Removes the build's directory and forgets what it held: run after the last program of a section, and once the
+// run's sections are done (run_checker_tests), so that no mode leaves the directory behind.
 static void check_test_program_build_release(void)
 {
     CheckTestProgramBuild* build = &check_test_program_build;
@@ -2493,6 +2499,106 @@ static void check_test_program_many_arguments(CheckTest* test, const char* clang
         "deep-aggregate-mixed-and-variadic-calls", clang);
 }
 
+// _BitInt values narrower than their classes (#148): kept extended from their widths, a narrow one's operations computed
+// in 32 bits, against clang -O0. Unsigned ones are spelled out, since a typedef of one loses its unsignedness on main.
+#define BUSTER_CHECK_TEST_BIT_INTS \
+    "typedef _BitInt(5) S5;typedef _BitInt(13) S13;typedef _BitInt(40) S40;\n#define U5 unsigned _BitInt(5)\n" \
+    "#define U13 unsigned _BitInt(13)\n#define U27 unsigned _BitInt(27)\n#define U40 unsigned _BitInt(40)\n" \
+    "static S5 table[3]={-3,7,-16};U5 u5(int n){return (U5)n;}S5 s5(int n){return (S5)(n%16);}"
+
+static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "int tested(int n){U5 a=u5(n*3),b=u5(n+29);U5 c=a+b,d=a*b,e=a-b,f=~a,g=a<<2,h=a>>1,i=a/(U5)(b|1u),j=a%(U5)(b|1u);"
+        "S5 p=s5(n),q=s5(n+3);S5 r=-p,s=p&q,t=p^q,v=(S5)(p|q),k=p>>1;"
+        "U13 big=(U13)(n*1000);big*=7;big<<=3;big-=(U13)n;big++;--big;big^=0x155;U27 m=(U27)n*1000003u;m+=(U27)0x7ffffff;"
+        "U40 w=(U40)n*(U40)123456789;w+=w;w>>=3;S40 x=(S40)n*(S40)1000000;"
+        "unsigned acc=(unsigned)c+3u*d+5u*e+7u*f+11u*g+13u*h+17u*(unsigned)(int)r+19u*(unsigned)(int)s+23u*i+29u*j;"
+        "acc=acc*31u+(unsigned)(int)t+(unsigned)(int)v*3u+(unsigned)(int)k*5u+big*3u+m%1000u+(unsigned)(w%1000)+(unsigned)(x%997);"
+        "return (int)(acc%1000003)+(a<b)+(p<q)*2+(big>4000)*4+(w>=x)*8+(a==0)*16+!p*32;}",
+        "bit-int-arithmetic", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "struct F{S5 x:3;U13 y:9;S40 z:20;};"
+        "int tested(int n){U5 a=u5(n*3);S5 p=s5(n);int sw=0;"
+        "switch(a){case 3:sw=1;break;case 30:sw=2;break;case 9 ... 12:sw=4;break;default:sw=3;}"
+        "switch(p){case -1:sw+=10;break;case -16 ... -10:sw+=20;break;default:sw+=30;}"
+        "struct F fs={0};fs.x=(S5)(n&3);fs.y=(U13)(n*37);fs.z=(S40)(n-7)*1000;fs.y+=300;fs.x-=1;"
+        "S13 dst=0;int o=__builtin_mul_overflow(n*1000,7,&dst);U5 small=0;int o2=__builtin_add_overflow(n,20,&small);"
+        "S5 kk=(S5)-3;S5 z=(S5)(kk+(S5)1);"
+        "return sw+(int)fs.x*100+(int)fs.y*1000+(int)(fs.z%1000)*7+o*13+o2*17+(int)dst*3+(int)small*19+(int)table[n&1]*23+(int)z*29;}",
+        "bit-int-switches-fields-and-overflow-destinations", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "unsigned _BitInt(5) external_bit_int(_BitInt(5),unsigned _BitInt(13),_BitInt(40),unsigned _BitInt(5)*);"
+        "int external_bit_apply(unsigned _BitInt(13)(*)(_BitInt(5),unsigned _BitInt(27)),int);"
+        "U13 mine(S5 a,U27 b){return (U13)(b%8000)+(U13)a;}"
+        "int tested(int n){union{unsigned char c;U5 v;}pu;pu.c=(unsigned char)(0xe0|n);union{unsigned char c;S5 v;}ps;ps.c=(unsigned char)(0xa0+n);"
+        "union{unsigned long l;U40 v;S40 s;}pw;pw.l=0xfedcba9876543210UL+(unsigned long)n;"
+        "static S5 t2[2]={-3,9};static U13 t3[2]={8000,3};static S40 t4=-5;"
+        "const unsigned char*b=(const unsigned char*)t2;const unsigned char*c=(const unsigned char*)t3;const unsigned char*d=(const unsigned char*)&t4;"
+        "union{S5 v;unsigned char c;}u1;u1.v=s5(n);union{U13 v;unsigned short s;}u2;u2.v=(U13)(n*1000);u2.v+=7000;"
+        "U5 q=0;U5 r=external_bit_int(s5(n),(U13)(n*700),(S40)n*1073741824,&q);"
+        "return (int)pu.v+(int)ps.v*7+(int)(pw.v%1009)+(int)(pw.s%1013)*3+b[n&1]+c[n&3]*3+d[n&7]*5+u1.c*11+u2.s*13+"
+        "(int)r*100+(int)q+external_bit_apply(mine,n)*1000;}",
+        "bit-int-memory-and-calls", clang);
+    // Updates of storage whose bits past the width a union's other member or a character type set: the old value is read
+    // as clang reads it, from its width alone, through a member, an address-taken local and a global, by shifts,
+    // division, remainder and postfix increments, whose old value is the result (#534's review).
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "static U5 g5;static S13 g13;"
+        "static void set13(S13*p,unsigned v){((unsigned char*)p)[0]=(unsigned char)v;((unsigned char*)p)[1]=(unsigned char)(v>>8);}"
+        "int tested(int n){union{unsigned char raw;U5 value;}u;u.raw=(unsigned char)(0xe0|(n&1));u.value>>=1;int r=(int)u.value;"
+        "union{unsigned char raw;S5 value;}s;s.raw=(unsigned char)(0x10|(n&15));s.value>>=1;r=r*3+(int)s.value;"
+        "u.raw=(unsigned char)(0xe0|(n&31));u.value/=3;r=r*5+(int)u.value;u.raw=(unsigned char)(0xa0|(n&31));u.value%=7;r=r*7+(int)u.value;"
+        "u.raw=(unsigned char)(0xe0|(n&31));r=r*11+(int)u.value++;r=r*13+(int)u.value;s.raw=(unsigned char)(0x60|(n&31));r=r*17+(int)s.value--;"
+        "U5 local=0;unsigned char*p=(unsigned char*)&local;*p=(unsigned char)(0xc0|(n&31));local>>=2;r=r*19+(int)local;"
+        "*p=(unsigned char)(0xa0|(n&31));r=r*37+(int)local++;r=r*43+(int)local;"
+        "*(unsigned char*)&g5=(unsigned char)(0xe0|(n&31));g5/=5;r=r*23+(int)g5;*(unsigned char*)&g5=(unsigned char)(0x60|(n&31));r=r*41+(int)g5++;"
+        "set13(&g13,0xe000u|(unsigned)(n*97&0x1fff));g13>>=3;r=r*29+(int)g13;set13(&g13,0x6000u|(unsigned)(n*89&0x1fff));g13%=1000;"
+        "return r*31+(int)g13;}",
+        "bit-int-updates-of-noncanonical-storage", clang);
+    // Of classes as wide as int and long (_BitInt(30), unsigned _BitInt(30) and _BitInt(60)): casts of locals whose bits past
+    // the width a character type set, which the batch's templates (c_check_program_batch.c) would read as the class's, and
+    // conversions to one from a type of its class, which change its bits though their classes are the same.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "typedef _BitInt(30) S30;typedef _BitInt(60) S60;\n#define U30 unsigned _BitInt(30)\n"
+        "int tested(int n){S30 d=0;unsigned char*p=(unsigned char*)&d;p[0]=(unsigned char)n;p[3]=(unsigned char)(0x80|(n&0x7f));"
+        "U30 e=0;unsigned char*q=(unsigned char*)&e;q[0]=(unsigned char)(n*3);q[3]=(unsigned char)(0xc0|(n&0x3f));"
+        "S60 f=0;unsigned char*r=(unsigned char*)&f;r[0]=(unsigned char)(n*5);r[7]=(unsigned char)(0x90|(n&0xf));"
+        "int x=(int)d;unsigned y=(unsigned)e;long z=(long)f;"
+        "long g=(long)(S30)(n*0x10000000);unsigned long h=(unsigned long)(U30)((unsigned)n*0x50000000u);long k=(long)(S60)((long)n<<58);"
+        "return (int)((x+(long)y*3+z%1000003*5+g*7+(long)(h%1000003)*11+k/(1L<<40)*13)%1000003);}",
+        "bit-int-class-wide-casts-and-conversions", clang);
+    // Of 65 to 128 bits, in the 128-bit classes (#137): every operation, kept extended from the width as the narrow ones
+    // are, libgcc's division and conversions to and from double, constants past 64 bits, storage whose bits past the
+    // width a union's bytes set, a switch, a pointer's update, and calls: an argument split between r9 and the stack.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "typedef _BitInt(65) S65;typedef _BitInt(100) S100;typedef _BitInt(128) S128;\n#define U65 unsigned _BitInt(65)\n"
+        "#define U80 unsigned _BitInt(80)\n#define U127 unsigned _BitInt(127)\n"
+        "static S100 mul(S100 a,S100 b){return a*b;}static U127 shl(U127 a,int s){return a<<s;}"
+        "static S65 split(long a,long b,long c,long d,long e,S65 f){return f+(S65)(a+b+c+d+e);}"
+        "static U80 back(U80*p,int n){U80 r=*p;*p=r*(U80)n+(U80)7;return r;}"
+        "int tested(int n){S65 a=(S65)n*(S65)0x123456789abcdefLL;S65 b=-a;S65 c=a>>3;S65 d=a/(S65)(n|1);S65 e=a%(S65)(n+7);S65 k=a*(S65)(n&7);"
+        "U65 p=(U65)a;p=p*p;p+=(U65)1<<64;p=~p;"
+        "S100 f=(S100)n*((S100)1<<80);f+=(S100)0x7fffffffffffffffLL;S100 g=mul((S100)n*((S100)1<<40),(S100)0x123456789LL);S100 h=~g^f;"
+        "U127 u=(U127)n*(U127)0xfedcba9876543210ULL;u=u*u;u=u*u;U127 v=shl(u,n&63);U127 w=u/(U127)(n+4);U127 r=u%(U127)1000003;"
+        "U80 x=(U80)-1;x+=(U80)n;x<<=3;U80 xb=back(&x,n);S128 y=(S128)a*(S128)(n+1);double z=(double)f;S100 fz=(S100)(z*0.5);"
+        "union{unsigned char raw[16];S100 v;U80 w;}m;for(int i=0;i<16;i++)m.raw[i]=(unsigned char)(0xa5^(i*n));S100 mv=m.v;U80 mw=m.w;"
+        "S65 s=split(1,2,3,4,(long)n,a);int sw=0;switch(f>>80){case 0:sw=1;break;case 1:sw=2;break;case 2:sw=4;break;default:sw=3;}"
+        "unsigned long acc=(unsigned long)a^(unsigned long)(a>>40)*3+(unsigned long)b*5+(unsigned long)c*7+(unsigned long)d*11+(unsigned long)e*13+(unsigned long)k*17;"
+        "acc=acc*29+(unsigned long)p+(unsigned long)(p>>60)*3+(unsigned long)(f>>50)+(unsigned long)g*3+(unsigned long)(g>>70)*5+(unsigned long)h*7+(unsigned long)(h>>64)*9;"
+        "acc=acc*37+(unsigned long)u+(unsigned long)(u>>64)*3+(unsigned long)v*5+(unsigned long)(v>>100)*7+(unsigned long)w*11+(unsigned long)r*13;"
+        "acc=acc*41+(unsigned long)x+(unsigned long)(x>>40)*3+(unsigned long)xb*5+(unsigned long)y+(unsigned long)(y>>64)*7+(unsigned long)fz*11;"
+        "acc=acc*43+(unsigned long)mv+(unsigned long)(mv>>64)*3+(unsigned long)(mw>>16)*5+(unsigned long)s*7+(unsigned long)(s>>64)*11;"
+        "return (int)(acc%1000003)+sw*7+(a<f)*2+(u>=(U127)n)*4+(mv==0)*8+!p*16;}",
+        "bit-int-128-bit-classes", clang);
+}
+
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
 {
     for (uint32_t bodies = 64; bodies <= 128; bodies *= 2)
@@ -2640,6 +2746,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "v+=(_Bool)p->next->value;v+=n?touch(p->value):touch(p->next->value);return v+side;}",
         "batch-member-address-load-conversion-chains", clang);
     check_test_program_long_double_builtins(test, clang);
+    check_test_program_bit_ints(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
@@ -3141,6 +3248,64 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
         "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
         "kr-definitions", clang);
+    // #659: the ABI receives promoted values; reads, writes and addresses in the body use the declared objects.
+    // The integer and SSE banks both overflow onto the stack, and the aggregate result reserves the hidden prefix.
+    check_test_program_source(test,
+        "int narrow(a,b,c,d,e,f,g,h) signed char a;unsigned char b;short c;unsigned short d;_Bool e;int f;char g;short h;"
+        "{signed char *pa=&a;short *ph=&h;*pa+=1;*ph-=2;return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){unsigned u=(unsigned)n;return narrow((int)(u&255),513,(int)(u&65535),65539,n,7,130,32769);}",
+        "kr-promoted-integers-addressed-and-stack", clang);
+    check_test_program_source_char(test,
+        "int f(x,y)char x;volatile unsigned char y;{char *p=&x;*p+=1;y+=2;return x+y;}"
+        "int tested(int n){return f(128+(n&127),257);}", "kr-promoted-unsigned-char", clang, true);
+    check_test_program_source(test,
+        "double f(a,b,c,d,e,f,g,h,i,j)float a,b,c,d,e,f,g,h,i,j;"
+        "{float *p=&j;*p+=1;return a+b+c+d+e+f+g+h+i+j;}"
+        "int roundtrip(x)float x;{float *p=&x;return (int)(*p-16777216.0f);}"
+        "int tested(int n){return (int)f(0.1,1.2,2.3,3.4,4.5,5.6,6.7,7.8,8.9,(double)(n&255)+0.1)+roundtrip(16777217.0);}",
+        "kr-float-entry-rounding-and-stack", clang);
+    check_test_program_source(test,
+        "struct R{long a,b,c;};struct R f(a,b,c,d,e,f,g)char a;float b;short c;_Bool d;int e;float f;short g;"
+        "{struct R r={a+c+g,(long)(b+f),d+e};return r;}"
+        "int tested(int n){struct R r=f(257,3.7,65539,n,5,7.9,32769);return (int)(r.a+r.b+r.c);}",
+        "kr-promoted-parameters-hidden-result", clang);
+    check_test_program_source(test,
+        "int f(x,y)volatile float x;short y __attribute__((aligned(32)));"
+        "{float a=x;short *p=&y;*p+=1;return (int)(a*10)+y+((unsigned long)p&31);}"
+        "int tested(int n){return f((double)(n&255)+0.125,65539);}", "kr-promoted-aligned-and-volatile", clang);
+    check_test_program_source(test,
+        "int f(int,double);int f(x,y)char x;float y;{return x+(int)(y*10);}"
+        "int before(int n){return f(n,3.7);}int f(int,double);"
+        "int tested(int n){int (*p)(int,double)=f;int (*q)()=f;return before(n&255)+p(n&255,3.7)+q((char)(n&255),3.7);}",
+        "kr-prior-later-prototypes-and-pointers", clang);
+    check_test_program_source(test,
+        "int f(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t)"
+        "_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}"
+        "int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}",
+        "kr-unused-promoted-parameter-capacity", clang);
+    check_test_program_source(test,
+        "int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}"
+        "int tested(int n){return f(n&127,(short)(n&63));}", "kr-promoted-atomic-parameter-objects", clang);
+    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+    check_test_program_source(test,
+        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+        "kr-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct T{int a,b,c;};int take(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,p,d)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10)+*p;}"
+        "int tested(int n){struct T t={n&127,5,7};int v=n&63;return f(65539,259,1.25,&v,3.7)+take(t);}",
+        "kr-parenthesized-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct S{long outer;};enum{A=19};"
+        "int tags(x,p,q)enum E{A=3}x;struct S{char a;long b;}*p;union U{char a;long b;}*q;"
+        "{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}"
+        "int tested(int n){return tags(n&127,0,0);}",
+        "kr-header-tag-layout-enum-abi-and-outer-scope", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
@@ -3868,17 +4033,19 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
     // C; __float128 is its spelling).
     check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
-    // A K&R definition (#154's decision: as clang): its callers pass its parameters' promoted types, which a parameter of a
-    // type the promotions change would convert from on entry, not lowered yet.
-    check_test_program_boundary_reason(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true,
-                                       false, 1, 0, "K&R parameters the default argument promotions change");
+    // A promoted K&R parameter now converts from double to its declared float on entry.
+    check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
-    // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
+    // The 128-bit integers and _BitInt(65) to _BitInt(128): lowered, but a _BitInt past 128 bits, the overflow builtins of
+    // a _BitInt of 65 to 127 bits, and a bit-field of them spread over more than 8 bytes.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
-    check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, true, 0, 1);
+    check_test_program_boundary_reason(test, "int tested(int n){_BitInt(129) x=n;return x>1;}", "bit-int-129", true, false, 0, 1, "_BitInt");
+    check_test_program_boundary_reason(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, false, 0, 0,
+                                       "overflow builtins of _BitInt of 65 to 127 bits");
     check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                 false, 0, 0);
     check_test_program_boundary(test,

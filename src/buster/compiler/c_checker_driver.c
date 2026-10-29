@@ -67,6 +67,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_KR_IMPLICIT_INT: result = "parameter was not declared; ISO C99 and later do not support implicit int"; break;
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
@@ -442,6 +443,26 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
     }
 }
 
+static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, warning);
+    if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (warning == CHECK_WARNING_KR_TOO_FEW || warning == CHECK_WARNING_KR_TOO_MANY)
+        {
+            const uint32_t name = parser->tokens.names[token];
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s to '%.*s'",
+                               check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+        }
+        else
+        {
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(warning));
+        }
+    }
+}
+
 // The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
@@ -471,11 +492,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
-    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count + 1;
+    const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
+    const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
+    const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
-    const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
+    const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
@@ -523,6 +546,44 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
             }
         }
+        for (uint32_t i = 0; show_warnings && i < input->kr_diagnostic_count; i += 1)
+        {
+            const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+            const uint32_t token = diagnostic.token;
+            if (token < count && check_diagnostic_kr_severity(input, token, diagnostic.warning) != CHECK_WARNING_IGNORE &&
+                (repair == NULL || check_repair_warning_token(repair, token)))
+            {
+                report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
+            }
+        }
+        // Gather both warning families in one mask scan. Call diagnostics don't fit the arithmetic warnings'
+        // packed 16-bit keys; sort those with the sparse source reports, without an extra pass over the nodes.
+        uint32_t warning_total = 0;
+        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
+        {
+            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t source = input->graph.tokens[node];
+                const uint32_t packed = stream->warnings[node] & 0xffffu;
+                if (source < count && packed != 0)
+                {
+                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    warning_keys[warning_total++] = check_driver_warning_key(source, packed, packed & ~ignored);
+                }
+                const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
+                if (flags != 0)
+                {
+                    const uint32_t token = check_diagnostic_kr_call_token(input, node);
+                    if (token < count && check_diagnostic_kr_severity(input, token, flags) != CHECK_WARNING_IGNORE &&
+                        (repair == NULL || check_repair_warning_token(repair, token)))
+                    {
+                        report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)call_offset64 + node);
+                    }
+                }
+            }
+        }
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
@@ -548,7 +609,6 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             firsts[first_count] = UINT64_MAX;
         }
-        uint32_t warning_total = 0;
         for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
             const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
@@ -572,21 +632,6 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 const uint32_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
                 if (flags != 0)
                 {
-                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
-                }
-            }
-        }
-        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
-        {
-            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
-            {
-                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t token = input->graph.tokens[node];
-                const uint32_t flags = stream->warnings[node];
-                if (token < count && flags != 0)
-                {
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
                 }
             }
@@ -705,7 +750,15 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
-                if (sequence >= offset)
+                if (sequence >= (uint32_t)call_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, stream->warnings[sequence - (uint32_t)call_offset64] & CHECK_WARNING_KR_CALLS);
+                }
+                else if (sequence >= (uint32_t)kr_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, input->kr_diagnostics[sequence - (uint32_t)kr_offset64].warning);
+                }
+                else if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
@@ -747,6 +800,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_KR_IMPLICIT_INT && token < count)
+                        {
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
+                                (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else
                         {
@@ -1203,7 +1263,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     {
         again = false;
         Runtime runtime;
-        const SnapshotResult opened = runtime_open(&runtime, cached ? cache : NULL);
+        const SnapshotResult opened = runtime_open_cache(&runtime, cached ? cache : NULL, RUNTIME_KIND_DYNAMIC);
         // The libraries -l names, imported for this runtime, whose version indices theirs follow.
         static RuntimeLibraries named;
         const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;
