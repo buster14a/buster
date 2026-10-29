@@ -19,6 +19,24 @@ static uint32_t check_input_expression_extensions(const Parser* parser)
     return BUSTER_CHECK_EXTENSION_GNU_CONSTANT | (parser->language.gnu ? BUSTER_CHECK_EXTENSION_GNU : 0);
 }
 
+// Required value contexts consume a copy. The cached expression keeps its lvalue identity for typeof,
+// address formation and later member selection; a GNU object read never becomes a standard ICE.
+static bool check_input_const_rvalue(CheckInputReader* reader, uint32_t position, CheckValue* value)
+{
+    const CheckAction action = {
+        .op = CHECK_OP_VALUE,
+        .operands = { *value },
+        .const_values = &reader->output->const_values,
+        .constant_evaluated = true,
+        .source_position = position,
+        .extensions = check_input_expression_extensions(reader->parser),
+    };
+    CheckActionResult checked = { 0 };
+    *value = check_action_operand(reader->types, &action, &checked, 0);
+    reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
+    return checked.diagnostic == CHECK_DIAG_NONE;
+}
+
 static bool check_input_integer_constant(const CheckInputReader* reader, const CheckValue* value)
 {
     return check_action_integer_constant(value, check_input_expression_extensions(reader->parser));
@@ -40,22 +58,39 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
     check_input_warning_range(reader, first, end, warnings, 0);
 }
 
-static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored)
+static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location)
 {
     if (first < end && end <= reader->parser->tokens.count && reader->output->constant_warnings != 0 &&
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
-        const bool present = (reader->output->constant_warnings[first] & CHECK_WARNING_GNU_CONSTANT) != 0;
-        check_input_warning_add_at(reader, first, CHECK_WARNING_GNU_CONSTANT, end);
-        if (reader->output->constant_warning_ignored != 0)
+        if ((value->flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0)
         {
-            if (ignored && !present)
+            const CheckWarningEvent event = {
+                .id = CHECK_WARNING_ID_GNU_CONSTANT,
+                .kind = ignored ? CHECK_WARNING_EVENT_GNU_ICE_FOLD : CHECK_WARNING_EVENT_GNU_ARRAY_FOLD,
+                .token = location,
+                .source = BUSTER_CHECK_NONE,
+                .flags = ignored ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
+                .completion_kind = ignored ? CHECK_WARNING_COMPLETE_AT_TOKEN : CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = end,
+                .payload = { .token = BUSTER_CHECK_NONE },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+        else
+        {
+            const bool present = (reader->output->constant_warnings[first] & CHECK_WARNING_GNU_CONSTANT) != 0;
+            check_input_warning_add_at(reader, first, CHECK_WARNING_GNU_CONSTANT, end);
+            if (reader->output->constant_warning_ignored != 0)
             {
-                reader->output->constant_warning_ignored[first] |= CHECK_WARNING_GNU_CONSTANT;
-            }
-            else if (!ignored)
-            {
-                reader->output->constant_warning_ignored[first] &= (uint8_t)~CHECK_WARNING_GNU_CONSTANT;
+                if (ignored && !present)
+                {
+                    reader->output->constant_warning_ignored[first] |= CHECK_WARNING_GNU_CONSTANT;
+                }
+                else if (!ignored)
+                {
+                    reader->output->constant_warning_ignored[first] &= (uint8_t)~CHECK_WARNING_GNU_CONSTANT;
+                }
             }
         }
     }
@@ -67,12 +102,14 @@ static void check_input_constant_warning(CheckInputReader* reader, uint32_t firs
 {
     check_input_constant_warning_clear(reader, first, end,
         CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
-    check_input_constant_fold_warning(reader, first, end, value, ignored);
+    check_input_constant_fold_warning(reader, first, end, value, ignored, first);
 }
 
-static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value)
+static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, uint32_t location)
 {
-    check_input_constant_warning(reader, first, end, value, false);
+    check_input_constant_warning_clear(reader, first, end,
+        CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
+    check_input_constant_fold_warning(reader, first, end, value, false, location);
     if (reader->constant_contexts != 0 && first < end && end <= reader->parser->tokens.count)
     {
         for (uint32_t token = first; token < end; token += 1)
@@ -704,7 +741,8 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
             {
                 CheckValue bound = { 0 };
                 int64_t extent = 0;
-                valid = check_constant_range_value(input, i + 1, close, &bound) && check_action_is_integer(reader->types, bound.type);
+                valid = check_constant_range_value(input, i + 1, close, &bound) && check_input_const_rvalue(reader, close, &bound) &&
+                        check_action_is_integer(reader->types, bound.type);
                 if (valid && (check_input_integer_attribute(reader, &bound) || (bound.flags & BUSTER_CHECK_ICE) != 0))
                 {
                     valid = check_action_i64(reader->types, &bound, &extent) && extent >= 0;
@@ -712,7 +750,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     part.extent = (uint64_t)extent;
                     if (valid)
                     {
-                        check_input_constant_bound_warning(reader, i + 1, close, &bound);
+                        check_input_constant_bound_warning(reader, i + 1, close, &bound, i);
                     }
                 }
                 else if (valid)
@@ -1508,7 +1546,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 *proof = input->proof_values[root - input->first];
             }
-            check_input_constant_fold_warning(reader, first, separator, &control, true);
+            check_input_constant_fold_warning(reader, first, separator, &control, true, first);
             check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? token : next, CHECK_WARNING_INTEGER_OVERFLOW);
         }
     }
@@ -1658,7 +1696,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 CheckValue bound = { 0 };
                 int64_t index = 0;
                 valid = close > i && close < token && type_kind_is_array(type_kind(reader->types, type)) &&
-                        check_constant_range_value(input, i + 1, close, &bound) && check_input_integer_constant(reader, &bound) &&
+                        check_constant_range_value(input, i + 1, close, &bound) && check_input_const_rvalue(reader, close, &bound) && check_input_integer_constant(reader, &bound) &&
                         check_action_i64(reader->types, &bound, &index) && index >= 0;
                 if (valid)
                 {
@@ -2020,6 +2058,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             .transparent_unions = reader->transparent_unions,
             .tag_completion_count = reader->types->tags.capacity,
             .source_position = reader->ends[token] + 1,
+                .const_values = &reader->output->const_values,
+                .constant_evaluated = true,
             .extensions = check_input_expression_extensions(parser),
         };
         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
@@ -2558,6 +2598,8 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 .transparent_unions = reader->transparent_unions,
                 .tag_completion_count = reader->types->tags.capacity,
                 .source_position = input->end,
+                .const_values = &reader->output->const_values,
+                .constant_evaluated = true,
                 .extensions = check_input_expression_extensions(reader->parser),
             };
             *value_count -= operation.arity;
@@ -3476,7 +3518,8 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
         check_constant_values_reset(input);
         valid = input->raw ? check_constant_raw_prepare(input) && check_constant_raw_expression(input, input->first, input->end) :
                             check_constant_evaluate(input);
-        valid = valid && check_constant_range_value(input, input->first, input->end, value) && check_constant_resolve(input, value, 0, value);
+        valid = valid && check_constant_range_value(input, input->first, input->end, value) && check_constant_resolve(input, value, 0, value) &&
+                check_input_const_rvalue(input->reader, input->end, value);
     }
     // A job that waits for a definition keeps the depth of the lists open around it, at which its caller reads the
     // definition; one that ended, or failed, gives its own back.
@@ -3544,7 +3587,7 @@ static __attribute__((unused)) bool check_input_evaluate_cached_at(CheckInputRea
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
 {
     CheckValue value = { 0 };
-    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_integer_constant(reader, &value) &&
+    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_constant(reader, &value) &&
                        check_action_i64(reader->types, &value, number);
     if (valid)
     {
@@ -3556,7 +3599,7 @@ static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint3
 static __attribute__((unused)) bool check_input_constant_ice(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
 {
     CheckValue value = { 0 };
-    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_integer_attribute(reader, &value) &&
+    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_attribute(reader, &value) &&
                        check_action_i64(reader->types, &value, number);
     if (valid)
     {

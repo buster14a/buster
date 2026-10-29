@@ -2157,12 +2157,12 @@ fixed with its fixture there:
     evaluation").
 - **Accepted, where clang refuses them:** the `_Noreturn` keyword on an object, and an `inline main`.
 
-One difference stays, recorded with the line the checker refuses the violation at. It's GNU's folding of a
-`const` object's value in an integer constant expression: `const int k = 3; enum { E = k };`, which clang folds,
-silently but for `-Wgnu-folding-constant`. The checker reads an object's value only as an address constant's
-place, not its initializer's value. It refuses the enumerator as clang refuses a non-`const` object's. Clang
-reads the initializers of `const` objects of every type there (members of a `const` struct's too), and this
-would need their values at the declaration.
+The remaining const-object difference is covered by declaration-time initializer receipts (#704).
+`const int k = 3; enum { E = k };` reads the completed initializer as GNU constant evidence, independently
+of the standard ICE flag. Typed sparse writes retain scalar values, implicit zero coverage, aggregate
+subobjects, symbolic pointers and active union selections. Each lookup checks the use's source boundary;
+volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
+including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
 The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
 declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
