@@ -2219,7 +2219,7 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 // argument's own effect. mark counts each selector's evaluations in a 3-bit field of its own (the argument's seen++ in
 // the lowest), not their order, since clang evaluates the normal and subnormal ones in an order its own build decides
 // (check_lower_floating_prepare). The order-recording mark, whose decimal digits are the selectors in the order they ran,
-// is the encoding these programs had, kept for the control below.
+// is the encoding these programs had, kept for the controls below.
 #define BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS "int seen;int mark(int n){seen+=1<<(3*n);return n;}"
 #define BUSTER_CHECK_TEST_FPCLASSIFY_ORDER "int seen;int mark(int n){seen=seen*10+n;return n;}"
 #define BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES \
@@ -2231,12 +2231,16 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
     "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}"
 
 // The controls' oracles, each __builtin_fpclassify for clang's build of a program: what clang's code computes for a
-// double, with the subnormal selector run before the normal one, as a GCC-built clang runs them; and mutants that
-// evaluate the normal selector twice, the subnormal one never or the argument twice.
-#define BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_FIRST \
+// double alone (the model compares with a double's smallest normal value), with the normal and subnormal selectors in
+// the order C's sequencing gives it (the normal one first, as check_lower_floating_prepare emits them, or the subnormal
+// one first, as a GCC-built clang runs them); and mutants that evaluate the normal selector twice, the subnormal one
+// never or the argument twice.
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL(first, second) \
     "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) ({double v_=(value);int z_=(zero);v_==0?z_:" \
     "({int n_=(nan);v_!=v_?n_:({int i_=(infinite);__builtin_fabs(v_)==__builtin_inf()?i_:" \
-    "({int s_=(subnormal);int m_=(normal);__builtin_fabs(v_)>=0x1p-1022?m_:s_;});});});})\n"
+    "({int " first ";int " second ";__builtin_fabs(v_)>=0x1p-1022?m_:s_;});});});})\n"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_NORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL("m_=(normal)", "s_=(subnormal)")
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL("s_=(subnormal)", "m_=(normal)")
 #define BUSTER_CHECK_TEST_FPCLASSIFY_NORMAL_TWICE \
     "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) " \
     "__builtin_fpclassify(nan,infinite,((normal),(normal)),subnormal,zero,value)\n"
@@ -2247,8 +2251,9 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
     "__builtin_fpclassify(nan,infinite,normal,subnormal,zero,((value),(value)))\n"
 
 // fpclassify's selector programs against clang's build, and the controls of their encoding: both agree with the model
-// that runs the subnormal selector first, which the order-recording encoding tells apart from ours (normal first, as
-// check_lower_floating_prepare emits them), and neither agrees with a mutant.
+// that runs the subnormal selector first, and neither with a mutant. With the order-recording encoding, ours must agree
+// with the model that runs the normal selector first and differ from the other, so that a change to
+// check_lower_floating_prepare's order changes these two controls.
 static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* test, const char* clang)
 {
     check_test_program_source(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
@@ -2256,13 +2261,20 @@ static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* t
     check_test_program_source(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
                               "fpclassify-known-category-effects", clang);
     check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
-                               BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
                                false, "fpclassify-conditional-selector-effects-subnormal-first", clang);
     check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
-                               BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS
+                               BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
                                false, "fpclassify-known-category-effects-subnormal-first", clang);
     check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_ORDER BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
-                               BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_ORDER BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_NORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_ORDER
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               false, "fpclassify-selector-order-normal-first", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_ORDER BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_ORDER
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
                                true, "fpclassify-selector-order-subnormal-first", clang);
     check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
                                BUSTER_CHECK_TEST_FPCLASSIFY_NORMAL_TWICE BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
