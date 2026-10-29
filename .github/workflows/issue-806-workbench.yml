@@ -6,21 +6,74 @@ on:
     paths: [.github/workflows/issue-806-workbench.yml]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: check
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Read isolated editing recipe
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: recipe
+          persist-credentials: false
+      - name: Check out exact implementation base
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           ref: 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
-          persist-credentials: false
-      - name: Export pinned source for implementation and review
-        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/issue-806-source.tar.gz"
+          path: source
+          persist-credentials: true
+      - name: Apply implementation and tests without workbench files
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 ../recipe/.github/issue-806-edit.py
+          python3 ../recipe/.github/issue-806-tests.py
+          git add src/buster/compiler docs/c-preprocessor.md docs/c-builtins-integration.md THIRD_PARTY_NOTICES.md
+          git diff --cached --check
+          git diff --cached --stat
+          git config user.name 'ChatGPT'
+          git config user.email 'chatgpt@users.noreply.github.com'
+          git switch -c chatgpt/issue-806-feature-queries
+          git commit -m 'Report implemented source features and share native builtin query inventory (#806)'
+          git push origin HEAD:refs/heads/chatgpt/issue-806-feature-queries
+          git rev-parse HEAD | tee "$RUNNER_TEMP/issue-806-head.txt"
+      - name: Install pinned official Clang 23.1.4
+        working-directory: source
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build complete compiler
+        working-directory: source
+        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-806-build.log"
+      - name: Preprocessor and Clang oracle
+        if: success()
+        continue-on-error: true
+        working-directory: source
+        run: set -o pipefail; ./build/compiler test-preprocessor --clang 2>&1 | tee "$RUNNER_TEMP/issue-806-preprocessor.log"
+      - name: Source checker and native programs
+        if: success()
+        continue-on-error: true
+        working-directory: source
+        run: set -o pipefail; ./build/compiler test-checker --seed 806 2>&1 | tee "$RUNNER_TEMP/issue-806-checker.log"
+      - name: Call graph
+        if: success()
+        continue-on-error: true
+        working-directory: source
+        run: set -o pipefail; ./build.sh check-call-graph 2>&1 | tee "$RUNNER_TEMP/issue-806-call-graph.log"
+      - name: Retain exact source for review
+        if: always()
+        working-directory: source
+        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/issue-806-candidate.tar.gz"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: issue-806-source
-          path: ${{ runner.temp }}/issue-806-source.tar.gz
-          retention-days: 1
+          name: issue-806-validation
+          path: ${{ runner.temp }}/issue-806-*
+          retention-days: 3
