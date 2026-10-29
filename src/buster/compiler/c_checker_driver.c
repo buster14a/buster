@@ -71,6 +71,14 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
+        case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
+        case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
+        case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
+        case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
+        case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function parameter has incompatible type"; break;
+        case CHECK_INPUT_CLEANUP_ARGUMENTS: result = "'cleanup' attribute takes one argument"; break;
+        case CHECK_INPUT_WEAK_LINKAGE: result = "weak declaration cannot have internal linkage"; break;
         case CHECK_INPUT_LABEL_UNDECLARED: result = "use of undeclared label"; break;
         case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
@@ -81,6 +89,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
     }
     return result;
 }
@@ -805,11 +814,24 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (source != BUSTER_CHECK_NONE)
                     {
                         const uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
-                        if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                        // The input's reports whose messages name their token's identifier.
+                        const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
+                        const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+                        if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
+                        {
+                            // clang's handleCleanupAttr names the argument; of the parameter's type it says what its other
+                            // spelling of the message does, without the two types.
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'cleanup' %s '%.*s' %s",
+                                                 kind == CHECK_INPUT_CLEANUP_FUNCTION ? "argument" : "function", (int)intern_length(pp->table, name),
+                                                 intern_bytes(pp->table, name), kind == CHECK_INPUT_CLEANUP_FUNCTION ? "is not a function" :
+                                                 kind == CHECK_INPUT_CLEANUP_PARAMETERS ? "must take 1 parameter" : "parameter has incompatible type");
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -840,6 +862,20 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0)
+                        {
+                            const uint32_t start = parser->tokens.pragma_sources[input->reports[index].pragma - 1];
+                            const CheckInputReader names = { .pp = pp, .parser = parser };
+                            const String8 first = check_driver_warning_name(pp, check_input_pragma_name(&names, start + 2));
+                            const bool vendor = pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "GCC") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "clang") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "STDC");
+                            const String8 second = vendor && start + 3 < pp->output.count ?
+                                check_driver_warning_name(pp, check_input_pragma_name(&names, start + 3)) : (String8){ .pointer = "" };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
+                                "unsupported semantic '#pragma %.*s%s%.*s' directive",
+                                (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
                         else
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
@@ -861,8 +897,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
         }
     }
+    const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
+    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
-    return ready;
+    return pragma_ready;
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -1784,6 +1823,10 @@ struct CheckDriverCommand
     // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
     // with a pattern, before the next unit reuses them (c_checker_units.c).
     bool poison_arenas;
+    // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
+    // after each part it takes itself, so that the lanes without units take some, and the command reports how many
+    // they took, after the units' diagnostics (c_checker_units.c).
+    bool shared_parts;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2032,6 +2075,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     uint32_t promoted_source = BUSTER_CHECK_NONE;
                     const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                     const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
+                    promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
@@ -2187,6 +2231,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
                 check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                {
+                    fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                }
             }
             if (!pp->fatal)
             {
@@ -2260,11 +2308,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
-    Arena arena = arena_reserve(1ull << 36);
-    Arena scratch = arena_reserve(1ull << 36);
-    Arena output_arena = arena_reserve(1ull << 36);
+    const uint64_t reservation_bytes = UINT64_C(1) << 36;
+    Arena arena = arena_reserve(reservation_bytes);
+    Arena scratch = arena_reserve(reservation_bytes);
+    Arena output_arena = arena_reserve(reservation_bytes);
     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
-    const bool reserved = arena.base != 0 && scratch.base != 0 && output_arena.base != 0;
+    const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
@@ -2288,8 +2337,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas: #152's test option (CheckDriverCommand.poison_arenas).
+    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
     bool poison_arenas = false;
+    bool shared_parts = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -2455,6 +2505,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         {
             poison_arenas = true;
         }
+        else if (strcmp(arguments[i], "--shared-parts") == 0)
+        {
+            shared_parts = true;
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -2510,7 +2564,14 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
+    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+                        pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
+    // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
+    const char* unsupported_pic = parsed && (emit_object || link) ?
+        (options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
+         options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -2540,6 +2601,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .id_ordered = id_ordered,
         .id_order = id_order,
         .poison_arenas = poison_arenas,
+        .shared_parts = shared_parts,
         .emit_object = emit_object,
         .link = link,
         .source_rows = source_rows,
@@ -2553,7 +2615,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!reserved)
     {
-        fprintf(stderr, "fatal error: can't reserve the driver's memory\n");
+        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
+    }
+    else if (!arguments_ready)
+    {
+        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
     }
     else if (unsupported_codegen != NULL)
     {
@@ -2561,8 +2627,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+    }
+    else if (unsupported_pic != NULL)
+    {
+        fprintf(stderr, "error: unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)\n", unsupported_pic);
     }
     else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
     {

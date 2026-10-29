@@ -121,9 +121,9 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return ready;
 }
 
-// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
-// the caller frees: its exit status, or -1 if it didn't exit.
-static int check_test_driver_spawn(char* const* arguments, char** text)
+// Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
+// The caller frees *text. Returns the exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
 {
     FILE* errors = tmpfile();
     int status = 0;
@@ -137,7 +137,8 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         if (child == 0)
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            if (output >= 0 && dup2(stdout_capture ? fileno(errors) : output, STDOUT_FILENO) >= 0 &&
+                dup2(stdout_capture ? output : fileno(errors), STDERR_FILENO) >= 0)
             {
                 execvp(arguments[0], arguments);
             }
@@ -156,6 +157,67 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         fclose(errors);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    return check_test_driver_spawn_stream(arguments, text, false);
+}
+
+// Exercise the real reservation failure in a child so its address-space limit cannot affect the test process.
+static void check_test_driver_reservation_failure(CheckTest* test)
+{
+#if (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)) && !defined(BUSTER_SANITIZER_RESOURCES)
+    // Until the resource-failure injection is available, a detector's shadow memory must not be constrained.
+    (void)test;
+#else
+    for (uint32_t command = 0; command < 2; command += 1)
+    {
+        FILE* errors = tmpfile();
+        pid_t child = -1;
+        int status = 0;
+        if (errors != NULL)
+        {
+            fflush(NULL);
+            child = fork();
+            if (child == 0)
+            {
+                const bool prepared = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0;
+#if defined(BUSTER_SANITIZER_RESOURCES) && BUSTER_SANITIZER_RESOURCES
+                lane_test_resources.arena_limited = true;
+                lane_test_resources.arena_limit = 0;
+                const bool limited = true;
+#else
+                const struct rlimit limit = { 0, 0 };
+                const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
+                const bool ready = prepared && limited;
+                char* arguments[] = { (char*)"-fsyntax-only", (char*)"missing.c" };
+                const int code = ready ? run_check_command(2, arguments, command != 0) : 126;
+                fflush(stderr);
+                _exit(code);
+            }
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        char* output = NULL;
+        size_t length = 0;
+        const bool read = errors != NULL && waited == child && pp_test_read_output(errors, &output, &length);
+        check_test_expect(test, read && WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+                                strstr(output, "fatal error: can't reserve checker memory") != NULL &&
+                                strstr(output, "68719476736 bytes") != NULL && strstr(output, "usage:") == NULL,
+                          "driver reservation failures report the requested size instead of usage");
+        free(output);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+    }
+#endif
 }
 
 // Whether the files at `a` and `b` can be read and have the same bytes.
@@ -707,6 +769,136 @@ static void check_test_driver_mmx(CheckTest* test, const char* clang, const char
     unlink(outputs[2]);
 }
 
+
+// Half-precision scalars' intrinsics by the driver (#136): a program of the clang 23 headers' functions that pass and
+// return _Float16 and __bf16 values (AVX512-FP16's sets of 8, 16 and 32 of them, their first elements, the scalar
+// arithmetic, conversions from integers, loads, stores and moves of them, F16C's _cvtsh_ss and AVX512-BF16's
+// conversions), linked for sapphirerapids by both paths into the same bytes, and printing, where the host has AVX512-FP16
+// and AVX512-BF16, what clang -O0's build of it prints.
+static void check_test_driver_halves(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <immintrin.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
+                                  "static void show(const char* name, const void* p, unsigned long n) { const unsigned short* x = p; printf(\"%s\", name); for (unsigned long i = 0; i < n / 2; i++) printf(\" %04x\", x[i]); printf(\"\\n\"); }\n"
+                                  "static void showh(const char* name, _Float16 h) { show(name, &h, 2); }\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int n = argc + 6;\n"
+                                  "    _Float16 a = (_Float16)n / (_Float16)3, b = (_Float16)-2.5, c = (_Float16)(n * 1000);\n"
+                                  "    __m128h v = _mm_set_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
+                                  "    __m128h s = _mm_set_sh(b);\n"
+                                  "    show(\"set\", &v, 16);\n"
+                                  "    __m128h r = _mm_setr_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
+                                  "    show(\"setr\", &r, 16);\n"
+                                  "    __m128h one = _mm_set1_ph(a);\n"
+                                  "    show(\"set1\", &one, 16);\n"
+                                  "    __m128h zero = _mm_setzero_ph();\n"
+                                  "    show(\"zero\", &zero, 16);\n"
+                                  "    show(\"set_sh\", &s, 16);\n"
+                                  "    showh(\"cvtsh_h\", _mm_cvtsh_h(v));\n"
+                                  "    __m128h t = _mm_add_sh(v, s);\n"
+                                  "    show(\"add_sh\", &t, 16);\n"
+                                  "    t = _mm_sub_sh(v, s);\n"
+                                  "    show(\"sub_sh\", &t, 16);\n"
+                                  "    t = _mm_mul_sh(v, s);\n"
+                                  "    show(\"mul_sh\", &t, 16);\n"
+                                  "    t = _mm_div_sh(v, s);\n"
+                                  "    show(\"div_sh\", &t, 16);\n"
+                                  "    t = _mm_cvti32_sh(v, -n * 77);\n"
+                                  "    show(\"cvti32_sh\", &t, 16);\n"
+                                  "    t = _mm_cvti64_sh(v, (long long)n * 999999);\n"
+                                  "    show(\"cvti64_sh\", &t, 16);\n"
+                                  "    t = _mm_cvtu32_sh(v, (unsigned)n * 3001u);\n"
+                                  "    show(\"cvtu32_sh\", &t, 16);\n"
+                                  "    t = _mm_cvtu64_sh(v, (unsigned long long)n << 40);\n"
+                                  "    show(\"cvtu64_sh\", &t, 16);\n"
+                                  "    _Float16 memory[2] = { c, a };\n"
+                                  "    t = _mm_load_sh(&memory[1]);\n"
+                                  "    show(\"load_sh\", &t, 16);\n"
+                                  "    _mm_store_sh(&memory[0], v);\n"
+                                  "    show(\"store_sh\", memory, 4);\n"
+                                  "    t = _mm_move_sh(v, s);\n"
+                                  "    show(\"move_sh\", &t, 16);\n"
+                                  "    __m256h w = _mm256_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
+                                  "    show(\"set256\", &w, 32);\n"
+                                  "    w = _mm256_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
+                                  "    show(\"setr256\", &w, 32);\n"
+                                  "    w = _mm256_set1_ph(b);\n"
+                                  "    show(\"set1_256\", &w, 32);\n"
+                                  "    showh(\"cvtsh_h256\", _mm256_cvtsh_h(_mm256_set1_ph(c)));\n"
+                                  "    w = _mm256_setzero_ph();\n"
+                                  "    show(\"zero256\", &w, 32);\n"
+                                  "    __m512h z = _mm512_set1_ph(c);\n"
+                                  "    show(\"set1_512\", &z, 64);\n"
+                                  "    z = _mm512_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
+                                  "    show(\"set512\", &z, 64);\n"
+                                  "    z = _mm512_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
+                                  "    show(\"setr512\", &z, 64);\n"
+                                  "    showh(\"cvtsh_h512\", _mm512_cvtsh_h(z));\n"
+                                  "    z = _mm512_setzero_ph();\n"
+                                  "    show(\"zero512\", &z, 64);\n"
+                                  "    float f = _cvtsh_ss((unsigned short)(0x3c00 + n));\n"
+                                  "    show(\"cvtsh_ss\", &f, 4);\n"
+                                  "    __bf16 bf = _mm_cvtness_sbh((float)n / 3.0f);\n"
+                                  "    show(\"cvtness_sbh\", &bf, 2);\n"
+                                  "    float back = _mm_cvtsbh_ss(bf);\n"
+                                  "    show(\"cvtsbh_ss\", &back, 4);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[3][256];
+    snprintf(source, sizeof(source), "%s/halves.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/halves", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/halves-scalar", directory);
+    snprintf(outputs[2], sizeof(outputs[2]), "%s/halves-clang", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the half-precision intrinsics' program written");
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=sapphirerapids", "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=sapphirerapids", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "the half-precision intrinsics link" : "the half-precision intrinsics link, scalar");
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        linked = linked && status == 0;
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable of the half-precision intrinsics");
+    const X86Target native = x86_target_native();
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) |
+                              BUSTER_X86_FEATURE(AVX512BF16) | BUSTER_X86_FEATURE(F16C);
+    if (linked && (native.features & required) == required && (native.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0)
+    {
+        char* text = NULL;
+        char* const reference[] = { (char*)clang, "-O0", "-march=sapphirerapids", "-o", outputs[2], source, NULL };
+        const int built = check_test_driver_spawn(reference, &text);
+        free(text);
+        static char expected[8192];
+        static char captured[8192];
+        const bool ran = built == 0 && check_test_driver_capture(outputs[2], expected, sizeof(expected)) &&
+                         check_test_driver_capture(outputs[0], captured, sizeof(captured));
+        check_test_expect(test, ran && strlen(expected) > 1000 && strcmp(captured, expected) == 0, "the half-precision intrinsics compute what clang's build of them does");
+        if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "half-precision intrinsics:\n%s\nclang's build:\n%s\n", captured, expected);
+        }
+    }
+    else if (linked)
+    {
+        printf("  half-precision intrinsics: native execution skipped (the host lacks AVX512-FP16 or AVX512-BF16); the program links\n");
+    }
+    unlink(source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(outputs[2]);
+}
 
 // The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
 // driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
@@ -2086,6 +2278,82 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Compiler identification is an action, while an option operand that spells an action is still an operand.
+static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
+{
+    char compiler[PATH_MAX];
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/identity.c", directory);
+    snprintf(object, sizeof(object), "%s/--version", directory);
+    static const char program[] = "int value = 42;\n";
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const version[] = { compiler, "-O2", "--version", source, NULL };
+    char* const machine[] = { compiler, "-dumpmachine", NULL };
+    char* const target[] = { compiler, "-target", "x86_64-acme-linux-gnu", "-dumpmachine", NULL };
+    char* const target_last[] = { compiler, "--target=x86_64-first-linux-gnu", "-target", "x86_64-linux-gnu", "-dumpmachine", NULL };
+    char* const both[] = { compiler, "--version", "-dumpmachine", NULL };
+    char* const invalid[] = { compiler, "-target", "aarch64-linux-gnu", "-dumpmachine", NULL };
+    char* const missing[] = { compiler, "-dumpmachine", "-target", NULL };
+    char* const* cases[] = { version, machine, target, target_last, both, invalid, missing };
+    const char* const expected[] = { "buster (development build)\nTarget: ", "x86_64-", "x86_64-acme-linux-gnu\n",
+                                     "x86_64-unknown-linux-gnu\n", "x86_64-", "", "" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(cases[i], &text, true) : -1;
+        const bool prefix = text != NULL && strncmp(text, expected[i], strlen(expected[i])) == 0;
+        check_test_expect(test, i < 5 ? status == 0 && prefix : status != 0 && text != NULL && text[0] == 0,
+                          "compiler identification selects the correct target and refuses unsupported targets");
+        free(text);
+    }
+    char* const compile[] = { "env", "-C", (char*)directory, compiler, "-pipe", "-c", "-o", "--version", "identity.c", NULL };
+    char* text = NULL;
+    const int compiled = made ? check_test_driver_spawn(compile, &text) : -1;
+    free(text);
+    FILE* output = fopen(object, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output != NULL && fread(magic, 1, sizeof(magic), output) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output != NULL)
+    {
+        fclose(output);
+    }
+    check_test_expect(test, compiled == 0 && elf, "-pipe compiles and an output named --version remains an operand");
+    char* const preprocess[] = { compiler, "-pipe", "-E", "-P", source, NULL };
+    text = NULL;
+    const int preprocessed = made ? check_test_driver_spawn_stream(preprocess, &text, true) : -1;
+    check_test_expect(test, preprocessed == 0 && text != NULL && strstr(text, "int value = 42;") != NULL,
+                      "-pipe is accepted in preprocessing mode");
+    free(text);
+    char* const command[] = { compiler, "parallel", "--version", NULL };
+    text = NULL;
+    const int command_status = made ? check_test_driver_spawn(command, &text) : -1;
+    check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "named commands take precedence over compiler identification");
+    free(text);
+    char* const assembly_version[] = { compiler, "-c", "--version", "missing.s", NULL };
+    char* const assembly_machine[] = { compiler, "-c", "-dumpmachine", "missing.s", NULL };
+    char* const* assembly_queries[] = { assembly_version, assembly_machine };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(assembly_queries); i += 1)
+    {
+        text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(assembly_queries[i], &text, true) : -1;
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, i == 0 ? "buster (development build)" : "x86_64-") != NULL,
+                          "information actions take precedence over implicit assembly compilation");
+        free(text);
+    }
+    char missing_assembly[256];
+    snprintf(missing_assembly, sizeof(missing_assembly), "%s/missing.s", directory);
+    char* const assembly_operand[] = { compiler, "-c", "-o", "--version", missing_assembly, NULL };
+    text = NULL;
+    const int operand_status = made ? check_test_driver_spawn_stream(assembly_operand, &text, true) : -1;
+    check_test_expect(test, operand_status != 0 && text != NULL && text[0] == 0,
+                      "an assembly output named --version does not select compiler identification");
+    free(text);
+    unlink(object);
+    unlink(source);
+}
+
 // Layout flags not implemented by the checker must not silently produce objects with another ABI.
 static void check_test_driver_layout_options(CheckTest* test, const char* executable, const char* directory)
 {
@@ -2334,9 +2602,12 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     unlink(source);
 }
 
+#include "c_check_pic_driver_test.c"
+
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
+    check_test_driver_pic(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
@@ -3332,9 +3603,11 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
+#include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_fortify_driver_test.c"
 #include "c_check_transparent_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
@@ -3426,6 +3699,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
+#include "c_check_cleanup_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -3680,6 +3954,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
+#include "c_check_symbol_driver_test.c"
+
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
@@ -4502,9 +4778,11 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_reservation_failure(&test);
         check_test_driver_link_failure_messages(&test);
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
+        check_test_driver_cleanup_errors(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
@@ -4517,17 +4795,21 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
+            check_test_driver_ignored_pragmas(&test, clang, executable, directory);
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
+            check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
+            check_test_driver_fortify(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
             check_test_driver_sockets(&test, clang, executable, directory);
             check_test_driver_target_selection(&test, executable, directory);
             check_test_driver_mmx(&test, clang, executable, directory);
+            check_test_driver_halves(&test, clang, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
@@ -4538,6 +4820,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_identification(&test, executable, directory);
             check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
             check_test_driver_layout_options(&test, executable, directory);

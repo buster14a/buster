@@ -168,6 +168,13 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
 // and the merge Tier 0's, then the link's and its bindings', then the encodings'). A part that fails stops, but past a
 // failure after Tier 0 it goes on with Tier 0 alone, whose failures come first. With one lane its bodies are one part,
 // and the emission takes source order's steps in source order's order.
+//
+// With several source files the units run on lanes (c_checker_units.c), each unit on one, where a unit's emission can't
+// run lanes of its own: lane_run refuses a group inside the units' group. The units' lanes are a board instead (#777,
+// CheckEmitBoard): a unit's emission that starts while one of them has no unit left to take cuts its bodies into parts
+// as lanes of its own would (parts_by_cost), shares them on its lane's share and takes them itself, and the lanes that
+// take no units take them too (check_program_emit_help), each with a writer and arenas of its own in that emission,
+// until no lane takes units. The parts are the same steps, merged the same way, so the outputs are one lane's.
 
 // The most lanes an emission runs.
 #define BUSTER_CHECK_EMIT_MAX_LANES 64
@@ -192,6 +199,37 @@ typedef enum CheckProgramAgain
     CHECK_PROGRAM_AGAIN_TIER0,
     CHECK_PROGRAM_AGAIN_CODE,
 } CheckProgramAgain;
+
+// A lane's share on the units' board (#777): the emission its unit shares, one at a time, each an epoch of the share.
+// The epoch's next part to take (low 32 bits of `ticket`) and its parts' count (low 32 bits of `limit`), each beside the
+// epoch (their high 32 bits): a take is a compare-and-swap of the ticket, whose epoch must be the limit's, so that a lane
+// that read an epoch's ticket takes none of the next's. Its owner sets the epoch's `run` and `order` (its parts, the
+// costliest first) before its ticket and waits, before the epoch's emission goes on, until `done` counts every part,
+// the last of which publishes `complete` (lane_publish, lane_wait): no lane reads the epoch's run after it.
+typedef struct CheckEmitShare CheckEmitShare;
+struct CheckEmitShare
+{
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint64_t ticket;
+    uint64_t limit;
+    uint32_t done;
+    uint32_t complete;
+    struct CheckEmitRun* run;
+    const uint32_t* order;
+};
+
+// The units' lanes as one board (#777): how many there are, how many still take units (a lane that takes no more helps,
+// check_program_emit_help, until none takes any), the word that advances (lane_advance) when a share opens and when a
+// lane stops taking units, which the helping lanes wait on, the parts that lanes other than the owner's took (a test's
+// count), and a share per lane.
+typedef struct CheckEmitBoard CheckEmitBoard;
+struct CheckEmitBoard
+{
+    uint32_t lanes;
+    uint32_t taking;
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t generation;
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint64_t others;
+    CheckEmitShare shares[BUSTER_LANE_MAX_COUNT];
+};
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
@@ -229,6 +267,13 @@ struct CheckProgramLanes
     uint32_t squeeze_body;
     uint32_t squeeze_arenas;
     uint64_t squeeze_room;
+    // With several source files (#777), the units' lanes' board, on which the emission shares its parts with the lanes
+    // that have no unit left to take rather than run lanes of its own, and its lane's place there; and a test's pause
+    // after each part the sharing lane takes itself, in microseconds, so that the other lanes take parts. Their lanes'
+    // states and arenas are their places plus one: the first is the sharing lane's, with the caller's arenas.
+    CheckEmitBoard* board;
+    uint32_t board_lane;
+    uint32_t board_pause_microseconds;
     // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
     // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
     // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
@@ -676,6 +721,119 @@ static void check_program_emit_alone(CheckEmitRun* run)
     }
 }
 
+// Takes the next part of `share`'s open epoch: its place in the epoch's order into *taken and true, or false when the
+// epoch has none left or none is open. A failed exchange loads the ticket's latest value, another lane's take or a new
+// epoch's, which the loop reads against the limit again.
+static bool check_program_share_take(CheckEmitShare* share, uint64_t* taken)
+{
+    uint64_t ticket = __atomic_load_n(&share->ticket, __ATOMIC_ACQUIRE);
+    bool open = true;
+    bool took = false;
+    while (open && !took)
+    {
+        const uint64_t limit = __atomic_load_n(&share->limit, __ATOMIC_ACQUIRE);
+        open = (limit >> 32) == (ticket >> 32) && (uint32_t)ticket < (uint32_t)limit;
+        took = open && __atomic_compare_exchange_n(&share->ticket, &ticket, ticket + 1, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE);
+    }
+    *taken = (uint32_t)ticket;
+    return took;
+}
+
+// The part `taken` of `share`'s epoch, on its run's lane state `state` (a writer and arenas made at the state's first
+// part, as a lane's: check_program_emit_lane_prepare), then counted done; the last part done publishes the epoch
+// complete.
+static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint32_t state)
+{
+    CheckEmitRun* run = share->run;
+    CheckEmitLane* lane = run->lane_states + state;
+    CheckEmitPart* part = run->parts + share->order[taken];
+    lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, state);
+    lane->prepared = true;
+    if (lane->ready)
+    {
+        check_program_emit_part(run, lane, part);
+    }
+    else
+    {
+        check_program_emit_part_refused(part);
+    }
+    if (__atomic_add_fetch(&share->done, 1, __ATOMIC_ACQ_REL) == run->part_count)
+    {
+        lane_publish(&share->complete, 2);
+    }
+}
+
+// The bodies' parts shared on the units' board (#777, CheckProgramLanes.board): cut for `active` lanes as lanes of its
+// own would cut them (parts_by_cost), opened as a new epoch of lane `index`'s share, taken by this lane (its run's first
+// state, with the caller's arenas) and by the board's lanes that take no units, and waited for.
+static void check_program_emit_shared(CheckEmitRun* run, CheckEmitBoard* board, uint32_t index, uint32_t active, uint32_t pause_microseconds)
+{
+    const uint64_t parts = parts_by_cost(run->costs, run->body_count, active, run->boundaries, run->orders[0]);
+    for (uint64_t p = 0; p < parts; p += 1)
+    {
+        run->parts[p].lower.first = (uint32_t)run->boundaries[p];
+        run->parts[p].lower.end = (uint32_t)run->boundaries[p + 1];
+    }
+    run->part_count = (uint32_t)parts;
+    CheckEmitShare* share = board->shares + index;
+    const uint64_t epoch = (__atomic_load_n(&share->ticket, __ATOMIC_RELAXED) >> 32) + 1;
+    share->run = run;
+    share->order = run->orders[0];
+    __atomic_store_n(&share->done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&share->complete, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&share->limit, epoch << 32 | parts, __ATOMIC_RELEASE);
+    __atomic_store_n(&share->ticket, epoch << 32, __ATOMIC_RELEASE);
+    lane_advance(&board->generation);
+    uint64_t taken = 0;
+    while (check_program_share_take(share, &taken))
+    {
+        check_program_share_run(share, taken, 0);
+        if (pause_microseconds != 0)
+        {
+            const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)pause_microseconds * 1000 };
+            nanosleep(&pause, NULL);
+        }
+    }
+    // The parts the other lanes took, which the last of them publishes done.
+    if (__atomic_load_n(&share->done, __ATOMIC_ACQUIRE) != parts)
+    {
+        lane_wait(&share->complete, 0);
+    }
+}
+
+// A lane of the units' board with no unit left to take (#777): takes the parts that the other lanes' emissions share,
+// any lane's, until no lane takes units any more and no share has a part left. Its state in each emission is its place
+// plus one (its arenas CheckProgramLanes.arenas' of the sharing lane, which that lane releases after its unit); a lane
+// whose state would be past an emission's room takes none.
+static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
+{
+    const uint32_t state = index + 1;
+    bool helping = state < BUSTER_CHECK_EMIT_MAX_LANES;
+    while (helping)
+    {
+        const uint32_t generation = __atomic_load_n(&board->generation, __ATOMIC_ACQUIRE) & ~1u;
+        bool took = false;
+        for (uint32_t i = 1; i <= board->lanes; i += 1)
+        {
+            CheckEmitShare* share = board->shares + (index + i) % board->lanes;
+            uint64_t taken = 0;
+            while (check_program_share_take(share, &taken))
+            {
+                check_program_share_run(share, taken, state);
+                __atomic_add_fetch(&board->others, 1, __ATOMIC_RELAXED);
+                took = true;
+            }
+        }
+        // A share that opens, and a lane that stops taking units, advance the word after this lane read it. The wait is
+        // for another lane's front end, a unit's preprocessing to its selection: long enough to sleep at once.
+        helping = took || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) != 0;
+        if (!took && helping)
+        {
+            lane_sleep(&board->generation, generation);
+        }
+    }
+}
+
 // The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: a label's a local symbol of its
 // own, which the merge defines where its template's code puts it; another name's the program's symbol of that link name
 // (its asm label or its identifier: a name the emission makes is no template's to know), found in one pass over the
@@ -1094,8 +1252,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         run.costs[b] = total;
     }
     // One lane, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest body's; no
-    // more than the bodies, which are at least as many as the parts.
-    const uint32_t most = lanes != NULL && lanes->lanes > 1 ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
+    // more than the bodies, which are at least as many as the parts. On the units' board (#777), only while one of its
+    // lanes takes no units: an emission that starts while every lane still takes units runs alone, its bodies one part.
+    CheckEmitBoard* board = lanes != NULL && lanes->board != NULL && lanes->board_lane < lanes->board->lanes ? lanes->board : NULL;
+    const bool sharing = board == NULL || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) < board->lanes;
+    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
     const uint64_t paid = lanes != NULL && lanes->every_lane ? UINT64_MAX : 1 + (total > 2 * largest ? total - 2 * largest : 0) / BUSTER_CHECK_EMIT_LANE_TOKENS;
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;
@@ -1106,10 +1267,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         active = worker_budget_acquire(lanes->budget, active, &lease);
     }
     const uint64_t part_room = active > 1 ? (uint64_t)BUSTER_LANE_PARTS_PER_LANE * active : 1;
+    // On the board, a state for the sharing lane and one for each lane that may take its parts, its place plus one.
+    const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : active;
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
-    run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, active) : 0;
+    run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, states) : 0;
     run.boundaries = valid && active > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
-    for (uint32_t lane = 0; valid && active > 1 && lane < active; lane += 1)
+    // Each lane's order of the parts, or on the board the one order every lane takes them in.
+    for (uint32_t lane = 0; valid && active > 1 && lane < (board != NULL ? 1 : active); lane += 1)
     {
         run.orders[lane] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, part_room + 1);
         valid = run.orders[lane] != 0;
@@ -1124,7 +1288,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
     if (valid && count != 0)
     {
-        memset(run.lane_states, 0, (uint64_t)active * sizeof(CheckEmitLane));
+        memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
         // The lanes' run, or the calling thread's alone; lanes that couldn't start, or a part that ran out of room, go
         // again on the calling thread alone, from the arenas as they were (each body sets what it reads of the shared
         // tables before it reads it, and puts local_map's entries back).
@@ -1134,7 +1298,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint64_t columns_before = columns->length;
         if (active > 1)
         {
-            again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            if (board != NULL)
+            {
+                check_program_emit_shared(&run, board, lanes->board_lane, active, lanes->board_pause_microseconds);
+            }
+            else
+            {
+                again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            }
             valid = worker_budget_release(&lease);
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
@@ -1205,24 +1376,17 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->lowered.output_bytes = output->length - mark;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
-    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
-    {
-        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
-        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object < program->object_count &&
-            program->object_symbols[candidate->object] != 0)
-        {
-            // A typed overload selection does not supply the required ABI symbol mangling.
-            result->status = CHECK_PROGRAM_UNSUPPORTED;
-            result->reason = "overloadable functions (their mangled names)";
-            result->token = candidate->declaration;
-            valid = false;
-        }
-    }
     CheckProgramFileAsm file_asm = { 0 };
     valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
+    // Each symbol's weak binding, and its constructor's and destructor's priorities (#147), two a symbol, each plus one (0
+    // for none), with the declaration whose attribute gave it: the latest declaration's first, as clang takes it.
+    uint8_t* weak = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    uint32_t* structors = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
+    uint32_t* structor_tokens = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
@@ -1233,6 +1397,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
+        memset(weak, 0, (uint64_t)program->symbol_count + 1);
+        memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain/alias obligations as well as static declarations'.
         uint32_t attributed = 0;
@@ -1304,18 +1470,28 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
+                    // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
+                    // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
+                    weak[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_WEAK;
+                    const uint32_t structor = (kind == CHECK_ATTRIBUTE_DESTRUCTOR ? 1u : 0u) + 2 * symbol;
+                    if (symbol != 0 && !attribute->ignored && (kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR) &&
+                        program->input->declaration_kinds[token] == C_BINDING_FUNCTION && (structors[structor] == 0 || structor_tokens[structor] < token))
+                    {
+                        const uint64_t priority = attribute->argument_count != 0 && attribute->resolved ? (uint64_t)attribute->value : 65535;
+                        structors[structor] = (uint32_t)(priority < 65535 ? priority : 65535) + 1;
+                        structor_tokens[structor] = token;
+                    }
                     const bool alias = kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC;
                     const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
-                    const bool unpublished = kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
-                                             kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
-                                             kind == CHECK_ATTRIBUTE_COMMON;
+                    const bool unpublished = kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_COMMON;
                     if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
                     {
-                        // The typed source contract retains these obligations. Until symbol aliases and startup
-                        // lists and weak semantics are published, refusing code
-                        // emission is required. A dropped definition has no object-format obligation of its own.
+                        // The typed source contract retains these obligations. Until symbol aliases, weak references to
+                        // other names, retained sections and common symbols are published, refusing code emission is
+                        // required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (alias, ifunc, constructor, destructor, weak, retain or common)";
+                        result->reason = "this attribute (alias, ifunc, weakref, retain or common)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
@@ -1334,6 +1510,44 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
+    // asm labels (which override mangling), before external binding, static-local naming and object publication.
+    CheckMangleSource mangling = {
+        .input = program->input,
+        .parser = parser,
+        .identifiers = identifiers,
+        .types = program->types,
+        .output = scratch,
+        .scalar = scalar,
+    };
+    Scratch mangle_scratch = { 0 };
+    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
+        const SymbolId symbol = candidate->object != 0 && candidate->object < program->object_count ? program->object_symbols[candidate->object] : 0;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && symbol != 0 && symbol_names[symbol].length == 0)
+        {
+            if (mangle_scratch.arena == NULL)
+            {
+                mangle_scratch = scratch_begin(scratch);
+            }
+            mangling.internal = program->input->linkage[candidate->declaration] == 1;
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+                                                               mangle_scratch.arena, &symbol_names[symbol]);
+            valid = status == CHECK_MANGLE_OK;
+            if (!valid)
+            {
+                result->status = status == CHECK_MANGLE_RESOURCE ? CHECK_PROGRAM_RESOURCE :
+                                 status == CHECK_MANGLE_INVALID ? CHECK_PROGRAM_INVALID : CHECK_PROGRAM_UNSUPPORTED;
+                result->reason = "this overloadable signature's ABI name (local/anonymous tags, variable arrays or calling convention)";
+                result->token = candidate->declaration;
+            }
+        }
+    }
+    if (mangle_scratch.arena != NULL)
+    {
+        scratch_end(mangle_scratch);
+    }
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
     // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
     uint32_t failed = count;
@@ -1443,21 +1657,28 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
+    // The defined functions' constructors' and destructors' entries, an atom of an init or fini array each (#147).
+    uint32_t structor_count = 0;
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        structor_count += (structors[2 * symbol] != 0) + (structors[2 * symbol + 1] != 0);
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
+                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
-            name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
+            name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
         .names = valid ? (uint32_t)name_count : 0,
         .atoms = valid ? (uint32_t)atom_count : 0,
         .symbols = valid ? (uint32_t)symbol_count : 0,
         .fixups = valid ? (uint32_t)fixup_count : 0,
         .wide_addends = valid ? (uint32_t)wide_count : 0,
-        .priorities = valid ? data_capacity.priorities + runtime.priorities : 0,
+        .priorities = valid ? data_capacity.priorities + runtime.priorities + structor_count : 0,
     };
     valid = valid && link_initialize(&result->link, output, output, capacity);
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
@@ -1548,7 +1769,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
-            flags = kind | (program->input->linkage[declaration] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
+            flags = kind | (program->input->linkage[declaration] != 2 ? BUSTER_LINK_SYMBOL_LOCAL : weak[s + 1] ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL);
             if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
             {
                 flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
@@ -1897,6 +2118,40 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
+    // The constructors' and destructors' entries (#147): a pointer to the function each, in an init or fini array atom
+    // of its own, in the order LLVM writes llvm.global_ctors and llvm.global_dtors: stably by priority, from the
+    // definitions' order. One below 65535 has its priority (-c's .init_array.N and .fini_array.N, check_program_sections),
+    // and the others are their arrays' own.
+    if (valid && structor_count != 0)
+    {
+        uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, structor_count);
+        uint64_t* sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, structor_count);
+        valid = order != 0 && sorting != 0;
+        uint32_t entries = 0;
+        for (uint32_t b = 0; valid && b < count; b += 1)
+        {
+            const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                if (structors[2 * symbol + k] != 0)
+                {
+                    order[entries++] = ((uint64_t)((k << 16) | (structors[2 * symbol + k] - 1)) << 32) | b;
+                }
+            }
+        }
+        const uint64_t* sorted = valid ? c_bindings_sort(order, sorting, structor_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : 0;
+        for (uint32_t e = 0; valid && e < structor_count; e += 1)
+        {
+            const uint32_t k = (uint32_t)(sorted[e] >> 48);
+            const uint32_t priority = (uint32_t)(sorted[e] >> 32) & 0xffff;
+            const SymbolId symbol = program->object_symbols[program->bodies[(uint32_t)sorted[e]].object];
+            uint8_t* data = arena_push(bytes, 8, 8);
+            const AtomId atom = data != 0 ? link_add_atom(&result->link, k != 0 ? BUSTER_LINK_CLASS_FINI_ARRAY : BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8,
+                                                       (uint8_t*)memset(data, 0, 8), 0) : 0;
+            valid = atom != 0 && link_add_fixup(&result->link, atom, 0, BUSTER_LINK_FIXUP_ABS64, symbol, 0) != 0 &&
+                    (priority == 65535 || link_add_priority(&result->link, atom, priority));
+        }
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     if (!valid)
     {
@@ -1984,7 +2239,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -1998,6 +2253,19 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 descriptors[code->asm_atoms[a]] = code->asm_sections[a];
             }
+            // A prioritized constructor's or destructor's entry (#147) is in .init_array.N or .fini_array.N, as clang's
+            // object has it (TargetLoweringObjectFileELF's getStaticCtorSection), of its array's type and flags.
+            for (uint32_t p = 1; valid && p < link->priorities.count; p += 1)
+            {
+                const AtomId atom = link->priorities.atom[p];
+                const uint8_t class = link->atoms.class[atom];
+                char* name = BUSTER_ARENA_PUSH_ARRAY(output, char, 24);
+                valid = name != 0;
+                const int length = valid ? snprintf(name, 24, "%s.%u", object_class_sections[class].name, (unsigned)link->priorities.priority[p]) : 0;
+                descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = name, .length = (uint64_t)length }, .type = object_class_sections[class].type,
+                                                         .flags = object_class_sections[class].flags };
+            }
+            code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
             *table = descriptors;
         }
         for (uint32_t p = 0; valid && p < placements; p += 1)

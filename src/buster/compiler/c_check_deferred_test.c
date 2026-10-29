@@ -9,11 +9,15 @@
 // whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
 // in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 8 lanes through each
 // resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
-// lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
-// group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
+// lanes, the lanes the reader planned from the parser's tree before its top level's walk (CheckDeferred.planned, by
+// which, in a large unit, check_input_run's arena of rare columns is base pages or huge: #764, #847; where more than one
+// lane reads a unit that isn't large, the lanes claiming the arena's regions before their first writes), its reader be copied by
+// one of them at least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture
+// is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
 // the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
-// known tokens are read by the rule alone: on each side of a second lane and of an
+// known tokens are read by the rule alone, as they are and with every unit large (CheckDeferred.base_page_tokens): on
+// each side of a second lane and of an
 // eighth, beside a largest body, which the first lane reads itself, and beside a second largest, which a woken lane
 // reads in about twice its tokens' time; their largest body must be the first lane's, also on every lane with the first
 // lane starting once the others have taken from the counter (CheckDeferred.late_first). A unit that
@@ -27,7 +31,8 @@
 // must survive; the entry's dispatch and the wake-up must fall within the lanes' span. Then
 // benchmark-checker-deferred's --cpus parser, the difference report on a deferred path that made no input, which must
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
-// unmapped by check_deferred_release.
+// unmapped by check_deferred_release; and the arena of rare columns' pages, base pages throughout where more than one
+// lane writes it, and otherwise huge past its prefix (check_input_sparse_arena, by the kernel's advice for the mapping).
 //
 //   ./build/compiler test-checker-deferred [--id-order N] [--keep]
 //
@@ -206,6 +211,12 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // A file-scope union made transparent in a body applies to what follows it: source order's. A union the body made,
     // which nothing after it can name, the merge takes, with its activation, which a call through a pointer reads.
     { "transparent-union-in-a-body", "union U { int* a; long* b; };\nint f(void) { typedef union U T __attribute__((transparent_union)); return 0; }\n", false },
+    // A body's variable with a cleanup (#147) is a record of the unit's, in source order: source order's. One the attribute
+    // is ignored on (a static's) is no record.
+    { "cleanup-in-a-body", "void release(int* p);\nint f(int n) { int a __attribute__((cleanup(release))) = n; return a; }\n", false },
+    { "cleanup-in-multiple-bodies", "void release(int* p);\nint f(void) { int a __attribute__((cleanup(release))); return 0; }\n"
+      "int g(void) { int b __attribute__((cleanup(release))); return 1; }\n", false },
+    { "cleanup-ignored-in-a-body", "void release(int* p);\nint f(int n) { static int a __attribute__((cleanup(release))); return a + n; }\n", true },
     { "transparent-local-union-in-a-body",
       "int f(int* p) { union L { int* a; long* b; }; typedef union L T __attribute__((transparent_union)); int (*fp)(T) = 0; return fp ? fp(p) : 0; }\n"
       "int g(void) { union M { char* c; }; return (int)sizeof(union M); }\n", true },
@@ -478,6 +489,79 @@ static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
         result = mincore((void*)(first + i * page), page, &resident) == 0 && (resident & 1) != 0;
     }
     return result;
+}
+
+// #764's fresh arena of rare columns (check_input_sparse_arena): base pages throughout where more than one lane reads the
+// deferred bodies, but source order and a deferred reading on one lane keep its small prefix and huge-page tail. Checks
+// the kernel's advice, not timing or whether a huge page happened to be allocated, with fresh mappings each time,
+// byte-sized and non-page-sized capacities among them, on both sides of the prefix.
+static bool check_deferred_test_sparse_pages(void)
+{
+    const uint64_t capacities[] =
+    {
+        1,
+        BUSTER_ARENA_SMALL_BYTES,
+        BUSTER_ARENA_SMALL_BYTES + 1,
+        3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 17,
+    };
+    const uint64_t prefixes[] =
+    {
+        0,
+        BUSTER_ARENA_PAGE_BYTES,
+        BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_PAGE_BYTES,
+        BUSTER_ARENA_HUGE_PAGE_BYTES,
+    };
+    bool valid = true;
+    for (uint32_t reading = 0; valid && reading < 2; reading += 1)
+    {
+        for (uint32_t mode = 0; valid && mode < 2; mode += 1)
+        {
+            for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
+            {
+                for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(prefixes); p += 1)
+                {
+                    const uint64_t bytes = capacities[c];
+                    const uint64_t small = prefixes[p] > BUSTER_ARENA_SMALL_BYTES ? prefixes[p] : BUSTER_ARENA_SMALL_BYTES;
+                    const bool shared = mode != 0;
+                    Arena arena = check_input_sparse_arena(bytes, prefixes[p], shared);
+                    valid = arena.base != 0 && arena.capacity == bytes && arena.length == 0;
+                    // Reserving must not eagerly clear or commit the columns on the calling thread.
+                    valid = valid && !check_deferred_test_resident(arena.base, 1) && !check_deferred_test_resident(arena.base + bytes - 1, 1);
+                    const uint64_t offsets[] =
+                    {
+                        0,
+                        small < bytes ? small - 1 : bytes - 1,
+                        small < bytes ? small : bytes - 1,
+                        bytes - 1,
+                    };
+                    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
+                    {
+                        const bool huge = !shared && offsets[i] >= small;
+                        const uintptr_t address = (uintptr_t)arena.base + offsets[i];
+                        bool found = false;
+                        const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
+                        valid = found && no_huge_flag == !huge;
+                        const bool huge_flag = lane_test_vm_flag(address, "hg", &found);
+                        valid = valid && found && huge_flag == huge && arena.base[offsets[i]] == 0;
+                    }
+                    if (valid)
+                    {
+                        arena.base[0] = 0x5a;
+                        arena.base[bytes - 1] = 0xa5;
+                        valid = arena.base[0] == (bytes == 1 ? 0xa5 : 0x5a) && arena.base[bytes - 1] == 0xa5;
+                    }
+                    arena_release(&arena);
+                    valid = valid && arena.base == 0 && arena.capacity == 0 && arena.length == 0;
+                }
+            }
+        }
+    }
+    Arena empty = check_input_sparse_arena(0, 0, true);
+    Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
+    valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;
+    arena_release(&empty);
+    arena_release(&oversized);
+    return valid;
 }
 
 // Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_commit asks for.
@@ -759,6 +843,63 @@ static bool check_deferred_test_merge_modes(void)
     return valid;
 }
 
+// A cleanup's scope-end write precedes the lane's refusal. Exercise that writer directly, before a source-order
+// fallback can hide its claim: no other writer runs, and this 64-byte-aligned column fits in one 2 MB region.
+// Source order, a one-lane reader, a cold claim, an already-completed claim and an ignored attribute retain their
+// respective stores, records and refusal behavior. The multi-body fixture above also attempts the normal fallback.
+static bool check_deferred_test_cleanup_claim(void)
+{
+    CheckTestTypes types = { 0 };
+    bool valid = check_test_types_open(&types);
+    const TypeId parameter = valid ? type_pointer(&types.table, BUSTER_TYPE_VOID) : 0;
+    const TypeId function = parameter != 0 ? type_function(&types.table, BUSTER_TYPE_VOID, &parameter, 1, BUSTER_TYPE_FLAG_PROTOTYPE) : 0;
+    valid = valid && function != 0;
+    for (uint32_t mode = 0; valid && mode < 5; mode += 1)
+    {
+        const bool lane = mode != 0;
+        const bool claiming = mode >= 2;
+        const bool applies = mode != 4;
+        uint32_t claim = mode == 3 ? 2 : 0;
+        _Alignas(64) uint32_t scope_ends[8] = { 0 };
+        uint32_t opening = 2;
+        uint32_t closing = 9;
+        TypeId declarations[1] = { function };
+        CheckInputCleanup cleanup[1] = { 0 };
+        CheckInput input = { .cleanups = cleanup, .cleanup_capacity = BUSTER_ARRAY_LENGTH(cleanup) };
+        CheckInputReader reader =
+        {
+            .types = &types.table,
+            .output = &input,
+            .declared_types = declarations,
+            .scope_count = 1,
+            .scope_openings = &opening,
+            .scope_ends = &closing,
+            .vla_scope_ends = scope_ends,
+            .rare_begin = (uint8_t*)scope_ends,
+            .rare_end = (uint8_t*)(scope_ends + BUSTER_ARRAY_LENGTH(scope_ends)),
+            .rare_claims = claiming ? &claim : NULL,
+            .lane = lane,
+        };
+        CheckInputAttribute attribute = { .argument_first = 3, .cleanup_function = 1, .kind = CHECK_ATTRIBUTE_CLEANUP };
+        const CheckInputAttributes attributes = { .records = &attribute, .count = 1 };
+        valid = check_input_cleanup_declaration(&reader, &attributes, 4, BUSTER_TYPE_INT, applies) && !input.resource &&
+                claim == (claiming && applies ? 2u : 0u) && scope_ends[4] == (applies ? closing + 1 : 0) &&
+                input.cleanup_count == (uint32_t)applies && reader.lane_unsupported == (lane && applies) &&
+                (reader.lane_reason != NULL) == (lane && applies);
+        if (valid && applies)
+        {
+            valid = cleanup[0].declaration == 4 && cleanup[0].function == 0 && cleanup[0].argument == 3 &&
+                    cleanup[0].scope == opening && cleanup[0].end == closing + 1;
+        }
+        for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(scope_ends); i += 1)
+        {
+            valid = scope_ends[i] == (applies && i == 4 ? closing + 1 : 0);
+        }
+    }
+    check_test_types_close(&types);
+    return valid;
+}
+
 // The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
 // from the rule (docs/c-deferred-bodies.md, "How many lanes").
 static uint64_t check_deferred_test_lane_tokens(uint64_t top)
@@ -796,7 +937,8 @@ struct CheckDeferredSize
     uint32_t second;
     uint32_t fewer;
     uint32_t lanes;
-    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases.
+    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases, whose `lanes` are the
+    // rule's for those tokens, and change with its constants.
     uint32_t base_tokens;
 };
 
@@ -971,7 +1113,11 @@ static int run_checker_deferred_tests(int count, char** arguments)
     static char sized[1 << 20];
     check_deferred_many(many, sizeof(many), 400);
     const uint32_t listed = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_fixtures);
-    const uint32_t fixtures = listed + 1 + (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
+    // The rule's sides twice: as they are, units too small to be large, whose rare columns stay huge pages, which more
+    // than one lane claims before writing; and every unit large (check_corpus_deferred_base_page_tokens 1), whose rare
+    // columns are base pages where more than one lane reads (#847).
+    const uint32_t sizes = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
+    const uint32_t fixtures = listed + 1 + 2 * sizes;
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
     static const CheckInputBindingMode modes[] = { CHECK_INPUT_BINDINGS_STACKS, CHECK_INPUT_BINDINGS_BATCH, CHECK_INPUT_BINDINGS_DIRECT };
     static const char* const mode_names[] = { "stacks", "batch", "direct" };
@@ -983,7 +1129,9 @@ static int run_checker_deferred_tests(int count, char** arguments)
     for (uint32_t f = 0; valid && f < fixtures; f += 1)
     {
         // The listed fixtures, the many bodies, and the rule's sides, which the reader reads by its own rule alone.
-        const CheckDeferredSize* size = f > listed ? check_deferred_sizes + (f - listed - 1) : 0;
+        const CheckDeferredSize* size = f > listed ? check_deferred_sizes + (f - listed - 1) % sizes : 0;
+        const bool large = f > listed + sizes;
+        check_corpus_deferred_base_page_tokens = large ? 1 : 0;
         uint64_t size_tokens = 0;
         uint64_t size_largest = 0;
         uint64_t size_second = 0;
@@ -991,7 +1139,9 @@ static int run_checker_deferred_tests(int count, char** arguments)
         {
             check_deferred_sized(sized, sizeof(sized), size, &size_tokens, &size_largest, &size_second);
         }
-        const char* name = f < listed ? check_deferred_fixtures[f].name : size == 0 ? "many-bodies" : size->name;
+        char name[128];
+        snprintf(name, sizeof(name), "%s%s", f < listed ? check_deferred_fixtures[f].name : size == 0 ? "many-bodies" : size->name, large ? "-large" : "");
+        const uint32_t size_lanes = size == 0 ? 0 : size->lanes;
         const char* source = f < listed ? check_deferred_fixtures[f].source : size == 0 ? many : sized;
         const bool expected = f < listed ? check_deferred_fixtures[f].merged : true;
         const bool every = size == 0;
@@ -1016,32 +1166,42 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 check_corpus_measure(path, &options, false, true, &outcome);
                 check_corpus_deferred_every_lane = true;
                 // The rule's lanes, and the reader copied by one of them at least and by no more; and a side of the
-                // rule's bodies of the tokens it was made with, on the lanes it was made for.
+                // rule's bodies of the tokens it was made with, on the lanes it was made for. The rare columns are base
+                // pages where more than one lane reads a large unit, and otherwise huge pages, which the lanes claim
+                // where more than one reads (#847): the many bodies, whose bodies declare locals, claim one at least.
                 const uint64_t top = outcome.tokens - outcome.deferred_body_tokens;
+                const bool unit_large = large || outcome.tokens >= BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS;
                 const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, top, outcome.deferred_largest_body,
                                                                 outcome.deferred_second_body, lane_counts[l], every);
                 // The parts a group of the bodies' lanes cuts, made before the lanes started (parts_by_cost).
                 const uint64_t group = most == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * most;
                 const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
-                const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
-                                                          outcome.deferred_copies <= most && outcome.deferred_parts == parts &&
+                const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
+                                                          outcome.deferred_large == unit_large && outcome.deferred_shared == (most > 1 && unit_large) &&
+                                                          outcome.deferred_claiming == (most > 1 && !unit_large) &&
+                                                          (size != 0 || f < listed || !outcome.deferred_claiming || outcome.deferred_claimed != 0) &&
+                                                          outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most &&
+                                                          outcome.deferred_parts == parts &&
                                                           outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(top));
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
-                                                       outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
-                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right;
+                                                       outcome.deferred_active == (size_lanes < lane_counts[l] ? size_lanes : lane_counts[l]));
+                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
+                                    !outcome.source_shared;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
-                            copied ? "" : " (not the rule's lanes, their parts or tokens, or its reader copied by too many of them or by none)",
-                            sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
+                            copied ? "" : " (not the rule's lanes, those it planned before the top level's walk, the rare columns' pages for "
+                                          "them or their regions' claims, their parts or tokens, or its reader copied by too many of them or by none)",
+                            sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
+                            outcome.source_shared ? " (source order's rare columns in base pages)" : "");
                 }
             }
         }
@@ -1081,7 +1241,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
             const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
                                                             outcome.deferred_largest_body, outcome.deferred_second_body, 8, false);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected &&
-                                (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
+                                (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
+                                                       outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
             checks += 1;
             failures += !passed;
             if (!passed)
@@ -1089,7 +1250,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on 8 lanes by the reader's rule: %s\n", name,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : outcome.deferred != expected ? (expected ? "not merged" : "merged") :
-                        "not the rule's lanes, or its reader copied by too many of them or by none");
+                        "not the rule's lanes or those it planned before the top level's walk, or its reader copied by too many of them or by none");
             }
         }
         // A side of the rule of more than one body, on every lane its bodies can take of 8 with the first lane starting once
@@ -1106,9 +1267,9 @@ static int run_checker_deferred_tests(int count, char** arguments)
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_late_first = false;
             check_corpus_deferred_every_lane = true;
-            const uint64_t most = policy == 0 ? (size->bodies < 8 ? size->bodies : 8) : size->lanes;
+            const uint64_t most = policy == 0 ? (size->bodies < 8 ? size->bodies : 8) : size_lanes;
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
-                                outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
+                                outcome.deferred_planned == most && outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
             checks += 1;
             failures += !passed;
             if (!passed)
@@ -1116,7 +1277,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on %" PRIu64 " lanes with the first lane starting last: %s\n", name, most,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
-                        outcome.deferred_active != most ? "not every lane" : "the largest body not the first lane's");
+                        outcome.deferred_active != most || outcome.deferred_planned != most ? "not every lane, or not the lanes it planned" :
+                        "the largest body not the first lane's");
             }
         }
         // A unit that merges, with its first lane taking every part: no other lane copies the reader. (The rule's sides,
@@ -1273,6 +1435,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             unlink(path);
         }
     }
+    check_corpus_deferred_base_page_tokens = 0;
     const bool linked_history = check_deferred_test_linked_history();
     checks += 1;
     failures += !linked_history;
@@ -1322,12 +1485,26 @@ static int run_checker_deferred_tests(int count, char** arguments)
     {
         fprintf(stderr, "test-checker-deferred: the state's memory wasn't laid out, kept or released as it should be\n");
     }
+    const bool sparse_pages = check_deferred_test_sparse_pages();
+    checks += 1;
+    failures += !sparse_pages;
+    if (!sparse_pages)
+    {
+        fprintf(stderr, "test-checker-deferred: the sparse arena's page policy, demand-zero storage or release differs\n");
+    }
     const bool names = check_deferred_test_lane_names();
     checks += 1;
     failures += !names;
     if (!names)
     {
         fprintf(stderr, "test-checker-deferred: a lane's per-name columns weren't laid out, kept, cleared or refused as they should be\n");
+    }
+    const bool cleanup_claim = check_deferred_test_cleanup_claim();
+    checks += 1;
+    failures += !cleanup_claim;
+    if (!cleanup_claim)
+    {
+        fprintf(stderr, "test-checker-deferred: a cleanup scope write wasn't claimed before lane refusal, or its controls changed\n");
     }
     if (!keep && valid)
     {

@@ -134,8 +134,7 @@ static X86Instruction check_vector_lower_record(uint32_t form, uint8_t reg, uint
 // as a role's j is its operand's place among them all); a splat, the scalar as its element's class (`scalar_class`). The
 // rows don't depend on the operands' depths: Tier 0 places them. A floating division of a vector of 4 or 8 bytes
 // divides its own elements alone, under a mask of them. Half-precision elements' rows but a negation's, which
-// flips their bits alone, take AVX512-FP16; a splat into them has none, as a scalar of their type has no class yet (the
-// checker and the scalar lowering refuse one first). With `excess` (clang's _Float16 excess precision, where the unit's
+// flips their bits alone, and a splat's, of a scalar's bits, take AVX512-FP16. With `excess` (clang's _Float16 excess precision, where the unit's
 // target hasn't AVX512-FP16: check_lower_vector_half_chain), a negation of them is clang's in float, which quiets their
 // signaling NaNs: the sign bits flipped, then each half converted to a float and back (VCVTPH2PS and VCVTPS2PH, exact
 // but for those NaNs), the 64-byte vector's in two halves of 32 bytes.
@@ -159,22 +158,20 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
     {
         reason = "vector operations on elements of this type";
     }
-    else if (op == BUSTER_CHECK_VECTOR_SPLAT && half)
-    {
-        reason = "vector splats of half-precision scalars";
-    }
     else if (op == BUSTER_CHECK_VECTOR_SPLAT)
     {
-        // The scalar, converted to the element's type already, in every element.
+        // The scalar, converted to the element's type already, in every element: a half-precision one's bits, an integer
+        // operand zero-extended to 32 bits (c_check_program_half.c), as a 16-bit integer's.
         const uint32_t b = element.bytes;
-        const CheckVectorForms forms = element.floating ? (b == 4 ? BUSTER_CHECK_VECTOR_FORMS(VBROADCASTSS_X_XM32_EVEX, VBROADCASTSS_Y_XM32_EVEX, VBROADCASTSS_Z_XM32) :
-                                                                    BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTQ_X_XM64_EVEX, VBROADCASTSD_Y_XM64_EVEX, VBROADCASTSD_Z_XM64)) :
+        const bool bits = !element.floating || half;
+        const CheckVectorForms forms = !bits ? (b == 4 ? BUSTER_CHECK_VECTOR_FORMS(VBROADCASTSS_X_XM32_EVEX, VBROADCASTSS_Y_XM32_EVEX, VBROADCASTSS_Z_XM32) :
+                                                        BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTQ_X_XM64_EVEX, VBROADCASTSD_Y_XM64_EVEX, VBROADCASTSD_Z_XM64)) :
                                        b == 1 ? BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTB_X_R32, VPBROADCASTB_Y_R32, VPBROADCASTB_Z_R32) :
                                        b == 2 ? BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTW_X_R32, VPBROADCASTW_Y_R32, VPBROADCASTW_Z_R32) :
                                        b == 4 ? BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTD_X_R32, VPBROADCASTD_Y_R32, VPBROADCASTD_Z_R32) :
                                                 BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTQ_X_R64, VPBROADCASTQ_Y_R64, VPBROADCASTQ_Z_R64);
-        needed = !element.floating && b <= 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
-        row->records[0] = check_vector_lower_record(forms.forms[width], v0, 0, element.floating ? BUSTER_TIER0_ROLE_FLOATING(0) : BUSTER_TIER0_ROLE_INTEGER(0));
+        needed = bits && b <= 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
+        row->records[0] = check_vector_lower_record(forms.forms[width], v0, 0, bits ? BUSTER_TIER0_ROLE_INTEGER(0) : BUSTER_TIER0_ROLE_FLOATING(0));
         row->record_count = 1;
         row->operand_count = 1;
         row->operand_classes[0] = scalar_class;
@@ -314,7 +311,7 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
                      "vector operations on 8- and 16-bit elements without AVX-512BW" :
                      "vector operations without AVX-512DQ";
     }
-    if (reason == NULL && half && op != CHECK_OP_NEGATIVE && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0)
+    if (reason == NULL && half && op != CHECK_OP_NEGATIVE && op != BUSTER_CHECK_VECTOR_SPLAT && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0)
     {
         reason = "vector operations on half-precision elements without AVX512-FP16";
     }
