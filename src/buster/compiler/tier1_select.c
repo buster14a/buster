@@ -91,23 +91,100 @@ static X86Instruction tier1_select_move(uint32_t width, uint8_t destination, uin
     return tier1_select_register_record(width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32, destination, source);
 }
 
-// The semantics module owns sign extension, zero idioms, immediate widths and the flags proof for each alternate form.
-// The target's allow-list is checked on the final records, independently of the host's ISA.
-static X86Instruction tier1_select_immediate(X86Operation operation, uint32_t width, uint8_t destination, int64_t value, uint8_t live_flags)
+// A node's records (tier1_select_expand's). At most one of them has an immediate whose form the function's batch chooses
+// (tier1_select_requests_flush, #141): the record at `request` when `requested`, empty until the batch, with the
+// request's destination, row, value and context.
+typedef struct Tier1SelectRecords Tier1SelectRecords;
+struct Tier1SelectRecords
 {
-    const uint16_t row = (uint16_t)x86_choice_row(operation, width);
-    const uint16_t context = BUSTER_X86_CONTEXT_REGISTER | (destination == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0) | live_flags;
-    uint16_t form = X86_FORM_NONE;
+    X86Instruction records[BUSTER_TIER1_SELECT_RECORDS_PER_NODE];
+    int64_t value;
+    uint16_t row;
+    uint16_t context;
+    uint8_t count;
+    uint8_t request;
+    uint8_t destination;
+    bool requested;
+};
+
+// A record whose operation, on the destination register, has an immediate, as a request. The semantics module owns sign
+// extension, zero idioms, immediate widths and the flags proof for each alternate form. An operation without a row
+// leaves the record empty, which validation refuses. The target's allow-list is checked on the final records,
+// independently of the host's ISA.
+static void tier1_select_request(Tier1SelectRecords* result, X86Operation operation, uint32_t width, uint8_t destination, int64_t value, uint8_t live_flags)
+{
+    const uint32_t row = x86_choice_row(operation, width);
     if (row != BUSTER_X86_CHOICE_NO_ROW)
     {
-        x86_choose_forms_scalar(&row, &value, &context, 1, &form);
+        result->requested = true;
+        result->request = result->count;
+        result->destination = destination;
+        result->row = (uint16_t)row;
+        result->value = value;
+        result->context = (uint16_t)(BUSTER_X86_CONTEXT_REGISTER | (destination == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0) | live_flags);
     }
-    X86Instruction result = {0};
-    if (form != X86_FORM_NONE)
+    result->records[result->count++] = (X86Instruction){0};
+}
+
+// A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
+// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context. On the
+// scalar path (`vector` false) each is chosen as it comes, by the twin, and none is held.
+#define BUSTER_TIER1_SELECT_BATCH 32
+typedef struct Tier1SelectRequests Tier1SelectRequests;
+struct Tier1SelectRequests
+{
+    int64_t values[BUSTER_TIER1_SELECT_BATCH];
+    uint32_t at[BUSTER_TIER1_SELECT_BATCH];
+    uint16_t rows[BUSTER_TIER1_SELECT_BATCH];
+    uint16_t contexts[BUSTER_TIER1_SELECT_BATCH];
+    uint16_t forms[BUSTER_TIER1_SELECT_BATCH];
+    uint8_t destinations[BUSTER_TIER1_SELECT_BATCH];
+    uint32_t count;
+    bool vector;
+};
+
+// The held requests' forms, chosen in one batch by x86_choose_forms: each record the chosen form's, or left empty where
+// no form takes the value, which validation then refuses, as a choice of one record at a time did.
+static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instruction* records)
+{
+    x86_choose_forms(requests->rows, requests->values, requests->contexts, requests->count, requests->forms);
+    for (uint32_t q = 0; q < requests->count; q += 1)
     {
-        result = x86_choice_instruction(form, (X86Instruction){ .rm = destination }, value);
+        const uint16_t form = requests->forms[q];
+        if (form != X86_FORM_NONE)
+        {
+            records[requests->at[q]] = x86_choice_instruction(form, (X86Instruction){ .rm = requests->destinations[q] }, requests->values[q]);
+        }
     }
-    return result;
+    requests->count = 0;
+}
+
+// The node's request, if it has one, its record at `first` among the function's `records`: held, a full batch's forms
+// chosen into the records first, or on the scalar path chosen at once.
+static void tier1_select_requests_add(Tier1SelectRequests* requests, const Tier1SelectRecords* selected, uint32_t first, X86Instruction* records)
+{
+    if (selected->requested && !requests->vector)
+    {
+        uint16_t form = X86_FORM_NONE;
+        x86_choose_forms_scalar(&selected->row, &selected->value, &selected->context, 1, &form);
+        if (form != X86_FORM_NONE)
+        {
+            records[first + selected->request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected->destination }, selected->value);
+        }
+    }
+    else if (selected->requested)
+    {
+        if (requests->count == BUSTER_TIER1_SELECT_BATCH)
+        {
+            tier1_select_requests_flush(requests, records);
+        }
+        const uint32_t q = requests->count++;
+        requests->at[q] = first + selected->request;
+        requests->values[q] = selected->value;
+        requests->rows[q] = selected->row;
+        requests->contexts[q] = selected->context;
+        requests->destinations[q] = selected->destination;
+    }
 }
 
 static bool tier1_select_immediate_fits(uint32_t width, uint64_t value)
@@ -182,13 +259,6 @@ struct Tier1SelectHoles
     bool compare_immediate;
 };
 
-typedef struct Tier1SelectRecords Tier1SelectRecords;
-struct Tier1SelectRecords
-{
-    X86Instruction records[BUSTER_TIER1_SELECT_RECORDS_PER_NODE];
-    uint8_t count;
-};
-
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
 {
     uint16_t form = X86_FORM_NONE;
@@ -223,18 +293,16 @@ static bool tier1_select_commutative(X86Operation operation)
     return operation == X86_OPERATION_ADD || operation == X86_OPERATION_AND || operation == X86_OPERATION_OR || operation == X86_OPERATION_XOR || operation == X86_OPERATION_IMUL;
 }
 
-static X86Instruction tier1_select_compare(const Tier1SelectHoles* holes)
+static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
-    X86Instruction result;
     if (holes->compare_immediate)
     {
-        result = tier1_select_immediate(X86_OPERATION_CMP, holes->width, holes->left, (int64_t)holes->immediate, tier1_select_condition_flags[holes->condition]);
+        tier1_select_request(result, X86_OPERATION_CMP, holes->width, holes->left, (int64_t)holes->immediate, tier1_select_condition_flags[holes->condition]);
     }
     else
     {
-        result = tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right);
+        result->records[result->count++] = tier1_select_register_record(holes->width == 8 ? X86_FORM_CMP_R64_RM64 : X86_FORM_CMP_R32_RM32, holes->left, holes->right);
     }
-    return result;
 }
 
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
@@ -248,7 +316,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_NONE:
         break;
     case TIER1_RULE_CONSTANT:
-        result.records[result.count++] = tier1_select_immediate(X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
+        tier1_select_request(&result, X86_OPERATION_MOV, width, destination, (int64_t)holes->immediate, 0);
         break;
     case TIER1_RULE_COPY:
         if (destination != holes->left || width == 4)
@@ -330,7 +398,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool multiply_shift = holes->rule == TIER1_RULE_MULTIPLY_SHIFT;
             const int64_t immediate = multiply_shift ? (int64_t)holes->scale : (int64_t)holes->immediate;
             const X86Operation operation = multiply_shift ? X86_OPERATION_SHL : holes->operation;
-            result.records[result.count++] = tier1_select_immediate(operation, width, destination, immediate, 0);
+            tier1_select_request(&result, operation, width, destination, immediate, 0);
         }
         break;
     }
@@ -386,12 +454,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_COMPARE:
     case TIER1_RULE_COMPARE_IMMEDIATE:
-        result.records[result.count++] = tier1_select_compare(holes);
+        tier1_select_compare(&result, holes);
         result.records[result.count++] = (X86Instruction){ .rm = destination, .form = tier1_select_condition_sets[holes->condition] };
         result.records[result.count++] = tier1_select_register_record(X86_FORM_MOVZX_R32_RM8, destination, destination);
         break;
     case TIER1_RULE_BRANCH_COMPARE:
-        result.records[result.count++] = tier1_select_compare(holes);
+        tier1_select_compare(&result, holes);
         result.records[result.count++] = (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] };
         result.records[result.count++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
         break;
@@ -475,6 +543,8 @@ struct Tier1SelectPlan
     uint32_t* costs;
     uint64_t estimated_cost;
     uint64_t arena_bytes;
+    // The path that planned it, which the legacy emitter's choice of immediates' forms takes too.
+    bool vector;
 };
 
 typedef struct Tier1SelectCode Tier1SelectCode;
@@ -507,7 +577,58 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call or a volatile access, which a
+    // load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no atomic access of its own:
+    // C's atomic operations reach it as calls of the unit's leaves.
+    const uint32_t* barriers;
 };
+
+static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+}
+
+// Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
+// scalar twin of tier1_select_barriers. A pass of its own, apart from the plan's pass over the nodes, where the store
+// would make the operands' walk reload the function's columns.
+static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t count, uint32_t* barriers)
+{
+    uint32_t barrier = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        barriers[node] = barrier;
+        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
+    }
+}
+
+// The same, 16 nodes at a time: their kinds and flags compared at once, each barrier's lane its position plus one, the
+// running maximum by four shifts of the lanes and the vectors' before, and each node's entry its lane before's. The
+// columns are read, and the entries written, with masked loads and stores.
+static void tier1_select_barriers(const IrFunction* function, uint32_t count, uint32_t* barriers)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i lanes = _mm512_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+    __m512i carry = zero;
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t left = count - first;
+        const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
+        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
+        const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
+        const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | volatile_load) & active;
+        __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 12));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 8));
+        at = _mm512_max_epu32(at, carry);
+        _mm512_mask_storeu_epi32(barriers + first, active, _mm512_alignr_epi32(at, carry, 15));
+        carry = _mm512_permutexvar_epi32(_mm512_set1_epi32(15), at);
+    }
+}
 
 static uint32_t tier1_select_width(uint32_t type)
 {
@@ -584,6 +705,14 @@ static X86Operation tier1_select_operation(uint32_t op)
 static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t parent, uint32_t value)
 {
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
+}
+
+// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
+// call nor access a volatile object (no barrier between them), and itself not volatile.
+static bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
+{
+    const IrFunction* function = forest->function;
+    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
@@ -792,8 +921,11 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
                 tier1_select_add_candidate(forest, node, &candidates, folded);
             }
         }
+        // The load the memory operand takes: the right operand's, or for a commutative operation the left's where the
+        // right isn't a load. Trying the left after a right load that can't fold cost the scalar twin's plan 2.5% on its
+        // shapes, its inlined code's registers and frame laid out otherwise, for a case code generators rarely make.
         const uint32_t load = function->op[b] == IR_LOAD ? b : tier1_select_commutative((X86Operation)base.operation) ? a : BUSTER_IR_NONE;
-        if (load != BUSTER_IR_NONE && load + 1 == node && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, node, load))
+        if (tier1_select_load_folds(forest, node, load))
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_LOAD_OPERAND;
@@ -996,7 +1128,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     const uint64_t output_mark = arguments ? output->length : 0;
     const uint64_t scratch_mark = arguments ? scratch->length : 0;
     const uint32_t count = function != 0 ? function->instruction_count : 0;
-    Tier1SelectPlan plan = { .function = function };
+    Tier1SelectPlan plan = { .function = function, .vector = BUSTER_VECTOR_PATH(vector) };
     if (!arguments)
     {
         error = TIER1_SELECT_ERROR_INVALID;
@@ -1013,9 +1145,14 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
             failed_node = check.instruction;
         }
+        else if (ir_function_has_simd(function))
+        {
+            error = TIER1_SELECT_ERROR_UNSUPPORTED;
+        }
     }
     uint32_t* blocks = 0;
     uint32_t* uses = 0;
+    uint32_t* barriers = 0;
     uint32_t* depths = 0;
     uint32_t* level_offsets = 0;
     uint32_t* level_nodes = 0;
@@ -1025,6 +1162,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         bool ok = true;
         blocks = ir_allocate(scratch, count, 4, &ok);
         uses = ir_allocate(scratch, count, 4, &ok);
+        barriers = ir_allocate(scratch, count, 4, &ok);
         depths = ir_allocate(scratch, count, 4, &ok);
         level_offsets = ir_allocate(scratch, (uint64_t)count + 2, 4, &ok);
         level_nodes = ir_allocate(scratch, count, 4, &ok);
@@ -1089,6 +1227,14 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             failed_node = node;
         }
     }
+    if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
+    {
+        tier1_select_barriers(function, count, barriers);
+    }
+    else if (error == TIER1_SELECT_OK)
+    {
+        tier1_select_barriers_scalar(function, count, barriers);
+    }
     if (error == TIER1_SELECT_OK)
     {
         bool ok = effective_capacity <= UINT32_MAX;
@@ -1120,6 +1266,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         .blocks = blocks,
         .uses = uses,
         .costs = plan.costs,
+        .barriers = barriers,
     };
     for (uint32_t level = 0; error == TIER1_SELECT_OK && level <= maximum_depth; level += 1)
     {
@@ -1327,6 +1474,7 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             failed_node = node;
         }
     }
+    Tier1SelectRequests requests = { .vector = plan != 0 && plan->vector };
     if (error == TIER1_SELECT_OK)
     {
         bool ok = true;
@@ -1340,6 +1488,9 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             error = TIER1_SELECT_ERROR_MEMORY;
         }
     }
+    // Each node's records go in as selected, their immediates' requests with them; a node whose registers allocation
+    // didn't give stops the loop.
+    uint32_t emitted = 0;
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         code.node_first[node] = code.count;
@@ -1360,30 +1511,15 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             if (!allocated)
             {
                 error = TIER1_SELECT_ERROR_ALLOCATION;
+                failed_node = node;
             }
-            if (error == TIER1_SELECT_OK)
+            else
             {
                 const Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
                 const Tier1SelectRecords selected = tier1_select_expand(&holes);
-                for (uint32_t r = 0; error == TIER1_SELECT_OK && r < selected.count; r += 1)
-                {
-                    const X86Instruction instruction = selected.records[r];
-                    if (x86_validate(&instruction, 1) != 1)
-                    {
-                        error = TIER1_SELECT_ERROR_INVALID;
-                    }
-                    else if (!x86_target_form_allowed(allowed_forms, instruction.form))
-                    {
-                        error = TIER1_SELECT_ERROR_TARGET;
-                    }
-                    else
-                    {
-                        code.records[code.count] = instruction;
-                        code.cost_ids[code.count] = x86_zen5_id(&instruction);
-                        code.unknown_costs += code.cost_ids[code.count] == 0;
-                        code.count += 1;
-                    }
-                }
+                memcpy(code.records + code.count, selected.records, selected.count * sizeof(X86Instruction));
+                tier1_select_requests_add(&requests, &selected, code.count, code.records);
+                code.count += selected.count;
                 if (function->op[node] == IR_BR)
                 {
                     code.branches[code.branch_count] = code.count - 1;
@@ -1397,10 +1533,33 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
                     code.targets[code.branch_count++] = function->block_offsets[function->c[node]];
                 }
             }
-            if (error != TIER1_SELECT_OK)
+        }
+        emitted = error == TIER1_SELECT_OK ? node + 1 : node;
+    }
+    // The records' immediates' forms, chosen for the function in batches, then every record checked in order: an
+    // invalid record or a form the target doesn't take is its node's failure, before a later node's allocation's, as
+    // when each node's records were checked before the next node was selected.
+    if (error == TIER1_SELECT_OK || error == TIER1_SELECT_ERROR_ALLOCATION)
+    {
+        tier1_select_requests_flush(&requests, code.records);
+        code.node_first[emitted] = code.count;
+        const uint32_t valid = (uint32_t)x86_validate(code.records, code.count);
+        uint32_t r = 0;
+        while (r < valid && x86_target_form_allowed(allowed_forms, code.records[r].form))
+        {
+            code.cost_ids[r] = x86_zen5_id(&code.records[r]);
+            code.unknown_costs += code.cost_ids[r] == 0;
+            r += 1;
+        }
+        if (r < code.count)
+        {
+            uint32_t node = 0;
+            while (code.node_first[node + 1] <= r)
             {
-                failed_node = node;
+                node += 1;
             }
+            error = r < valid ? TIER1_SELECT_ERROR_TARGET : TIER1_SELECT_ERROR_INVALID;
+            failed_node = node;
         }
     }
     if (error == TIER1_SELECT_OK)

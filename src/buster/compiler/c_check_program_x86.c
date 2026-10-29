@@ -1350,11 +1350,11 @@ static X86Instruction check_x86_lower_record(uint32_t form, uint8_t reg, uint8_t
     return (X86Instruction){ .form = (uint16_t)form, .reg = reg, .vvvv = vvvv, .rm = rm, .mode = BUSTER_X86_REGISTER_DIRECT };
 }
 
-// The vector moves of a width (16, 32 or 64 bytes) into VECTOR(0): VMOVDQU64's, which a row ends with where its
-// instruction leaves its result in another register.
+// The vector moves of a width (16, 32 or 64 bytes, or 16's for a vector of 4 or 8) into VECTOR(0): VMOVDQU64's, which a
+// row ends with where its instruction leaves its result in another register.
 static X86Instruction check_x86_lower_move_result(uint32_t bytes, uint8_t from)
 {
-    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const uint32_t width = bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
     return check_x86_lower_record(check_x86_lower_move(8, width, false), BUSTER_TIER0_ROLE_VECTOR(0), 0, from);
 }
 

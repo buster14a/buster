@@ -113,7 +113,18 @@ temporary reachable row. With `row_bytes` rounded to a 512-bit boundary, the
 vector path requires `(2 * blocks + 1) * row_bytes <= 16 MiB`. Above this bound,
 `ssa_build` uses the scalar constructor and requests only the shared scalar
 dominator tree. It does not request frontier or loop matrices on that path.
-This is a storage policy, **not a measured performance crossover**.
+This is a storage policy, **not a measured performance crossover**. The IR's
+promotion (`ssa_ir_promote`) adds one (#787): its vector path's phi placement,
+entry definitions and renaming each pass over every (block, slot) cell, where the
+scalar constructor's work follows the instructions, so a function of more than
+16,384 cells (`BUSTER_SSA_IR_VECTOR_CELLS`) takes the scalar constructor. On the
+9700X, timed per function on the frozen `sqlite3.c` (`benchmark-ir-source
+--functions`), the vector path was up to 9% faster from 2^5 to 2^14 cells, even
+below them, and slower from 2^15, by 67% on `sqlite3VdbeExec`'s 763,840 cells.
+Every bound from 8,192 to 32,768 cells gave the corpus's promotion time within
+−0.28% to +0.26% of the 16,384-cell bound's; the power-of-two bounds 8,192 and
+32,768 were within 0.14%. See the
+[retained measurement record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29).
 
 The shared analyzer requires distinct output and temporary arenas. SSA carves
 two disjoint, bounded views from its existing scratch tail: a size-derived

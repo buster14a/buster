@@ -83,7 +83,10 @@ a digit first and reject signs, leading whitespace and overflow.
 
 This additive test tool does not change IR, verifier, optimizer or interpreter
 implementations. Its first structural subset is scalar IR; unfamiliar opcodes,
-vector/mask values and unsupported signatures refuse before candidate changes.
+vector/mask values (including an unused vector-constant pool) and unsupported
+signatures refuse before candidate changes. Borrowed vector payloads are covered
+by ownership preflight before verifier allocations; neither arena's writable
+tail may overlap any part of that pool.
 So does function metadata the rebuild doesn't remap: labels, by-value
 aggregates' ABI records (the function's own and its calls') and a variadic
 definition's incoming frame. `ir_rebuild` returns `IR_ERROR_METADATA` and

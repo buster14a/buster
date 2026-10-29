@@ -11,6 +11,81 @@ struct IrReduceOwnershipPlan
     uint8_t* spans[5];
 };
 
+// #732's sparse vector payload belongs to the source even when every instruction is scalar. Refuse it before
+// scalar-only copies, and protect its entire borrowed span before either verifier can allocate into a writable tail.
+static void ir_reduce_test_simd_ownership(IrReduceTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(1) << 20);
+    Arena output = arena_reserve(UINT64_C(1) << 20);
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    Arena verification = arena_reserve(UINT64_C(1) << 20);
+    const IrSizes sizes = { .instruction_count = 1, .block_count = 1, .vector_constant_count = 2 };
+    IrFunction source = { 0 };
+    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL && verification.base != NULL &&
+                       ir_create(&input, &sizes, &source) == IR_OK;
+    ir_reduce_test_expect(test, ready, "unused vector-pool fixture storage");
+    if (ready)
+    {
+        source.result_type = IR_VOID;
+        source.block_offsets[0] = 0;
+        source.block_offsets[1] = 1;
+        source.op[0] = IR_RET;
+        source.type[0] = IR_VOID;
+        source.flags[0] = 0;
+        source.alignment_log2[0] = 0;
+        source.a[0] = BUSTER_IR_NONE;
+        source.b[0] = BUSTER_IR_NONE;
+        source.c[0] = BUSTER_IR_NONE;
+        IrSimdValue* own = source.vector_constants;
+        for (uint32_t placement = 0; placement < 5; placement += 1)
+        {
+            memset(output.base, 0xa4, 384);
+            memset(scratch.base, 0xb5, 384);
+            output.length = 128;
+            scratch.length = 128;
+            // The crossing cases begin in a retained prefix: only the second payload overlaps the writable tail.
+            source.vector_constants = placement == 0 ? own :
+                                      (IrSimdValue*)((placement & 1 ? output.base : scratch.base) + (placement < 3 ? 128 : 64));
+            memset(source.vector_constants, 0x73, 2 * sizeof(IrSimdValue));
+            const bool verified = ir_verify_complete(&source, &verification, true).error == IR_OK &&
+                                  ir_verify_complete(&source, &verification, false).error == IR_OK;
+            ir_reduce_test_expect(test, verified && ir_function_has_simd(&source) && ir_function_has_simd_scalar(&source),
+                                  "scalar return with an unused vector pool is valid and still a SIMD function");
+            uint8_t out_before[384];
+            uint8_t temp_before[384];
+            uint8_t pool_before[2 * sizeof(IrSimdValue)];
+            memcpy(out_before, output.base, sizeof(out_before));
+            memcpy(temp_before, scratch.base, sizeof(temp_before));
+            memcpy(pool_before, source.vector_constants, sizeof(pool_before));
+            IrFunction unpublished;
+            memset(&unpublished, 0x59, sizeof(unpublished));
+            const IrFunction unchanged = unpublished;
+            const IrCheck check = verified ? ir_rebuild(&source, NULL, &output, &scratch, &unpublished) : (IrCheck){ .error = IR_OK };
+            const uint64_t checked_scratch = placement == 0 ? 128 : sizeof(temp_before);
+            ir_reduce_test_expect(test, check.error == (placement == 0 ? IR_ERROR_TYPE : IR_ERROR_STRUCTURE) &&
+                                  output.length == 128 && scratch.length == 128 && memcmp(&unpublished, &unchanged, sizeof(unpublished)) == 0 &&
+                                  memcmp(out_before, output.base, sizeof(out_before)) == 0 && memcmp(temp_before, scratch.base, checked_scratch) == 0 &&
+                                  memcmp(pool_before, source.vector_constants, sizeof(pool_before)) == 0,
+                                  "rebuild refuses the whole SIMD function and protects a vector pool in either writable tail");
+            uint32_t calls = 0;
+            const IrReduceLimits limits = ir_reduce_limits();
+            IrReduceResult result;
+            memset(&result, 0x6a, sizeof(result));
+            const IrReduceResult before = result;
+            const IrReduceStatus status = verified ? ir_reduce(&source, ir_reduce_test_counting, &calls, &limits, &output, &scratch, &result) :
+                                                     IR_REDUCE_COMPLETE;
+            ir_reduce_test_expect(test, status == IR_REDUCE_INVALID && calls == 0 && output.length == 128 && scratch.length == 128 &&
+                                  memcmp(&result, &before, sizeof(result)) == 0 && memcmp(out_before, output.base, sizeof(out_before)) == 0 &&
+                                  memcmp(temp_before, scratch.base, checked_scratch) == 0 && memcmp(pool_before, source.vector_constants, sizeof(pool_before)) == 0,
+                                  "reducer protects the whole borrowed vector pool before allocation and never shows a stripped copy to its predicate");
+        }
+    }
+    arena_release(&verification);
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static bool ir_reduce_test_ownership_plan(const IrFunction* source, Arena* scratch, IrReduceOwnershipPlan* result)
 {
     const uint64_t mark = scratch->length;
