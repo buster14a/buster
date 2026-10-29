@@ -153,8 +153,9 @@
 //   - STACK_RESTORE: pops the operand (U64), a position STACK_SAVE pushed in this function, and releases what ALLOCA
 //     has reserved since (`class` U64; `value` 0): the end of a variable-length array's scope.
 //   - JUMP_INDIRECT: pops the operand (U64), the address of one of the function's labels (Tier0Function.label_entries),
-//     and goes there (`class` U64; `value` 0): GNU C's goto *. At statement level, as the labels are: an address of a
-//     label is a GLOBAL_ADDRESS of the symbol a front end defines at its record (Tier0Code.label_records).
+//     and goes there (`class` U64; `value` 0): GNU C's goto *, or a jump table's dispatch, which reaches only its table's
+//     labels (Tier0Function.table_jumps). At statement level, as the labels are: an address of a label is a
+//     GLOBAL_ADDRESS of the symbol a front end defines at its record (Tier0Code.label_records).
 //   - X86: the machine operation `value` of Tier0Function.operations (Tier0Operation, a short run of records), which
 //     pops its operands, the first pushed first, of the classes its row says, and pushes its result, of the row's result
 //     class (`class`, or nothing for VOID): a vector operation, an intrinsic's instruction.
@@ -407,7 +408,11 @@ struct Tier0Operation
 // The labels whose addresses the code takes (GNU C's labels as values, which JUMP_INDIRECT goes to) are an optional
 // column too, 0 for a function without them: label_entries holds label_count entries' indices, each a statement's start
 // or the count for the function's end. Tier0Code.label_records gives each one's first record, where the front end
-// defines the symbol whose GLOBAL_ADDRESS is the label's address.
+// defines the symbol whose GLOBAL_ADDRESS is the label's address. Jump tables (#785) are optional columns of their own,
+// table_count of them: label_tables gives each label its table, 1 + t for table t's and 0 for a label whose address the
+// code takes, table t's labels after table t - 1's, and table_jumps each table's JUMP_INDIRECT, its entry's index, in
+// increasing order. A table's jump reaches its table's labels alone, and any other JUMP_INDIRECT (a goto *) the labels of
+// no table; Tier 0's code takes every label for a target of every JUMP_INDIRECT all the same.
 //
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
 // compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
@@ -458,6 +463,9 @@ struct Tier0Function
     bool vectors;
     const uint32_t* label_entries;
     uint32_t label_count;
+    const uint32_t* label_tables;
+    const uint32_t* table_jumps;
+    uint32_t table_count;
     bool entry_records;
     bool choice_requests;
 };
@@ -3049,6 +3057,28 @@ struct Tier0Entries
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
 {
     return ((labels[entry >> 6] >> (entry & 63)) & 1) != 0;
+}
+
+// The jump tables' columns (Tier0Function.table_jumps): each table's jump a JUMP_INDIRECT, after the one before; each
+// label of no table or of one of them, table t's labels after table t - 1's (each table's at its dispatch); and each table
+// with a label.
+static bool tier0_jump_tables_valid(const Tier0Function* function)
+{
+    const uint32_t tables = function->table_count;
+    bool valid = tables == 0 || (function->label_tables != 0 && function->table_jumps != 0 && function->label_entries != 0);
+    for (uint32_t t = 0; valid && t < tables; t += 1)
+    {
+        const uint32_t entry = function->table_jumps[t];
+        valid = entry < function->count && function->kinds[entry] == BUSTER_TYPED_JUMP_INDIRECT && (t == 0 || function->table_jumps[t - 1] < entry);
+    }
+    uint32_t next = 1;
+    for (uint32_t k = 0; valid && tables != 0 && k < function->label_count; k += 1)
+    {
+        const uint32_t table = function->label_tables[k];
+        valid = table == 0 || table == next - 1 || table == next;
+        next += valid && table == next ? 1 : 0;
+    }
+    return valid && next == tables + 1;
 }
 
 // The labels JUMP_INDIRECT may go to (Tier0Function.label_entries), a bit each, into `labels`.
@@ -9023,6 +9053,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
         {
             tier0_reject(&validator, 0, "the labels' count without their entries");
         }
+        if (!tier0_jump_tables_valid(function))
+        {
+            tier0_reject(&validator, 0, "jump tables whose jumps aren't JUMP_INDIRECTs in order, or whose labels aren't in their tables' order");
+        }
         for (uint32_t k = 0; k < function->label_count && function->label_entries != 0 && validator.check.error == TIER0_OK; k += 1)
         {
             const uint32_t target = function->label_entries[k];
@@ -11416,7 +11450,8 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t local_count = function->local_count;
     const uint32_t call_count = function->call_count;
     // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
-    bool valid = !function->vectors && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) && tier0_scan_tables(function);
+    bool valid = !function->vectors && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) && tier0_jump_tables_valid(function) &&
+                 tier0_scan_tables(function);
     Scratch scratch = scratch_begin(0);
     // Per entry, the depth before it (and room for a block's store past the last); per entry and the end, the depth the
     // forward arrivals there bring (UNREACHED before the first) and what else they bring: the producer just below what

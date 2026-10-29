@@ -645,6 +645,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             {
                 sizes.extra_count += (uint64_t)source->c[node] * 2 + 1;
             }
+            else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
+            {
+                sizes.extra_count += source->c[node];
+            }
         }
         call += calls;
     }
@@ -785,6 +789,13 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         const uint32_t count = source->c[node] * 2 + 1;
                         memcpy(rewritten.extra + extra, source->extra + source->b[node], (uint64_t)count * 4);
                         extra += count;
+                    }
+                    else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
+                    {
+                        // Its labels' list (#785), the caller's label indices, as its blocks are.
+                        rewritten.b[cursor] = extra;
+                        memcpy(rewritten.extra + extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
+                        extra += source->c[node];
                     }
                     cursor += 1;
                 }
