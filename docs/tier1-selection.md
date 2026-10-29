@@ -31,9 +31,9 @@ patterns are:
   into registers, while stores write exactly one/two bytes. Larger displacements
   return an unsupported result until materialization is implemented.
 - A nonvolatile load whose only use is an arithmetic consumer in its block
-  can become that consumer's memory operand (the right operand of a
-  subtraction, either of a commutative operation), its access moved to the
-  consumer (#141). It moves past the nodes between them that neither write
+  can become that consumer's memory operand (the right operand, or a
+  commutative operation's left where its right isn't a load), its access moved
+  to the consumer (#141). It moves past the nodes between them that neither write
   memory, call nor access a volatile object (arithmetic, constants, addresses,
   other nonvolatile loads) and past none that do: a store to any address, a
   call, a volatile load or store. A pass of its own after the plan's pass over

@@ -921,10 +921,11 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
                 tier1_select_add_candidate(forest, node, &candidates, folded);
             }
         }
-        // The load the memory operand takes: the right operand's, or for a commutative operation either's.
-        const bool commutative = tier1_select_commutative((X86Operation)base.operation);
-        const uint32_t load = tier1_select_load_folds(forest, node, b) ? b : commutative && tier1_select_load_folds(forest, node, a) ? a : BUSTER_IR_NONE;
-        if (load != BUSTER_IR_NONE)
+        // The load the memory operand takes: the right operand's, or for a commutative operation the left's where the
+        // right isn't a load. Trying the left after a right load that can't fold cost the scalar twin's plan 2.5% on its
+        // shapes, its inlined code's registers and frame laid out otherwise, for a case code generators rarely make.
+        const uint32_t load = function->op[b] == IR_LOAD ? b : tier1_select_commutative((X86Operation)base.operation) ? a : BUSTER_IR_NONE;
+        if (tier1_select_load_folds(forest, node, load))
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_LOAD_OPERAND;
