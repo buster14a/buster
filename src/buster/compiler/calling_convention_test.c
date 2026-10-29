@@ -11,6 +11,8 @@
 // run_calling_convention_tests. The checks, in this order:
 //   - Merge: clang's merge and post-merge, written again here as clang writes them, against the module's on every pair
 //     of classes and both kinds of size.
+//   - Builtin projection: every column against fresh scalar classification, both char modes and all vector widths,
+//     bounded logical prefixes, small/reserved capacities, poisoned padding/tails and first-derived scheduling.
 //   - Fixtures: types whose classes, passing, slots and results clang's IR and LLVM's fixed stack objects show
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
 //     them; abi_test_build_split_vectors the vectors LLVM breaks up or packs that aren't _Atomic, and records of them),
@@ -3168,6 +3170,149 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
             abi_test_expect(tally, supported && slots && totals, "fixtures", detail);
         }
     }
+}
+
+// Recompute the builtin facts from the TypeTable, without reading the generated rows. The scalar classification
+// and finishing rules are independent of the immutable projection and catch stale facts when either module changes.
+static void abi_test_builtin_recompute(AbiTable* abi, const TypeTable* types)
+{
+    const uint32_t builtins = types->types.count < BUSTER_TYPE_BUILTIN_COUNT ? types->types.count : BUSTER_TYPE_BUILTIN_COUNT;
+    memset(abi->rows, 0, (uint64_t)builtins * BUSTER_ABI_ROW_BYTES);
+    memset(abi->pass, 0, (uint64_t)abi->capacity * sizeof(*abi->pass));
+    memset(abi->stack_bytes, 0, (uint64_t)builtins * sizeof(*abi->stack_bytes));
+    memset(abi->alignment_log2, 0, builtins);
+    memset(abi->storage, 0, abi->capacity);
+    memset(abi->layout, 0, (uint64_t)abi->capacity * sizeof(*abi->layout));
+    memset(abi->results, 0, (uint64_t)builtins * sizeof(*abi->results));
+    abi->larger = 0;
+    abi->rare = 0;
+    for (uint32_t a = 0; a < BUSTER_ABI_CLASS_COUNT; a += 1)
+    {
+        for (uint32_t b = 0; b < BUSTER_ABI_CLASS_COUNT; b += 1)
+        {
+            abi->merge[a * BUSTER_ABI_CLASS_COUNT + b] = abi_merge_class((uint8_t)a, (uint8_t)b);
+        }
+    }
+    for (uint32_t index = 1; index < builtins; index += 1)
+    {
+        if (types->types.kind[index] != BUSTER_TYPE_KIND_NONE)
+        {
+            for (uint32_t offset = 0; offset < BUSTER_ABI_ROW_BYTES; offset += 1)
+            {
+                abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset] = abi_row_entry(abi, types, index, offset);
+            }
+            abi_finish(abi, types, index);
+        }
+    }
+}
+
+static bool abi_test_builtin_range(const Arena* arena, const void* pointer, uint64_t bytes)
+{
+    const uintptr_t base = (uintptr_t)arena->base;
+    const uintptr_t address = (uintptr_t)pointer;
+    const bool result = address >= base && address - base <= arena->capacity && bytes <= arena->capacity - (address - base);
+    return result;
+}
+
+// Prefixes and reservations are deliberately independent: zero/small tables remain valid, a future row is not
+// seeded before its type exists, and a refusal writes none of the arena. Poisoned padding and tails check every copy.
+static bool abi_test_builtin_rows(void)
+{
+    AbiTestTally tally = { 0 };
+    TypeTestTable types = { 0 };
+    const bool opened = type_test_table_open(&types, 2);
+    const TypeId pointer = opened ? type_pointer(&types.table, BUSTER_TYPE_CHAR) : 0;
+    const uint64_t capacity = abi_capacity_bytes(BUSTER_TYPE_BUILTIN_COUNT + 2) + 64;
+    Arena actual = arena_reserve(capacity);
+    Arena reference = arena_reserve(capacity);
+    Arena expected = arena_reserve(capacity);
+    const bool room = opened && pointer != 0 && actual.base != 0 && reference.base != 0 && expected.base != 0;
+    abi_test_expect(&tally, room, "builtins", "builtin projection tables can be made");
+    const uint32_t counts[] = { 0, 1, 2, 3, 4, 31, 32, 35, 36, 54, 55, 63, 64, 65 };
+    const uint32_t widths[] = { 0, 15, 16, 32, 64, 128 };
+    for (uint32_t mode = 0; room && mode < 2; mode += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+        {
+            for (uint32_t requested = 0; requested <= BUSTER_TYPE_BUILTIN_COUNT + 2; requested += 1)
+            {
+                for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(widths); w += 1)
+                {
+                    TypeTable view = types.table;
+                    view.char_unsigned = mode != 0;
+                    view.types.count = counts[c];
+                    view.types.capacity = BUSTER_TYPE_BUILTIN_COUNT + 1;
+                    memset(actual.base, 0xa5, actual.capacity);
+                    memset(reference.base, 0xa5, reference.capacity);
+                    memset(expected.base, 0xa5, expected.capacity);
+                    actual.length = 64;
+                    reference.length = 64;
+                    AbiTable got = { 0 };
+                    AbiTable oracle = { 0 };
+                    const bool valid = requested >= view.types.count && requested <= view.types.capacity &&
+                                       (widths[w] == 16 || widths[w] == 32 || widths[w] == 64);
+                    const bool initialized = abi_initialize_types(&got, &actual, &view, widths[w], requested);
+                    abi_test_expect(&tally, initialized == valid, "builtins", "prefix/count/width acceptance matches the contract");
+                    if (initialized)
+                    {
+                        const bool initialized_reference = abi_initialize_types(&oracle, &reference, &view, widths[w], requested);
+                        abi_test_expect(&tally, initialized_reference, "builtins", "the independent recomputation has room");
+                        if (initialized_reference)
+                        {
+                            abi_test_builtin_recompute(&oracle, &view);
+                            const uint32_t prefix = view.types.count < BUSTER_TYPE_BUILTIN_COUNT ? view.types.count : BUSTER_TYPE_BUILTIN_COUNT;
+                            bool bounds = true;
+#define BUSTER_ABI_TEST_BUILTIN(field, bytes) \
+                            bounds = bounds && abi_test_builtin_range(&actual, got.field, bytes); \
+                            if (bounds) \
+                            { \
+                                abi_test_expect(&tally, memcmp(got.field, oracle.field, bytes) == 0, "builtins", #field " matches fresh scalar classification"); \
+                                memcpy(expected.base + ((uint8_t*)got.field - actual.base), oracle.field, bytes); \
+                            }
+                            BUSTER_ABI_TEST_BUILTIN(rows, (uint64_t)prefix * BUSTER_ABI_ROW_BYTES);
+                            BUSTER_ABI_TEST_BUILTIN(pass, (uint64_t)requested * sizeof(*got.pass));
+                            BUSTER_ABI_TEST_BUILTIN(stack_bytes, (uint64_t)prefix * sizeof(*got.stack_bytes));
+                            BUSTER_ABI_TEST_BUILTIN(alignment_log2, prefix);
+                            BUSTER_ABI_TEST_BUILTIN(storage, requested);
+                            BUSTER_ABI_TEST_BUILTIN(layout, (uint64_t)requested * sizeof(*got.layout));
+                            BUSTER_ABI_TEST_BUILTIN(results, (uint64_t)prefix * sizeof(*got.results));
+#undef BUSTER_ABI_TEST_BUILTIN
+                            abi_test_expect(&tally, bounds, "builtins", "all column slices remain inside the reservation");
+                            abi_test_expect(&tally, memcmp(actual.base, expected.base, actual.capacity) == 0, "builtins", "padding and unclassified tails remain untouched");
+                            abi_test_expect(&tally, memcmp(got.merge, oracle.merge, sizeof(got.merge)) == 0 && got.larger == oracle.larger &&
+                                            got.rare == oracle.rare && got.capacity == requested && got.vector_bytes == widths[w],
+                                            "builtins", "merge/state/target policy matches the independent recomputation");
+                            if (view.types.count > BUSTER_TYPE_BUILTIN_COUNT)
+                            {
+                                const uint32_t classified = abi_classify_all(&got, &view);
+                                abi_classify_scalar(&oracle, &view, &pointer, 1);
+                                const uint32_t index = pointer >> BUSTER_TYPE_INDEX_SHIFT;
+                                const bool same = memcmp(got.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, oracle.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES) == 0 &&
+                                                  got.pass[index] == oracle.pass[index] && got.stack_bytes[index] == oracle.stack_bytes[index] &&
+                                                  got.alignment_log2[index] == oracle.alignment_log2[index] && got.storage[index] == oracle.storage[index] &&
+                                                  got.layout[index] == oracle.layout[index] && memcmp(&got.results[index], &oracle.results[index], sizeof(AbiReturn)) == 0;
+                                abi_test_expect(&tally, classified == 1 && same && abi_classify_all(&got, &view) == 0, "builtins", "the first derived row still uses the dependency scheduler exactly once");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        abi_test_expect(&tally, actual.length == 64 && memcmp(actual.base, expected.base, actual.capacity) == 0,
+                                        "builtins", "refusal restores the arena without writing a row");
+                    }
+                }
+            }
+        }
+    }
+    arena_release(&expected);
+    arena_release(&reference);
+    arena_release(&actual);
+    if (opened)
+    {
+        type_test_table_close(&types);
+    }
+    abi_test_report("calling convention builtin rows", tally);
+    return tally.failures == 0;
 }
 
 // Plain char extends as the table's char is signed (TypeTable.char_unsigned, -funsigned-char), as clang's does, and so
@@ -7631,6 +7776,7 @@ static int run_calling_convention_tests(int argc, char** argv)
     else
     {
         bool passed = abi_test_merge();
+        passed = abi_test_builtin_rows() && passed;
         passed = abi_test_dependencies() && passed;
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
