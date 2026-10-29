@@ -4275,6 +4275,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 0, 3);
     check_test_program_boundary(test, "int tested(int n){_Complex char z=n;_BitInt(129) w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-bit-int-129", true,
                                 true, 0, 3);
+    // Their operations' room (check_lower_limb_room): a chain of sums of complex _BitInt(2100)s, each part 33 limbs, and
+    // every operation on them, a quotient's and an update's computations a part among them, all lowered.
+    check_test_program_boundary(test, "typedef __typeof__((_Complex char)0+(unsigned _BitInt(2100))0) C;C f(C a,C b){return a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b;}",
+                                "complex-bit-int-2100-chain", true, true, 0, 0);
+    check_test_program_boundary(test,
+                                "typedef __typeof__((_Complex char)0+(_BitInt(2100))0) C;"
+                                "C g(C a,C b,int n){C x=a*b;x/=a;x-=b;x*=b;x=-x;x=~x;x+=n;return x==a?a/b:x*a-b/a;}",
+                                "complex-bit-int-2100-operations", true, true, 0, 1);
     // A promoted K&R parameter now converts from double to its declared float on entry.
     check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
     check_test_program_boundary(test, "__float128 g;int tested(int n){__float128 x=n;g=x*x;return g>1;}", "float128-lowering", true, true, 1, 1);

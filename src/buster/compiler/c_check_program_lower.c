@@ -760,12 +760,25 @@ static bool check_lower_limb_types(const TypeTable* types)
     return found;
 }
 
+// The room a node of `type` takes in check_lower_limb_room, in units of 64 entries a limb, and whether it is complex: a
+// _BitInt's past 128 bits its limbs; a complex one's of such parts four times its element's, as both its parts go
+// through the element's computations (a quotient's four products, two sums and a quotient a part,
+// check_lower_complex_parts_compute) and an update converts both of them there and back; none for any other type.
+static uint32_t check_lower_limb_room_units(const TypeTable* types, TypeId type, bool* complex)
+{
+    const TypeId element = check_lower_complex_element(types, type);
+    const uint32_t units = element != 0 ? 4 * check_lower_limb_type(types, element).count : check_lower_limb_type(types, type).count;
+    *complex = *complex || (element != 0 && units != 0);
+    return units;
+}
+
 // The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound), none in a unit without
 // one (check_lower_limb_types): each node that computes, converts or updates one writes up to 64 entries a limb
 // (check_lower_limb_arithmetic and the rest go a limb at a time, an update converting, computing and converting back),
-// the most limbs of its value's, its operands' and their converted types, and takes up to 16 temporaries and frame
-// objects (`locals`). Out of line, as few units have such a type: the preparation's own loops compile as they do
-// without it.
+// the most of its value's, its operands' and their converted types (check_lower_limb_room_units, four times a complex
+// one's element's), and takes up to 16 temporaries and frame objects (`locals`), or 128 for a complex one's, whose
+// parts' computations each take their own. Out of line, as few units have such a type: the preparation's own loops
+// compile as they do without it.
 static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -777,16 +790,17 @@ static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgr
     for (uint32_t node = 0; node < count; node += 1)
     {
         const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
-        uint32_t limbs = check_lower_limb_type(types, stream->values[node].type).count;
+        bool complex = false;
+        uint32_t units = check_lower_limb_room_units(types, stream->values[node].type, &complex);
         for (uint32_t i = 0; i < 2; i += 1)
         {
-            const uint32_t own = operands[i] < graph->count ? check_lower_limb_type(types, stream->values[operands[i]].type).count : 0;
-            const uint32_t converted = check_lower_limb_type(types, stream->conversions[node].operands[i].type).count;
-            limbs = own > limbs ? own : limbs;
-            limbs = converted > limbs ? converted : limbs;
+            const uint32_t own = operands[i] < graph->count ? check_lower_limb_room_units(types, stream->values[operands[i]].type, &complex) : 0;
+            const uint32_t converted = check_lower_limb_room_units(types, stream->conversions[node].operands[i].type, &complex);
+            units = own > units ? own : units;
+            units = converted > units ? converted : units;
         }
-        entries += 64 * (uint64_t)limbs;
-        *locals += limbs != 0 ? 16 : 0;
+        entries += 64 * (uint64_t)units;
+        *locals += complex ? 128 : units != 0 ? 16 : 0;
     }
     return entries;
 }
