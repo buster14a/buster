@@ -161,6 +161,7 @@ rm "$flags_file" "$sources_file"
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler test-ir-parse
+./build/compiler test-ir-metamorphic --seed 731 --count 6
 ./build/compiler test-interpreter
 ./build/compiler test-interpreter-native
 ./build/compiler test-interpreter-link
