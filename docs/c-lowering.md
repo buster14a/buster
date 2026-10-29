@@ -143,9 +143,15 @@ definition. Its flags and edges:
 
 - **Roots:** a definition with external linkage, unless it is inline-only; and
   one marked `used`, `retain`, `constructor` or `destructor`. A C99 inline
-  definition without an `extern` declaration in the unit is inline-only, and so
-  is a GNU `extern inline` one (with `gnu_inline`): its calls and addresses go to
-  the external symbol.
+  definition without an `extern` declaration in the unit is inline-only. GNU
+  inline semantics apply in C89 modes, under `-fgnu89-inline`, or for a function
+  carrying `gnu_inline`. An `extern inline` definition is inline-only unless a
+  declaration of that function is plain `inline`; a plain inline definition is
+  emitted. Inline-only calls and addresses go to the external symbol. Like Clang,
+  `-fno-gnu89-inline` turns the option off in C99 and later modes but does not
+  change C89's GNU inline semantics. The checker currently rejects a GNU
+  `extern inline` definition followed by an ordinary definition of the same
+  function in one translation unit; this selection change does not accept it.
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`
