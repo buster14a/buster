@@ -23,8 +23,8 @@
 // to the first lane's arrival; the others' wake-up, from the first lane's arrival to the last one's, which on one lane
 // is none; and the lanes' arenas before they start, reserved or taken back (`arenas`); and in
 // how many passes the first lane read the largest body (`largest_first`); and where more than one lane read the bodies
-// of a unit that isn't large, the time this thread took to fault in the rare columns' huge pages before the lanes
-// started, and how many 2 MB regions it faulted in (`fault`, `faulted`). The unit's line gives its bodies' tokens, the
+// of a unit that isn't large, how many 2 MB regions of the rare columns' huge pages the lanes claimed (`claimed`,
+// check_input_rare_claim). The unit's line gives its bodies' tokens, the
 // largest body's and the largest of the others' (`second_body`), the top level's tokens, the bodies' tokens that pay
 // for a lane by the reader's rule (`lane_tokens`) and whether the unit is large (CheckDeferred.large): from
 // --base-page-tokens N tokens on, which for the measurements of #847 takes the place of
@@ -69,8 +69,7 @@ struct CheckDeferredSample
     uint64_t dispatch[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t wake[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t arenas[BUSTER_CHECK_SOURCE_MAX_PASSES];
-    uint64_t fault[BUSTER_CHECK_SOURCE_MAX_PASSES];
-    uint64_t faulted[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t claimed[BUSTER_CHECK_SOURCE_MAX_PASSES];
     // The passes in which the first lane read the largest body (the first of the largest in source order).
     uint32_t largest_first;
 };
@@ -193,8 +192,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 sample->dispatch[pass] = deferred.dispatch_ns;
                 sample->wake[pass] = deferred.wake_ns;
                 sample->arenas[pass] = deferred.arenas_ns;
-                sample->fault[pass] = deferred.fault_ns;
-                sample->faulted[pass] = deferred.faulted;
+                sample->claimed[pass] = deferred.claimed;
                 sample->largest_first += deferred.largest_lane == 0;
                 merged &= !deferred.unsupported;
                 reason = deferred.unsupported ? deferred.reason : reason;
@@ -229,7 +227,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
             const CheckDeferredSample* sample = samples + way;
             printf("checker-deferred:   lanes=%u active=%" PRIu64 " copies=%" PRIu64 " whole=%.2f top=%.2f environment=%.3f walks=%.2f positions=%.3f"
                    " lanes_span=%.2f merge=%.2f rest=%.2f ns/token, positions=%.1f ns/body, copy=%" PRIu64 " ns/lane, dispatch=%" PRIu64 " ns,"
-                   " wake=%" PRIu64 " ns, arenas=%" PRIu64 " ns, fault=%" PRIu64 " ns, faulted=%" PRIu64 ", largest_first=%u/%u\n",
+                   " wake=%" PRIu64 " ns, arenas=%" PRIu64 " ns, claimed=%" PRIu64 ", largest_first=%u/%u\n",
                    way == 0 ? 1 : lanes, check_source_median(sample->active, count), check_source_median(sample->copies, count),
                    (double)check_source_median(sample->whole, count) / tokens,
                    (double)check_source_median(sample->top, count) / tokens, (double)check_source_median(sample->environment, count) / tokens,
@@ -237,7 +235,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                    (double)check_source_median(sample->lanes, count) / tokens, (double)check_source_median(sample->merge, count) / tokens,
                    (double)check_source_median(sample->rest, count) / tokens, (double)check_source_median(sample->positions, count) / per_body,
                    check_source_median(sample->copy, count), check_source_median(sample->dispatch, count), check_source_median(sample->wake, count),
-                   check_source_median(sample->arenas, count), check_source_median(sample->fault, count), check_source_median(sample->faulted, count),
+                   check_source_median(sample->arenas, count), check_source_median(sample->claimed, count),
                    sample->largest_first, count);
             printf("checker-deferred:   lanes=%u merge's parts: replay=%.3f tables=%.3f events=%.3f tags=%.3f pass=%.3f rest=%.3f ns/token\n",
                    way == 0 ? 1 : lanes, (double)check_source_median(sample->merge_parts[0], count) / tokens,

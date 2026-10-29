@@ -57,8 +57,9 @@
 // The unit's tokens from which check_input_run's arena of rare columns is base pages where more than one lane reads the
 // bodies (check_deferred_shared, #764, #847). In a smaller unit the top level's walk faults in most of the arena's huge
 // pages, the bodies' lanes write into them at no cost, and the phases after the merge read the huge zero page where
-// nothing wrote; the rest are faulted in before the lanes start (check_deferred_fault_regions), so that no two lanes
-// clear one at once. In a larger one, the top level's walk would clear a huge page for each 2 MB its few entries fall in.
+// nothing wrote; a lane claims each of the others before its first write into it (check_input_rare_claim), so that no
+// two lanes clear one at once. In a larger one, the top level's walk would clear a huge page for each 2 MB its few
+// entries fall in.
 #define BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS 48640
 // A lane's arenas (CheckDeferredArenas), in this order in one mapping: its reader's records, its scratch and its
 // bodies' results of 64 GB each, its copy of the top level's table of 16 GB, the table's index of 4 GB and its per-name
@@ -328,10 +329,10 @@ struct CheckDeferred
     // rare columns in base pages.
     bool large;
     uint32_t base_page_tokens;
-    // The 2 MB regions of the rare columns that this thread faulted in before the lanes started, in a unit that isn't
-    // large read on more than one lane (check_deferred_fault_regions), and with `timing`, how long it took.
-    uint32_t faulted;
-    uint64_t fault_ns;
+    // Whether the lanes claimed the rare columns' 2 MB regions before their first writes into them, as in a unit that
+    // isn't large read on more than one lane (check_input_rare_claim), and how many regions they claimed.
+    bool claiming;
+    uint32_t claimed;
     uint64_t top_ns;
     uint64_t environment_ns;
     uint64_t lanes_ns;
@@ -2300,23 +2301,6 @@ static bool check_deferred_shared(const CheckDeferred* deferred)
     return deferred->planned > 1 && deferred->large;
 }
 
-// Each 2 MB region of the rare columns from `begin` to `end` (CheckInputReader.rare_begin and .rare_end) faulted in by
-// a store of the byte it holds, before more than one lane reads the bodies of a unit whose arena is huge pages: a region
-// the top level's walk wrote costs a store, and one it only read, or left untouched, gets its huge page here, where no
-// other thread clears one for it at once. A lane that wrote a region first would race the others to clear it (#764).
-// How many regions.
-static uint32_t check_deferred_fault_regions(uint8_t* begin, uint8_t* end)
-{
-    const uintptr_t region = (uintptr_t)1 << 21;
-    uint32_t regions = 0;
-    for (uintptr_t at = (uintptr_t)begin; at < (uintptr_t)end; at = (at & ~(region - 1)) + region)
-    {
-        volatile uint8_t* const byte = (volatile uint8_t*)at;
-        *byte = *byte;
-        regions += 1;
-    }
-    return regions;
-}
 
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
@@ -2420,11 +2404,16 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
     deferred->parts = valid && deferred->body_count != 0 ? parts_by_cost(deferred->costs, deferred->body_count, active, deferred->boundaries, deferred->order) : 0;
     check_deferred_primary_part(deferred);
-    // Where more than one lane will write the rare columns and they are huge pages, the regions the top level's walk
-    // left without a page of their own, faulted in before the lanes start (check_deferred_fault_regions).
-    const uint64_t fault_begin = deferred->timing ? check_deferred_now() : 0;
-    deferred->faulted = valid && active > 1 && !input->rare_columns_shared ? check_deferred_fault_regions(reader->rare_begin, reader->rare_end) : 0;
-    deferred->fault_ns = deferred->timing ? check_deferred_now() - fault_begin : 0;
+    // Where more than one lane will write the rare columns and they are huge pages, a claim word per 2 MB region of their
+    // token columns, which the lanes' readers take from this one's (check_input_rare_claim).
+    const uint64_t regions = reader->rare_end > reader->rare_begin ? (((uintptr_t)reader->rare_end - 1) >> 21) - ((uintptr_t)reader->rare_begin >> 21) + 1 : 0;
+    uint32_t* const claims = valid && active > 1 && !input->rare_columns_shared && regions != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, regions) : 0;
+    if (claims != 0)
+    {
+        memset(claims, 0, regions * sizeof(uint32_t));
+    }
+    reader->rare_claims = claims;
+    deferred->claiming = claims != 0;
     // The lanes' arenas, on this thread: those of a lane the state hasn't run reserved, the others taken back. A lane
     // without them takes its parts' bodies for source order's (check_deferred_lane_prepare).
     const uint64_t arenas_begin = deferred->timing ? check_deferred_now() : 0;
@@ -2441,6 +2430,11 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
+    reader->rare_claims = 0;
+    for (uint64_t region = 0; claims != 0 && region < regions; region += 1)
+    {
+        deferred->claimed += claims[region] == 2;
+    }
     deferred->largest_lane = valid && deferred->body_count != 0 ? deferred->results[deferred->largest_index].lane : 0;
     // The first lane arrives after lane_run's dispatch, and the last one after the others' wake-up; a lane that didn't
     // run arrived nowhere (0).

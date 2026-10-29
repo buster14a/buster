@@ -186,8 +186,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             };
             // The opener identifies declarator construction; the first bound token identifies type extents.
             // A C bound cannot begin with an array declarator opener, so these two sparse keys never collide.
+            check_input_rare_claim(reader, &reader->vla_bounds[open]);
             reader->vla_bounds[open] = index + 1;
+            check_input_rare_claim(reader, &reader->vla_bounds[first]);
             reader->vla_bounds[first] = index + 1;
+            check_input_rare_claim(reader, &reader->vla_ends[end]);
             reader->vla_ends[end] = index + 1;
         }
     }
@@ -272,8 +275,11 @@ static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint
                             .scope_end = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] : end,
                             .evaluated = reader->function_body != BUSTER_CHECK_NONE,
                         };
+                        check_input_rare_claim(reader, &reader->vla_bounds[open]);
                         reader->vla_bounds[open] = identity + 1;
+                        check_input_rare_claim(reader, &reader->vla_bounds[begin]);
                         reader->vla_bounds[begin] = identity + 1;
+                        check_input_rare_claim(reader, &reader->vla_ends[close]);
                         reader->vla_ends[close] = identity + 1;
                     }
                 }
@@ -305,6 +311,7 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first
                 (is_typedef || !array || (storage != C_NAME_STATIC && !thread_local && (!initialized || empty)));
         if (valid)
         {
+            check_input_rare_claim(reader, &reader->vla_scope_ends[declaration]);
             reader->vla_scope_ends[declaration] = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] + 1 : point + 1;
             for (uint32_t i = vla_begin; i < reader->output->vla_count; i += 1)
             {

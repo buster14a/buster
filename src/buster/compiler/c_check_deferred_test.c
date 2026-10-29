@@ -11,7 +11,7 @@
 // resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
 // lanes, the lanes the reader planned from the parser's tree before its top level's walk (CheckDeferred.planned, by
 // which, in a large unit, check_input_run's arena of rare columns is base pages or huge: #764, #847; where more than one
-// lane reads a unit that isn't large, the arena's regions faulted in before the lanes start), its reader be copied by
+// lane reads a unit that isn't large, the lanes claiming the arena's regions before their first writes), its reader be copied by
 // one of them at least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture
 // is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
@@ -1055,8 +1055,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
     static char sized[1 << 20];
     check_deferred_many(many, sizeof(many), 400);
     const uint32_t listed = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_fixtures);
-    // The rule's sides twice: as they are, units too small to be large, whose rare columns stay huge pages, faulted in
-    // before more than one lane reads; and every unit large (check_corpus_deferred_base_page_tokens 1), whose rare
+    // The rule's sides twice: as they are, units too small to be large, whose rare columns stay huge pages, which more
+    // than one lane claims before writing; and every unit large (check_corpus_deferred_base_page_tokens 1), whose rare
     // columns are base pages where more than one lane reads, and whose lanes the rule's _BASE_ constants pay for (#847).
     const uint32_t sizes = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
     const uint32_t fixtures = listed + 1 + 2 * sizes;
@@ -1109,8 +1109,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 check_corpus_deferred_every_lane = true;
                 // The rule's lanes, and the reader copied by one of them at least and by no more; and a side of the
                 // rule's bodies of the tokens it was made with, on the lanes it was made for. The rare columns are base
-                // pages where more than one lane reads a large unit, and otherwise huge pages, faulted in before the
-                // lanes start where more than one reads (#847).
+                // pages where more than one lane reads a large unit, and otherwise huge pages, which the lanes claim
+                // where more than one reads (#847): the many bodies, whose bodies declare locals, claim one at least.
                 const uint64_t top = outcome.tokens - outcome.deferred_body_tokens;
                 const bool unit_large = large || outcome.tokens >= BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS;
                 const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, top, outcome.deferred_largest_body,
@@ -1120,7 +1120,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
                 const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
                                                           outcome.deferred_large == unit_large && outcome.deferred_shared == (most > 1 && unit_large) &&
-                                                          (outcome.deferred_faulted != 0) == (most > 1 && !unit_large) &&
+                                                          outcome.deferred_claiming == (most > 1 && !unit_large) &&
+                                                          (size != 0 || f < listed || !outcome.deferred_claiming || outcome.deferred_claimed != 0) &&
                                                           outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most &&
                                                           outcome.deferred_parts == parts &&
                                                           outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(unit_large, top));
@@ -1140,7 +1141,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
                             copied ? "" : " (not the rule's lanes, those it planned before the top level's walk, the rare columns' pages for "
-                                          "them or their regions faulted in, their parts or tokens, or its reader copied by too many of them or by none)",
+                                          "them or their regions' claims, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
                             outcome.source_shared ? " (source order's rare columns in base pages)" : "");
                 }
