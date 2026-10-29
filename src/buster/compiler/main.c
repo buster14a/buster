@@ -301,6 +301,13 @@ int run_floors_benchmark(int argc, char** argv);
 #include "buster/compiler/branch_sizing_test.c"
 int run_branch_sizing_benchmark(int argc, char** argv);
 
+// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
+// and the value-preserving form choice), before the assembler's matcher, which takes its values' immediates from it.
+// Its tests, for the test-x86-semantics command, follow the assembler's (they take the encoder's tests' printer and
+// branch sizing's tests' runner, and check x86_match.c against the shared rule). Its benchmark is another translation
+// unit.
+#include "buster/compiler/x86_semantics.c"
+
 #include "buster/compiler/x86_match.c"
 #include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
@@ -308,11 +315,6 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_test.c"
 #include "buster/compiler/assembler_benchmark.c"
 
-// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
-// and the value-preserving form choice) and its tests, for the test-x86-semantics command (which takes the encoder's
-// tests' printer and branch sizing's tests' runner, and checks x86_match.c's ranges). Its benchmark is another
-// translation unit.
-#include "buster/compiler/x86_semantics.c"
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
 
@@ -523,6 +525,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/interpreter_driver.c"
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
+#include "buster/compiler/ir_source_test.c"
+#include "buster/compiler/ir_source_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -1117,6 +1121,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
+    {
+        result = run_ir_source_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
+    {
+        result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {
