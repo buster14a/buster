@@ -628,6 +628,43 @@ are 14.00% (#15: 16.8% of the `-O0` code), the next being `yy_reduce` (2.68%) an
 lane's arena at a time (#151). c-testsuite's subset comes to 2.63 bytes per token,
 its tokens mostly its headers'.
 
+### `sqlite3.c`'s functions on the 9700X
+
+`benchmark-ir-source` on the frozen `sqlite3.c`, on CPU 2 of the 9700X under the
+shared lock, with the 9700X job's build (`BUSTER_DEBUG_INFO=0`) of `dc8adc81`
+([the record](https://github.com/buster14a/buster-performance/tree/5120896936665615bade0b20d72e3a1f4319819d/docs/measurements/ir-source-131-2026-10-28)):
+21-pass medians per typed entry over every function.
+
+| Variant | ns | Cycles | Instructions | IPC |
+| --- | ---: | ---: | ---: | ---: |
+| `lower` (`ir_lower_typed`) | 46.86 | 259.67 | 569.59 | 2.19 |
+| `lower-scalar` | 49.64 | 274.93 | 687.01 | 2.50 |
+| `verify` (`ir_verify`) | 23.45 | 129.77 | 330.79 | 2.55 |
+| `verify-scalar` | 24.06 | 133.25 | 429.03 | 3.22 |
+| `promote` (`ssa_ir_promote`) | 159.40 | 882.69 | 2,535.19 | 2.87 |
+| `promote-scalar` | 150.85 | 835.80 | 2,285.41 | 2.73 |
+
+Lowering the unit's 396,872 typed entries thus takes about 19 ms, 26 ns per
+source token, and after 200 ms of scalar work before each sample `lower` takes
+46.92 ns per entry, the same. The vector path is 6% faster than its twin here:
+the emission, which both share, is most of the work. Promotion is #134's: its
+vector path is 6% slower than its scalar twin on these functions, and runs under
+Zen 5's power cap (#199), 31.2 dispatch slots per instruction throttled against
+the twin's 13.9.
+
+Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the
+same instructions but 0.0004% and writes the same object. The checker's unit
+compiles 1.14 s longer (25.6 s against 24.4 s), since `test-ir-source` and
+`benchmark-ir-source` run there with the IR's modules: a command that runs the
+checker's emission and the adapter, whose validation reads the x86 encoder's
+templates as the emission's encoding does, must run both in one unit's copy
+(`./build.sh check-call-graph`'s split state). The IR's synthetic benchmarks
+read the verifier 1% to 7% slower on the 9700X and 2% to 7% faster on a Zen 4
+laptop: its vector path runs 1.1% fewer instructions than main's, with 13.6%
+more of its dispatch slots left empty by the front end. The lowering of the
+generated programs does 1.8% more work, the new kinds' and records' tests, and
+takes 3% to 8% longer there (within 1% on the laptop's larger programs).
+
 ### Initial 9700X qualification
 
 [Protected run 39934441798](https://github.com/buster14a/buster/actions/runs/39934441798)
