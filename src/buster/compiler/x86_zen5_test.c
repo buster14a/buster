@@ -125,12 +125,36 @@ static bool x86_zen5_test_cases(void)
     zero.reg = X86_REGISTER_RDX;
     valid &= x86_zen5_id(&zero) == X86_COST_XOR_RM64_R64_REGISTER;
     uint64_t parsed = 123;
-    valid &= !x86_zen5_number("18446744073709551616", 1, 10000000, &parsed) && parsed == 123;
-    valid &= !x86_zen5_number("-1", 1, 10000000, &parsed);
-    valid &= !x86_zen5_number("", 1, 10000000, &parsed);
-    valid &= !x86_zen5_number("0", 1, 10000000, &parsed);
-    valid &= !x86_zen5_number("1x", 1, 10000000, &parsed);
-    valid &= x86_zen5_number("10000000", 1, 10000000, &parsed) && parsed == 10000000;
+    valid &= !x86_zen5_number("18446744073709551616", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed) && parsed == 123;
+    valid &= !x86_zen5_number("-1", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
+    valid &= !x86_zen5_number("", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
+    valid &= !x86_zen5_number("0", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
+    valid &= !x86_zen5_number("1x", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
+    valid &= x86_zen5_number("10000000", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed) && parsed == 10000000;
+    valid &= !x86_zen5_number("10000001", 1, BUSTER_X86_COST_MAX_ITERATIONS, &parsed);
+    // The branch experiment's cases: 35, the logic operations, add and sub of 3, inc, dec, neg and shr and sar by one;
+    // not an add of 4660 at 32 bits (which overflows), a multiply, a shift by 3 (OF undefined), shl by one, not, lea or
+    // mov (no flags written).
+    uint32_t branch_cases = 0;
+    for (uint32_t id = 0; id < X86_COST_COUNT; id += 1)
+    {
+        branch_cases += x86_zen5_branch_case((uint8_t)id);
+    }
+    valid &= branch_cases == 35 && !x86_zen5_branch_case(X86_COST_NONE);
+    static const uint8_t branched[] = { X86_COST_INC_RM32_REGISTER, X86_COST_DEC_RM32_REGISTER, X86_COST_ADD_RM32_IMM8_REGISTER, X86_COST_SUB_RM32_IMM8_REGISTER,
+                                        X86_COST_INC_RM64_REGISTER, X86_COST_DEC_RM64_REGISTER, X86_COST_ADD_RM64_IMM8_REGISTER, X86_COST_SUB_RM64_IMM8_REGISTER,
+                                        X86_COST_ADD_RM64_IMM32_REGISTER, X86_COST_XOR_RM32_R32_ZERO, X86_COST_NEG_RM32_REGISTER, X86_COST_SHR_RM64_1_REGISTER };
+    static const uint8_t unbranched[] = { X86_COST_ADD_RM32_IMM32_REGISTER, X86_COST_IMUL_R32_RM32_REGISTER, X86_COST_IMUL_R64_RM64_IMM8_REGISTER, X86_COST_SHL_RM32_IMM8_REGISTER,
+                                          X86_COST_SAR_RM64_IMM8_REGISTER, X86_COST_SHL_RM64_1_REGISTER, X86_COST_NOT_RM32_REGISTER, X86_COST_LEA_R64_M_LEA_SIMPLE,
+                                          X86_COST_MOV_R64_IMM64_REGISTER, X86_COST_MOV_R64_RM64_L1_LOAD };
+    for (uint32_t i = 0; i < sizeof(branched); i += 1)
+    {
+        valid &= x86_zen5_branch_case(branched[i]);
+    }
+    for (uint32_t i = 0; i < sizeof(unbranched); i += 1)
+    {
+        valid &= !x86_zen5_branch_case(unbranched[i]);
+    }
     printf("Zen 5 operand cases and unknown coverage: %u cases, %s\n", X86_COST_COUNT - 1, valid ? "pass" : "FAIL");
     return valid;
 }
@@ -143,8 +167,11 @@ static bool x86_zen5_test_programs(void)
         for (uint32_t experiment = 0; valid && experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
         {
             X86CostProgram program = {0};
-            valid = x86_zen5_program(id, experiment, &program);
-            if (valid)
+            // The branch experiment is the cases' whose jo is never taken: the program of any other is refused.
+            const bool built = x86_zen5_program(id, experiment, &program);
+            const bool wanted = experiment != X86_COST_BRANCH || x86_zen5_branch_case((uint8_t)id);
+            valid = built == wanted && (built || program.code == 0);
+            if (built)
             {
                 x86_zen5_execute(&program, 2);
                 const uint32_t expected = id == 0 ? 0 : BUSTER_X86_COST_BLOCK * (experiment >= X86_COST_MIX_ADD ? 2 : 1);

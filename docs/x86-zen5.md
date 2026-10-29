@@ -88,7 +88,7 @@ returns. The code mapping is writable while being constructed and executable
 only after construction. Both encoders must produce identical code before it
 can run, and every record must pass `x86_validate`.
 
-Seven experiments run in rotating order over an odd number of passes:
+Seven experiments run in rotating order over an odd number of passes (the seventh for 35 of the cases):
 
 1. Twelve independent register chains (an address-independent repeated L1
    load for the load case).
@@ -102,7 +102,16 @@ Seven experiments run in rotating order over an odd number of passes:
 6. Six target chains interleaved with six independent IMUL chains.
 7. The twelve independent chains with a never-taken `jo` after each
    instruction (`branch`): whether a flag-setting instruction and its
-   conditional branch retire as one macro-op, and the cycles per pair.
+   conditional branch retire as one macro-op, and the cycles per pair. Only
+   the cases whose OF the chains keep clear run it (`x86_zen5_branch_case`):
+   the logic operations, which clear it; an add or sub of 3, an inc and a
+   dec, which can't leave the chain's width from 3 in the most iterations a
+   call runs (`BUSTER_X86_COST_MAX_ITERATIONS`, a static assertion); neg; and
+   shr and sar by one. The multiplies overflow, shifts by 3 leave OF
+   undefined, shl by one shifts the chains' bits into the sign, an add of
+   4660 overflows at 32 bits, and not, lea and mov write no flags, so their
+   `jo` would read what came before them: the harness refuses the experiment
+   for those cases.
 
 The ring avoids accidentally turning an ordinary XOR or SUB into its zero
 idiom. IMUL with an immediate chains its source into the result. Loads use an
@@ -186,15 +195,22 @@ and 64 bits, its widths, cost no more than `add` and `sub` with an imm8 of the
 same width in GPR latency, throughput and retired macro-ops, each of them
 known (`tier0_inc_dec`, decided once by `tier0_initialize`).
 
-The [2026-10-29 evidence](https://github.com/buster14a/buster-performance/blob/2d837779fb82b86f6f15bb1987e1d88b73a25cc2/docs/measurements/x86-zen5-inc-dec-181-2026-10-29/README.md)
+The [2026-10-29 evidence](https://github.com/buster14a/buster-performance/blob/10c9d5fe412935d246163121b9c145308088c3dc/docs/measurements/x86-zen5-inc-dec-181-2026-10-29/README.md)
 retains three 9700X processes of the eight cases' seven experiments
-(`measure-x86-zen5 --only CASE --passes 11 --iterations 20000`, CPU 2). Every
-case measured the same in every process, each experiment to within 0.06%:
+(`measure-x86-zen5 --only CASE --passes 11 --iterations 20000`, CPU 2), all
+eight cases the branch experiment's. Every case measured the same in every
+process, each experiment to within 0.06%; each case's median of the three:
 
 | Case | Independent | Six chains | Chain | Mix with ADD | Mix with IMUL | Before `jo` (per pair) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `inc` and `dec` r32 and r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `add` and `sub` r32 and r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `inc` r32 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `dec` r32 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `add` r32, imm8 | 0.1883 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `sub` r32, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `inc` r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `dec` r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `add` r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3757 | 0.5003 | 0.3348 |
+| `sub` r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
 
 Cycles per instruction (per pair in the mixes and before `jo`); the chain is
 both chains, through the written operand and through the source, which for
