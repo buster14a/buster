@@ -1511,9 +1511,13 @@ What the lowering covers past scalars (#145's programs):
   `+ - * /` and unary `+` and `-` of a chain of them compute in float, and the
   chain's value rounds once, where it leaves the chain (a store, a cast, a
   compare, a call's argument, a conditional's or a comma's operand). A compound
-  assignment computes in float and rounds once, and `++` and `--` add one in
-  float. With AVX512-FP16, each operator rounds (float's two roundings of one
-  operation round as once). A chain of unary operators alone over its operand
+  assignment computes in float and rounds once; into a destination of another
+  type (an integer, a `_Bool`, a bit-field, the other format) it converts the
+  destination's value to float and the result back directly, with no rounding to
+  the half-precision type, as clang's promotion types do
+  (`check_lower_update_through`). `++` and `--` add one in float. With
+  AVX512-FP16, each operator rounds (float's two roundings of one operation
+  round as once). A chain of unary operators alone over its operand
   is LLVM's fold of it: a binary16's a sign flip per `-`; a bfloat16's an
   extension, a negation and a rounding where the count of `-` is odd, and the
   value where it is even; and in a function with `FENV_ACCESS` anywhere in it
@@ -1535,8 +1539,11 @@ What the lowering covers past scalars (#145's programs):
   clang's constrained conversions does, and a float rounds to a `__bf16` by
   libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
   unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
-  this type") and a conversion to `__bf16` with AVX512-BF16 but not AVX-512VL
-  are refused by name. Of clang 23's code it doesn't follow four things: a
+  this type"), an `_Atomic` integer's update by one ("this operation on
+  half-precision values": clang's code adds the operand converted to an
+  unsigned integer there, not as the usual arithmetic conversions compute), a
+  `_BitInt`'s past 128 bits conversions to and from them, and a conversion to
+  `__bf16` with AVX512-BF16 but not AVX-512VL are refused by name. Of clang 23's code it doesn't follow four things: a
   conversion between `__fp16` and `__bf16` converts the value through float
   (clang copies the bits one way, and its backend stops the other way); `__bf16`
   under `FENV_ACCESS` extends by its bits as elsewhere (clang's code calls

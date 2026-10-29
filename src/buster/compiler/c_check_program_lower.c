@@ -5545,12 +5545,15 @@ static inline __attribute__((always_inline)) void check_lower_terminate(CheckLow
     }
 }
 
-// The computation of an update whose stored class is past VECTOR (check_lower_update's), out of line: from the old value
-// on top, converted to the computation's type `calculated`, to the result of it. A half-precision computation's is in
-// float: the old value extended, the right operand a float (its chain's, unrounded, under excess precision), the result
-// rounded once, as clang computes it; a real computation's of a half-precision value is its class's, as
-// check_lower_update's; and any other class's entries are refused as they are written, as check_lower_update's would be.
-static __attribute__((noinline)) void check_lower_update_classless(CheckLowerWriter* writer, uint32_t node, uint8_t kind, bool increment, TypeId calculated, TypeId right_type)
+// The computation of an update whose stored class or computation's class is past VECTOR (check_lower_update's and
+// check_lower_bit_update's), out of line: from the old value on top, converted to `through` (check_lower_update_through:
+// the computation's type `calculated`, or float), to the result of it, of `through`. A half-precision computation's is
+// in float: the old value extended, the right operand a float (its chain's, unrounded, under excess precision), the
+// result rounded once, as clang computes it, but neither where the old value is a float already and the result stays
+// one; a real computation's of a half-precision value is its class's, as check_lower_update's; and any other class's
+// entries are refused as they are written, as check_lower_update's would be.
+static __attribute__((noinline)) void check_lower_update_classless(CheckLowerWriter* writer, uint32_t node, uint8_t kind, bool increment, TypeId calculated, TypeId through,
+                                                                   TypeId right_type)
 {
     const uint8_t class = check_lower_class(writer, calculated);
     const CheckHalf half = check_lower_class_half(class);
@@ -5560,7 +5563,7 @@ static __attribute__((noinline)) void check_lower_update_classless(CheckLowerWri
     }
     else if (half != CHECK_HALF_NONE)
     {
-        check_lower_convert(writer, BUSTER_TYPE_FLOAT, calculated);
+        check_lower_convert(writer, BUSTER_TYPE_FLOAT, through);
         check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_F32, 0);
         if (increment)
         {
@@ -5570,7 +5573,7 @@ static __attribute__((noinline)) void check_lower_update_classless(CheckLowerWri
         {
             check_lower_half_operand(writer, node, 1, right_type, check_lower_half_excess(writer, half));
         }
-        check_lower_convert(writer, calculated, BUSTER_TYPE_FLOAT);
+        check_lower_convert(writer, through, BUSTER_TYPE_FLOAT);
     }
     else
     {
@@ -5585,6 +5588,19 @@ static __attribute__((noinline)) void check_lower_update_classless(CheckLowerWri
             check_lower_operand(writer, node, 1, false, right_type);
         }
     }
+}
+
+// The type an update whose stored class or computation's class is past VECTOR converts its old value to and its result
+// from (check_lower_update's and check_lower_bit_update's `through`): its computation's type `calculated`, but float
+// for a half-precision computation under excess precision into a destination of another type (an integer, a _Bool, a
+// bit-field, the other half-precision format), which clang's code converts to float and back directly (its compound
+// assignment's promotion types), with no rounding to the computation's type, as the C standard's excess precision
+// allows.
+static __attribute__((noinline)) TypeId check_lower_update_through(const CheckLowerWriter* writer, TypeId stored, TypeId calculated)
+{
+    const CheckHalf half = check_lower_half_of(writer, calculated);
+    const bool other = check_lower_half_of(writer, stored) != half;
+    return half != CHECK_HALF_NONE && other && check_lower_half_excess(writer, half) ? BUSTER_TYPE_FLOAT : calculated;
 }
 
 static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
@@ -5612,8 +5628,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     // A vector's compound assignment is its operator's row (check_lower_vector_row) between the load and the store, its
     // right operand a scalar's splat where it isn't a vector, at the stored vector's type, as a shift's count is. Past
     // VECTOR, the last of Tier 0's classes, the half-precision classes and no class compute out of line
-    // (check_lower_update_classless).
-    const bool vector = stored_class >= BUSTER_TYPED_CLASS_VECTOR;
+    // (check_lower_update_classless), a half-precision computation's into a destination of another type too, through
+    // `through` (check_lower_update_through).
+    const bool vector = stored_class >= BUSTER_TYPED_CLASS_VECTOR || calculated_class >= BUSTER_TYPED_CLASS_VECTOR;
+    const TypeId through = vector ? check_lower_update_through(writer, stored, calculated) : calculated;
     const uint32_t vector_op = op <= CHECK_OP_SHIFT_RIGHT_ASSIGN ? CHECK_OP_ADD + (uint32_t)(op - CHECK_OP_ADD_ASSIGN) : CHECK_OP_BIT_AND + (uint32_t)(op - CHECK_OP_BIT_AND_ASSIGN);
     if (vector && increment && stored_class == BUSTER_TYPED_CLASS_VECTOR)
     {
@@ -5642,7 +5660,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         old_temporary = check_lower_temporary(writer, stored_class);
     }
     check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access_value(program->types, stored_class, stored));
-    check_lower_convert(writer, calculated, stored);
+    check_lower_convert(writer, through, stored);
     if (vector)
     {
         if (stored_class == BUSTER_TYPED_CLASS_VECTOR)
@@ -5654,7 +5672,8 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         }
         else
         {
-            check_lower_update_classless(writer, node, increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op), increment, calculated, right_type);
+            check_lower_update_classless(writer, node, increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op), increment, calculated, through,
+                                         right_type);
         }
     }
     else if (pointer)
@@ -5715,7 +5734,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     {
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computing, 0);
     }
-    check_lower_convert(writer, stored, calculated);
+    check_lower_convert(writer, stored, through);
     if (direct)
     {
         if (postfix)
@@ -6021,7 +6040,10 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT;
     const uint32_t destination = check_lower_bit_destination(program, graph->operand0[node]);
     CheckLowerBitField field = { 0 };
-    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field) || calculated_class >= BUSTER_TYPED_CLASSES)
+    // A half-precision computation's (the field's value converted to `through`, check_lower_update_through) is out of line
+    // (check_lower_update_classless).
+    const bool half = check_lower_class_half(calculated_class) != CHECK_HALF_NONE;
+    if (destination == BUSTER_CHECK_NONE || !check_lower_bit_member(program, destination, &field) || (calculated_class >= BUSTER_TYPED_CLASSES && !half))
     {
         check_lower_unsupported(writer, "bit-fields of this type or spread over more than 8 bytes");
     }
@@ -6038,30 +6060,38 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
         // field the store truncates.
         const uint8_t computing = check_lower_computed(calculated_class);
         const uint8_t kind = increment ? subtract ? BUSTER_TYPED_SUB : BUSTER_TYPED_ADD : check_lower_binary(op);
+        const TypeId through = half ? check_lower_update_through(writer, stored, calculated) : calculated;
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_STORE, .type = packed, .value = address, .discard = postfix || discard });
-        check_lower_convert(writer, calculated, stored);
-        if (computing != calculated_class)
+        check_lower_convert(writer, through, stored);
+        if (half)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, calculated_class, 0);
-        }
-        check_lower_instruction(writer, kind, computing, 0);
-        if (increment)
-        {
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, computing, 1);
+            check_lower_update_classless(writer, node, kind, increment, calculated, through, stream->conversions[node].operands[1].type);
         }
         else
         {
-            if (computing != calculated_class && kind != BUSTER_TYPED_SHL && kind != BUSTER_TYPED_SHR)
+            if (computing != calculated_class)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, calculated_class, 0);
+            }
+            check_lower_instruction(writer, kind, computing, 0);
+            if (increment)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, computing, 1);
+            }
+            else
+            {
+                if (computing != calculated_class && kind != BUSTER_TYPED_SHL && kind != BUSTER_TYPED_SHR)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computing, 0);
+                }
+                check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
+            }
+            if (computing != calculated_class)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computing, 0);
             }
-            check_lower_operand(writer, node, 1, false, stream->conversions[node].operands[1].type);
         }
-        if (computing != calculated_class)
-        {
-            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computing, 0);
-        }
-        check_lower_convert(writer, stored, calculated);
+        check_lower_convert(writer, stored, through);
         if (old != BUSTER_CHECK_NONE)
         {
             check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, field.class, old);

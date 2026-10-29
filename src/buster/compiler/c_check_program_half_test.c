@@ -2,18 +2,18 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's half-precision scalars in the lowering (c_check_program_half.c, for #129's --lower-all of main.c), against
-// clang -O0's code of the same source: _Float16's, __fp16's and __bf16's values in arithmetic chains, compares and truth,
-// compound assignments, increments, conditionals and statement values; conversions to and from every integer and
-// floating type, between _Float16 and the others, of constants and as bit casts; calls passing and returning them alone,
-// in structs and through va_arg, with members, arrays, globals and unions of them; unary chains over signaling NaNs and
-// subnormals; and floating-point flags under FENV_ACCESS. Each program runs for five targets, each where the host has
-// the features clang's code of it may take and their saved state, and is compiled and linked elsewhere: x86-64 (libgcc's
-// conversions), x86-64-v3 (F16C's), x86-64-v4 (AVX-512 without BF16), znver5 (AVX512-BF16's rounding) and
-// sapphirerapids (AVX512-FP16's arithmetic, which rounds each operation). Then what the lowering refuses by name. What
-// clang 23 compiles wrong the programs leave out (docs/c-checker.md, "Half-precision values"): conversions between
-// __fp16 and __bf16, __bf16 under FENV_ACCESS, and __bf16 parameters' subnormals and signaling NaNs. They leave out too
-// what the lowering doesn't follow: a unary + alone of a signaling NaN in a function with FENV_ACCESS. Include after
-// c_check_program_fp16_test.c.
+// clang -O0's code of the same source: _Float16's, __fp16's and __bf16's values in arithmetic chains, compares and
+// truth, compound assignments (into destinations of other types too), increments, conditionals and statement values;
+// conversions to and from every integer and floating type, between _Float16 and the others, of constants and as bit
+// casts; calls passing and returning them alone, in structs and through va_arg, with members, arrays, globals and
+// unions of them; unary chains over signaling NaNs and subnormals; and floating-point flags under FENV_ACCESS. Each
+// program runs for five targets, each where the host has the features clang's code of it may take and their saved
+// state, and is compiled and linked elsewhere: x86-64 (libgcc's conversions), x86-64-v3 (F16C's), x86-64-v4 (AVX-512
+// without BF16), znver5 (AVX512-BF16's rounding) and sapphirerapids (AVX512-FP16's arithmetic, which rounds each
+// operation). Then what the lowering refuses by name. What clang 23 compiles wrong the programs leave out
+// (docs/c-checker.md, "Half-precision values"): conversions between __fp16 and __bf16, __bf16 under FENV_ACCESS, and
+// __bf16 parameters' subnormals and signaling NaNs. They leave out too what the lowering doesn't follow: a unary +
+// alone of a signaling NaN in a function with FENV_ACCESS. Include after c_check_program_fp16_test.c.
 
 // The programs' helpers: the hash, half-precision values from their bits, and bits of special values (zeros,
 // infinities, a quiet and a signaling NaN, subnormals, ones, the largest finite one, the smallest normal one, and
@@ -42,6 +42,35 @@ static const char* const check_test_half_programs[][2] = {
         "_Float16 i=d;i++;++i;i--;--i;_Float16 j=(_Float16)2048;j++;_Float16 l=j--;FOLD(i);FOLD(j);FOLD(l);"
         "_Float16 s=n>3?a+b:a-b;_Float16 q=(a,b+c);_Float16 e=({_Float16 z=a*b;z+d;});FOLD(s);FOLD(q);FOLD(e);"
         "_Float16 big=(_Float16)60000;_Float16 o=big*(_Float16)(n+2)/(_Float16)(n+4);_Float16 p=(big+big)-big;FOLD(o);FOLD(p);"
+        "return (int)h;}",
+    },
+    {
+        // A half-precision computation into a destination of another type (#862's review): every integer type, _Bool,
+        // narrow _BitInts, bit-fields, a pointer's and a global's objects and __bf16 by _Float16, with +=, -=, *= and /=,
+        // and each assignment's value. Under excess precision clang converts the destination's value to float and the
+        // result back directly, with no rounding to the half-precision type: the old values past 2048 are odd, which
+        // binary16 can't hold (and past 256 for bfloat16's), and the __bf16 destination is past binary16's range.
+        "half-compound-into-other-types",
+        "struct bits{int a:13;unsigned b:7;_Bool c:1;signed char d:5;};static int gi=2051;static long long gl=-4097;"
+        "int tested(int n){unsigned h=2166136261u;"
+        "_Float16 x=(_Float16)n/(_Float16)4,y=x+(_Float16)8;__bf16 xb=(__bf16)n/(__bf16)4;"
+        "int i=2049+3*n;unsigned u=3001+n;short s=(short)(2047+2*n);signed char sc=(signed char)(20+n);unsigned char uc=(unsigned char)(101+n);"
+        "long long ll=-4099+5*n;unsigned long long ull=8193+3*n;__int128 w=(__int128)2049+3*n;unsigned __int128 uw=(unsigned __int128)4097+5*n;"
+        "_Bool b0=n&1,b1=1,b2=n<5,b3=0;_BitInt(7) s7=(_BitInt(7))(20+n);unsigned _BitInt(13) u13=(unsigned _BitInt(13))(2049+3*n);"
+        "_BitInt(100) b100=(_BitInt(100))2049+3*n;"
+        "int v1=(i+=x);unsigned v2=(u-=x);short v3=(s*=x);signed char v4=(sc/=y);unsigned char v5=(uc+=x);FOLD(i);FOLD(u);FOLD(s);FOLD(sc);FOLD(uc);"
+        "FOLD(v1);FOLD(v2);FOLD(v3);FOLD(v4);FOLD(v5);"
+        "long long v6=(ll*=x);unsigned long long v7=(ull+=x);__int128 v8=(w*=x);unsigned __int128 v9=(uw/=y);FOLD(ll);FOLD(ull);FOLD(w);FOLD(uw);"
+        "FOLD(v6);FOLD(v7);FOLD(v8);FOLD(v9);"
+        "_Bool v10=(b0+=x);_Bool v11=(b1-=x);_Bool v12=(b2*=x);_Bool v13=(b3/=y);FOLD(b0);FOLD(b1);FOLD(b2);FOLD(b3);FOLD(v10);FOLD(v11);FOLD(v12);FOLD(v13);"
+        "_BitInt(7) v14=(s7-=x);unsigned _BitInt(13) v15=(u13*=x/(_Float16)4+(_Float16)1);_BitInt(100) v16=(b100*=x);"
+        "int t7=s7,t13=u13;long long t100=b100,r14=v14,r15=v15,r16=v16;FOLD(t7);FOLD(t13);FOLD(t100);FOLD(r14);FOLD(r15);FOLD(r16);"
+        "struct bits bf={2049+3*n,100+n,n&1,n%7};int f1=(bf.a+=x),f2=(bf.b-=x),f3=(bf.c*=x),f4=(bf.d+=x);"
+        "int g1=bf.a,g2=bf.b,g3=bf.c,g4=bf.d;FOLD(f1);FOLD(f2);FOLD(f3);FOLD(f4);FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);"
+        "int arr[2]={2053+n,-2055-n};int*p=arr;*p+=x;p[1]/=y;int v17=(p[n&1]*=x);FOLD(arr);FOLD(v17);gi-=x;gl/=y;int v18=(gi+=x);FOLD(gi);FOLD(gl);FOLD(v18);"
+        "int ib=301+2*n;ib+=xb;unsigned ub=1001+2*n;ub-=xb;long long lb=-513-2*n;lb*=xb;FOLD(ib);FOLD(ub);FOLD(lb);"
+        "__bf16 bd=(__bf16)100000+(__bf16)n;__bf16 v19=(bd+=x);__bf16 bs=(__bf16)(301+2*n);bs-=x;FOLD(bd);FOLD(v19);FOLD(bs);"
+        "float fd=2049.5f+n;fd+=x;double dd=n*0.1;dd-=x;long double ld=n;ld*=x;_Complex float z=n;z+=x;FOLD(fd);FOLD(dd);FOLDLD(ld);FOLD(z);"
         "return (int)h;}",
     },
     {
@@ -186,13 +215,18 @@ static const char* const check_test_half_programs[][2] = {
      BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BF16))
 
 // What the lowering refuses by name: __bf16's arithmetic where the unit's target has AVX10.2's (which rounds each
-// operation in bfloat16, and Tier 0 doesn't emit), complex _Float16, and a conversion to __bf16 where AVX512-BF16 has
-// no VL to round one float with.
+// operation in bfloat16, and Tier 0 doesn't emit), complex _Float16, a conversion to __bf16 where AVX512-BF16 has no VL
+// to round one float with, an _Atomic integer's update by a half-precision value (whose computation clang's code
+// doesn't take from the usual arithmetic conversions: it adds the operand converted to an unsigned integer, and
+// multiplies the old value converted as an unsigned one), and a _BitInt's past 128 bits, whose conversions to and from
+// the half-precision types aren't lowered.
 static void check_test_program_half_refusals(CheckTest* test)
 {
+    X86Target v4 = { 0 };
     X86Target avx10 = { 0 };
     X86Target without_vl = { 0 };
-    const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &avx10) && x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &without_vl);
+    const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4) && x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &avx10) &&
+                        x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &without_vl);
     check_test_expect(test, parsed, "the half-precision refusals' targets");
     if (parsed)
     {
@@ -204,6 +238,10 @@ static void check_test_program_half_refusals(CheckTest* test)
                                            "complex types other than _Complex float, double, long double and __float128", &avx10);
         check_test_program_boundary_target(test, "int tested(int n){__bf16 b=(float)n;return b==1;}", "bf16-without-vl", true, false, 0, 1,
                                            "conversions to __bf16 with AVX512-BF16 but not AVX-512VL", &without_vl);
+        check_test_program_boundary_target(test, "int tested(int n){_Atomic int a=n;a+=(_Float16)n;return a;}", "atomic-half-update", true, false, 0, 1,
+                                           "this operation on half-precision values", &v4);
+        check_test_program_boundary_target(test, "int tested(int n){_BitInt(256) x=n;x+=(_Float16)n;return (int)x;}", "bit-int-half-update", true, false, 0, 1,
+                                           "conversions from _BitInt past 128 bits to this type", &v4);
     }
 }
 
