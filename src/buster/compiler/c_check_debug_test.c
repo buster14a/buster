@@ -29,6 +29,12 @@
 //   function's breakpoint on its first statement, steps over an untaken branch, steps from a computed goto to its
 //   target's statement, and gives a backtrace's frames their functions, files and lines, the header's function in the
 //   header.
+// - Several units, with --cross-check (#779): two units, each with a static function of one name, calling each other's
+//   functions, linked with -g by --lanes 1 and 8 and by each path into the same bytes, which run; llvm-dwarfdump
+//   --verify finds no error; gdb stops at each unit's functions and lines, in their own files, with backtraces across
+//   the units. And a third unit's weak function, which the second's strong one replaces: its DWARF describes its own
+//   code, so that its line's breakpoint is elsewhere than the strong one's and never stops the run (while the checker
+//   refuses the weak attribute, before #758, the run says so and leaves the third unit out).
 // - Objects, with --cross-check (#395's -c -g): the fixture's object by each path into the same bytes, whose five DWARF
 //   sections are the -g executable's but at their relocations' fields (zero in the object), and which llvm-dwarfdump
 //   --verify finds no error in; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's
@@ -993,6 +999,168 @@ static void check_debug_test_driver(CheckDebugTestTally* tally, const char* dire
     check_debug_test_read(tally, outputs[0], arena);
 }
 
+// Whether `needle` is in the text from `start` on, before `end` (or anywhere after `start`, for a null `end`).
+static bool check_debug_test_within(const char* start, const char* end, const char* needle)
+{
+    const char* found = start != 0 ? strstr(start, needle) : 0;
+    return found != 0 && (end == 0 || found < end);
+}
+
+// The address gdb gave breakpoint `number` in `transcript` ("Breakpoint N at 0x..."), or 0.
+static uint64_t check_debug_test_breakpoint(const char* transcript, uint32_t number)
+{
+    char prefix[48];
+    snprintf(prefix, sizeof(prefix), "Breakpoint %u at 0x", number);
+    const char* found = transcript != 0 ? strstr(transcript, prefix) : 0;
+    return found != 0 ? strtoull(found + strlen(prefix), 0, 16) : 0;
+}
+
+// The driver with -g on several units (#779; see the file's comment).
+static void check_debug_test_units(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    static const char main_text[] = "#include <stdio.h>\n"                                // 1
+                                    "\n"                                                  // 2
+                                    "int units_scale(int value);\n"                       // 3
+                                    "int units_pick(void);\n"                             // 4
+                                    "\n"                                                  // 5
+                                    "static int units_helper(int value)\n"                // 6
+                                    "{\n"                                                 // 7
+                                    "    return value + 1;\n"                             // 8
+                                    "}\n"                                                 // 9
+                                    "\n"                                                  // 10
+                                    "int main(void)\n"                                    // 11
+                                    "{\n"                                                 // 12
+                                    "    int total = units_scale(20);\n"                  // 13
+                                    "    total = units_helper(total);\n"                  // 14
+                                    "    printf(\"%d %d\\n\", total, units_pick());\n"    // 15
+                                    "    return total == 41 && units_pick() == 7 ? 0 : 1;\n" // 16
+                                    "}\n";                                                // 17
+    static const char scale_text[] = "static int units_helper(int value)\n"               // 1
+                                     "{\n"                                                // 2
+                                     "    return value * 3;\n"                            // 3
+                                     "}\n"                                                // 4
+                                     "\n"                                                 // 5
+                                     "int units_scale(int value)\n"                       // 6
+                                     "{\n"                                                // 7
+                                     "    int doubled = value * 2;\n"                     // 8
+                                     "    return units_helper(doubled) / 3;\n"            // 9
+                                     "}\n"                                                // 10
+                                     "\n"                                                 // 11
+                                     "int units_pick(void)\n"                             // 12
+                                     "{\n"                                                // 13
+                                     "    return 7;\n"                                    // 14
+                                     "}\n";                                               // 15
+    static const char weak_text[] = "__attribute__((weak)) int units_pick(void)\n"        // 1
+                                    "{\n"                                                 // 2
+                                    "    return 9;\n"                                     // 3
+                                    "}\n"                                                 // 4
+                                    "\n"                                                  // 5
+                                    "int units_weak_caller(void)\n"                       // 6
+                                    "{\n"                                                 // 7
+                                    "    return units_pick() + 1;\n"                      // 8
+                                    "}\n";                                                // 9
+    char sources[3][PATH_MAX];
+    static const char* const names[] = { "dbg_units_main.c", "dbg_units_scale.c", "dbg_units_weak.c" };
+    const char* const texts[] = { main_text, scale_text, weak_text };
+    const uint64_t lengths[] = { sizeof(main_text) - 1, sizeof(scale_text) - 1, sizeof(weak_text) - 1 };
+    bool written = true;
+    for (uint32_t s = 0; s < 3; s += 1)
+    {
+        snprintf(sources[s], sizeof(sources[s]), "%s/%s", directory, names[s]);
+        written = written && foreign_test_write(sources[s], texts[s], lengths[s]);
+    }
+    check_debug_test_expect(tally, written, "write the units' fixtures", directory);
+    // The two units by --lanes 1 and 8 and by each path.
+    static const char* const variants[][3] = { { "--lanes", "1", 0 }, { "--lanes", "8", 0 }, { "--scalar", "--lanes", "8" } };
+    char outputs[3][PATH_MAX];
+    String8 files[3] = { 0 };
+    for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        char errors[PATH_MAX + 8];
+        snprintf(outputs[v], sizeof(outputs[v]), "%s/dbg_units_%u", directory, v);
+        snprintf(errors, sizeof(errors), "%s.err", outputs[v]);
+        char* arguments[12] = { (char*)"/proc/self/exe", (char*)"-g" };
+        uint32_t used = 2;
+        for (uint32_t o = 0; o < 3 && variants[v][o] != 0; o += 1)
+        {
+            arguments[used++] = (char*)variants[v][o];
+        }
+        arguments[used++] = (char*)"-o";
+        arguments[used++] = outputs[v];
+        arguments[used++] = sources[0];
+        arguments[used++] = sources[1];
+        arguments[used] = 0;
+        const bool linked = object_test_run(arguments, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, linked, "the driver links two units with -g", errors);
+        files[v] = linked ? foreign_test_read(arena, outputs[v]) : (String8){ 0 };
+        char* run[] = { outputs[v], 0 };
+        check_debug_test_expect(tally, linked && object_test_run(run, "/dev/null", "/dev/null") == 0, "the units' program runs and returns 0", outputs[v]);
+        check_debug_test_expect(tally, v == 0 || (files[v].pointer != 0 && files[0].pointer != 0 && files[v].length == files[0].length &&
+                                                  memcmp(files[v].pointer, files[0].pointer, files[0].length) == 0),
+                                "the units' executable with -g is the same bytes by --lanes 1 and 8 and by each path", outputs[v]);
+    }
+    if (files[0].pointer != 0)
+    {
+        char report[PATH_MAX + 16];
+        snprintf(report, sizeof(report), "%s.verify", outputs[0]);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[0], 0 };
+        object_test_run(verify, report, "/dev/null");
+        const String8 verified = foreign_test_read(arena, report);
+        check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error in the units' DWARF",
+                                report);
+        // Each unit's function, its static function of the name the other's has, and their callers' lines.
+        snprintf(report, sizeof(report), "%s.gdb-units", outputs[0]);
+        static const char* const stops[] = { "break units_scale", "break dbg_units_scale.c:3", "break dbg_units_main.c:8", "run", "bt", "continue", "bt", "continue", "bt" };
+        const String8 traced = check_debug_test_gdb(outputs[0], report, stops, BUSTER_ARRAY_LENGTH(stops), arena);
+        const char* first = traced.pointer != 0 ? strstr(traced.pointer, "Breakpoint 1, units_scale") : 0;
+        const char* second = first != 0 ? strstr(first, "Breakpoint 2, units_helper") : 0;
+        const char* third = second != 0 ? strstr(second, "Breakpoint 3, units_helper") : 0;
+        check_debug_test_expect(tally, check_debug_test_within(first, second, "dbg_units_scale.c:8") && check_debug_test_within(first, second, "main () at") &&
+                                           check_debug_test_within(first, second, "dbg_units_main.c:13"),
+                                "gdb stops at the second unit's function on its first statement, called from the first unit's line", report);
+        check_debug_test_expect(tally, check_debug_test_within(second, third, "dbg_units_scale.c:3") && check_debug_test_within(second, third, "dbg_units_scale.c:9") &&
+                                           check_debug_test_within(second, third, "dbg_units_main.c:13"),
+                                "the second unit's static function stops in its own file, called from its unit's caller", report);
+        check_debug_test_expect(tally, check_debug_test_within(third, 0, "dbg_units_main.c:8") && check_debug_test_within(third, 0, "dbg_units_main.c:14"),
+                                "the first unit's static function of the same name stops in its own file", report);
+    }
+    // The weak function the second unit's strong one replaces, in a third unit.
+    char weak_output[PATH_MAX];
+    char weak_errors[PATH_MAX + 8];
+    snprintf(weak_output, sizeof(weak_output), "%s/dbg_units_weak", directory);
+    snprintf(weak_errors, sizeof(weak_errors), "%s.err", weak_output);
+    char* weak_arguments[] = { (char*)"/proc/self/exe", (char*)"-g", (char*)"-o", weak_output, sources[0], sources[1], sources[2], 0 };
+    const bool weak_linked = written && object_test_run(weak_arguments, "/dev/null", weak_errors) == 0;
+    const String8 weak_message = written && !weak_linked ? foreign_test_read(arena, weak_errors) : (String8){ 0 };
+    const bool refused = weak_message.pointer != 0 && strstr(weak_message.pointer, "unsupported: this attribute (alias, ifunc, constructor, destructor, weak") != 0;
+    if (refused)
+    {
+        printf("  units: the checker refuses the weak attribute (#758), so the replaced weak function's DWARF isn't checked\n");
+    }
+    else if (written)
+    {
+        check_debug_test_expect(tally, weak_linked, "the driver links the units with -g, the third's weak function replaced", weak_errors);
+        char* run[] = { weak_output, 0 };
+        check_debug_test_expect(tally, weak_linked && object_test_run(run, "/dev/null", "/dev/null") == 0, "the program with the replaced weak function runs and returns 0",
+                                weak_output);
+        char report[PATH_MAX + 16];
+        snprintf(report, sizeof(report), "%s.verify", weak_output);
+        char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", weak_output, 0 };
+        object_test_run(verify, report, "/dev/null");
+        const String8 verified = weak_linked ? foreign_test_read(arena, report) : (String8){ 0 };
+        check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error with the replaced function",
+                                report);
+        snprintf(report, sizeof(report), "%s.gdb-weak", weak_output);
+        static const char* const stops[] = { "break dbg_units_weak.c:3", "break dbg_units_scale.c:14", "run" };
+        const String8 traced = weak_linked ? check_debug_test_gdb(weak_output, report, stops, BUSTER_ARRAY_LENGTH(stops), arena) : (String8){ 0 };
+        const uint64_t replaced = check_debug_test_breakpoint(traced.pointer, 1);
+        const uint64_t strong = check_debug_test_breakpoint(traced.pointer, 2);
+        check_debug_test_expect(tally, replaced != 0 && strong != 0 && replaced != strong && traced.pointer != 0 &&
+                                           strstr(traced.pointer, "Breakpoint 2, units_pick") != 0 && strstr(traced.pointer, "Breakpoint 1, ") == 0,
+                                "the replaced weak function's line is at its own code, which never runs, and the strong one's stops the run", report);
+    }
+}
+
 // A relocatable object's section named `name`, and with `relocations` its .rela section; or zeros.
 static Elf64_Shdr check_debug_test_section(String8 file, const char* name, bool relocations)
 {
@@ -1221,6 +1389,7 @@ static int run_check_debug_tests(int argc, char** argv)
         if (cross_check)
         {
             check_debug_test_driver(&tally, directory, &arena);
+            check_debug_test_units(&tally, directory, &arena);
             check_debug_test_objects(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);

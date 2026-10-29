@@ -57,12 +57,19 @@
 #else
 #define BUSTER_HOME_DYNAMIC BUSTER_ELSEWHERE
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+#define BUSTER_HOME_CHECKER
+#else
+#define BUSTER_HOME_CHECKER BUSTER_ELSEWHERE
+#endif
 // The modules' homes (at the top): the lexer's (c_lexer.c), the preprocessor's (c_preprocessor.c), the parser's
-// (c_parser.c) and the linker's (link.c's).
+// (c_parser.c) and the linker's (link.c's); and the checker's, for the IR's commands on real C (ir_source_test.c's
+// ir_source_prepare, the driver's check and emission of a file), which the backend's unit runs with the IR (#784).
 #define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
 #define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
 #define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
+#define BUSTER_IR_SOURCE_ENTRY BUSTER_HOME_CHECKER
 
 // The ISA requirement tables are immutable and need no initialization. Share their frontend copy without sharing
 // encoder storage or adding calls/loads to the local table-building kernels. Standalone inclusions stay static.
@@ -450,6 +457,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
+// The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
+#include "buster/compiler/c_checker_units.c"
 #pragma clang section text = ""
 // The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681). On the 9700X, the measured
 // 716c980d to 4ce693ad pair's checker-unit mean fell from 33.7 to 27.35 s, and compilation-phase wall from 33.7 to
@@ -486,6 +495,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_debug_test.c"
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
 #include "buster/compiler/c_check_lanes_test.c"
+// #152's test-check-units: the driver's commands of several source files, every unit's output its own alone's.
+#include "buster/compiler/c_check_units_test.c"
 #include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #pragma clang optimize on
@@ -509,6 +520,7 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
+#include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
 #include "buster/compiler/ssa_ir.c"
 #include "buster/compiler/ir_validate.c"
@@ -565,6 +577,8 @@ bool run_x86_target_selection_tests(void);
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
 #include "buster/compiler/ir_stack_test.c"
+#include "buster/compiler/ir_simd_typed_test.c"
+#include "buster/compiler/ir_simd_consumer_test.c"
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
@@ -1035,6 +1049,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_lanes_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-units") == 0)
+    {
+        result = run_check_units_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
         result = run_check_builtin_tests(argc - 2, argv + 2);
@@ -1159,11 +1177,11 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
@@ -1286,6 +1304,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir") == 0)
     {
         result = run_ir_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-simd") == 0)
+    {
+        result = run_ir_simd_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-lowering") == 0)
     {

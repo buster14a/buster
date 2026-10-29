@@ -1671,6 +1671,10 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
     arena_pop_to(memory, mark);
 }
 
+#include "ir_simd_model_test.c"
+#include "ir_simd_execute.c"
+#include "ir_simd_test.c"
+
 static int run_ir_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -1721,6 +1725,10 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_label_lists(&tally, &memory, &scratch);
             ir_test_aggregates(&tally, &memory, &scratch);
             ir_test_types(&tally, &memory, &scratch);
+            ir_test_simd(&tally, &memory, &scratch);
+            const IrSimdModelTest model = ir_simd_model_test(stderr);
+            tally.checks += model.checks;
+            tally.failures += model.failures;
             ir_test_guards(&tally, &memory, &scratch);
             ir_test_dominance_tails(&tally, &memory, &scratch);
             ir_test_generated(&tally, &memory, &scratch, count);

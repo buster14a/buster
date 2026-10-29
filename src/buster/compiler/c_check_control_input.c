@@ -22,6 +22,16 @@ static void check_input_region_prepare(CheckInputReader* reader, uint32_t openin
                 final = child;
             }
         }
+        // A labeled last statement is its statement, through its labels, as clang has it: `({ ...; out: r; })` is r.
+        for (uint32_t steps = 0; final < parser->tokens.count && parser->tree.roles[final] == PARSE_ROLE_LABEL && steps < parser->tokens.count; steps += 1)
+        {
+            uint32_t statement = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[final]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                statement = child > final ? child : statement;
+            }
+            final = statement;
+        }
         bool expression = final < parser->tokens.count && parser->tree.roles[final] == PARSE_ROLE_TERMINATOR &&
                           reader->first_child[final] != BUSTER_CHECK_NONE;
         for (uint32_t child = expression ? reader->first_child[final] : BUSTER_CHECK_NONE; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
@@ -123,20 +133,161 @@ static bool check_input_label_address(const Parser* parser, uint32_t token)
     return parser->tree.roles[token] == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_AMPAMP;
 }
 
-// The label of `body` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
-static uint32_t check_input_find_label(const CheckInputReader* reader, const uint32_t* labels, uint64_t capacity, uint32_t body, uint32_t name)
+// GNU C's local labels (#147): `__label__ a, b;` at a block's start, whose names are labels of that block
+// (CheckLocalLabels) and declare nothing else. Its tokens are the reader's, which the walks then ignore.
+static void check_input_local_labels(CheckInputReader* reader, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t end = parser->tree.parents[keyword];
+    bool valid = reader->function_body < count && end < count && end > keyword && parser->tokens.kinds[end] == PARSE_KIND_SEMI;
+    for (uint32_t token = keyword; valid && token <= end; token += 1)
+    {
+        // Names, a comma between each two, as the parser reads the list (PARSE_MODE_LOCAL_LABEL_NAME).
+        const uint8_t expected = ((token - keyword) & 1) != 0 ? PARSE_KIND_IDENTIFIER : PARSE_KIND_COMMA;
+        valid = token == keyword || token == end || parser->tokens.kinds[token] == expected;
+        reader->ignored[token] = valid;
+    }
+    if (!valid)
+    {
+        check_input_report(reader, keyword, CHECK_INPUT_DECLARATION);
+    }
+}
+
+// The labels in scope of the `__label__` lists of the blocks around the controls' scan, as clang's scopes have them: each
+// name a list declares is a label of the list's block, whose definitions and uses inside the block (a nested block's too,
+// but where a nested list declares the name again) are that label's, and a name no list in scope declares is the
+// function's. The scan meets each list before its block's labels and uses (lists start blocks), pushes its names, and
+// pops them past the block's closing brace. A label's definitions and uses take a scope: the name token in the innermost
+// list that declares it, or the body, which the controls' table keys a label by with its name. Built on a unit's first
+// list: a unit without one builds none of it, and its labels' scopes are their bodies (CheckInput.declaration_bodies).
+typedef struct CheckLocalLabels CheckLocalLabels;
+struct CheckLocalLabels
+{
+    // Per name: 1 + the entry of its innermost list in scope, or 0.
+    uint32_t* heads;
+    // Per entry: its name, the head it shadowed, its name token in the list, and its block's closing brace.
+    uint32_t* names;
+    uint32_t* shadowed;
+    uint32_t* tokens;
+    uint32_t* ends;
+    // Per token: 1 + a label definition's or use's scope, or 0 for its body.
+    uint32_t* scopes;
+    uint32_t count;
+};
+
+// A label definition's or use's scope (CheckLocalLabels).
+static uint32_t check_input_label_scope(const CheckInputReader* reader, const CheckLocalLabels* locals, uint32_t token)
+{
+    return locals->scopes != NULL && locals->scopes[token] != 0 ? locals->scopes[token] - 1 : reader->output->declaration_bodies[token];
+}
+
+// The label of `scope` spelled `name` in check_input_controls' table (`capacity` slots), or BUSTER_CHECK_NONE.
+static uint32_t check_input_find_label(const CheckInputReader* reader, const CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t scope,
+                                       uint32_t name)
 {
     const Parser* parser = reader->parser;
     uint32_t result = BUSTER_CHECK_NONE;
-    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + body) & (capacity - 1);
+    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
     while (result == BUSTER_CHECK_NONE && labels[slot] != 0)
     {
         const uint32_t target = labels[slot] - 1;
         const uint32_t target_name = reader->first_child[target];
-        result = reader->output->declaration_bodies[target] == body && parser->tokens.names[target_name] == name ? target : BUSTER_CHECK_NONE;
+        result = check_input_label_scope(reader, locals, target) == scope && parser->tokens.names[target_name] == name ? target : BUSTER_CHECK_NONE;
         slot = (slot + 1) & (capacity - 1);
     }
     return result;
+}
+
+// Pushes a `__label__` list's names (check_input_local_labels marked it), whose block ends at its statement's parent's
+// parent: the block's closing brace, after the list's `;`. Makes the columns on a unit's first list: the heads per name,
+// the entries and scopes per token, each of which takes at most one.
+static void check_input_local_label_push(CheckInputReader* reader, CheckLocalLabels* locals, uint32_t keyword)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t names = reader->pp->table->count;
+    if (locals->heads == NULL)
+    {
+        locals->heads = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)names + 1);
+        locals->names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->shadowed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        locals->scopes = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+        const bool made = locals->heads != NULL && locals->names != NULL && locals->shadowed != NULL && locals->tokens != NULL && locals->ends != NULL &&
+                          locals->scopes != NULL;
+        reader->output->resource |= !made;
+        if (made)
+        {
+            memset(locals->heads, 0, ((uint64_t)names + 1) * sizeof(uint32_t));
+            memset(locals->scopes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
+        else
+        {
+            locals->heads = NULL;
+            locals->scopes = NULL;
+        }
+    }
+    const uint32_t statement = parser->tree.parents[keyword];
+    const uint32_t end = statement < count ? parser->tree.parents[statement] : count;
+    for (uint32_t token = keyword + 1; locals->heads != NULL && end < count && token < statement; token += 1)
+    {
+        const uint32_t name = parser->tokens.names[token];
+        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && name < names && locals->count < count)
+        {
+            const uint32_t entry = locals->count++;
+            locals->names[entry] = name;
+            locals->shadowed[entry] = locals->heads[name];
+            locals->tokens[entry] = token;
+            locals->ends[entry] = end;
+            locals->heads[name] = entry + 1;
+        }
+    }
+}
+
+// The entry of a name's innermost local label in scope, or BUSTER_CHECK_NONE: the function's label.
+static uint32_t check_input_local_label(const CheckInputReader* reader, const CheckLocalLabels* locals, uint32_t name)
+{
+    return locals->heads != NULL && name < reader->pp->table->count && locals->heads[name] != 0 ? locals->heads[name] - 1 : BUSTER_CHECK_NONE;
+}
+
+// Whether a local label's name is declared twice in its block (clang's "reference to 'a' is ambiguous" where its block
+// defines or uses it): the entry it shadowed is its block's too.
+static bool check_input_local_label_ambiguous(const CheckLocalLabels* locals, uint32_t entry)
+{
+    const uint32_t shadowed = locals->shadowed[entry];
+    return shadowed != 0 && locals->ends[shadowed - 1] == locals->ends[entry];
+}
+
+// Pops the local labels whose blocks end before `token`: every label of a block, a run of entries at the stack's top,
+// together, and each one its block doesn't define (an ambiguous one never) reported at its name, in its block's lists'
+// order, as clang reports them where it leaves the block. In a prefix's pass, only a block that ends before the limit.
+static void check_input_local_label_pop(CheckInputReader* reader, CheckLocalLabels* locals, const uint32_t* labels, uint64_t capacity, uint32_t token,
+                                        uint32_t limit)
+{
+    while (locals->count != 0 && locals->ends[locals->count - 1] < token)
+    {
+        const uint32_t end = locals->ends[locals->count - 1];
+        uint32_t first = locals->count - 1;
+        while (first != 0 && locals->ends[first - 1] == end)
+        {
+            first -= 1;
+        }
+        for (uint32_t entry = first; entry < locals->count && end < limit; entry += 1)
+        {
+            const uint32_t name_token = locals->tokens[entry];
+            if (check_input_find_label(reader, locals, labels, capacity, name_token, locals->names[entry]) == BUSTER_CHECK_NONE)
+            {
+                check_input_report(reader, name_token, CHECK_INPUT_LABEL_UNDECLARED);
+            }
+        }
+        for (uint32_t entry = locals->count; entry-- > first;)
+        {
+            locals->heads[locals->names[entry]] = locals->shadowed[entry];
+        }
+        locals->count = first;
+    }
 }
 
 // The computed gotos of each function with one, as clang's JumpScopeChecker takes them: a function without an address of
@@ -211,7 +362,8 @@ static uint64_t check_input_control_mask(const uint8_t* kinds, const uint8_t* ro
     {
         selected |= _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)) |
                     _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_LABEL)) |
-                    _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_OPEN_CASE));
+                    _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_OPEN_CASE)) |
+                    _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_LABEL));
     }
     return selected & valid;
 }
@@ -262,6 +414,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
     }
     uint32_t* labels = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     reader->output->resource |= labels == 0;
+    CheckLocalLabels locals = { 0 };
     if (labels != 0)
     {
         memset(labels, 0, capacity * sizeof(uint32_t));
@@ -289,12 +442,20 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 // No consumer observes body between control events, so its expiry may wait for the next event.
                 body = BUSTER_CHECK_NONE;
             }
+            if (locals.count != 0)
+            {
+                check_input_local_label_pop(reader, &locals, labels, capacity, token, limit);
+            }
             if (role == PARSE_ROLE_OPEN_BODY)
             {
                 body = token;
                 close = parser->tree.parents[token];
             }
-            if (role == PARSE_ROLE_LABEL)
+            if (kind == PARSE_KIND_LABEL && reader->ignored[token])
+            {
+                check_input_local_label_push(reader, &locals, token);
+            }
+            else if (role == PARSE_ROLE_LABEL)
             {
                 const uint32_t name_token = reader->first_child[token];
                 if (body == BUSTER_CHECK_NONE || name_token >= count || parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
@@ -308,27 +469,55 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 {
                     reader->output->declaration_bodies[token] = body;
                     const uint32_t name = parser->tokens.names[name_token];
-                    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + body) & (capacity - 1);
-                    while (labels[slot] != 0)
+                    // A local label's definition is its scope's (CheckLocalLabels); one of an ambiguous name defines none.
+                    const uint32_t local = check_input_local_label(reader, &locals, name);
+                    const bool ambiguous = local != BUSTER_CHECK_NONE && check_input_local_label_ambiguous(&locals, local);
+                    const uint32_t scope = local != BUSTER_CHECK_NONE ? locals.tokens[local] : body;
+                    if (local != BUSTER_CHECK_NONE)
+                    {
+                        locals.scopes[token] = ambiguous ? 0 : scope + 1;
+                    }
+                    uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
+                    while (!ambiguous && labels[slot] != 0)
                     {
                         const uint32_t old = labels[slot] - 1;
                         const uint32_t old_name = reader->first_child[old];
-                        if (reader->output->declaration_bodies[old] == body && parser->tokens.names[old_name] == name)
+                        if (check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
                             if (!prefix || token < limit)
                             {
-                                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                                check_input_report(reader, name_token, CHECK_INPUT_LABEL_REDEFINITION);
                             }
                             break;
                         }
                         slot = (slot + 1) & (capacity - 1);
                     }
-                    labels[slot] = token + 1;
+                    if (ambiguous && (!prefix || token < limit))
+                    {
+                        check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
+                    }
+                    else if (!ambiguous)
+                    {
+                        labels[slot] = token + 1;
+                    }
                 }
             }
             else if ((kind == PARSE_KIND_GOTO && check_input_asm_id(reader->output, token) == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
                 reader->output->declaration_bodies[token] = body;
+                // A use of a local label takes its scope here, where its lists are in scope: an ambiguous name's, at its name.
+                const uint32_t operand = reader->first_child[token];
+                const uint32_t local = operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER && !check_input_indirect_goto(parser, token) ?
+                                       check_input_local_label(reader, &locals, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                if (local != BUSTER_CHECK_NONE)
+                {
+                    const bool ambiguous = check_input_local_label_ambiguous(&locals, local);
+                    locals.scopes[token] = ambiguous ? BUSTER_CHECK_NONE : locals.tokens[local] + 1;
+                    if (ambiguous && (!prefix || token < limit))
+                    {
+                        check_input_report(reader, operand, CHECK_INPUT_LABEL_AMBIGUOUS);
+                    }
+                }
             }
             else if (role == PARSE_ROLE_OPEN_CASE && (!prefix || token < limit))
             {
@@ -355,6 +544,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                 }
             }
         }
+        check_input_local_label_pop(reader, &locals, labels, capacity, BUSTER_CHECK_NONE, limit);
         scan = (CheckInputControlScan){ 0 };
         for (uint32_t token = 0; token < limit; token += 1)
         {
@@ -381,11 +571,15 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
             else if (jump || address)
             {
                 // A goto's label, or the label whose address &&name is: the same function's (clang names a missing one at
-                // its name, and an address of a label outside a function too).
+                // its name, and an address of a label outside a function too), or a local label's in its scope, whose
+                // missing definition (or ambiguous name) the first scan reported at the label instead.
                 const uint32_t body = reader->output->declaration_bodies[token];
                 const uint32_t operand = reader->first_child[token];
-                uint32_t target = body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
-                                        check_input_find_label(reader, labels, capacity, body, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                const bool local = locals.scopes != NULL && locals.scopes[token] != 0;
+                const bool ambiguous = locals.scopes != NULL && locals.scopes[token] == BUSTER_CHECK_NONE;
+                const uint32_t scope = check_input_label_scope(reader, &locals, token);
+                uint32_t target = body != BUSTER_CHECK_NONE && !ambiguous && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
+                                        check_input_find_label(reader, &locals, labels, capacity, scope, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
                 const bool unfinished = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY &&
                                         parser->tree.parents[body] >= reader->fragment_end;
                 if (prefix && unfinished && address && target == BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER)
@@ -410,9 +604,9 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
                         check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                     }
                 }
-                if (target == BUSTER_CHECK_NONE && !unfinished)
+                if (target == BUSTER_CHECK_NONE && !unfinished && !local)
                 {
-                    check_input_report(reader, address && operand < count ? operand : token, CHECK_INPUT_UNDECLARED);
+                    check_input_report(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token, CHECK_INPUT_LABEL_UNDECLARED);
                 }
             }
             else if (kind == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)

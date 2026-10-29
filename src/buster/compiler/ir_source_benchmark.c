@@ -7,7 +7,7 @@
 // (ir_verify and ir_verify_scalar) and of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar). Include
 // after ir_source_test.c and tier0_benchmark_measure.c, whose clock, counters and medians it takes.
 //
-//   build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
+//   build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [--functions] [preprocessor options] file...
 //
 // The files' functions are prepared as test-ir-source prepares them (ir_source_prepare), each lowered once by both
 // paths, which must agree, into the IR the verifier and promotion variants read, and promoted once by both, outside
@@ -291,10 +291,65 @@ static bool ir_source_measure(const IrSourceCorpus* corpus, Arena* output, Arena
     return failed == BUSTER_IR_SOURCE_VARIANTS;
 }
 
+// --functions (#787): each function's promotion by both paths timed apart, with its blocks, slots and instructions:
+// where the vector path pays against its twin. A sample is `repetitions` runs of a path, enough for both paths' one run
+// (the calibration) to take BUSTER_IR_SOURCE_FUNCTION_NS together; each path's line takes its least time per run over
+// BUSTER_IR_SOURCE_FUNCTION_SAMPLES samples, the paths taking turns running first.
+#define BUSTER_IR_SOURCE_FUNCTION_NS 500000ull
+#define BUSTER_IR_SOURCE_FUNCTION_SAMPLES 5
+
+static uint64_t ir_source_function_run(const IrFunction* lowered, bool vector, uint32_t repetitions, Arena* output, Arena* scratch, bool* failed)
+{
+    const uint64_t mark = output->length;
+    const uint64_t begin = tier0_benchmark_now();
+    for (uint32_t r = 0; r < repetitions; r += 1)
+    {
+        IrFunction result;
+        const IrCheck check = vector ? ssa_ir_promote(lowered, output, scratch, &result) : ssa_ir_promote_scalar(lowered, output, scratch, &result);
+        *failed |= check.error != IR_OK;
+        arena_pop_to(output, mark);
+    }
+    return tier0_benchmark_now() - begin;
+}
+
+static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Arena* scratch)
+{
+    bool failed = false;
+    for (uint32_t f = 0; f < corpus->count && !failed; f += 1)
+    {
+        const IrFunction* lowered = &corpus->lowered[f];
+        const uint64_t once = ir_source_function_run(lowered, true, 1, output, scratch, &failed) + ir_source_function_run(lowered, false, 1, output, scratch, &failed);
+        const uint64_t wanted = BUSTER_IR_SOURCE_FUNCTION_NS / (once != 0 ? once : 1) + 1;
+        const uint32_t repetitions = wanted < 100000 ? (uint32_t)wanted : 100000;
+        uint64_t least[2] = { UINT64_MAX, UINT64_MAX };
+        for (uint32_t sample = 0; sample < BUSTER_IR_SOURCE_FUNCTION_SAMPLES && !failed; sample += 1)
+        {
+            for (uint32_t turn = 0; turn < 2; turn += 1)
+            {
+                const uint32_t path = (sample & 1) != 0 ? 1 - turn : turn;
+                const uint64_t taken = ir_source_function_run(lowered, path == 0, repetitions, output, scratch, &failed);
+                least[path] = taken < least[path] ? taken : least[path];
+            }
+        }
+        IrFunction promoted;
+        const uint64_t mark = output->length;
+        failed |= ssa_ir_promote(lowered, output, scratch, &promoted).error != IR_OK;
+        const uint32_t promoted_instructions = promoted.instruction_count;
+        arena_pop_to(output, mark);
+        if (!failed)
+        {
+            printf("benchmark-ir-source: function=%s blocks=%u slots=%u instructions=%u promoted_instructions=%u vector_ns=%.1f scalar_ns=%.1f\n", corpus->functions[f].name,
+                   lowered->block_count, lowered->slot_count, lowered->instruction_count, promoted_instructions, (double)least[0] / repetitions, (double)least[1] / repetitions);
+        }
+    }
+    return !failed;
+}
+
 static int run_ir_source_benchmark(int count, char** arguments)
 {
     uint32_t only = BUSTER_IR_SOURCE_VARIANTS;
     uint64_t after_scalar = 0;
+    bool functions = false;
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
@@ -317,6 +372,10 @@ static int run_ir_source_benchmark(int count, char** arguments)
         else if (strcmp(arguments[i], "--after-scalar") == 0)
         {
             valid = i + 1 < count && check_corpus_number(arguments[++i], &after_scalar) && after_scalar <= 10000;
+        }
+        else if (strcmp(arguments[i], "--functions") == 0)
+        {
+            functions = true;
         }
         else if (arguments[i][0] != '-')
         {
@@ -351,7 +410,7 @@ static int run_ir_source_benchmark(int count, char** arguments)
     if (valid && corpus.failures == 0 && corpus.count != 0 && corpus.entries != 0 && corpus.tokens != 0)
     {
         ir_source_bytes(&corpus);
-        reported = ir_source_measure(&corpus, &output, &scratch, only, after_scalar);
+        reported = functions ? ir_source_functions(&corpus, &output, &scratch) : ir_source_measure(&corpus, &output, &scratch, only, after_scalar);
     }
     else if (valid)
     {
@@ -359,7 +418,7 @@ static int run_ir_source_benchmark(int count, char** arguments)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar] [--after-scalar MS] "
+        fprintf(stderr, "usage: compiler benchmark-ir-source [--only lower|lower-scalar|verify|verify-scalar|promote|promote-scalar] [--after-scalar MS] [--functions] "
                         "[preprocessor options] file...\n");
     }
     fflush(stdout);
