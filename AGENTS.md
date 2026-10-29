@@ -5412,7 +5412,7 @@ and the program runs: each side checks every argument, result, hidden pointer,
 this compiler on our side: a world of what its C passes (integers to 64 bits,
 `_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
-at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
+GNU's complex integer types to 64 bits, at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's

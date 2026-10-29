@@ -1482,8 +1482,10 @@ What the lowering covers past scalars (#145's programs):
   `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
   stack), division, remainder and conversions to and from the floating types
   by libgcc's functions. One of fewer than 128 bits is kept extended from its
-  width as a narrower one is, by a pair of 128-bit shifts (a constant comes
-  folded to its width and extended so).
+  width as a narrower one is, by a pair of 128-bit shifts. A constant comes
+  folded to its width's bits, which the lowering extends from the width, as a
+  narrower one's: a negative one's conversion to `__int128` or compare reads it
+  as it is.
   The overflow builtins of one of 65 to 127 bits are refused by name (their
   recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
@@ -1696,7 +1698,9 @@ What the lowering covers past scalars (#145's programs):
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
-- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+- **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
+  and GNU's complex integer types of up to 64 bits (`_Complex char` to
+  `_Complex unsigned long long`), are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
   objects, the stream carries a value by its object's address, and copies,
@@ -1712,21 +1716,30 @@ What the lowering covers past scalars (#145's programs):
   of two complex values, and a real dividend's over a complex divisor, call
   libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
   `__divxc3`, runtime functions as the 128-bit integers' are, which give the
-  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  values clang -O0's inline product and its NaN recovery give. A complex
+  integer type's operation computes in its element's class, or in 32 bits for
+  one of 8 or 16 (`check_lower_computed`), each part wrapped back to the
+  element's width, and its product and quotient are clang -O0's inline ones,
+  in the element's type whatever the operands' domains: (ac − bd) + (ad + bc)i,
+  and ((ac + bd) / (cc + dd)) + ((bc − ad) / (cc + dd))i, each product and sum
+  wrapped before the division (`check_lower_complex_quotient`). `==` and `!=`
   compare both parts; a value's truth is either part's; a conversion converts
   each part (to a real type the real part, to `_Bool` the truth); a compound
   assignment reads its destination in the calculation's type through its
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
-  parts are a floating constant's (a `long double`'s in the function's table).
+  parts are a floating constant's (a `long double`'s in the function's table),
+  or a complex integer constant's halves, each its part's bits.
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: GNU's
-  complex integer types ("complex integer types") and the complex types of
-  the other floating types, `_Complex _Float16` and `_Complex __float128`
-  ("complex types other than _Complex float, double and long double"). A
+  The complex types it doesn't take are refused by what they need: the
+  complex integer types of `__int128` and of `_BitInt`s, which the usual
+  arithmetic conversions make ("complex integer types of __int128 and
+  _BitInt"), and the complex types of the other floating types, `_Complex
+  _Float16` and `_Complex __float128` ("complex types other than _Complex
+  float, double and long double"). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
@@ -1894,7 +1907,7 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: complex integer types,
+`error: unsupported: FEATURE`, naming the feature: complex integer types of `__int128`,
 `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
