@@ -2039,6 +2039,8 @@ struct CheckSourceFixture
     bool undecided;
     // The type table's room, for a fixture larger than check_test_types_open's; null for that.
     const TypeCapacity* capacity;
+    // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
+    double* check_seconds;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -2135,7 +2137,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         lines[p] = outcome.line;
         if (!rejected[p])
         {
+            struct timespec reader_start;
+            struct timespec reader_stop;
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_start);
+            }
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_stop);
+                *fixture->check_seconds += (double)(reader_stop.tv_sec - reader_start.tv_sec) + (double)(reader_stop.tv_nsec - reader_start.tv_nsec) * 1e-9;
+            }
             if (adapted || input[p].diagnostic_graph)
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
@@ -2169,7 +2182,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     .scalar = p == 0,
                     .verify = true
                 };
+                struct timespec start;
+                struct timespec stop;
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &start);
+                }
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &stop);
+                    *fixture->check_seconds += (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9;
+                }
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
@@ -4378,19 +4402,15 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
                     .name = name,
                     .source = (const char*)text.base,
                     .capacity = &capacity,
+                    .check_seconds = timing ? &seconds[c - 1] : NULL,
                 };
-                struct timespec start;
-                struct timespec stop;
-                clock_gettime(CLOCK_MONOTONIC, &start);
                 check_test_source(test, &fixture, path, &outcome);
-                clock_gettime(CLOCK_MONOTONIC, &stop);
-                seconds[timing ? c - 1 : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : seconds[0];
             }
             unlink(path);
             arena_release(&text);
         }
         char description[200];
-        snprintf(description, sizeof(description), "%s: %u checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
+        snprintf(description, sizeof(description), "%s: %u read and checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
                  timed[form] / 10, seconds[0]);
         check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
         printf("test-checker: %s\n", description);

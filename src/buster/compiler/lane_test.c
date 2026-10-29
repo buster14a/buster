@@ -49,8 +49,9 @@
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
 //     forked child refuses the inherited team without waiting for workers that exist only in its parent.
 //
-// A watchdog ends the run with status 1 if a group runs for longer than BUSTER_LANE_TEST_TIMEOUT_SECONDS, which is how a
-// lost wake-up would show. The exit status is 1 if the arguments are invalid or a check fails.
+// A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
+// the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
+// checks have a fixed deadline. The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the inputs (lane_test_random, lane_test_cost, lane_test_make_records and lane_test_output_byte),
 // the arena checks (lane_test_arenas), the lanes' side of each check (lane_test_ranges, lane_test_syncs,
@@ -86,6 +87,8 @@
 #define BUSTER_LANE_TEST_PARTITION_BITS 6
 #define BUSTER_LANE_TEST_PARTITIONS (1u << BUSTER_LANE_TEST_PARTITION_BITS)
 #define BUSTER_LANE_TEST_TIMEOUT_SECONDS 60
+#define BUSTER_LANE_TEST_STRINGIFY_(value) #value
+#define BUSTER_LANE_TEST_STRINGIFY(value) BUSTER_LANE_TEST_STRINGIFY_(value)
 // The arenas: the large reservation, and how much of /proc/self/smaps is read.
 #define BUSTER_LANE_TEST_LARGE_ARENA (64ull << 30)
 #define BUSTER_LANE_TEST_SMAPS_BYTES (16ull << 20)
@@ -550,6 +553,10 @@ static void lane_test_stall(uint64_t nanoseconds)
     nanosleep(&duration, 0);
 }
 
+// Written by lane 0 only after a completed sync and broadcast; sampled by the watchdog's signal handler. The word
+// uses lock-free machine atomics so the handler can exchange it safely even if it interrupts a lane's update.
+static _Alignas(64) uint32_t lane_test_progress;
+
 static uint64_t lane_test_syncs(LaneTest* test)
 {
     const uint32_t lanes = lane_count();
@@ -581,6 +588,10 @@ static uint64_t lane_test_syncs(LaneTest* test)
         const uint32_t source = (uint32_t)(round % lanes);
         const uint64_t expected = ~lane_test_value(round, source);
         failures += lane_broadcast(index == source ? expected : lane_test_value(round, index), source) != expected ? 1 : 0;
+        if (index == 0)
+        {
+            __atomic_store_n(&lane_test_progress, 1, __ATOMIC_RELAXED);
+        }
     }
     // Broadcasts back to back, with nothing between them but the next broadcast: each source offers its value while
     // slower lanes may still be reading the last one.
@@ -588,6 +599,10 @@ static uint64_t lane_test_syncs(LaneTest* test)
     {
         const uint32_t source = (uint32_t)((round * 7 + 3) % lanes);
         failures += lane_broadcast(lane_test_value(round, index), source) != lane_test_value(round, source) ? 1 : 0;
+        if (index == 0)
+        {
+            __atomic_store_n(&lane_test_progress, 1, __ATOMIC_RELAXED);
+        }
     }
     // Narrow tasks spread over the lanes, each result broadcast from the lane that ran its task.
     for (uint64_t task = 0; task < 3 * BUSTER_LANE_TEST_MAX_LANES; task += 1)
@@ -991,18 +1006,67 @@ static void lane_test_main(void* argument)
 // Verification
 
 // The check and lane count the watchdog names if a group doesn't finish.
-static const char* volatile lane_test_watched_check;
-static volatile uint32_t lane_test_watched_lanes;
+// One atomic value selects an immutable diagnostic and the progress policy. The handler cannot race a message being
+// formatted for the next group, even if a previous alarm was already pending when it was canceled.
+static uint32_t lane_test_watch_state;
+_Static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0), "the watchdog needs lock-free atomics");
+
+static void lane_test_watch(uint32_t check, uint32_t lanes, bool progress)
+{
+    __atomic_store_n(&lane_test_progress, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&lane_test_watch_state, (check << 8) | lanes | (progress ? 0x10000u : 0), __ATOMIC_RELAXED);
+}
+
+// Called only after all of the watched group's workers have joined. Block delivery to the sole remaining thread,
+// cancel the timer, and consume any process-pending alarm before a new group can install its watchdog state. This
+// also cancels a timer that a handler rearmed immediately before the block.
+static bool lane_test_unwatch(void)
+{
+    sigset_t mask;
+    sigset_t previous;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGALRM);
+    bool result = pthread_sigmask(SIG_BLOCK, &mask, &previous) == 0;
+    alarm(0);
+    if (result)
+    {
+        const struct timespec now = { 0 };
+        int signal_number;
+        do
+        {
+            signal_number = sigtimedwait(&mask, 0, &now);
+        }
+        while (signal_number == SIGALRM || (signal_number < 0 && errno == EINTR));
+        result = signal_number < 0 && errno == EAGAIN;
+        result = pthread_sigmask(SIG_SETMASK, &previous, 0) == 0 && result;
+    }
+    return result;
+}
 
 static void lane_test_report_hang(int signal_number)
 {
     (void)signal_number;
-    char message[160];
-    const int length = snprintf(message, sizeof(message), "%s on %u lanes didn't finish in %d s\n", lane_test_watched_check, lane_test_watched_lanes,
-                                BUSTER_LANE_TEST_TIMEOUT_SECONDS);
-    if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
+    static const char* const names[] = { "ranges", "syncs", "alone", "scratch", "exchange", "parts", "team lifetime" };
+    static const uint8_t lengths[] = { 6, 5, 5, 7, 8, 5, 13 };
+    static const char digits[] = "012345678";
+    static const char middle[] = " on ";
+    static const char elapsed[] = " lanes didn't finish in " BUSTER_LANE_TEST_STRINGIFY(BUSTER_LANE_TEST_TIMEOUT_SECONDS) " s\n";
+    static const char stalled[] = " lanes made no progress during the last " BUSTER_LANE_TEST_STRINGIFY(BUSTER_LANE_TEST_TIMEOUT_SECONDS) " s\n";
+    const uint32_t state = __atomic_load_n(&lane_test_watch_state, __ATOMIC_RELAXED);
+    const uint32_t check = (state >> 8) & 0xffu;
+    const uint32_t lanes = state & 0xffu;
+    const bool progress = (state & 0x10000u) != 0;
+    if (progress && __atomic_exchange_n(&lane_test_progress, 0, __ATOMIC_RELAXED) != 0)
     {
-        _exit(1);
+        alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+        return;
+    }
+    if (check < BUSTER_ARRAY_LENGTH(names) && lanes < sizeof(digits) - 1)
+    {
+        (void)write(STDOUT_FILENO, names[check], lengths[check]);
+        (void)write(STDOUT_FILENO, middle, sizeof(middle) - 1);
+        (void)write(STDOUT_FILENO, &digits[lanes], 1);
+        (void)write(STDOUT_FILENO, progress ? stalled : elapsed, progress ? sizeof(stalled) - 1 : sizeof(elapsed) - 1);
     }
     _exit(1);
 }
@@ -1014,12 +1078,11 @@ static uint64_t lane_test_run(LaneTest* test, LaneTestCheck check, uint32_t lane
     test->check = check;
     memset(test->failures, 0, sizeof(test->failures));
     memset(test->sleeps, 0, sizeof(test->sleeps));
-    lane_test_watched_check = lane_test_check_names[check];
-    lane_test_watched_lanes = lanes;
+    lane_test_watch(check, lanes, check == LANE_TEST_SYNCS);
     alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
     const bool started = lane_run(lanes, lane_test_main, test, 0);
-    alarm(0);
-    uint64_t result = started ? 0 : 1;
+    const bool unwatched = lane_test_unwatch();
+    uint64_t result = (started ? 0 : 1) + (unwatched ? 0 : 1);
     *sleeps = 0;
     for (uint32_t lane = 0; lane < lanes; lane += 1)
     {
@@ -1030,7 +1093,85 @@ static uint64_t lane_test_run(LaneTest* test, LaneTestCheck check, uint32_t lane
     {
         printf("  %s: a group of %u lanes couldn't be started\n", lane_test_check_names[check], lanes);
     }
+    if (!unwatched)
+    {
+        printf("  %s: couldn't stop the watchdog\n", lane_test_check_names[check]);
+    }
     return result;
+}
+
+// Exercise the alarm paths without waiting for the real deadline. A child with a completed round must return from its
+// first alarm, but if nothing else completes, its next alarm must terminate it. The pipe proves the first alarm returned.
+static bool lane_test_watchdog(void)
+{
+    bool passed = true;
+    lane_test_watch(LANE_TEST_SYNCS, 2, false);
+    alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+    for (uint32_t scenario = 0; scenario < 4; scenario += 1)
+    {
+        int marker[2];
+        const bool piped = pipe(marker) == 0;
+        const pid_t child = piped ? fork() : -1;
+        if (child == 0)
+        {
+            close(marker[0]);
+            const int sink = open("/dev/null", O_WRONLY);
+            if (sink < 0 || dup2(sink, STDOUT_FILENO) < 0)
+            {
+                _exit(3);
+            }
+            close(sink);
+            lane_test_watch(LANE_TEST_SYNCS, 2, true);
+            alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+            if (scenario == 3)
+            {
+                sigset_t mask;
+                sigset_t previous;
+                sigset_t pending;
+                sigemptyset(&mask);
+                sigaddset(&mask, SIGALRM);
+                const bool blocked = pthread_sigmask(SIG_BLOCK, &mask, &previous) == 0;
+                const bool raised = blocked && raise(SIGALRM) == 0;
+                const bool drained = raised && lane_test_unwatch();
+                const bool empty = drained && sigpending(&pending) == 0 && sigismember(&pending, SIGALRM) == 0;
+                if (!empty || pthread_sigmask(SIG_SETMASK, &previous, 0) != 0)
+                {
+                    _exit(3);
+                }
+                const char byte = 1;
+                _exit(write(marker[1], &byte, 1) == 1 ? 2 : 3);
+            }
+            __atomic_store_n(&lane_test_progress, scenario != 0, __ATOMIC_RELAXED);
+            raise(SIGALRM);
+            const char byte = 1;
+            if (write(marker[1], &byte, 1) != 1)
+            {
+                _exit(3);
+            }
+            if (scenario == 2)
+            {
+                raise(SIGALRM);
+            }
+            _exit(2);
+        }
+        if (piped)
+        {
+            close(marker[1]);
+        }
+        char byte = 0;
+        const ssize_t bytes = piped ? read(marker[0], &byte, 1) : -1;
+        if (piped)
+        {
+            close(marker[0]);
+        }
+        int status = 0;
+        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+        passed = waited && WIFEXITED(status) && WEXITSTATUS(status) == (scenario == 1 || scenario == 3 ? 2 : 1) &&
+                 bytes == (scenario == 0 ? 0 : 1) && passed;
+    }
+    passed = lane_test_unwatch() && passed;
+    printf("watchdog: progress and stalled rounds %s\n", passed ? "passed" : "failed");
+    return passed;
 }
 
 // The lane that lane_range_by_cost must give item i, with total cost `total` (not 0): the first k whose share's end,
@@ -1496,8 +1637,7 @@ static uint64_t lane_test_team_keep(uint32_t threads_before)
 
 static uint64_t lane_test_teams(void)
 {
-    lane_test_watched_check = "team lifetime";
-    lane_test_watched_lanes = BUSTER_LANE_TEST_MAX_LANES;
+    lane_test_watch(BUSTER_ARRAY_LENGTH(lane_test_check_names), BUSTER_LANE_TEST_MAX_LANES, false);
     alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
     const uint32_t threads_before = lane_test_thread_count();
     const Lane previous = thread_context.lane;
@@ -1578,7 +1718,7 @@ static uint64_t lane_test_teams(void)
     failures += retained_value == 0 || *retained_value != BUSTER_LANE_TEST_GOLDEN_RATIO ? 1 : 0;
     failures += test.forbidden_calls != 0 || test.invalid_indices != 0 ? 1 : 0;
     scratch_end(retained);
-    alarm(0);
+    failures += lane_test_unwatch() ? 0 : 1;
     printf("teams: %u operations with changing lane counts, %lu wrong\n", BUSTER_LANE_TEST_TEAM_ROUNDS + 12, (unsigned long)failures);
     return failures;
 }
@@ -1654,7 +1794,8 @@ static int run_lane_tests(int argc, char** argv)
     }
     else
     {
-        bool passed = lane_test_arenas();
+        bool passed = lane_test_watchdog();
+        passed = lane_test_arenas() && passed;
         passed = lane_test_teams() == 0 && passed;
         fflush(stdout);
 
