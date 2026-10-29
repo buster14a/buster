@@ -1099,6 +1099,21 @@ static void tier0_test_inputs(uint64_t seed, uint64_t inputs[BUSTER_TIER0_TEST_I
 // thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone (nothing but
 // the program's code runs while it is the block's), and copies them back beside the other globals, whose bytes it
 // hashes as the interpreter's.
+typedef uint64_t (*Tier0TestRunEntry)(uint64_t, uint64_t, uint64_t);
+
+// The entry's call with FS the program's block (`fs`) from its start to its end, then `saved` again: by the system call
+// itself, and without a sanitizer's instrumentation, which reaches its thread's state through FS. The result goes to
+// `value`, whose shadow the caller's initialization made clean.
+static __attribute__((noinline, disable_sanitizer_instrumentation)) void tier0_test_call_tls(Tier0TestRunEntry entry, const uint64_t inputs[3], uint64_t fs, uint64_t saved,
+                                                                                            uint64_t* value)
+{
+    int64_t call = SYS_arch_prctl;
+    __asm__ volatile("syscall" : "+a"(call) : "D"(ARCH_SET_FS), "S"(fs) : "rcx", "r11", "memory");
+    *value = entry(inputs[0], inputs[1], inputs[2]);
+    call = SYS_arch_prctl;
+    __asm__ volatile("syscall" : "+a"(call) : "D"(ARCH_SET_FS), "S"(saved) : "rcx", "r11", "memory");
+}
+
 // Generated code has no Clang function-type prefix before its entry point.
 // Disable only that metadata check at the call boundary; keep all other checks.
 static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
@@ -1112,6 +1127,9 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0P
     const uint64_t data_pages = (data_bytes + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
     Tier0TestOutcome* shared = mmap(0, sizeof(Tier0TestOutcome) * BUSTER_TIER0_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     bool result = shared != MAP_FAILED;
+    // The child leaves no copy of buffered output to write again at its exit (a sanitizer's _exit flushes).
+    fflush(stdout);
+    fflush(stderr);
     const pid_t child = result ? fork() : -1;
     if (child == 0)
     {
@@ -1164,8 +1182,7 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0P
         {
             _exit(5);
         }
-        typedef uint64_t (*Tier0TestEntry)(uint64_t, uint64_t, uint64_t);
-        Tier0TestEntry entry = 0;
+        Tier0TestRunEntry entry = 0;
         void* entry_address = region + code->offsets[program->function_count - 1];
         memcpy(&entry, &entry_address, sizeof(entry));
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
@@ -1176,14 +1193,14 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0P
                 const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
                 memcpy(tls + data->tls_offsets[g], data_base + data->offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
             }
+            uint64_t value = 0;
             if (data->tls_size != 0)
             {
-                syscall(SYS_arch_prctl, ARCH_SET_FS, self);
+                tier0_test_call_tls(entry, inputs[r], self, saved_fs, &value);
             }
-            const uint64_t value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
-            if (data->tls_size != 0)
+            else
             {
-                syscall(SYS_arch_prctl, ARCH_SET_FS, saved_fs);
+                value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
             }
             for (uint32_t g = 0; g < program->global_count; g += 1)
             {

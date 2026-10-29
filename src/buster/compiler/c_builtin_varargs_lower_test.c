@@ -404,7 +404,8 @@ static uint32_t cbuiltin_va_lower_test_class_index(uint32_t class)
     return result;
 }
 
-static void cbuiltin_va_lower_test_read(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t class, void* list, uint64_t expected, uint32_t item)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_va_lower_test_read(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t class, void* list, uint64_t expected, uint32_t item)
 {
     uint8_t bytes[24];
     uint8_t expected_bytes[24];
@@ -453,7 +454,8 @@ static uint32_t cbuiltin_va_lower_test_oracle(va_list list, uint32_t class, uint
     return result;
 }
 
-static __attribute__((noinline)) void cbuiltin_va_lower_test_clang(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t shape, double named, ...)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower_test_clang(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t shape, double named, ...)
 {
     va_list generated;
     va_list oracle;
@@ -612,7 +614,8 @@ struct CBuiltinVaLowerTestRun
 
 // The run's sequence's arguments, read by the helpers from a list Clang started, each against Clang's va_arg of a copy:
 // an aggregate's data bytes copied out exactly, nothing around them written, and both cursors alike after it.
-static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
 {
     va_list generated;
     va_list oracle;

@@ -3497,7 +3497,7 @@ struct ParseTestProbe
     char text[1024];
 };
 
-static ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared, bool preprocess)
+static __attribute__((unused)) ParseTestProbe parse_test_probe(char** arguments, int count, int capture, uint64_t base, uint64_t limit, ParseTestProbe* shared, bool preprocess)
 {
     *shared = (ParseTestProbe){ .status = -1 };
     const pid_t child = fork();
@@ -3528,7 +3528,7 @@ static ParseTestProbe parse_test_probe(char** arguments, int count, int capture,
 
 // Checks a run with a limit, in which a reservation failed: it must fail with status 1 having said why (one fatal error),
 // before its address space reached the limit, and leave the address space and the descriptors as they were.
-static uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name)
+static __attribute__((unused)) uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name)
 {
     const char* fatal = strstr(probe->text, "fatal error: ");
     const bool failed = probe->status == 1 && fatal != 0 && strstr(fatal + 1, "fatal error: ") == 0 && probe->peak <= limit;
@@ -3548,6 +3548,16 @@ static uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t lim
 static uint32_t parse_test_driver_limits(char** arguments, int count, int capture, ParseTestProbe* shared, const char* name, bool preprocess)
 {
     uint32_t failures = 0;
+#if __has_feature(thread_sanitizer)
+    // ThreadSanitizer maps shadow for the memory a run maps and keeps it, so the address space neither returns to its base
+    // nor bounds the run's own reservations. The other detectors' builds and the plain ones check them.
+    (void)arguments;
+    (void)count;
+    (void)capture;
+    (void)shared;
+    (void)preprocess;
+    printf("driver: %s: reservations failed in turn aren't checked under ThreadSanitizer, whose shadow grows the address space\n", name);
+#else
     char text[1024];
     // A run without a limit, which also grows the stack as far as a run takes it, and one in a child, for its peak.
     const int status = parse_test_drive(arguments, count, capture, text, sizeof(text), preprocess);
@@ -3573,6 +3583,7 @@ static uint32_t parse_test_driver_limits(char** arguments, int count, int captur
     }
     failures += runs >= 10000;
     printf("driver: %s: %u reservations and mappings failed in turn, each reported and released\n", name, runs);
+#endif
     return failures;
 }
 

@@ -251,11 +251,6 @@ typedef struct ThreadContext ThreadContext;
 struct ThreadContext
 {
     Lane lane;
-#if BUSTER_SANITIZER_RESOURCES
-    bool test_no_threads;
-    bool test_arena_limited;
-    uint64_t test_arena_limit;
-#endif
     // A command's fixed team, or 0 for standalone calls. running also guards calls made after lane_alone.
     LaneTeam* team;
     bool running;
@@ -291,9 +286,27 @@ static _Thread_local ThreadContext thread_context = {
 #endif
 
 #if BUSTER_SANITIZER_RESOURCES
+// The injected failures, the process's rather than a thread's: lanes reserve their arenas on their own threads. A test
+// sets them before the lanes start and puts them back after they end.
+typedef struct LaneTestResources LaneTestResources;
+struct LaneTestResources
+{
+    bool no_threads;
+    bool arena_limited;
+    uint64_t arena_limit;
+};
+
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern LaneTestResources lane_test_resources;
+#elif defined(BUSTER_UNIT)
+LaneTestResources lane_test_resources;
+#else
+static LaneTestResources lane_test_resources;
+#endif
+
 static bool arena_test_reservation_allowed(uint64_t bytes)
 {
-    return !thread_context.test_arena_limited || bytes <= thread_context.test_arena_limit;
+    return !lane_test_resources.arena_limited || bytes <= lane_test_resources.arena_limit;
 }
 #endif
 
@@ -1012,7 +1025,7 @@ static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* c
 {
     bool result = team != 0 && capacity >= 1 && capacity <= BUSTER_LANE_MAX_COUNT && thread_context.team == 0 && !thread_context.running;
 #if BUSTER_SANITIZER_RESOURCES
-    result = result && (capacity == 1 || !thread_context.test_no_threads);
+    result = result && (capacity == 1 || !lane_test_resources.no_threads);
 #endif
     result = result && team->capacity == 0;
     if (result)
@@ -1166,7 +1179,7 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     pthread_t threads[BUSTER_LANE_MAX_COUNT];
     bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0;
 #if BUSTER_SANITIZER_RESOURCES
-    valid = valid && (count == 1 || !thread_context.test_no_threads);
+    valid = valid && (count == 1 || !lane_test_resources.no_threads);
 #endif
     uint32_t created = 1;
     for (uint32_t i = 1; valid && i < count && created == i; i += 1)

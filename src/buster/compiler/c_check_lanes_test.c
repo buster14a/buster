@@ -355,10 +355,10 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
     const CheckProgram* program = &unit->selected.program;
     const bool ready = output.base != 0 && bytes.base != 0 && scratch.base != 0;
 #if BUSTER_SANITIZER_RESOURCES
-    const bool before_limited = thread_context.test_arena_limited;
-    const uint64_t before_room = thread_context.test_arena_limit;
-    thread_context.test_arena_limited = room != UINT64_MAX;
-    thread_context.test_arena_limit = room;
+    const bool before_limited = lane_test_resources.arena_limited;
+    const uint64_t before_room = lane_test_resources.arena_limit;
+    lane_test_resources.arena_limited = room != UINT64_MAX;
+    lane_test_resources.arena_limit = room;
     result.limited = room != UINT64_MAX;
 #else
     struct rlimit before = { 0 };
@@ -378,8 +378,8 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
                                           check_program_emit(&code, program, parser, identifiers, unit->selected.data.capacity, scalar, &output, &bytes, &scratch, NULL,
                                                              rows ? &row_set : NULL, unwind, true));
 #if BUSTER_SANITIZER_RESOURCES
-    thread_context.test_arena_limited = before_limited;
-    thread_context.test_arena_limit = before_room;
+    lane_test_resources.arena_limited = before_limited;
+    lane_test_resources.arena_limit = before_room;
 #else
     result.limited = result.limited && setrlimit(RLIMIT_AS, &before) == 0;
 #endif
@@ -982,8 +982,8 @@ static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* d
             alarm(BUSTER_OBJECT_TEST_RUN_SECONDS);
             CheckLanesTestTally own = { .random = 1 };
 #if BUSTER_SANITIZER_RESOURCES
-            thread_context.test_no_threads = true;
-            check_lanes_test_expect(&own, thread_context.test_no_threads, "inject the child's lane-start failure", 0);
+            lane_test_resources.no_threads = true;
+            check_lanes_test_expect(&own, lane_test_resources.no_threads, "inject the child's lane-start failure", 0);
 #else
             check_lanes_test_expect(&own, setrlimit(RLIMIT_NPROC, &limit) == 0, "limit the child to the processes it has", 0);
 #endif

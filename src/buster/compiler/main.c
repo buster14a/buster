@@ -1405,7 +1405,7 @@ static int main_driver(int argc, char** argv)
 {
 #if BUSTER_SANITIZER_RESOURCES
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
-    thread_context.test_no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
+    lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
 #endif
     const int guardian = worker_budget_guardian_command(argc, argv);
     // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before

@@ -412,10 +412,13 @@ jobs:
       - name: Prove entry override, crash preservation and exact-input replay
         if: matrix.entry == 'crash-replay-proof'
         run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay"
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
           printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
+          # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
+          # audit below still rejects any other diagnostic. configure writes log_path last.
+          planted="${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report"
           status=0
-          ./build/compiler --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+          ASAN_OPTIONS="$planted" ./build/compiler --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
             "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
           test "$status" -eq 77
           grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
@@ -423,10 +426,16 @@ jobs:
           test "${#artifacts[@]}" -eq 1
           cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
           status=0
-          ./build/compiler --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
+          ASAN_OPTIONS="$planted" ./build/compiler --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
             "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
           test "$status" -eq 77
           grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
+          reports=("$RUNNER_TEMP/fuzz-planted/"report.*)
+          test "${#reports[@]}" -eq 2
+          for report in "${reports[@]}"; do
+              grep -Fq 'in buster_fuzz_test_input' "$report"
+              grep -Fq 'tests/fuzz/entry_probe.c:' "$report"
+          done
 
       - name: Reject every unexpected sanitizer diagnostic
         if: ${{ !cancelled() }}
@@ -441,6 +450,7 @@ jobs:
             ${{ runner.temp }}/fuzz-corpus
             ${{ runner.temp }}/fuzz-artifacts
             ${{ runner.temp }}/fuzz-replay
+            ${{ runner.temp }}/fuzz-planted
             ${{ runner.temp }}/fuzzer*.log
             ${{ runner.temp }}/sanitizer-reports
             ${{ runner.temp }}/sanitizer-probes

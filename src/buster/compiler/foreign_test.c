@@ -2366,7 +2366,7 @@ static void foreign_test_unstarted(ForeignTestTally* tally, char** arguments, ui
         if (child == 0)
         {
 #if BUSTER_SANITIZER_RESOURCES
-            thread_context.test_no_threads = true;
+            lane_test_resources.no_threads = true;
             const bool limited = true;
 #else
             const struct rlimit limit = {

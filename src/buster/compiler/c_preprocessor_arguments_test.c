@@ -86,8 +86,8 @@ static bool pp_test_argument_invoke_failure(bool vectorized)
         };
         context.tokens = &pp.arguments;
 #if BUSTER_SANITIZER_RESOURCES
-        thread_context.test_arena_limited = true;
-        thread_context.test_arena_limit = 0;
+        lane_test_resources.arena_limited = true;
+        lane_test_resources.arena_limit = 0;
         const bool limited = true;
 #else
         const struct rlimit limit = { 0, 0 };
@@ -180,8 +180,8 @@ static bool pp_test_argument_links(void)
     if (child == 0)
     {
 #if BUSTER_SANITIZER_RESOURCES
-        thread_context.test_arena_limited = true;
-        thread_context.test_arena_limit = 0;
+        lane_test_resources.arena_limited = true;
+        lane_test_resources.arena_limit = 0;
         const bool limited = true;
 #else
         const struct rlimit limit = { 0, 0 };

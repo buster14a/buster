@@ -1106,7 +1106,8 @@ static bool tier0_test_vector_native(const uint8_t* code, uint32_t length, Tier0
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static void tier0_test_vector_run_body(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_body(const void* code, Tier0TestVectorShared* shared)
 {
     typedef void (*Body)(const void*, const void*, const void*, void*);
     Body body = 0;
@@ -1672,7 +1673,8 @@ static __m128i tier0_test_vector_x(const Tier0TestVectorShared* shared, uint32_t
     return _mm_loadu_si128((const __m128i*)shared->arguments[k]);
 }
 
-static void tier0_test_vector_run_pick(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_pick(const void* code, Tier0TestVectorShared* shared)
 {
     typedef __m512i (*Pick)(__m512i, __m256i, __m128i, double, __m512i, void*);
     Pick pick = 0;
@@ -1682,7 +1684,8 @@ static void tier0_test_vector_run_pick(const void* code, Tier0TestVectorShared* 
     _mm512_storeu_si512(shared->results[0], result);
 }
 
-static void tier0_test_vector_run_caller(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_caller(const void* code, Tier0TestVectorShared* shared)
 {
     typedef __m256i (*Caller)(__m512i, __m128i);
     Caller caller = 0;
@@ -1690,7 +1693,8 @@ static void tier0_test_vector_run_caller(const void* code, Tier0TestVectorShared
     _mm256_storeu_si256((__m256i*)shared->results[0], caller(tier0_test_vector_z(shared, 0), tier0_test_vector_x(shared, 1)));
 }
 
-static void tier0_test_vector_run_stacked(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_stacked(const void* code, Tier0TestVectorShared* shared)
 {
     typedef __m128i (*Stacked)(__m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m128i, __m512i);
     Stacked stacked = 0;
@@ -1701,7 +1705,8 @@ static void tier0_test_vector_run_stacked(const void* code, Tier0TestVectorShare
     _mm_storeu_si128((__m128i*)shared->results[0], result);
 }
 
-static void tier0_test_vector_run_summer(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_summer(const void* code, Tier0TestVectorShared* shared)
 {
     typedef __m128i (*Summer)(__m128i, __m128i);
     Summer summer = 0;
@@ -1709,7 +1714,8 @@ static void tier0_test_vector_run_summer(const void* code, Tier0TestVectorShared
     _mm_storeu_si128((__m128i*)shared->results[0], summer(tier0_test_vector_x(shared, 0), tier0_test_vector_x(shared, 1)));
 }
 
-static void tier0_test_vector_run_keep(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_keep(const void* code, Tier0TestVectorShared* shared)
 {
     typedef float (*Keep)(float, float, __m512i);
     Keep keep = 0;
@@ -1718,7 +1724,8 @@ static void tier0_test_vector_run_keep(const void* code, Tier0TestVectorShared* 
     memcpy(shared->results[0], &result, sizeof(result));
 }
 
-static void tier0_test_vector_run_widen(const void* code, Tier0TestVectorShared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_widen(const void* code, Tier0TestVectorShared* shared)
 {
     typedef __m512i (*Widen)(__m512i);
     Widen widen = 0;
