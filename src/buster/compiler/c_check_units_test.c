@@ -1001,7 +1001,9 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
 // A run of the driver's `arguments` (run_check_command's) in a child whose address space may grow `limit` bytes past
 // `base` (this process's), in `directory` and with its standard error into `capture`: its exit status (-1 if it didn't
 // report), how far past `base` its address space grew, and whether it left the address space and the descriptors as
-// they were. The child writes them to `shared`, a page both see.
+// they were. The child writes them to `shared`, a page both see. With `warm`, run in the parent before its baseline is
+// frozen, through this same command/observation frame; the caller restores the parent's limits, directory and stderr.
+// Keep the frame out of line so a direct warmup cannot use a shallower call path than the measured child.
 typedef struct CheckUnitsTestProbe CheckUnitsTestProbe;
 struct CheckUnitsTestProbe
 {
@@ -1019,21 +1021,30 @@ struct CheckUnitsTestProbe
     bool clean;
 };
 
-static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
-                                                  CheckUnitsTestProbe* shared)
+static __attribute__((noinline)) CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
+                                                                         bool warm, CheckUnitsTestProbe* shared)
 {
     *shared = (CheckUnitsTestProbe){ .status = -1 };
     fflush(stdout);
     fflush(stderr);
-    const pid_t child = fork();
+    const pid_t child = warm ? 0 : fork();
     if (child == 0)
     {
-        const struct rlimit core = { 0 };
+        struct rlimit core = { 0 };
         struct rlimit space;
         bool limited = getrlimit(RLIMIT_AS, &space) == 0 && base + limit <= space.rlim_max;
+        // A child can drop its hard core limit; the parent must keep it so the saved limit can be restored.
+        if (warm)
+        {
+            limited = limited && getrlimit(RLIMIT_CORE, &core) == 0;
+            core.rlim_cur = 0;
+        }
         space.rlim_cur = base + limit;
         limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
-        alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        if (!warm)
+        {
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        }
         const int before = parse_test_lowest_descriptor();
         // These observations can themselves change stack use; keep the whole-process cleanup equality unchanged.
         shared->before_stack = parse_test_status_bytes("VmStk:");
@@ -1050,7 +1061,10 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
         shared->after_descriptor = after;
         shared->clean = shared->after_size == base && after == before;
         shared->status = status;
-        _exit(0);
+        if (!warm)
+        {
+            _exit(0);
+        }
     }
     int child_status = 0;
     pid_t waited = child;
@@ -1058,13 +1072,14 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
     {
     }
     CheckUnitsTestProbe result = *shared;
-    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    result.status = warm || (child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0) ? result.status : -1;
     return result;
 }
 
 // Every reservation and mapping of two units' -c by one lane failed in turn (see the file's comment), in a directory of
-// its own under `directory`. The command runs once in this process first, as the children's runs do, so that what only
-// a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's already.
+// its own under `directory`. The command and observations run once through the probe in this process first, so that
+// what only a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's
+// already. The parent baseline is frozen only after that same-frame warmup and restoration of the parent's state.
 static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
 {
     static const char header[] = "int limits_square(int value);\n";
@@ -1099,14 +1114,20 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     int status = -1;
     const int saved_directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     const int saved_errors = dup(2);
-    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && chdir(limits) == 0)
+    struct rlimit saved_space = { 0 };
+    struct rlimit saved_core = { 0 };
+    const bool saved_limits = getrlimit(RLIMIT_AS, &saved_space) == 0 && getrlimit(RLIMIT_CORE, &saved_core) == 0;
+    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && saved_limits)
     {
-        if (dup2(capture, 2) == 2)
-        {
-            status = run_check_command(count, arguments, true);
-            dup2(saved_errors, 2);
-        }
-        status = fchdir(saved_directory) == 0 ? status : -1;
+        const uint64_t warm_base = parse_test_status_bytes("VmSize:");
+        const CheckUnitsTestProbe warmed = warm_base != 0 ? check_units_test_probe(arguments, count, limits, capture, warm_base, 1ull << 46, true, shared) :
+                                                         (CheckUnitsTestProbe){ .status = -1 };
+        // Attempt every restoration even if an earlier one failed. The warmup must not calibrate over a leaked descriptor.
+        const bool restored_space = setrlimit(RLIMIT_AS, &saved_space) == 0;
+        const bool restored_core = setrlimit(RLIMIT_CORE, &saved_core) == 0;
+        const bool restored_errors = dup2(saved_errors, 2) == 2;
+        const bool restored_directory = fchdir(saved_directory) == 0;
+        status = restored_space && restored_core && restored_errors && restored_directory && warmed.before_descriptor == warmed.after_descriptor ? warmed.status : -1;
         parse_test_read_capture(capture, text, sizeof(text));
     }
     if (saved_errors >= 0)
@@ -1129,7 +1150,7 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     }
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t base = parse_test_status_bytes("VmSize:");
-    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, shared) : (CheckUnitsTestProbe){ 0 };
+    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, false, shared) : (CheckUnitsTestProbe){ 0 };
     parse_test_read_capture(capture, text, sizeof(text));
     char detail[1400];
     snprintf(detail, sizeof(detail), "status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
@@ -1155,7 +1176,7 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
         const uint64_t limit = peak - page;
         unlink(objects[0]);
         unlink(objects[1]);
-        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, shared);
+        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, false, shared);
         parse_test_read_capture(capture, text, sizeof(text));
         const bool failed = probe.status == 1 && strstr(text, "error: ") != NULL;
         const bool fallen_back = probe.status == 0 && text[0] == 0 && check_test_driver_same_files(objects[0], wholes[0]) &&
