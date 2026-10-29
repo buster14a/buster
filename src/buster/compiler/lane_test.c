@@ -1009,7 +1009,7 @@ static void lane_test_main(void* argument)
 // One atomic value selects an immutable diagnostic and the progress policy. The handler cannot race a message being
 // formatted for the next group, even if a previous alarm was already pending when it was canceled.
 static uint32_t lane_test_watch_state;
-_Static_assert(__atomic_always_lock_free(sizeof(uint32_t), 0), "the watchdog needs lock-free atomics");
+_Static_assert(sizeof(uint32_t) == sizeof(unsigned int) && __GCC_ATOMIC_INT_LOCK_FREE == 2, "the watchdog needs lock-free atomics");
 
 static void lane_test_watch(uint32_t check, uint32_t lanes, bool progress)
 {
