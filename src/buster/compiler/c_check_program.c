@@ -195,10 +195,14 @@ struct CheckProgram
     PredefinesHost host;
     bool host_read;
     // Per body of a selection (check_program_select_mode), whether clang's code generation emits its function where the
-    // unit defines it rather than when its emission first refers to it (ASTContext::DeclMustBeEmitted): an external
+    // unit defines it rather than when its emission first refers to it or at the unit's end (ASTContext::
+    // DeclMustBeEmitted, as CodeGenModule::EmitGlobal asks it when the parser hands over the definition): an external
     // definition, by the selection's rules of GNU's and C99's inline functions, or a function with a used, constructor
-    // or destructor attribute. Code generation's check of target features takes clang's order of emission from it
-    // (#775); null in a program that no selection made, or in a unit without a target attribute, which the check skips.
+    // or destructor attribute, both by the function's declarations up to the definition (check_program_body_eager),
+    // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
+    // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
+    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
+    // a program that no selection made, or in a unit without a target attribute, which the check skips.
     uint8_t* body_eager;
 };
 

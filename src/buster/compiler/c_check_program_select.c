@@ -72,26 +72,77 @@ static bool check_program_attribute_eager(const CheckInputAttributes* attributes
     return eager;
 }
 
-// Whether clang emits function `object`, defined by a body of the unit, where the unit defines it (CheckProgram.body_eager):
-// an external definition by its selection's flags (`flags`, not an inline-only one), or by an attribute of one of its
-// static declarations, a run of check_data_prepare's keys, which are in object order. Out of line, as only a unit with a
-// target attribute asks it, once per selected body.
-__attribute__((noinline)) static bool check_program_object_eager(const CheckInput* input, const CheckDataPrepared* data, uint32_t object, uint32_t flags)
+// Whether a declaration's `attributes` hold a gnu_inline attribute, which turns GNU's rules of inline functions on.
+static bool check_program_attribute_gnu_inline(const CheckInputAttributes* attributes)
 {
-    bool eager = (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0 && (flags & BUSTER_C_LOWERING_EXTERNAL) != 0;
-    uint32_t low = 0;
-    uint32_t high = eager ? 0 : data->declaration_count;
-    while (low < high)
+    bool gnu_inline = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
-        const uint32_t middle = low + (high - low) / 2;
-        low = (uint32_t)(data->declaration_keys[middle] >> 32) < object ? middle + 1 : low;
-        high = (uint32_t)(data->declaration_keys[middle] >> 32) < object ? high : middle;
+        gnu_inline |= !attributes->records[i].ignored && attributes->records[i].kind == CHECK_ATTRIBUTE_GNU_INLINE;
     }
-    for (uint32_t d = low; !eager && (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0 && d < data->declaration_count &&
-                           (uint32_t)(data->declaration_keys[d] >> 32) == object;
-         d += 1)
+    return gnu_inline;
+}
+
+// Whether clang emits `body`'s function where the unit defines it (CheckProgram.body_eager), as CodeGenModule::EmitGlobal
+// decides when the parser hands over the definition: by the declarations that exist then, those of the function up to
+// and including the definition (a run of check_data_prepare's keys, in object and token order), not the unit's final
+// ones, which the selection's flags have. A later declaration is no emission point: one that makes the definition
+// external (C99's `extern int f(int);` after `inline int f(int) {...}`, GNU89's plain inline one after `extern inline`)
+// only queues the function for the unit's end, with the other deferred functions, and one with a used, constructor or
+// destructor attribute adds nothing to a definition before it (a declaration inherits attributes from the ones before
+// it, not the other way). So it is emitted at once if its definition is external by the definitions loop's rules of
+// GNU's and C99's inline functions (the same, over those declarations alone), or, where its linkage is not external, if
+// one of them has a used, constructor or destructor attribute (an inline-only definition is never emitted). An ordinary
+// external definition (not an inline one) is emitted at once whatever its declarations, and is not looked at further.
+// Out of line, as only a unit with a target attribute asks it, once per selected body.
+__attribute__((noinline)) static bool check_program_body_eager(const CheckProgram* program, const CheckDataPrepared* data, const CheckProgramBody* body)
+{
+    const CheckInput* input = program->input;
+    const uint8_t definition = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
+    const bool external = input->linkage[body->declaration] == 2;
+    bool eager = external && (definition & CHECK_INPUT_FUNCTION_INLINE) == 0;
+    if (!eager)
     {
-        eager = check_program_attribute_eager(input->attributes[(uint32_t)data->declaration_keys[d]]);
+        const uint32_t object = body->object;
+        uint32_t low = 0;
+        uint32_t high = data->declaration_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            low = (uint32_t)(data->declaration_keys[middle] >> 32) < object ? middle + 1 : low;
+            high = (uint32_t)(data->declaration_keys[middle] >> 32) < object ? high : middle;
+        }
+        // Over the declarations up to the definition: the attributes (a function that is not external), and the inline
+        // rules (one that is): a plain inline declaration, whether a file-scope one lacks inline or spells extern, a gnu_inline.
+        bool attribute = false;
+        bool gnu_inline = false;
+        bool plain_inline = false;
+        bool c99_inline_only = true;
+        for (uint32_t d = low; d < data->declaration_count && (uint32_t)(data->declaration_keys[d] >> 32) == object && (uint32_t)data->declaration_keys[d] <= body->declaration;
+             d += 1)
+        {
+            const uint32_t token = (uint32_t)data->declaration_keys[d];
+            if (external)
+            {
+                const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
+                const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
+                gnu_inline |= check_program_attribute_gnu_inline(input->attributes[token]);
+                plain_inline |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE;
+                c99_inline_only &= !(function && input->declaration_bodies[token] == BUSTER_CHECK_NONE &&
+                                     ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0));
+            }
+            else
+            {
+                attribute |= check_program_attribute_eager(input->attributes[token]);
+            }
+        }
+        // The language mode's rules of inline functions matter to an external definition alone.
+        const Preprocessor* pp = program->parser->preprocessor;
+        const bool gnu = external && (gnu_inline || (pp != NULL && predefines_gnu_inline(&pp->options.predefines, pp->options.language)));
+        const bool inline_only = gnu ? (definition & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) ==
+                                           (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN) && !plain_inline :
+                                       c99_inline_only;
+        eager = external ? !inline_only : attribute;
     }
     return eager;
 }
@@ -285,7 +336,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     // Only code generation's check of target features reads CheckProgram.body_eager, and only in a unit with a target
-    // attribute (CheckProgram.attribute_keys): others make none.
+    // attribute (CheckProgram.attribute_keys): others make none. It is made by check_program_body_eager, from each
+    // selected body's declarations up to its definition, not by the definitions' flags, which hold the unit's final ones.
     const bool eager_needed = full->attribute_keys != 0;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
@@ -509,8 +561,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 }
                 if (candidate.program.body_eager != 0)
                 {
-                    candidate.program.body_eager[bodies] =
-                        check_program_object_eager(input, data, source->object, definition_flags[object_definitions[source->object] - 1]);
+                    candidate.program.body_eager[bodies] = check_program_body_eager(full, data, source);
                 }
                 candidate.program.bodies[bodies] = *source;
                 candidate.program.bodies[bodies++].reference_first = references;

@@ -17,16 +17,20 @@
 // branch's or operand's, sizeof's or what follows a return; a callee is direct where it is the function's name alone,
 // not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits the functions it must
 // emit where the unit defines them (ASTContext::DeclMustBeEmitted: an external definition, by GNU's and C99's rules of
-// inline functions, or one with a used, constructor or destructor attribute), and none after the first that has one,
-// nor the functions it defers to the unit's end; where none of those has one, it emits every deferred function, past
-// their errors. So this reports the first such function's errors alone, or else every deferred function's, by the
-// selection's CheckProgram.body_eager, each function's in clang's emission order: by statement, in the lowering's order
-// of them (a for loop's increment after its body), and in a statement by the calls' ends (an argument's call before its
-// own; but where clang evaluates out of source order, an assignment's right side first). Clang emits the eager
-// functions in source order, and the deferred ones depth first from where its emission first referred to them; this
-// takes those in source order too. Where the feature an error names is the first of the rest of a function's map (an
-// attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its StringMap's and this
-// one predefines_features', so the two may name another feature for the same call.
+// inline functions, or one with a used, constructor or destructor attribute, both by the declarations up to the
+// definition, as the parser has them when it hands the definition over), and none after the first that has one, nor
+// the functions it defers to the unit's end; where none of those has one, it emits every deferred function, past their
+// errors. A declaration after a definition is no emission point: one that makes an inline definition external (C99's
+// `extern int f(int);`) only queues it for the unit's end, so the first ordinary function with an error, before that
+// declaration or after it, is the one reported, and the queued function's errors go with the deferred ones. So this
+// reports the first such function's errors alone, or else every deferred function's, by the selection's
+// CheckProgram.body_eager, each function's in clang's emission order: by statement, in the lowering's order of them (a
+// for loop's increment after its body), and in a statement by the calls' ends (an argument's call before its own; but
+// where clang evaluates out of source order, an assignment's right side first). Clang emits the eager functions in
+// source order, and the deferred ones in the order its emission first referred to them or a declaration queued them,
+// depth first; this takes those in source order. Where the feature an error names is the first of the rest of a
+// function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its
+// StringMap's and this one predefines_features', so the two may name another feature for the same call.
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute alone (CheckProgram.attribute_keys), and walks
 // only a body that refers to a callee that may fail, whose call sites it then finds (clang's headers give every intrinsic
@@ -309,7 +313,8 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
 
 // Code generation's check of target features of `program`'s bodies (-c's selection): *errors, `*count` of them in
 // `output`, as clang reports them: the first function's to have any of those it emits where the unit defines them
-// (CheckProgram.body_eager), or else every deferred one's. Returns false without room in either arena.
+// (CheckProgram.body_eager, by the declarations up to each definition), or else every deferred one's. Returns false
+// without room in either arena.
 static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PredefinesOptions* options, bool scalar, Arena* output,
                                                                   Arena* scratch, CheckTargetFeatureError** errors, uint32_t* count)
 {

@@ -354,37 +354,57 @@ unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
 GNU's and C99's rules of inline functions, or a function with a `used`,
 `constructor` or `destructor` attribute) and none after the first that has an
 error, nor the functions it defers to the unit's end; where none of those has
-one, it emits every deferred function, past their errors. So the driver reports
-the first such function's errors alone, or else every deferred function's, by
-the selection's classification of each body (`CheckProgram.body_eager`, from the
-same rules that decide which inline definitions `-c` emits): each function's in
-clang's emission order, by statement in the lowering's order of them (a for
+one, it emits every deferred function, past their errors. It decides where it
+emits a function when the parser hands over the definition, by the declarations
+that exist then, those up to the definition: a later declaration is no emission
+point. One that makes an inline definition external (C99's `extern int f(int);`
+after `inline int f(int) {...}`, GNU89's plain `inline` declaration after
+`extern inline`) only queues the function for the unit's end, where the deferred
+functions are emitted, and a `used`, `constructor` or `destructor` attribute on
+a later declaration adds nothing to the definition before it. So the driver
+reports the first such function's errors alone, or else every deferred
+function's, by the selection's classification of each body
+(`CheckProgram.body_eager`, made by `check_program_body_eager` from the rules
+that decide which inline definitions `-c` emits, applied to the function's
+declarations up to the definition rather than to all of them): each function's
+in clang's emission order, by statement in the lowering's order of them (a for
 loop's increment after its body) and in a statement by the calls' ends (an
 argument's call before its own), after its closing brace, as clang reports them
 when it emits the function, or at the unit's end for a deferred one. Clang emits
-the deferred functions depth first from where its emission first referred to
-them, and the driver in source order; where clang evaluates a statement out of
-source order (an assignment's right side first), the order of several errors in
-it may differ; and where an error's feature is the first of the rest of a map
-(an `arch=` CPU's, or a caller's attribute that turns several features off),
-clang's order is its `StringMap`'s and the driver's `predefines_features`', so
-the two may name different features. `--lower-all`, #129's test option, checks
-every definition it lowers, those clang never emits among them.
+the deferred functions in the order its emission first referred to them or a
+declaration queued them, depth first, and the driver in source order: the errors
+of two deferred functions come in the other order where their definitions are in
+the other order from the first uses or the declarations that queue them. Where
+clang evaluates a statement out of source order (an assignment's right side
+first), the order of several errors in it may differ; and where an error's
+feature is the first of the rest of a map (an `arch=` CPU's, or a caller's
+attribute that turns several features off), clang's order is its `StringMap`'s
+and the driver's `predefines_features`', so the two may name different features.
+`--lower-all`, #129's test option, checks every definition it lowers, those
+clang never emits among them.
 
 `test-checker-driver` compares each fixture's first error at `-c` with clang
-`-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes
-it: callees' attributes before and after the call, callers' that add and turn
-off features, `flatten`, calls through the address, dead branches, which
-function's errors clang reports and in which order, and `<immintrin.h>`'s
-`_bzhi_u32` at targets with BMI2 and without. Eleven fixtures' every error, line
-for line, must be clang's: the first external function's alone, calls in their
+`-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes it:
+callees' attributes before and after the call, callers' that add and turn off
+features, `flatten`, calls through the address, dead branches, which function's
+errors clang reports and in which order, and `<immintrin.h>`'s `_bzhi_u32` at
+targets with BMI2 and without. Twenty-six fixtures' every error, line for
+line, must be clang's: the first external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
 deferred one's unreported, two deferred functions', where no external function
 has any, loops' and a statement expression's, a for loop's increment after its
 body, and which functions clang emits where they are: GNU89's plain inline,
 C99's extern inline and a `gnu_inline` plain inline definition before an
 ordinary function, inline-only definitions, `used` beside `retain`, and a
-destructor and a constructor.
+destructor and a constructor. And where they are not: a C99 inline definition
+released by a later `extern` or plain declaration, with an ordinary function's
+errors before the declaration, after it, or both, or with none, which leaves the
+released function's errors to the unit's end beside a static function's; an
+earlier `extern` declaration, which makes the definition external where it is;
+the same for GNU89's `extern inline` and a later or an earlier plain `inline`
+declaration, and an earlier `gnu_inline` attribute, which the definition
+inherits; and `used`, `constructor` and `destructor` on a later declaration (no
+effect) and on an earlier one (as on the definition).
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

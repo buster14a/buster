@@ -3561,9 +3561,10 @@ static bool check_test_driver_error_lines(const char* text, const char* path, ch
 }
 
 // #775: every error of the code-generation check, in order, must be clang -c's, which reports them all (without
-// -ferror-limit): the errors of the first externally visible function that has any, and no other's, or where none has
-// any, every deferred function's (in the order clang's emission first refers to them, which the fixtures keep in source
-// order), each by its calls' ends. Through the executable.
+// -ferror-limit): the errors of the first function that clang emits where it is defined (an external definition, or one
+// with a used, constructor or destructor attribute, by the declarations up to the definition) that has any, and no
+// other's, or where none has any, every deferred function's (in the order clang's emission first refers to them or a
+// declaration queues them, which the fixtures keep in source order), each by its calls' ends. Through the executable.
 static void check_test_driver_target_feature_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -3608,6 +3609,53 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         { "a destructor and a constructor emitted where they are",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic __attribute__((destructor)) void d(void) { h(3); }\nint b(int x) { return h(x + 1); }\n"
           "static __attribute__((constructor)) void c(void) { h(4); }\n" },
+        // A later declaration is no emission point (#863's second review): clang emits a function where its definition is
+        // handed over, by the declarations up to the definition, and a later one that makes an inline definition
+        // external only queues it for the unit's end, so the first ordinary function with errors, before or after that
+        // declaration, is the only one reported, and the queued function's errors come with the deferred ones.
+        { "a C99 inline definition released by a later extern declaration, after an ordinary function's errors",
+          "__attribute__((always_inline,target(\"avx2\"))) int h(int x){return x;}\ninline int a(int x){return h(x);}\nint b(int x){return h(x+1);}\nextern int a(int);\n", "-std=c99" },
+        { "a later extern declaration is no emission point: the ordinary function after it fails first",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nextern int a(int);\n"
+          "int c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "an ordinary function's errors between a C99 inline definition and its extern declaration, and another's after it",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "extern int a(int);\nint c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "a later plain declaration of a C99 inline definition, after an ordinary function's errors and before another's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "int a(int);\nint c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "a C99 inline definition released by a later extern declaration, emitted with the deferred functions",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nextern int a(int);\n"
+          "static int s(int x) { return h(x + 1); }\nint e(int x) { return s(x); }\n", "-std=c99" },
+        { "an earlier extern declaration makes a C99 inline definition external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n", "-std=c99" },
+        { "a GNU89 extern inline definition released by a later plain inline declaration, after an ordinary function's errors",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "inline int a(int x);\nint c(int x) { return h(x + 2); }\n", "-std=gnu89" },
+        { "a GNU89 extern inline definition released by a later plain inline declaration, emitted at the unit's end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\ninline int a(int x);\n", "-std=gnu89" },
+        { "a used attribute on a later declaration doesn't emit a static function where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic int s(void) { return h(2); }\nstatic int s(void) __attribute__((used));\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a used attribute on an earlier declaration does",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic int s(void) __attribute__((used));\nstatic int s(void) { return h(2); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a constructor attribute on a later declaration doesn't emit a static function where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic void c(void) { h(4); }\nstatic void c(void) __attribute__((constructor));\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a destructor attribute on an earlier declaration does",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic void d(void) __attribute__((destructor));\nstatic void d(void) { h(3); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "an earlier plain inline declaration makes a GNU89 extern inline definition external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int);\nextern inline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n", "-std=gnu89" },
+        { "a gnu_inline attribute on an earlier declaration is the definition's: its plain inline spelling is external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n__attribute__((gnu_inline)) inline int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "an earlier plain inline declaration of a C99 inline definition leaves it inline-only",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
