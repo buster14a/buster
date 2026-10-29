@@ -26,7 +26,8 @@ file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
 from the profile where `-march` names one of the six above, and that profile's
 architecture (`X86_ARCH_OTHER` for clang's other CPUs). Its `extensions` are
 the features past those (`X86Extension`: AVX512-FP16 so far), which form
-eligibility doesn't classify and only the lowering's x86 rows read. An unknown name or
+eligibility doesn't classify and only the lowering's rows read (the x86
+builtins' and half-precision vectors': [the checker's guide](c-checker.md)). An unknown name or
 switch is an error, as in clang (the preprocessor takes only the `-m` options
 clang 23 uses for x86-64 Linux), so no option silently leaves baseline macros
 active. `-mtune=` accepts clang's names and `generic`, independently of the
@@ -39,7 +40,8 @@ replacement of the entire macro preamble.
 `X86Target` means baseline. The v2/v3/v4 profiles are cumulative; the named Zen 5
 profile includes its optional extensions. `native` reads CPUID at option parsing
 time. It requires XSAVE/OSXSAVE and XCR0's XMM/YMM bits before exposing AVX,
-and the opmask/ZMM state bits before exposing AVX-512. Missing CPUID leaves
+and the opmask/ZMM state bits before exposing AVX-512 and AVX512-FP16's
+extension, which tests read to run its code. Missing CPUID leaves
 remain zero. Its feature catalogue covers the supported Zen 5 host; this is not
 a CPU-dispatch mechanism or a promise of support for other compiler hosts.
 

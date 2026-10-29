@@ -44,7 +44,7 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
         {
             // The floating selects, which move bits: each width of ps, pd and pbf, and the scalar ones, whose first element
             // is a's or w's by the mask's first bit and whose others are a's. (ph's rows are pbf's; their builtins need
-            // AVX512-FP16, which znver5 hasn't.)
+            // AVX512-FP16, which znver5 hasn't: c_check_program_fp16_test.c calls them.)
             "x86-float-selects",
             "int tested(int n){unsigned h=2166136261u;v4sf a4,w4;v8sf a8,w8;v16sf a16,w16;v2df b2,x2;v4df b4,x4;v8df b8,x8;"
             "v8bf d8,z8;v16bf d16,z16;v32bf d32,z32;"
@@ -1627,6 +1627,7 @@ static void check_test_program_x86_rows(CheckTest* test)
 {
     static const uint64_t immediates[] = { 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 63, 0x1b, 0x80, 0xff };
     static const uint64_t rounds[] = { 4, 8, 9, 10, 11, 12, 15 };
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
     uint32_t rows = 0;
     uint32_t invalid = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
@@ -1637,7 +1638,7 @@ static void check_test_program_x86_rows(CheckTest* test)
             const uint64_t immediate = immediates[k % BUSTER_ARRAY_LENGTH(immediates)];
             const uint64_t round = rounds[k / BUSTER_ARRAY_LENGTH(immediates)];
             Tier0Operation row;
-            if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && check_x86_lower_row_of(UINT64_MAX, rule, immediate, round, &row) == NULL)
+            if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && check_x86_lower_row_of(&every, rule, immediate, round, &row) == NULL)
             {
                 for (uint32_t j = 0; j < row.operand_count; j += 1)
                 {

@@ -1473,11 +1473,13 @@ static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier
 }
 
 // An X86 entry of an operator's row at a vector type (check_vector_lower_row), or its refusal: its operands are the
-// stack's when it runs.
+// stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
+// (check_lower_vector_half_chain).
 static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
     Tier0Operation row;
-    const char* reason = check_vector_lower_row(writer->program->types, writer->target.features, op, vector, scalar_class, &row);
+    const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
+    const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, op, vector, scalar_class, &row);
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
@@ -1486,6 +1488,37 @@ static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
         check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
+    }
+}
+
+// clang's _Float16 excess precision (#136): where the unit's target hasn't AVX512-FP16, clang computes +, -, * and / of
+// half-precision elements and their negation in float, and rounds to them only where a value leaves the chain of those
+// operators (a store, a cast, a compare, a call's argument, a conditional's or a comma's operand), even in a function
+// whose target attribute adds the extension. One operator's row in half precision rounds as clang's does (float's 24 bits
+// are at least twice half's 11 and 2 more, so its two roundings round as once, NaNs propagating alike), and a negation's
+// quiets the signaling NaNs as clang's float conversions do (check_vector_lower_row's `excess`). A chain's doesn't: an
+// operator (`op`, one of those) whose operand `a` or `b` (or BUSTER_CHECK_NONE) is of half-precision elements and itself
+// one of them, or a unary plus, is refused.
+static void check_lower_vector_half_chain(CheckLowerWriter* writer, TypeId vector, uint32_t op, uint32_t a, uint32_t b)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckVectorElement element = check_vector_lower_element(program->types, vector);
+    const bool excess = element.floating && element.bytes == 2 && (program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
+    const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE || op == CHECK_OP_NEGATIVE;
+    bool chained = false;
+    for (uint32_t i = 0; excess && arithmetic && i < 2; i += 1)
+    {
+        const uint32_t operand = i == 0 ? a : b;
+        const CheckOp kind = operand != BUSTER_CHECK_NONE ? graph->ops[operand] : CHECK_OP_VALUE;
+        const bool link = kind == CHECK_OP_ADD || kind == CHECK_OP_SUBTRACT || kind == CHECK_OP_MULTIPLY || kind == CHECK_OP_DIVIDE || kind == CHECK_OP_NEGATIVE ||
+                          kind == CHECK_OP_POSITIVE;
+        const CheckVectorElement linked = link ? check_vector_lower_element(program->types, program->stream->values[operand].type) : (CheckVectorElement){ 0 };
+        chained |= linked.floating && linked.bytes == 2;
+    }
+    if (chained)
+    {
+        check_lower_unsupported(writer, "chained arithmetic of half-precision vectors, which clang computes in float without AVX512-FP16");
     }
 }
 
@@ -3190,6 +3223,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     if (vector)
     {
         const bool scalar = check_lower_vector_bytes(program->types, stream->values[graph->operand1[node]].type) == 0;
+        check_lower_vector_half_chain(writer, calculated, vector_op, BUSTER_CHECK_NONE, graph->operand1[node]);
         check_lower_vector_row(writer, vector_op, calculated, 0);
         check_lower_operand(writer, node, 1, false, scalar ? calculated : right_type);
     }
@@ -4206,12 +4240,13 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     {
         const TypeId vector = stream->values[a].type;
         const CheckVectorElement element = check_vector_lower_element(types, vector);
+        check_lower_vector_half_chain(writer, vector, op, a, BUSTER_CHECK_NONE);
         if (op == CHECK_OP_NEGATIVE && element.floating)
         {
             // The sign bit, the row's integer operand, after the vector.
             check_lower_vector_row(writer, op, vector, 0);
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, element.bytes == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64,
-                                     element.bytes == 4 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000));
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, element.bytes == 8 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32,
+                                     element.bytes == 2 ? UINT64_C(0x8000) : element.bytes == 4 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000));
         }
         else
         {
@@ -4224,6 +4259,7 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
         const TypeId vector = stream->conversions[node].operands[0].type;
         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
         const bool scalar_count = shift && check_lower_vector_bytes(types, stream->values[b].type) == 0;
+        check_lower_vector_half_chain(writer, vector, op, a, b);
         check_lower_vector_row(writer, op, vector, 0);
         check_lower_operand(writer, node, 1, false, scalar_count ? vector : stream->conversions[node].operands[1].type);
         check_lower_operand(writer, node, 0, false, vector);
@@ -4318,7 +4354,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
-                         check_x86_lower_row_of(writer->target.features, rule, (uint64_t)immediates[0].integer,
+                         check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
@@ -4551,7 +4587,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const uint64_t target = writer->target.features;
+    const X86Target* target = &writer->target;
     const uint32_t selected = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
     const CheckBuiltinVectorEffect* effect = selected != BUSTER_CHECK_NONE ? stream->vectors + selected : NULL;
     const CBuiltinId builtin = effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE;

@@ -94,7 +94,7 @@ struct CheckVectorShuffle
 // so). Any other is one VPERMT2 at the wider of the two vectors' widths (F bytes, T elements): a is its first table and
 // its destination, b its second (or a again where the shuffle doesn't read b), and the index vector selects element i
 // of a as i and element i of b as T + i, an undefined element as 0.
-static const char* check_vector_shuffle_row(const TypeTable* types, uint64_t target, TypeId source, TypeId result, const uint32_t* indices, bool b_kept,
+static const char* check_vector_shuffle_row(const TypeTable* types, const X86Target* target, TypeId source, TypeId result, const uint32_t* indices, bool b_kept,
                                             Tier0Operation* row, CheckVectorShuffle* plan)
 {
     const CheckVectorShape in = check_vector_builtin_shape(types, source);
@@ -154,7 +154,7 @@ static const char* check_vector_shuffle_row(const TypeTable* types, uint64_t tar
         row->operand_bytes[operands] = (uint8_t)bytes;
         operands += 1;
         const uint64_t needed = in.element == 1 ? BUSTER_X86_FEATURE(AVX512VBMI) : in.element == 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
-        reason = (target & needed) != needed ? (in.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
+        reason = (target->features & needed) != needed ? (in.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
                                                                   "vector shuffles of 16-bit elements without AVX-512BW") :
                                                NULL;
     }
@@ -164,17 +164,51 @@ static const char* check_vector_shuffle_row(const TypeTable* types, uint64_t tar
 
 // The forms of a __builtin_convertvector with floating elements (check_vector_convert_row) by its pair, at the width a
 // widening one takes at its result's and any other at its source's, or the reason it has none. `needed` gets what they
-// need past AVX-512F and AVX-512VL: DQ's for 64-bit integers.
-static const char* check_vector_convert_floating_forms(CheckVectorShape in, CheckVectorShape out, CheckVectorForms* forms, uint64_t* needed)
+// need past AVX-512F and AVX-512VL: DQ's for 64-bit integers. Between half-precision elements and 16-, 32- and 64-bit
+// integers or doubles they are AVX512-FP16's, which the target's `extensions` must have.
+static const char* check_vector_convert_floating_forms(CheckVectorShape in, CheckVectorShape out, uint64_t extensions, CheckVectorForms* forms, uint64_t* needed)
 {
     const char* reason = NULL;
     const bool half_in = in.floating && in.element == 2;
     const bool half_out = out.floating && out.element == 2;
+    const bool other_in = (in.integer && in.element >= 2) || (in.floating && in.element == 8);
+    const bool other_out = (out.integer && out.element >= 2) || (out.floating && out.element == 8);
+    const bool fp16 = (half_in && !in.bfloat && other_out) || (half_out && !out.bfloat && other_in);
     *forms = (CheckVectorForms){ { 0, 0, 0 } };
     *needed = (in.integer && in.element == 8) || (out.integer && out.element == 8) ? BUSTER_X86_FEATURE(AVX512DQ) : 0;
     if (in.floating && out.floating && in.element == out.element && in.bfloat == out.bfloat)
     {
         // One format: the bits are the result.
+    }
+    else if (fp16 && (extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0)
+    {
+        reason = "vector conversions between half-precision elements and types other than float without AVX512-FP16";
+    }
+    else if (fp16)
+    {
+        // To half-precision elements from 16-, 32- and 64-bit integers by their signedness and from doubles, at the
+        // source's width (rounded as MXCSR says, as clang's sitofp, uitofp and fptrunc are); from them to those, the
+        // integers truncated, at the result's.
+        static const CheckVectorForms to_half[3][3] = {
+            { BUSTER_CHECK_VECTOR_UNARY_PACKED(VCVTW2PH), BUSTER_CHECK_VECTOR_UNARY_PACKED(VCVTUW2PH), { { 0, 0, 0 } } },
+            { BUSTER_CHECK_VECTOR_FORMS(VCVTDQ2PH_X_XM128, VCVTDQ2PH_X_YM256, VCVTDQ2PH_Y_ZM512),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTUDQ2PH_X_XM128, VCVTUDQ2PH_X_YM256, VCVTUDQ2PH_Y_ZM512), { { 0, 0, 0 } } },
+            { BUSTER_CHECK_VECTOR_FORMS(VCVTQQ2PH_X_XM128, VCVTQQ2PH_X_YM256, VCVTQQ2PH_X_ZM512),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTUQQ2PH_X_XM128, VCVTUQQ2PH_X_YM256, VCVTUQQ2PH_X_ZM512),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTPD2PH_X_XM128, VCVTPD2PH_X_YM256, VCVTPD2PH_X_ZM512) },
+        };
+        static const CheckVectorForms from_half[3][3] = {
+            { BUSTER_CHECK_VECTOR_UNARY_PACKED(VCVTTPH2W), BUSTER_CHECK_VECTOR_UNARY_PACKED(VCVTTPH2UW), { { 0, 0, 0 } } },
+            { BUSTER_CHECK_VECTOR_FORMS(VCVTTPH2DQ_X_XM64, VCVTTPH2DQ_Y_XM128, VCVTTPH2DQ_Z_YM256),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTTPH2UDQ_X_XM64, VCVTTPH2UDQ_Y_XM128, VCVTTPH2UDQ_Z_YM256), { { 0, 0, 0 } } },
+            { BUSTER_CHECK_VECTOR_FORMS(VCVTTPH2QQ_X_XM32, VCVTTPH2QQ_Y_XM64, VCVTTPH2QQ_Z_XM128),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTTPH2UQQ_X_XM32, VCVTTPH2UQQ_Y_XM64, VCVTTPH2UQQ_Z_XM128),
+              BUSTER_CHECK_VECTOR_FORMS(VCVTPH2PD_X_XM32, VCVTPH2PD_Y_XM64, VCVTPH2PD_Z_XM128) },
+        };
+        const CheckVectorShape other = half_out ? in : out;
+        const uint32_t size = other.element == 2 ? 0 : other.element == 4 ? 1 : 2;
+        const uint32_t kind = other.floating ? 2 : other.is_signed ? 0 : 1;
+        *forms = half_out ? to_half[size][kind] : from_half[size][kind];
     }
     else if ((in.integer && in.element <= 2) || (out.integer && out.element <= 2))
     {
@@ -251,7 +285,7 @@ static const char* check_vector_convert_floating_forms(CheckVectorShape in, Chec
 // rest), between floats and doubles (VCVTPS2PD, VCVTPD2PS), from half-precision elements to floats (VCVTPH2PS) and from
 // floats to them (VCVTPS2PH at the current rounding, its imm8 4), and from bf16 elements to floats, whose bits are the
 // floats' high halves (VPMOVZXWD, then VPSLLD by 16); between floating elements of one format, none.
-static const char* check_vector_convert_row(const TypeTable* types, uint64_t target, TypeId source, uint32_t operand_bytes, TypeId result, Tier0Operation* row)
+static const char* check_vector_convert_row(const TypeTable* types, const X86Target* target, TypeId source, uint32_t operand_bytes, TypeId result, Tier0Operation* row)
 {
     const CheckVectorShape in = check_vector_builtin_shape(types, source);
     const CheckVectorShape out = check_vector_builtin_shape(types, result);
@@ -279,7 +313,7 @@ static const char* check_vector_convert_row(const TypeTable* types, uint64_t tar
     else if (in.floating || out.floating)
     {
         CheckVectorForms forms;
-        reason = check_vector_convert_floating_forms(in, out, &forms, &needed);
+        reason = check_vector_convert_floating_forms(in, out, target->extensions, &forms, &needed);
         const uint32_t form = forms.forms[check_vector_builtin_width(out.element > in.element ? out.bytes : in.bytes)];
         if (reason == NULL && form != 0)
         {
@@ -295,7 +329,7 @@ static const char* check_vector_convert_row(const TypeTable* types, uint64_t tar
             row->records[1].immediate = 16;
             row->record_count = 2;
         }
-        if (reason == NULL && (target & needed) != needed)
+        if (reason == NULL && (target->features & needed) != needed)
         {
             reason = "vector conversions between 64-bit integers and floating elements without AVX-512DQ";
         }
@@ -343,7 +377,7 @@ static const char* check_vector_convert_row(const TypeTable* types, uint64_t tar
         row->record_count = 1;
         needed = pair == 0 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
     }
-    if (reason == NULL && (target & needed) != needed)
+    if (reason == NULL && (target->features & needed) != needed)
     {
         reason = "vector conversions of 8-bit elements to 16-bit ones without AVX-512BW";
     }
@@ -359,7 +393,7 @@ static const char* check_vector_convert_row(const TypeTable* types, uint64_t tar
 // it permutes the two (VPERMT2, at the result's width or 16 bytes): the conversion's elements are the first table's, the
 // constant's the second's. Its operands are x, then where it permutes the constant (`plan->second`, 16 bytes) and the
 // index vector.
-static const char* check_vector_narrow_shuffle_row(const TypeTable* types, uint64_t target, TypeId converted, TypeId narrow, TypeId result,
+static const char* check_vector_narrow_shuffle_row(const TypeTable* types, const X86Target* target, TypeId converted, TypeId narrow, TypeId result,
                                                    const uint32_t* indices, const uint8_t* b_bytes, Tier0Operation* row, CheckVectorShuffle* plan)
 {
     const CheckVectorShape in = check_vector_builtin_shape(types, converted);
@@ -422,7 +456,7 @@ static const char* check_vector_narrow_shuffle_row(const TypeTable* types, uint6
             row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[2] = (uint8_t)bytes;
             const uint64_t needed = out.element == 1 ? BUSTER_X86_FEATURE(AVX512VBMI) : out.element == 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
-            reason = (target & needed) != needed ? (out.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
+            reason = (target->features & needed) != needed ? (out.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
                                                                        "vector shuffles of 16-bit elements without AVX-512BW") :
                                                    NULL;
         }
@@ -548,10 +582,10 @@ static const char* check_vector_builtin_feature_reason(CBuiltinId builtin, uint6
 
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading zero
-// counts (clzg's second operand the elements a zero element takes) and funnel shifts; of floats and doubles, the square
-// roots and the fused multiply-adds at the current rounding, as llvm.sqrt's and llvm.fma's are (VSQRTPS/PD of a,
-// VFMADD213PS/PD of a, b and c: a = b * a + c).
-static const char* check_vector_elementwise_row(const TypeTable* types, uint64_t target, CBuiltinId builtin, TypeId vector, uint32_t arguments, Tier0Operation* row)
+// counts (clzg's second operand the elements a zero element takes) and funnel shifts; of half-precision elements (with
+// AVX512-FP16), floats and doubles, the square roots and the fused multiply-adds at the current rounding, as llvm.sqrt's
+// and llvm.fma's are (VSQRTPH/PS/PD of a, VFMADD213PH/PS/PD of a, b and c: a = b * a + c).
+static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, Tier0Operation* row)
 {
     const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
@@ -569,18 +603,23 @@ static const char* check_vector_elementwise_row(const TypeTable* types, uint64_t
         row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
         row->operand_bytes[j] = (uint8_t)shape.bytes;
     }
-    if (shape.floating && shape.element >= 4 && (builtin == CBUILTIN_ELEMENTWISE_SQRT || builtin == CBUILTIN_ELEMENTWISE_FMA))
+    if (shape.floating && !shape.bfloat && shape.element >= 2 && (builtin == CBUILTIN_ELEMENTWISE_SQRT || builtin == CBUILTIN_ELEMENTWISE_FMA))
     {
-        static const CheckVectorForms roots[2] = { BUSTER_CHECK_VECTOR_UNARY_EVEX(VSQRTPS), BUSTER_CHECK_VECTOR_UNARY_EVEX(VSQRTPD) };
-        static const CheckVectorForms products[2] = { BUSTER_CHECK_VECTOR_EVEX(VFMADD213PS), BUSTER_CHECK_VECTOR_EVEX(VFMADD213PD) };
-        const uint32_t d = shape.element == 8;
+        static const CheckVectorForms roots[3] = { BUSTER_CHECK_VECTOR_UNARY_PACKED(VSQRTPH), BUSTER_CHECK_VECTOR_UNARY_EVEX(VSQRTPS),
+                                                   BUSTER_CHECK_VECTOR_UNARY_EVEX(VSQRTPD) };
+        static const CheckVectorForms products[3] = { BUSTER_CHECK_VECTOR_PACKED(VFMADD213PH), BUSTER_CHECK_VECTOR_EVEX(VFMADD213PS),
+                                                      BUSTER_CHECK_VECTOR_EVEX(VFMADD213PD) };
+        const uint32_t d = shape.element == 2 ? 0 : shape.element == 4 ? 1 : 2;
         row->records[0] = builtin == CBUILTIN_ELEMENTWISE_SQRT ? check_vector_lower_record(roots[d].forms[width], v0, 0, v0) :
                                                                   check_vector_lower_record(products[d].forms[width], v0, v1, v2);
         row->record_count = 1;
+        reason = shape.element == 2 && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0 ?
+                     "elementwise vector builtins of half-precision elements without AVX512-FP16" :
+                     NULL;
     }
-    else if (shape.floating && shape.element == 2)
+    else if (shape.bfloat)
     {
-        reason = "elementwise vector builtins of half-precision and bf16 elements";
+        reason = "elementwise vector builtins of bf16 elements";
     }
     else if (!shape.integer)
     {
@@ -643,9 +682,9 @@ static const char* check_vector_elementwise_row(const TypeTable* types, uint64_t
             row->records[0] = check_vector_lower_record(form, v0, v0, v1);
             row->record_count = 1;
         }
-        if (reason == NULL && (target & needed) != needed)
+        if (reason == NULL && (target->features & needed) != needed)
         {
-            reason = check_vector_builtin_feature_reason(builtin, needed, target);
+            reason = check_vector_builtin_feature_reason(builtin, needed, target->features);
         }
     }
     return reason;
@@ -655,7 +694,7 @@ static const char* check_vector_elementwise_row(const TypeTable* types, uint64_t
 // operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of a, b and c (a = b * a + c), into the first
 // operand's register at the current rounding, as llvm.sqrt and llvm.fma compute them. Their EVEX forms are AVX-512F's,
 // which a target may lack though the operands are no vectors.
-static const char* check_vector_scalar_row(uint64_t target, CBuiltinId builtin, uint8_t class, uint32_t arguments, Tier0Operation* row)
+static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId builtin, uint8_t class, uint32_t arguments, Tier0Operation* row)
 {
     const bool root = builtin == CBUILTIN_ELEMENTWISE_SQRT && arguments == 1;
     const bool product = builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3;
@@ -665,7 +704,7 @@ static const char* check_vector_scalar_row(uint64_t target, CBuiltinId builtin, 
     {
         reason = "elementwise builtins of scalars";
     }
-    else if ((target & BUSTER_X86_FEATURE(AVX512F)) == 0)
+    else if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0)
     {
         reason = "elementwise builtins of scalars without AVX-512F";
     }
@@ -732,7 +771,7 @@ static void check_vector_nontemporal_row(const TypeTable* types, TypeId vector, 
 // each beside the low part in v1), then that element in the general register (VMOVQ, VMOVD, VPEXTRW or VPEXTRB). A
 // halving is two records: past three of them (elements under 8 bytes, or under 4 of a 32-byte vector), the first row
 // takes four, its result the 16 bytes left, and the second the rest. `count` gets the rows' number.
-static const char* check_vector_reduce_rows(const TypeTable* types, uint64_t target, CBuiltinId builtin, TypeId vector,
+static const char* check_vector_reduce_rows(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector,
                                             Tier0Operation rows[BUSTER_CHECK_VECTOR_REDUCE_ROWS], uint32_t* count)
 {
     const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
@@ -794,9 +833,9 @@ static const char* check_vector_reduce_rows(const TypeTable* types, uint64_t tar
         {
             reason = builtin == CBUILTIN_REDUCE_MUL ? "vector multiplication of 8-bit elements" : "this vector reduction";
         }
-        else if ((target & needed) != needed)
+        else if ((target->features & needed) != needed)
         {
-            reason = check_vector_builtin_feature_reason(builtin, needed, target);
+            reason = check_vector_builtin_feature_reason(builtin, needed, target->features);
         }
         else
         {
