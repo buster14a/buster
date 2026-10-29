@@ -46,6 +46,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CLEANUP_PARAMETERS,
     CHECK_INPUT_CLEANUP_TYPE,
     CHECK_INPUT_CLEANUP_ARGUMENTS,
+    // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
+    CHECK_INPUT_WIDE_LITERAL,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -78,6 +80,7 @@ static const char* const check_input_messages[] =
     "'cleanup' function must take 1 parameter",
     "'cleanup' function's parameter has a type incompatible with the variable's address",
     "'cleanup' attribute takes one argument",
+    "bit-precise integer constants wider than 128 bits are not supported",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -1944,8 +1947,23 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
             check_literal_number(bytes, length, reader->scratch, result);
         }
     }
+    if (result->valid && result->bit_width != 0)
+    {
+        // A bit-precise constant (#768): its _BitInt, of up to 128 bits, the most the checker's values hold; a wider one
+        // is refused by name (check_input_literal_report).
+        const bool supported = result->bit_width <= BUSTER_CHECK_LITERAL_BIT_WIDTH;
+        result->type = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
+        result->valid = result->type != 0;
+    }
     reader->output->resource |= result->resource;
     arena_pop_to(reader->scratch, mark);
+}
+
+// The report of a literal check_input_literal found invalid: a bit-precise constant past 128 bits by name, any other as
+// an invalid or unsupported literal.
+static CheckInputMessage check_input_literal_report(const CheckLiteral* literal)
+{
+    return literal->bit_width > BUSTER_CHECK_LITERAL_BIT_WIDTH ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
 }
 
 static CheckOp check_input_binary(uint8_t kind);
@@ -5046,7 +5064,7 @@ static void check_input_expressions(CheckInputReader* reader)
             check_input_literal(reader, token, &literal);
             if (!literal.valid)
             {
-                check_input_report(reader, token, CHECK_INPUT_LITERAL);
+                check_input_report(reader, token, check_input_literal_report(&literal));
             }
             else
             {

@@ -16679,8 +16679,15 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 // What buster implements, which the feature queries answer outside the oracle's mode (#154: until everything clang
 // supports is, they say exactly what is). The preprocessor's __is_target_* are implemented here. C builtins use the
 // shared catalog's source/constant-expression acceptance, independently of recognition and standalone actions.
-// No attribute, feature or extension is advertised here yet. __has_warning and __has_declspec_attribute answer as
-// clang does in both modes. Sorted for binary search.
+// The implemented attribute tables cover only behavior the checker and lowering honor. Other attributes, features
+// and extensions remain unadvertised. __has_warning and __has_declspec_attribute answer as clang does in both modes.
+// Sorted for binary search.
+static const PPFeature pp_implemented_attribute[] = {
+    { "packed", 1 },
+};
+static const PPFeature pp_implemented_c_attribute[] = {
+    { "gnu::packed", 1 },
+};
 static const PPFeature pp_implemented_builtin[] = {
     { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
 };
@@ -16761,7 +16768,8 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
     switch (builtin)
     {
         case PP_BUILTIN_HAS_ATTRIBUTE:
-            result = clang ? pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length, standard) : 0;
+            result = clang ? pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length, standard)
+                           : pp_feature_lookup(pp_implemented_attribute, BUSTER_ARRAY_LENGTH(pp_implemented_attribute), name, length, standard);
             break;
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
@@ -16782,7 +16790,8 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
                            : 0;
             break;
         case PP_BUILTIN_HAS_C_ATTRIBUTE:
-            result = clang ? pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard) : 0;
+            result = clang ? pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard)
+                           : pp_feature_lookup(pp_implemented_c_attribute, BUSTER_ARRAY_LENGTH(pp_implemented_c_attribute), name, length, standard);
             break;
         case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length, standard); break;
         case PP_BUILTIN_IS_TARGET_ARCH:
@@ -20049,7 +20058,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
         }
-        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
+        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-c") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
         {
             options->freestanding &= strcmp(argument, "-fhosted") != 0;
             options->suppress_warnings |= strcmp(argument, "-w") == 0;

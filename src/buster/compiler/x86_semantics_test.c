@@ -98,21 +98,24 @@ static bool x86_semantics_report(const X86SemanticsTally* tally)
 // The harness
 
 // What the harness loads into the processor and stores back: the general registers (RSP the stack's), RFLAGS, ZMM0 to
-// ZMM15 (or their low 128 bits on a host without AVX-512), and the x87's state as FXSAVE64 lays it out (its control and
-// status words, its abridged tags and its registers, with MXCSR the C code's; the image's XMM registers are overwritten
-// by `vector`). x86_semantics_test_enter's offsets are these.
+// ZMM31 and K0 to K7 (or XMM0 to XMM15's 128 bits alone on a host without AVX-512), and the x87's state as FXSAVE64
+// lays it out (its control and status words, its abridged tags and its registers, with MXCSR the C code's; the image's
+// XMM registers are overwritten by `vector`). x86_semantics_test_enter's offsets are these. The System V convention
+// keeps no vector or opmask register across a call, so the trampoline saves none of the C code's.
 typedef struct X86SemanticsState X86SemanticsState;
 struct X86SemanticsState
 {
     uint64_t gpr[16];
     uint64_t flags;
     uint64_t padding[7];
-    uint8_t vector[16][64];
+    uint8_t vector[32][64];
+    uint64_t opmask[8];
     uint8_t x87[512] __attribute__((aligned(64)));
 };
 _Static_assert(offsetof(X86SemanticsState, flags) == 128, "x86_semantics_test_enter's offset of the flags");
 _Static_assert(offsetof(X86SemanticsState, vector) == 192, "x86_semantics_test_enter's offset of the vector registers");
-_Static_assert(offsetof(X86SemanticsState, x87) == 1216, "x86_semantics_test_enter's offset of the x87's state");
+_Static_assert(offsetof(X86SemanticsState, opmask) == 2240, "x86_semantics_test_enter's offset of the opmask registers");
+_Static_assert(offsetof(X86SemanticsState, x87) == 2304, "x86_semantics_test_enter's offset of the x87's state");
 // The FXSAVE image's fields the checks compare: the control word, the status word, the abridged tags, and each register's
 // 10 bytes, 16 apart (but the last instruction's and operand's pointers and opcode, which AMD stores only with an
 // exception pending, and MXCSR, whose status flags the SSE forms may set).
@@ -149,7 +152,7 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "mov qword ptr [rip + x86_semantics_test_saved_rsp], rsp\n"
                      "mov qword ptr [rip + x86_semantics_test_state], rdi\n"
                      "fxsave64 [rip + x86_semantics_test_host]\n"
-                     "fxrstor64 [rdi + 1216]\n"
+                     "fxrstor64 [rdi + 2304]\n"
                      "cmp byte ptr [rip + x86_semantics_test_wide], 0\n"
                      "je .Lsemantics_load_sse\n"
                      "vmovdqu64 zmm0, zmmword ptr [rdi + 192]\n"
@@ -168,6 +171,30 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "vmovdqu64 zmm13, zmmword ptr [rdi + 1024]\n"
                      "vmovdqu64 zmm14, zmmword ptr [rdi + 1088]\n"
                      "vmovdqu64 zmm15, zmmword ptr [rdi + 1152]\n"
+                     "vmovdqu64 zmm16, zmmword ptr [rdi + 1216]\n"
+                     "vmovdqu64 zmm17, zmmword ptr [rdi + 1280]\n"
+                     "vmovdqu64 zmm18, zmmword ptr [rdi + 1344]\n"
+                     "vmovdqu64 zmm19, zmmword ptr [rdi + 1408]\n"
+                     "vmovdqu64 zmm20, zmmword ptr [rdi + 1472]\n"
+                     "vmovdqu64 zmm21, zmmword ptr [rdi + 1536]\n"
+                     "vmovdqu64 zmm22, zmmword ptr [rdi + 1600]\n"
+                     "vmovdqu64 zmm23, zmmword ptr [rdi + 1664]\n"
+                     "vmovdqu64 zmm24, zmmword ptr [rdi + 1728]\n"
+                     "vmovdqu64 zmm25, zmmword ptr [rdi + 1792]\n"
+                     "vmovdqu64 zmm26, zmmword ptr [rdi + 1856]\n"
+                     "vmovdqu64 zmm27, zmmword ptr [rdi + 1920]\n"
+                     "vmovdqu64 zmm28, zmmword ptr [rdi + 1984]\n"
+                     "vmovdqu64 zmm29, zmmword ptr [rdi + 2048]\n"
+                     "vmovdqu64 zmm30, zmmword ptr [rdi + 2112]\n"
+                     "vmovdqu64 zmm31, zmmword ptr [rdi + 2176]\n"
+                     "kmovq k0, qword ptr [rdi + 2240]\n"
+                     "kmovq k1, qword ptr [rdi + 2248]\n"
+                     "kmovq k2, qword ptr [rdi + 2256]\n"
+                     "kmovq k3, qword ptr [rdi + 2264]\n"
+                     "kmovq k4, qword ptr [rdi + 2272]\n"
+                     "kmovq k5, qword ptr [rdi + 2280]\n"
+                     "kmovq k6, qword ptr [rdi + 2288]\n"
+                     "kmovq k7, qword ptr [rdi + 2296]\n"
                      "jmp .Lsemantics_loaded\n"
                      ".Lsemantics_load_sse:\n"
                      "movdqu xmm0, xmmword ptr [rdi + 192]\n"
@@ -247,6 +274,30 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "vmovdqu64 zmmword ptr [rdi + 1024], zmm13\n"
                      "vmovdqu64 zmmword ptr [rdi + 1088], zmm14\n"
                      "vmovdqu64 zmmword ptr [rdi + 1152], zmm15\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1216], zmm16\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1280], zmm17\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1344], zmm18\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1408], zmm19\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1472], zmm20\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1536], zmm21\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1600], zmm22\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1664], zmm23\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1728], zmm24\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1792], zmm25\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1856], zmm26\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1920], zmm27\n"
+                     "vmovdqu64 zmmword ptr [rdi + 1984], zmm28\n"
+                     "vmovdqu64 zmmword ptr [rdi + 2048], zmm29\n"
+                     "vmovdqu64 zmmword ptr [rdi + 2112], zmm30\n"
+                     "vmovdqu64 zmmword ptr [rdi + 2176], zmm31\n"
+                     "kmovq qword ptr [rdi + 2240], k0\n"
+                     "kmovq qword ptr [rdi + 2248], k1\n"
+                     "kmovq qword ptr [rdi + 2256], k2\n"
+                     "kmovq qword ptr [rdi + 2264], k3\n"
+                     "kmovq qword ptr [rdi + 2272], k4\n"
+                     "kmovq qword ptr [rdi + 2280], k5\n"
+                     "kmovq qword ptr [rdi + 2288], k6\n"
+                     "kmovq qword ptr [rdi + 2296], k7\n"
                      "vzeroupper\n"
                      "jmp .Lsemantics_stored\n"
                      ".Lsemantics_store_sse:\n"
@@ -267,7 +318,7 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "movdqu xmmword ptr [rdi + 1088], xmm14\n"
                      "movdqu xmmword ptr [rdi + 1152], xmm15\n"
                      ".Lsemantics_stored:\n"
-                     "fxsave64 [rdi + 1216]\n"
+                     "fxsave64 [rdi + 2304]\n"
                      "fxrstor64 [rip + x86_semantics_test_host]\n"
                      "cld\n"
                      "pop r15\n"
@@ -490,8 +541,8 @@ static bool x86_semantics_x87_same(const X86SemanticsState* a, const X86Semantic
     return same;
 }
 
-// A random state: random general and vector registers and status flags (DF clear), RSP the stack's top, a random x87
-// state, and random bytes in the data and stack pages.
+// A random state: random general, vector and opmask registers and status flags (DF clear), RSP the stack's top, a
+// random x87 state, and random bytes in the data and stack pages.
 static void x86_semantics_random_state(uint64_t* state, X86SemanticsMachine* machine, X86SemanticsState* result)
 {
     for (uint32_t g = 0; g < 16; g += 1)
@@ -500,13 +551,17 @@ static void x86_semantics_random_state(uint64_t* state, X86SemanticsMachine* mac
     }
     result->gpr[X86_REGISTER_RSP] = (uint64_t)(machine->stack + BUSTER_X86_SEMANTICS_TEST_STACK_TOP);
     result->flags = BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE | x86_semantics_rflags((uint8_t)(x86_test_random(state) & BUSTER_X86_FLAGS_STATUS));
-    for (uint32_t v = 0; v < 16; v += 1)
+    for (uint32_t v = 0; v < 32; v += 1)
     {
         for (uint32_t i = 0; i < 64; i += 8)
         {
             const uint64_t bits = x86_test_random(state);
             memcpy(&result->vector[v][i], &bits, 8);
         }
+    }
+    for (uint32_t k = 0; k < 8; k += 1)
+    {
+        result->opmask[k] = x86_test_random(state);
     }
     x86_semantics_random_x87(state, result->x87);
     for (uint32_t i = 0; i < BUSTER_X86_SEMANTICS_TEST_PAGE; i += 8)
@@ -669,8 +724,8 @@ static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_FNSTSW_AX,
     X86_FORM_LDMXCSR_M32,
     X86_FORM_VZEROALL,
-    X86_FORM_VMOVDQU8_Z_ZM512,
-    X86_FORM_VADDPS_Y_Y_YM256,
+    X86_FORM_VMASKMOVDQU_X_X,
+    X86_FORM_VPCMPISTRI_X_XM128_IMM8,
 };
 
 static bool x86_semantics_check_fixtures(void)
@@ -1059,6 +1114,136 @@ static bool x86_semantics_check_resolved(void)
         x86_semantics_expect(&tally, reads == cases[i].reads && writes == cases[i].writes, "%s: reads %#llx and writes %#llx, not %#llx and %#llx", cases[i].what,
                              (unsigned long long)reads, (unsigned long long)writes, (unsigned long long)cases[i].reads, (unsigned long long)cases[i].writes);
     }
+    // The opmask registers' effects (#760), each by both paths with `opmasks` (bits 0 to 7 read, 8 to 15 written), and
+    // without them everything: a record with an opmask, or a form with an opmask register, reads and writes every resource.
+    typedef struct X86SemanticsOpmaskCase X86SemanticsOpmaskCase;
+    struct X86SemanticsOpmaskCase
+    {
+        X86Instruction record;
+        uint64_t reads;
+        uint64_t writes;
+        uint16_t opmasks;
+        const char* what;
+    };
+    const uint64_t v1 = BUSTER_X86_RESOURCE_VECTOR(1);
+    const X86SemanticsOpmaskCase opmask_cases[] = {
+        {
+            .record = { .form = X86_FORM_VMOVDQU32_Z_ZM512, .reg = 1, .rm = 2, .decorations = 3 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(2) | v1,
+            .writes = v1,
+            .opmasks = 0x0008,
+            .what = "vmovdqu32 zmm1 {k3}, zmm2: reads k3, and zmm1's elements it keeps",
+        },
+        {
+            .record = { .form = X86_FORM_VMOVDQU32_Z_ZM512, .reg = 1, .rm = 2, .decorations = 3 | BUSTER_X86_DECORATION_ZEROING },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(2),
+            .writes = v1,
+            .opmasks = 0x0008,
+            .what = "vmovdqu32 zmm1 {k3}{z}, zmm2: zeroes the rest, so doesn't read zmm1",
+        },
+        {
+            .record = { .form = X86_FORM_VMOVDQU32_ZM512_Z, .reg = 1, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .decorations = 7 },
+            .reads = v1 | BUSTER_X86_RESOURCE_GPR(3),
+            .writes = memory,
+            .opmasks = 0x0080,
+            .what = "vmovdqu32 [rbx] {k7}, zmm1: a masked store",
+        },
+        {
+            .record = { .form = X86_FORM_VPCMPD_K_Z_ZM512_IMM8, .reg = 2, .vvvv = 1, .rm = 4, .decorations = 5, .immediate = 1 },
+            .reads = v1 | BUSTER_X86_RESOURCE_VECTOR(4),
+            .writes = 0,
+            .opmasks = 0x0420,
+            .what = "vpcmpd k2 {k5}, zmm1, zmm4, 1: writes k2, whole",
+        },
+        {
+            .record = { .form = X86_FORM_KANDW_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 },
+            .reads = 0,
+            .writes = 0,
+            .opmasks = 0x020c,
+            .what = "kandw k1, k2, k3",
+        },
+        {
+            .record = { .form = X86_FORM_KMOVW_R32_K, .reg = X86_REGISTER_RAX, .rm = 4 },
+            .reads = 0,
+            .writes = BUSTER_X86_RESOURCE_GPR(0),
+            .opmasks = 0x0010,
+            .what = "kmovw eax, k4",
+        },
+        {
+            .record = { .form = X86_FORM_KMOVW_K_R32, .reg = 6, .rm = X86_REGISTER_RCX },
+            .reads = BUSTER_X86_RESOURCE_GPR(1),
+            .writes = 0,
+            .opmasks = 0x4000,
+            .what = "kmovw k6, ecx",
+        },
+        {
+            .record = { .form = X86_FORM_VPGATHERDD_Z_VM32Z, .reg = 1, .rm = X86_REGISTER_RAX, .index = 3, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 2 },
+            .reads = BUSTER_X86_RESOURCE_GPR(0) | BUSTER_X86_RESOURCE_VECTOR(3) | memory | v1,
+            .writes = v1,
+            .opmasks = 0x0404,
+            .what = "vpgatherdd zmm1 {k2}, [rax + zmm3 * 4]: reads and clears k2, keeps zmm1's elements it leaves",
+        },
+        {
+            .record = { .form = X86_FORM_VPSCATTERDD_VM32Z_Z, .reg = 6, .rm = X86_REGISTER_RBX, .index = 5, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
+            .reads = BUSTER_X86_RESOURCE_GPR(3) | BUSTER_X86_RESOURCE_VECTOR(5) | BUSTER_X86_RESOURCE_VECTOR(6),
+            .writes = memory,
+            .opmasks = 0x0202,
+            .what = "vpscatterdd [rbx + zmm5 * 4] {k1}, zmm6",
+        },
+        {
+            .record = { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .index = 3, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) },
+            .reads = BUSTER_X86_RESOURCE_GPR(0) | BUSTER_X86_RESOURCE_VECTOR(3) | memory | v1 | BUSTER_X86_RESOURCE_VECTOR(2),
+            .writes = v1 | BUSTER_X86_RESOURCE_VECTOR(2),
+            .opmasks = 0,
+            .what = "vpgatherdd xmm1, [rax + xmm3 * 4], xmm2: reads and clears its mask, xmm2",
+        },
+        {
+            .record = { .form = X86_FORM_VPBLENDVB_X_X_XM128_X, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 4 << 4 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(2) | BUSTER_X86_RESOURCE_VECTOR(3) | BUSTER_X86_RESOURCE_VECTOR(4),
+            .writes = v1,
+            .opmasks = 0,
+            .what = "vpblendvb xmm1, xmm2, xmm3, xmm4: the /is4 register",
+        },
+        {
+            .record = { .form = X86_FORM_VPXORD_Z_Z_ZM512, .reg = 2, .vvvv = 2, .rm = 2, .decorations = 1 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(2),
+            .writes = BUSTER_X86_RESOURCE_VECTOR(2),
+            .opmasks = 0x0002,
+            .what = "vpxord zmm2 {k1}, zmm2, zmm2: a zero idiom that keeps zmm2's elements k1 leaves",
+        },
+        {
+            .record = { .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = 1, .rm = 3 },
+            .reads = v1 | BUSTER_X86_RESOURCE_VECTOR(3),
+            .writes = 0,
+            .opmasks = 0x0c00,
+            .what = "vp2intersectd k2, zmm1, zmm3: writes k2 and k3",
+        },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(opmask_cases); i += 1)
+    {
+        const X86SemanticsOpmaskCase* entry = &opmask_cases[i];
+        uint64_t reads[2] = { 0 };
+        uint64_t writes[2] = { 0 };
+        uint16_t opmasks[2] = { 0 };
+        x86_instruction_effects_opmasks_scalar(&entry->record, &reads[0], &writes[0], &opmasks[0]);
+        x86_instructions_effects_opmasks(&entry->record, 1, &reads[1], &writes[1], &opmasks[1]);
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            x86_semantics_expect(&tally, reads[path] == entry->reads && writes[path] == entry->writes && opmasks[path] == entry->opmasks,
+                                 "%s, by the %s path: reads %#llx, writes %#llx and opmasks %#x, not %#llx, %#llx and %#x", entry->what, path == 0 ? "scalar" : "vector",
+                                 (unsigned long long)reads[path], (unsigned long long)writes[path], opmasks[path], (unsigned long long)entry->reads,
+                                 (unsigned long long)entry->writes, entry->opmasks);
+        }
+        const bool touches = (entry->record.decorations & BUSTER_X86_DECORATION_MASK) != 0 || (x86_effects(entry->record.form)->properties & BUSTER_X86_EFFECT_OPMASKS) != 0;
+        x86_instruction_effects_scalar(&entry->record, &reads[0], &writes[0]);
+        x86_instructions_effects(&entry->record, 1, &reads[1], &writes[1]);
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            x86_semantics_expect(&tally, !touches || (reads[path] == BUSTER_X86_RESOURCE_ALL && writes[path] == BUSTER_X86_RESOURCE_ALL),
+                                 "%s, by the %s path without opmasks: reads %#llx and writes %#llx, not everything", entry->what, path == 0 ? "scalar" : "vector",
+                                 (unsigned long long)reads[path], (unsigned long long)writes[path]);
+        }
+    }
     // A shift's flags by its count.
     typedef struct X86SemanticsCount X86SemanticsCount;
     struct X86SemanticsCount
@@ -1150,13 +1335,19 @@ static bool x86_semantics_check_resolved(void)
 // A random register for an operand descriptor: a vector register (of the 16 the harness has), an x87 one, or a general
 // one but RSP (the harness's stack) and SPL, sometimes AH to BH for a byte register (x86_validate refuses those beside
 // REX, and the caller retries).
-static uint8_t x86_semantics_random_register(uint64_t* state, uint16_t descriptor)
+// A random register of an operand's class: a vector one (an EVEX form's of 32, `evex`; another's of 16), an opmask one,
+// an x87 one, or a general one (AH to BH a quarter of a byte operand's, never RSP).
+static uint8_t x86_semantics_random_register(uint64_t* state, uint16_t descriptor, bool evex)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = 0;
     if (class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM)
     {
-        result = (uint8_t)x86_random_below(state, 16);
+        result = (uint8_t)x86_random_below(state, evex ? 32 : 16);
+    }
+    else if (class == BUSTER_X86_CLASS_OPMASK)
+    {
+        result = (uint8_t)x86_random_below(state, 8);
     }
     else if (class == BUSTER_X86_CLASS_ST)
     {
@@ -1180,9 +1371,26 @@ static uint32_t x86_semantics_register_number(uint8_t value)
     return (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3u) : (value & 15u);
 }
 
-// A random record of the form: random registers, the memory operand RIP-relative into the data page when `memory` (or
-// when rm takes only memory), and a random immediate (a count or bit index often 0 or 1). Retries until x86_validate takes
-// it. Division never divides by RAX or RDX, which hold the dividend.
+// A VSIB operand's data element and index: a gather's or scatter's last letter and the one before it (vpgatherdq:
+// dword indices, qword elements).
+static uint32_t x86_semantics_vsib_element(uint32_t form)
+{
+    const char* mnemonic = x86_form_descriptions[form].mnemonic;
+    return mnemonic[strlen(mnemonic) - 1] == 'q' ? 8 : 4;
+}
+
+static uint32_t x86_semantics_vsib_index(uint32_t form)
+{
+    const char* mnemonic = x86_form_descriptions[form].mnemonic;
+    return mnemonic[strlen(mnemonic) - 2] == 'q' ? 8 : 4;
+}
+
+// A random record of the form: random registers (vvvv's too), the memory operand RIP-relative into the data page when
+// `memory` (or when rm takes only memory; a VSIB one, a gather's or scatter's, indexes from a base x86_semantics_check_run
+// points at the data page, scaled by its element), a random immediate (a count or bit index often 0 or 1; an /is4
+// operand's register), and for an EVEX form that takes one, an opmask half the time (always for a gather's or a
+// scatter's), zeroing half of those times where the form zeroes. Retries until x86_validate takes it. Division never
+// divides by RAX or RDX, which hold the dividend, and a gather's index is never its destination.
 static X86Instruction x86_semantics_random_record(uint64_t* state, uint32_t form, bool memory)
 {
     const X86FormDescription* description = &x86_form_descriptions[form];
@@ -1195,11 +1403,24 @@ static X86Instruction x86_semantics_random_record(uint64_t* state, uint32_t form
         result = (X86Instruction){
             .form = (uint16_t)form,
         };
+        const bool evex = description->family == BUSTER_X86_FAMILY_EVEX;
         if (description->reg != BUSTER_X86_OPERAND_NONE)
         {
-            result.reg = x86_semantics_random_register(state, description->reg);
+            result.reg = x86_semantics_random_register(state, description->reg, evex);
         }
-        if (description->rm != BUSTER_X86_OPERAND_NONE)
+        if (description->vvvv != BUSTER_X86_OPERAND_NONE)
+        {
+            result.vvvv = x86_semantics_random_register(state, description->vvvv, evex);
+        }
+        if (description->rm & BUSTER_X86_OPERAND_VSIB)
+        {
+            const uint32_t scale = x86_semantics_vsib_element(form) == 8 ? 3 : 2;
+            result.mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(scale);
+            result.rm = x86_semantics_random_register(state, BUSTER_X86_OPERAND_GQ, false);
+            result.index = (uint8_t)x86_random_below(state, evex ? 32 : 16);
+            result.index = result.index == result.reg ? (uint8_t)((result.index + 1) % (evex ? 32 : 16)) : result.index;
+        }
+        else if (description->rm != BUSTER_X86_OPERAND_NONE)
         {
             const bool in_memory = (description->rm & BUSTER_X86_OPERAND_MEMORY) && (memory || !(description->rm & BUSTER_X86_OPERAND_REGISTER));
             if (in_memory)
@@ -1209,8 +1430,13 @@ static X86Instruction x86_semantics_random_record(uint64_t* state, uint32_t form
             }
             else
             {
-                result.rm = x86_semantics_random_register(state, description->rm);
+                result.rm = x86_semantics_random_register(state, description->rm, evex);
             }
+        }
+        if (evex && (description->evex & BUSTER_X86_EVEX_MASK) && ((description->rm & BUSTER_X86_OPERAND_VSIB) || x86_random_below(state, 2) == 0))
+        {
+            result.decorations = (uint8_t)(1 + x86_random_below(state, 7));
+            result.decorations |= (description->evex & BUSTER_X86_EVEX_ZEROING) && x86_random_below(state, 2) == 0 ? BUSTER_X86_DECORATION_ZEROING : 0;
         }
         const uint32_t kind = x86_effects_immediate_kind(effects);
         if (description->immediate_bytes == 8)
@@ -1232,6 +1458,11 @@ static X86Instruction x86_semantics_random_record(uint64_t* state, uint32_t form
         {
             const uint32_t shift = 64 - 8 * description->immediate_bytes;
             result.immediate = (int32_t)((int64_t)(x86_test_random(state) << shift) >> shift);
+        }
+        const uint8_t syntax = description->syntax;
+        if (syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || syntax == X86_SYNTAX_REG_VVVV_IS4_RM)
+        {
+            result.immediate = (int32_t)(x86_random_below(state, 16) << 4);
         }
         const bool divides_dividend = division && (result.mode & BUSTER_X86_MODE_MEMORY) == 0 && x86_semantics_register_number(result.rm) <= X86_REGISTER_RDX &&
                                       x86_semantics_register_number(result.rm) != X86_REGISTER_RCX;
@@ -1301,10 +1532,15 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
     const X86Effects* effects = x86_effects(record->form);
     const char* name = x86_semantics_test_name(record->form);
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
-    snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "%s (reg %u, rm %u, mode %#x, immediate %d)", name, record->reg, record->rm, record->mode, record->immediate);
+    snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "%s (reg %u, rm %u, vvvv %u, index %u, mode %#x, immediate %d, decorations %#x)", name, record->reg,
+             record->rm, record->vvvv, record->index, record->mode, record->immediate, record->decorations);
     uint64_t reads = 0;
     uint64_t writes = 0;
-    x86_instruction_effects_scalar(record, &reads, &writes);
+    uint16_t opmasks = 0;
+    x86_instruction_effects_opmasks_scalar(record, &reads, &writes, &opmasks);
+    const uint32_t vectors = x86_semantics_test_wide ? 32 : 16;
+    const bool masked = (record->decorations & BUSTER_X86_DECORATION_MASK) != 0;
+    const bool vsib = (x86_form_description(record->form)->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     uint8_t flags_read = 0;
     uint8_t flags_written = 0;
     uint8_t flags_undefined = 0;
@@ -1332,6 +1568,17 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
     {
         input.gpr[X86_REGISTER_RBP] = (uint64_t)(machine->stack + BUSTER_X86_SEMANTICS_TEST_STACK_TOP + 64);
     }
+    if (vsib)
+    {
+        // A gather's or scatter's elements: the operand's, one after another (index i the ith), at most 128 bytes.
+        input.gpr[record->rm & 15] = (uint64_t)(machine->data + BUSTER_X86_SEMANTICS_TEST_OPERAND);
+        const bool qwords = x86_semantics_vsib_index(record->form) == 8;
+        for (uint32_t i = 0; i < (qwords ? 8u : 16u); i += 1)
+        {
+            const uint64_t element = i;
+            memcpy(&input.vector[record->index & 31][qwords ? 8 * i : 4 * i], &element, qwords ? 8 : 4);
+        }
+    }
     memcpy(data, machine->data, sizeof(data));
     memcpy(stack, machine->stack, sizeof(stack));
     output = input;
@@ -1349,7 +1596,12 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
             const bool written = (writes & BUSTER_X86_RESOURCE_GPR(g)) != 0;
             x86_semantics_expect(tally, written || output.gpr[g] == input.gpr[g], "%s changed general register %u, which it doesn't write", x86_semantics_test_case, g);
         }
-        for (uint32_t v = 0; v < 16; v += 1)
+        for (uint32_t k = 0; x86_semantics_test_wide && k < 8; k += 1)
+        {
+            const bool written = (opmasks >> (8 + k)) & 1;
+            x86_semantics_expect(tally, written || output.opmask[k] == input.opmask[k], "%s changed opmask register %u, which it doesn't write", x86_semantics_test_case, k);
+        }
+        for (uint32_t v = 0; v < vectors; v += 1)
         {
             const bool written = (writes & BUSTER_X86_RESOURCE_VECTOR(v)) != 0;
             x86_semantics_expect(tally, written || memcmp(output.vector[v], input.vector[v], x86_semantics_test_wide ? 64 : 16) == 0, "%s changed vector register %u, which it doesn't write",
@@ -1360,7 +1612,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                 x86_semantics_expect(tally, !written || !(effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || upper_kept,
                                      "%s changed vector register %u's bits above 127", x86_semantics_test_case, v);
                 const bool zeroes_upper = (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) != 0;
-                x86_semantics_expect(tally, !zeroes_upper || (memcmp(output.vector[v], input.vector[v], 16) == 0 && x86_semantics_zero_bytes(output.vector[v], 16, 64)),
+                x86_semantics_expect(tally, !zeroes_upper || v >= 16 || (memcmp(output.vector[v], input.vector[v], 16) == 0 && x86_semantics_zero_bytes(output.vector[v], 16, 64)),
                                      "%s didn't keep ZMM%u's low 128 bits and zero the rest", x86_semantics_test_case, v);
             }
         }
@@ -1382,19 +1634,28 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
             {
                 const uint8_t value = values[role];
                 changes->roles_written |= 1u << role;
-                if (bits & BUSTER_X86_ROLE_VECTOR)
+                if (effects->properties & BUSTER_X86_EFFECT_OPMASK(role))
                 {
-                    const uint8_t* before = input.vector[value & 15];
-                    const uint8_t* after = output.vector[value & 15];
+                    // vp2intersect's pair: either register's change shows the write.
+                    const uint32_t number = value & 7;
+                    const bool pair = role == BUSTER_X86_ROLE_REG && (x86_form_description(record->form)->reg & BUSTER_X86_OPERAND_PAIR);
+                    const bool changed = input.opmask[pair ? number & 6 : number] != output.opmask[pair ? number & 6 : number] ||
+                                         (pair && input.opmask[number | 1] != output.opmask[number | 1]);
+                    changes->roles_changed |= changed ? 1u << role : 0;
+                }
+                else if (bits & BUSTER_X86_ROLE_VECTOR)
+                {
+                    const uint8_t* before = input.vector[value & 31];
+                    const uint8_t* after = output.vector[value & 31];
                     const bool zeroes = rest == BUSTER_X86_REST_ZERO || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && memory);
                     const bool keeps = rest == BUSTER_X86_REST_MERGE || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && !memory);
                     // A legacy SSE form's rest ends at byte 15 (it keeps the bits above 127); a VEX or EVEX form's at the
                     // register's end, as far as the harness's state reaches.
                     const uint32_t end = (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || !x86_semantics_test_wide ? 16 : 64;
                     x86_semantics_expect(tally, !zeroes || x86_semantics_zero_bytes(after, effects->write_bytes, end), "%s didn't zero vector register %u's bytes %u to %u",
-                                         x86_semantics_test_case, value & 15, effects->write_bytes, end - 1);
+                                         x86_semantics_test_case, value & 31, effects->write_bytes, end - 1);
                     x86_semantics_expect(tally, !keeps || memcmp(after + effects->write_bytes, before + effects->write_bytes, 16 - effects->write_bytes) == 0,
-                                         "%s didn't keep XMM%u's bytes %u to 15", x86_semantics_test_case, value & 15, effects->write_bytes);
+                                         "%s didn't keep XMM%u's bytes %u to 15", x86_semantics_test_case, value & 31, effects->write_bytes);
                     changes->roles_changed |= memcmp(before, after, 16) != 0 ? 1u << role : 0;
                 }
                 else
@@ -1450,7 +1711,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         bool data_kept = true;
         for (uint32_t i = 0; i < BUSTER_X86_SEMANTICS_TEST_PAGE; i += 1)
         {
-            const bool inside = stores && i >= BUSTER_X86_SEMANTICS_TEST_OPERAND && i < BUSTER_X86_SEMANTICS_TEST_OPERAND + operand_bytes;
+            const bool inside = stores && i >= BUSTER_X86_SEMANTICS_TEST_OPERAND && i < BUSTER_X86_SEMANTICS_TEST_OPERAND + (vsib ? 128 : operand_bytes);
             data_kept &= inside || data[i] == data_after[i];
         }
         x86_semantics_expect(tally, data_kept, "%s changed memory it doesn't store to", x86_semantics_test_case);
@@ -1475,7 +1736,11 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         const uint8_t unread_flags = (uint8_t)(BUSTER_X86_FLAGS_STATUS & ~flags_read);
         const uint8_t new_flags = (uint8_t)((x86_semantics_flags(input.flags) & ~unread_flags) | (x86_test_random(state) & unread_flags));
         second_input.flags = BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE | x86_semantics_rflags(new_flags);
-        for (uint32_t v = 0; v < 16; v += 1)
+        for (uint32_t k = 0; x86_semantics_test_wide && k < 8; k += 1)
+        {
+            second_input.opmask[k] = (opmasks >> k) & 1 ? input.opmask[k] : x86_test_random(state);
+        }
+        for (uint32_t v = 0; v < vectors; v += 1)
         {
             if (!(reads & BUSTER_X86_RESOURCE_VECTOR(v)))
             {
@@ -1500,7 +1765,12 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
             x86_semantics_expect(tally, !written || second_output.gpr[g] == output.gpr[g], "%s wrote general register %u from something it doesn't read",
                                  x86_semantics_test_case, g);
         }
-        for (uint32_t v = 0; v < 16; v += 1)
+        for (uint32_t k = 0; x86_semantics_test_wide && k < 8; k += 1)
+        {
+            const bool written = (opmasks >> (8 + k)) & 1;
+            x86_semantics_expect(tally, !written || second_output.opmask[k] == output.opmask[k], "%s wrote opmask register %u from something it doesn't read", x86_semantics_test_case, k);
+        }
+        for (uint32_t v = 0; v < vectors; v += 1)
         {
             // The whole register, bits 511 to 128 included: an unread register is changed whole.
             const bool written = (writes & BUSTER_X86_RESOURCE_VECTOR(v)) != 0;
@@ -1524,7 +1794,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
             const uint32_t rest = (bits & BUSTER_X86_ROLE_REST) >> BUSTER_X86_ROLE_REST_SHIFT;
             const bool merges = rest == BUSTER_X86_REST_MERGE || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && !memory);
             const bool register_operand = !(role == BUSTER_X86_ROLE_RM && memory);
-            if ((bits & BUSTER_X86_ROLE_WRITE) && !(bits & BUSTER_X86_ROLE_READ) && merges && register_operand && !shared)
+            if ((bits & BUSTER_X86_ROLE_WRITE) && !(bits & BUSTER_X86_ROLE_READ) && merges && register_operand && !shared && !masked)
             {
                 const uint8_t value = values[role];
                 // Other operands that read the same register would see the change: skip those records.
@@ -1546,7 +1816,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                     {
                         for (uint32_t i = 0; i < effects->write_bytes; i += 1)
                         {
-                            second_input.vector[value & 15][i] ^= (uint8_t)(1 + x86_random_below(state, 255));
+                            second_input.vector[value & 31][i] ^= (uint8_t)(1 + x86_random_below(state, 255));
                         }
                     }
                     else
@@ -2696,6 +2966,50 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
                                  records[i].reg, records[i].rm, records[i].mode, records[i].immediate, (unsigned long long)scalar_reads[i], (unsigned long long)scalar_writes[i],
                                  (unsigned long long)vector_reads[i], (unsigned long long)vector_writes[i]);
         }
+        // With the opmasks: the same records' sets and opmask columns.
+        uint64_t* opmask_scalar_reads = malloc(count * sizeof(uint64_t));
+        uint64_t* opmask_scalar_writes = malloc(count * sizeof(uint64_t));
+        uint64_t* opmask_vector_reads = malloc(count * sizeof(uint64_t));
+        uint64_t* opmask_vector_writes = malloc(count * sizeof(uint64_t));
+        uint16_t* scalar_opmasks = malloc(count * sizeof(uint16_t));
+        uint16_t* vector_opmasks = malloc(count * sizeof(uint16_t));
+        if (x86_semantics_expect(&tally, opmask_scalar_reads && opmask_scalar_writes && opmask_vector_reads && opmask_vector_writes && scalar_opmasks && vector_opmasks,
+                                 "the opmask columns"))
+        {
+            x86_instructions_effects_opmasks_scalar(records, count, opmask_scalar_reads, opmask_scalar_writes, scalar_opmasks);
+            x86_instructions_effects_opmasks(records, count, opmask_vector_reads, opmask_vector_writes, vector_opmasks);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                x86_semantics_expect(&tally,
+                                     opmask_scalar_reads[i] == opmask_vector_reads[i] && opmask_scalar_writes[i] == opmask_vector_writes[i] &&
+                                         scalar_opmasks[i] == vector_opmasks[i],
+                                     "record %u (%s, reg %u, rm %u, vvvv %u, mode %#x, decorations %#x) with opmasks: scalar %#llx %#llx %#x, vector %#llx %#llx %#x", i,
+                                     x86_semantics_test_name(records[i].form), records[i].reg, records[i].rm, records[i].vvvv, records[i].mode, records[i].decorations,
+                                     (unsigned long long)opmask_scalar_reads[i], (unsigned long long)opmask_scalar_writes[i], scalar_opmasks[i],
+                                     (unsigned long long)opmask_vector_reads[i], (unsigned long long)opmask_vector_writes[i], vector_opmasks[i]);
+            }
+            // Page edges for the opmask column: every count to 100, the column ending at a PROT_NONE page.
+            const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+            uint64_t opmask_mapped = 0;
+            uint8_t* opmask_end = x86_map_guarded(100 * sizeof(uint16_t), page, &opmask_mapped);
+            if (x86_semantics_expect(&tally, opmask_end != 0, "the guarded opmask column"))
+            {
+                for (uint32_t edge_count = 0; edge_count <= 100 && edge_count <= count; edge_count += 1)
+                {
+                    snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "the vector path's opmasks on %u items at a page's end", edge_count);
+                    uint16_t* edge_opmasks = (uint16_t*)(opmask_end - edge_count * sizeof(uint16_t));
+                    x86_instructions_effects_opmasks(records, edge_count, opmask_vector_reads, opmask_vector_writes, edge_opmasks);
+                    x86_semantics_expect(&tally, memcmp(edge_opmasks, scalar_opmasks, edge_count * sizeof(uint16_t)) == 0, "%u items' opmasks at a page's end", edge_count);
+                }
+                munmap(opmask_end - (opmask_mapped - 2 * page) - page, opmask_mapped);
+            }
+        }
+        free(opmask_scalar_reads);
+        free(opmask_scalar_writes);
+        free(opmask_vector_reads);
+        free(opmask_vector_writes);
+        free(scalar_opmasks);
+        free(vector_opmasks);
     }
     // Page edges: every count to 100, each column ending at a PROT_NONE page (a read past it faults: the handler names the
     // case), and the outputs too.
@@ -3055,10 +3369,13 @@ static int run_x86_semantics_tests(int argc, char** argv)
         }
         // RORX's substitution fixture executes it even though the effects table does not cover it.
         x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = (native.features & BUSTER_X86_FEATURE(BMI2)) != 0;
-        x86_semantics_test_wide = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
+        // The wide trampoline moves ZMM0 to ZMM31 (AVX512F) and the eight opmasks whole, with kmovq (AVX512BW): an
+        // AVX512F host without BW takes the 128-bit state, as one without AVX-512 does.
+        const uint64_t wide = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW);
+        x86_semantics_test_wide = (native.features & wide) == wide;
         if (!x86_semantics_test_wide)
         {
-            printf("x86 semantics: native vector state checked through 128 bits (AVX-512 unavailable)\n");
+            printf("x86 semantics: native vector state checked through 128 bits (AVX512F and AVX512BW unavailable)\n");
         }
         printf("x86 semantics: seed %llu, %u choice rows, initialization %s\n", (unsigned long long)seed, x86_choice_row_count, initialized ? "ok" : "failed");
         result = initialized;
