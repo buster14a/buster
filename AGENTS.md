@@ -5379,7 +5379,7 @@ this compiler on our side: a world of what its C passes (integers to 64 bits,
 `_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
 GNU's complex integer types (of `__int128` too) and in clang's complex
-`_BitInt`s to 128 bits, in clang's `_Atomic`s of those
+`_BitInt`s to 128 bits, `__float128`, in clang's `_Atomic`s of those
 scalars and records (themselves, records holding them and aligned typedefs of
 them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the

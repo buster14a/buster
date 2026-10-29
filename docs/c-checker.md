@@ -1711,6 +1711,30 @@ What the lowering covers past scalars (#145's programs):
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
+- **`__float128` (#137).** A value is an aggregate's: a frame object of its
+  16 bytes, aligned to 16, which the stream carries by its address
+  (`check_lower_quad`), so that copies, calls, returns and `va_arg` take it as
+  the convention classifies it (SSE, SSEUP: a vector register's 16 bytes,
+  which Tier 0 moves with `movups`). Tier 0 has no entry of its arithmetic,
+  and as clang -O0's code its sums, differences, products and quotients are
+  libgcc's `__addtf3`, `__subtf3`, `__multf3` and `__divtf3`
+  (`check_lower_quad_compute`), its comparisons `__lttf2` to `__netf2`'s int
+  against 0 (unordered operands make each false but `!=`), a value's truth
+  `__netf2`'s against +0.0, and its conversions `__extendsftf2` to
+  `__trunctfxf2` for the floating types and `__floatsitf` to `__fixunstfti`
+  for the integers, through `int`, `unsigned int`, `long`, `unsigned long`,
+  `__int128` or `unsigned __int128`, the first that holds the integer's values,
+  a signed one where one does, as LLVM promotes a narrower unsigned
+  conversion (`check_lower_quad_conversion`, from the scalar conversions' rare
+  branch, an aggregate against a scalar); a negation flips a copy's sign bit,
+  as clang's `xorps` does. A compound assignment reads its destination in
+  `__float128`, computes and copies the result back, or converts and stores it
+  into a real destination; a global without an initializer is 16 zero bytes.
+  The checker folds no `__float128` constant (`check_action_float_supported`):
+  a static one with an initializer is refused as not constant, an increment by
+  name ("increments of __float128 values"), and the `q` suffix's literals as
+  invalid. `test-checker`'s `float128` program, against clang -O0's build of
+  it, has each of them, clean under clang's UBSan on every input.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -1872,8 +1896,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `__float128` values,
-`_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: increments of `__float128`
+values, `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation

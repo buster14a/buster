@@ -1495,8 +1495,9 @@ and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 (#133's lowering, as aggregates of their two parts), GNU's complex integer
 types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
 `__int128` spelled as the usual arithmetic conversions make them, #137) and,
-in clang's runs, complex `_BitInt`s of 13 to 128 bits, spelled so too, at 64
-bytes the vectors
+in clang's runs, complex `_BitInt`s of 13 to 128 bits, spelled so too,
+`__float128` (an aggregate's value in this compiler's C, whose arithmetic and
+conversions are libgcc's, #137), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
 `char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
 clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
