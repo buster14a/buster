@@ -279,6 +279,16 @@ fields, and `llvm-dwarfdump --verify` must pass it. Linked by `cc` through
 GNU ld and through lld, and by `link-foreign` from GCC's driver's line, it
 must make programs that run and read alike in `llvm-dwarfdump` and gdb.
 
+With several source files (#152), `-g` links an executable of the units'
+DWARF, one unit each (#779): each unit builds its own on its lane as `-c -g`
+writes it, keeps it with its link, and the units' merge lays their
+contributions out in the command line's order and moves each one's four
+fields by where its contributions start, as a linker relocates them
+(`docs/translation-units.md`, "The DWARF"). `test-check-debug --cross-check`
+links two units so, by `--lanes` 1 and 8 and by each path into the same
+bytes, which `llvm-dwarfdump --verify` passes and gdb reads: each unit's
+functions and lines in their own files, backtraces across the units.
+
 ## Prepared C debug emission (#606)
 
 The [October 27 qualification record](https://github.com/buster14a/buster-performance/tree/ba3d5f0de24d1fd36032d5c0903c750f9ba746b4/docs/measurements/debug-plan-606-2026-10-27)

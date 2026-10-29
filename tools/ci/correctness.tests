@@ -224,6 +224,9 @@ rm "$flags_file" "$sources_file"
 # (#153's --id-order).
 unset CPATH C_INCLUDE_PATH
 ./build/compiler test-checker-corpus --clang clang --deferred 8 --id-order 153 build/c-testsuite/tests/single-exec
+== Compile c-testsuite's programs as the units of one command [2 CPUs]
+# #152: every program at once with -c by 8 lanes, each one's object and diagnostics its own alone, in order.
+./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
 == Test the semantic driver's diagnostics and emission against clang
@@ -334,6 +337,12 @@ awk -F '\t' 'NR > 1 { counts[$1]++ } END { exit !(counts["identical"] == 4 && NR
 ./build/compiler test-x86-target
 == Test generated-code ISA selection and native records
 ./build/compiler test-x86-target-selection
+== Test the driver's commands of several source files [2 CPUs]
+# #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
+# that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
+# and by both paths; each unit's -c object its own alone; diagnostics in the command line's order; refusals; and
+# lanes that don't start.
+./build/compiler test-check-units
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 ./build/compiler test-unwind --cross-check
 == Test C-source binding identities and scope semantics
