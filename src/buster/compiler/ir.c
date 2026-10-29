@@ -706,13 +706,33 @@ static IrSimdShape ir_simd_shape(uint32_t type)
 }
 
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
-// scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows.
-static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
+// scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
+// instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
+// twin, which must agree; the other columns are a few entries each.
+static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
 {
+    (void)vector;
+
     bool found = function->vector_constant_count != 0 || function->result_type >= IR_V4I32;
-    for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+    if (BUSTER_VECTOR_PATH(vector))
     {
-        found = function->type[i] >= IR_V4I32 || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
+        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
+        {
+            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
+            const __mmask64 simd = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) |
+                                   _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
+            found = simd != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+        {
+            found = function->type[i] >= IR_V4I32 || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
+        }
     }
     for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
     {
@@ -731,6 +751,22 @@ static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* funct
         found = function->slots[i].type >= IR_V4I32;
     }
     return found;
+}
+
+static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function);
+
+static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
+{
+#if !BUSTER_HOST_VECTOR
+    return ir_function_has_simd_scalar(function);
+#else
+    return ir_function_has_simd_path(function, true);
+#endif
+}
+
+static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function)
+{
+    return ir_function_has_simd_path(function, false);
 }
 
 static IrCheck ir_check(IrError error, uint32_t instruction, uint32_t detail)
