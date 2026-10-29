@@ -2249,6 +2249,20 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     {
         printf("  --time-stages: status %d: %s\n", link_status, text != NULL ? text : "");
     }
+    // The write's phases after the stages (#778), each once, adding up to no more than the write's stage.
+    double write_phases = 0;
+    bool phases_once = text != NULL;
+    for (uint32_t p = 0; phases_once && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\ntime-write\t%s\t", check_clock_write_names[p]);
+        const char* found = strstr(text, needle);
+        double value = -1;
+        phases_once = found != NULL && strstr(found + 1, needle) == NULL && sscanf(found + strlen(needle), "%lf", &value) == 1 && value >= 0;
+        write_phases += value;
+    }
+    check_test_expect(test, link_report && phases_once && write_phases <= stages[CHECK_STAGE_WRITE] + 0.001 * BUSTER_CHECK_CLOCK_WRITE_PHASES,
+                      "--time-stages on the direct path gives the write's phases once each, within its stage");
     free(text);
     text = NULL;
     const int ran = link_status == 0 ? check_test_driver_spawn(run, &text) : -1;
@@ -3030,6 +3044,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_transparent_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -4224,6 +4239,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_sockets(&test, clang, executable, directory);
             check_test_driver_target_selection(&test, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
