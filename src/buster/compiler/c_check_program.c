@@ -184,6 +184,12 @@ struct CheckProgram
     uint32_t* body_targets;
     X86Target* targets;
     uint32_t target_count;
+    // The function declarations with a target, target_clones, always_inline or flatten attribute, as keys of their
+    // object in the high half and their token in the low, sorted by object (per object, the target attributes' in token
+    // order, then the others'), for code generation's check of target features at -c (#775,
+    // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
+    uint64_t* attribute_keys;
+    uint32_t attribute_key_count;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -286,6 +292,9 @@ static bool check_program_attribute_naked(const CheckInputAttributes* attributes
 // The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
 // resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
+// Beside them, the declarations with an always_inline or flatten attribute, as keys of the same form, which only code
+// generation's check of target features reads, and only in a unit with a target attribute (#775,
+// CheckProgram.attribute_keys).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -293,6 +302,9 @@ struct CheckProgramTargetEvents
     uint64_t* keys;
     uint32_t count;
     uint32_t capacity;
+    uint64_t* inline_keys;
+    uint32_t inline_count;
+    uint32_t inline_capacity;
     bool room;
 };
 
@@ -308,28 +320,46 @@ static bool check_program_attribute_target(const CheckInputAttributes* attribute
     return target;
 }
 
-static void check_program_target_event(CheckProgramTargetEvents* events, uint32_t object, uint32_t token)
+// Whether a declaration's `attributes` hold an always_inline or flatten attribute (CheckProgramTargetEvents).
+static bool check_program_attribute_inline(const CheckInputAttributes* attributes)
 {
-    if (events->room && events->count == events->capacity)
+    bool inline_attribute = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
-        const uint32_t capacity = events->capacity == 0 ? 64 : events->capacity <= UINT32_MAX / 2 ? events->capacity * 2 : 0;
-        uint64_t* keys = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(events->scratch, uint64_t, capacity) : 0;
-        events->room = keys != 0;
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        inline_attribute |= (attribute->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || attribute->kind == CHECK_ATTRIBUTE_FLATTEN) && !attribute->ignored;
+    }
+    return inline_attribute;
+}
+
+// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling.
+static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
+{
+    if (events->room && *count == *capacity)
+    {
+        const uint32_t grown = *capacity == 0 ? 64 : *capacity <= UINT32_MAX / 2 ? *capacity * 2 : 0;
+        uint64_t* moved = grown != 0 ? BUSTER_ARENA_PUSH_ARRAY(events->scratch, uint64_t, grown) : 0;
+        events->room = moved != 0;
         if (events->room)
         {
-            if (events->count != 0)
+            if (*count != 0)
             {
-                memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+                memcpy(moved, *keys, (uint64_t)*count * sizeof(uint64_t));
             }
-            events->keys = keys;
-            events->capacity = capacity;
+            *keys = moved;
+            *capacity = grown;
         }
     }
     if (events->room)
     {
-        events->keys[events->count] = ((uint64_t)object << 32) | token;
-        events->count += 1;
+        (*keys)[*count] = ((uint64_t)object << 32) | token;
+        *count += 1;
     }
+}
+
+static void check_program_target_event(CheckProgramTargetEvents* events, uint32_t object, uint32_t token)
+{
+    check_program_event_push(events, &events->keys, &events->count, &events->capacity, object, token);
 }
 
 // Compact builtin descriptors start with their stable graph node and are source ordered in both schedulers.
@@ -2062,6 +2092,10 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_target_event(events, object, token);
         }
+        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_inline(input->attributes[token]))
+        {
+            check_program_event_push(events, &events->inline_keys, &events->inline_count, &events->inline_capacity, object, token);
+        }
         if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
         {
             if (program->object_naked == 0 && room)
@@ -2266,11 +2300,50 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
     return valid;
 }
 
+// The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
+// unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
+// so each object's are still in token order) and then the always_inline and flatten ones, sorted stably by object with
+// the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it can lack a
+// feature by clang's rule. Returns false if there was no room.
+static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+{
+    const uint64_t total = (uint64_t)events->count + events->inline_count;
+    bool valid = events->room && total <= UINT32_MAX;
+    if (valid && events->count != 0)
+    {
+        uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
+        valid = keys != 0 && temporary != 0;
+        if (valid)
+        {
+            memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            if (events->inline_count != 0)
+            {
+                memcpy(keys + events->count, events->inline_keys, (uint64_t)events->inline_count * sizeof(uint64_t));
+            }
+            uint32_t varying = 0;
+            for (uint64_t e = 1; e < total; e += 1)
+            {
+                varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
+            }
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, !scalar, varying);
+            if (sorted != keys)
+            {
+                memcpy(keys, sorted, total * sizeof(uint64_t));
+            }
+            program->attribute_keys = keys;
+            program->attribute_key_count = (uint32_t)total;
+        }
+    }
+    return valid;
+}
+
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
 
 #include "c_check_x86_diagnostic.c"
+#include "c_check_target_feature.c"
 
 static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
@@ -2650,6 +2723,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_attribute_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;
     }

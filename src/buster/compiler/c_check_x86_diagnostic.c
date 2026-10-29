@@ -5,6 +5,9 @@
 // worklist exists only for an out-of-range immediate. Each control/node enters it once, with no recursion, token
 // reparsing or dependence on target features. Unknown conditions retain both edges. Scratch has exactly one byte
 // and one u64 slot per control/node; no padding is read. Failure publishes no partially resolved events.
+// Code generation's check of target features walks the same way (#775, c_check_target_feature.c): with `calls`, the
+// walk also appends each call it reaches to that arena, a uint32_t node each, `call_count` of them, in a run nothing else
+// pushes into while it walks; `call_room` turns false if one had no room.
 
 typedef struct CheckX86DiagnosticWalk CheckX86DiagnosticWalk;
 struct CheckX86DiagnosticWalk
@@ -14,6 +17,9 @@ struct CheckX86DiagnosticWalk
     uint8_t* seen;
     uint64_t* stack;
     uint64_t depth;
+    Arena* calls;
+    uint32_t call_count;
+    bool call_room;
 };
 
 static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t index, bool control)
@@ -170,6 +176,16 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     }
     else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
     {
+        if (op == CHECK_OP_CALL && walk->calls != NULL)
+        {
+            uint32_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint32_t, 1) : NULL;
+            walk->call_room = call != NULL;
+            if (call != NULL)
+            {
+                *call = node;
+                walk->call_count += 1;
+            }
+        }
         uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
         bool truth = false;
         if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&

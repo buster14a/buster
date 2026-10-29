@@ -298,6 +298,54 @@ what clang ignores, and every flagged feature on and off.
 functions, each by an attribute of its own, inherited, `arch=`, trimmed and
 `"default"`, against clang -O0's code, and checks each refusal by name.
 
+### Code generation's check of target features
+
+Clang's code generation refuses a call that would inline a function into one
+without its features (`CodeGenFunction::EmitCall` and `checkTargetFeatures`):
+at `-c` and when it links, not at `-fsyntax-only`, and so does the C driver
+after `-c`'s selection, before lowering (#775, `c_check_target_feature.c`'s
+`check_program_target_features`). A direct call of an `always_inline` function
+where either function has a target attribute, or a call in a `flatten` function
+where either has one, is checked: where the callee's attribute applies (one
+version), the first feature of its map that the caller's lacks is an error,
+the attribute's own features first in its order; otherwise, where the caller's
+applies, each feature of the callee's map that the caller's lacks is one. The
+maps are `predefines_apply`'s, and the attributes those of the declarations
+before the call (the callee's) or up to the definition (the caller's), as clang
+inherits them; `CheckProgram.attribute_keys` keeps them, in a unit with a target
+attribute alone. The calls are those clang emits: the walk of the x86 builtins'
+range errors (#487) reaches what a constant condition leaves running, and a
+direct callee is the function's name alone, not `(*f)` or `(&f)`.
+
+Clang's errors are unrecoverable, so it emits no top-level function after the
+first one that has any, nor the static and inline functions it defers to the
+unit's end; where no top-level function has an error, it emits every deferred
+one, past their errors. So the driver reports the first externally visible
+function's errors alone, or else every deferred function's: each function's in
+its calls' order of ends (an argument's call before its own), after its closing
+brace, as clang reports them when it emits the function, or at the unit's end
+for a deferred one. Clang emits the deferred functions depth first from where
+its emission first referred to them, and the driver in source order; and
+where an error's feature is the first of the rest of a map (an `arch=` CPU's, or
+a caller's attribute that turns several features off), clang's order is its
+`StringMap`'s and the driver's `predefines_features`', so the two may name
+different features. `--lower-all`, #129's test option, checks every definition
+it lowers, those clang never emits among them.
+
+`test-checker-driver` compares each fixture's first error at `-c` with clang
+`-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes
+it: callees' attributes before and after the call, callers' that add and turn
+off features, `flatten`, calls through the address, dead branches, which
+function's errors clang reports and in which order, and `<immintrin.h>`'s
+`_bzhi_u32` at targets with BMI2 and without. Four fixtures' every error, line
+for line, must be clang's: the first external function's alone, calls in their
+arguments in the order of their ends, an external function's that leave a
+deferred one's unreported, and two deferred functions', where no external
+function has any.
+
+A builtin's own required features (`'__builtin_ia32_palignr128' needs target
+feature ssse3`) aren't checked yet.
+
 ## Sources and reproduction
 
 The instruction-set levels follow the

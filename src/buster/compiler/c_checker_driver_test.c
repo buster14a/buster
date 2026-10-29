@@ -15,8 +15,11 @@ struct CheckDriverFixture
     bool quiet;
 };
 
-static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
-                                  CheckCorpusOracle* outcome, uint32_t* warnings)
+// Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
+// without one -fsyntax-only, and `extra`'s `extra_count` arguments (at most 8) before the source: its first error, as
+// clang's oracle reads one, and its warnings' count.
+static bool check_test_driver_run_with(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                       const char* const* extra, uint32_t extra_count, CheckCorpusOracle* outcome, uint32_t* warnings)
 {
     *outcome = (CheckCorpusOracle){ 0 };
     *warnings = 0;
@@ -38,7 +41,7 @@ static bool check_test_driver_run(const char* executable, const char* source, co
                 _exit(126);
             }
             close(output);
-            char* arguments[16] = { 0 };
+            char* arguments[24] = { 0 };
             uint32_t count = 0;
             arguments[count++] = (char*)(executable != NULL ? executable : "checker");
             if (scalar)
@@ -68,6 +71,10 @@ static bool check_test_driver_run(const char* executable, const char* source, co
             else
             {
                 arguments[count++] = "-fsyntax-only";
+            }
+            for (uint32_t i = 0; i < extra_count && i < 8; i += 1)
+            {
+                arguments[count++] = (char*)extra[i];
             }
             arguments[count++] = (char*)source;
             if (executable != NULL)
@@ -119,6 +126,12 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     }
     free(text);
     return ready;
+}
+
+static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                  CheckCorpusOracle* outcome, uint32_t* warnings)
+{
+    return check_test_driver_run_with(executable, source, object, scalar, dump_static, quiet, lazy, NULL, 0, outcome, warnings);
 }
 
 // Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
@@ -2806,6 +2819,193 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
     }
 }
 
+// #775: code generation's check of target features, which clang makes at -c and not at -fsyntax-only. Each fixture's
+// first error at -c, or none, must be clang -c's at its -march, by both paths, in this process and through the
+// executable: its place, and its message where clang names the feature by the attribute's order (`message`; clang's
+// order past it is its StringMap's). At -fsyntax-only each must pass, as it does clang's.
+static void check_test_driver_target_features(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* march;
+        const char* source;
+        bool rejected;
+        bool message;
+    } fixtures[] = {
+        { "an always_inline callee's target attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true, true },
+        { "a caller of the callee's features", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target(\"avx2,bmi2\"))) int caller(int x) { return h(x); }\n",
+          false, true },
+        { "an always_inline callee without an attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"avx2\"))) int caller(int x) { return h(x); }\n", false,
+          true },
+        { "a caller's attribute that turns a feature off", "-march=x86-64-v2",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n"
+          "__attribute__((target(\"no-sse4.2\"))) int caller(int x) { return h(x); }\n",
+          true, true },
+        { "a flatten caller", "-march=x86-64",
+          "__attribute__((target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((flatten)) int caller(int x) { return h(x); }\n", true, true },
+        { "calls through the function's address", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nint caller(int x) { return (*h)(x) + (&h)(x); }\n", false,
+          true },
+        { "attributes declared after the call", "-march=x86-64",
+          "int h(int x);\nint caller(int x) { return h(x); }\n__attribute__((always_inline, target(\"avx2\"))) inline int h(int x) { return x + 1; }\n", false,
+          true },
+        { "an attribute declared before the call", "-march=x86-64",
+          "__attribute__((target(\"avx2\"))) static inline __attribute__((always_inline)) int h(int x);\nint caller(int x) { return h(x); }\n"
+          "static inline int h(int x) { return x + 1; }\n",
+          true, true },
+        { "dead branches and code", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { if (0) return h(x); return (0 && h(x)) + (1 ? x : h(x)); }\nint after(int x) { return x; return h(x); }\n",
+          false, true },
+        { "the first function to have an error", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e1(int x) { return s(x) + h(x + 1); }\nint e2(int x) { return h(x + 2); }\n",
+          true, true },
+        { "a deferred function's error", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e(int x) { return s(x); }\n",
+          true, true },
+        { "an argument's call first", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\nint e1(int x) { return h(g(x)) + h(x); }\n",
+          true, true },
+        { "an arch= attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"arch=haswell\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
+          false },
+        { "an intrinsic of a feature the unit lacks", "-march=x86-64",
+          "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", true, true },
+        { "an intrinsic of a feature the unit has", "-march=x86-64-v3",
+          "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
+        { "an intrinsic of a feature its caller's attribute adds", "-march=x86-64",
+          "#include <immintrin.h>\n__attribute__((target(\"bmi2\"))) unsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
+    };
+    const uint32_t routes = executable != NULL ? 4 : 2;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[1024];
+        snprintf(source, sizeof(source), "%s/target-feature-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/target-feature-%u.o", directory, i);
+        const char* arguments[] = { "-std=gnu17", fixtures[i].march, "-w" };
+        CheckCorpusOracle oracle = { 0 };
+        const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                                  check_corpus_clang_compile(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        snprintf(description, sizeof(description), "%s: clang -c %s it", fixtures[i].name, fixtures[i].rejected ? "refuses" : "takes");
+        check_test_expect(test, oracle_ready && oracle.rejected == fixtures[i].rejected, description);
+        const char* extra[] = { fixtures[i].march, "-w" };
+        for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
+        {
+            unlink(object);
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const char* driver = route >= 2 ? executable : NULL;
+            const bool scalar = (route & 1) != 0;
+            const bool ready = check_test_driver_run_with(driver, source, object, scalar, false, false, false, extra, BUSTER_ARRAY_LENGTH(extra), &checked, &warnings);
+            const bool same = ready && checked.rejected == oracle.rejected &&
+                              (!oracle.rejected || (checked.line == oracle.line && checked.column == oracle.column &&
+                                                    (!fixtures[i].message || strcmp(checked.message, oracle.message) == 0)));
+            snprintf(description, sizeof(description), "%s, %s %s: -c's first error %u:%u \"%s\", clang's %u:%u \"%s\"", fixtures[i].name,
+                     route >= 2 ? "default CLI" : "direct", scalar ? "scalar" : "vector", checked.line, checked.column, checked.message, oracle.line,
+                     oracle.column, oracle.message);
+            check_test_expect(test, same, description);
+            snprintf(description, sizeof(description), "%s, %s %s: a refused unit writes no object", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     scalar ? "scalar" : "vector");
+            check_test_expect(test, !checked.rejected || access(object, F_OK) != 0, description);
+            CheckCorpusOracle syntax = { 0 };
+            const bool syntax_ready = check_test_driver_run_with(driver, source, NULL, scalar, false, false, false, extra, BUSTER_ARRAY_LENGTH(extra), &syntax, &warnings);
+            snprintf(description, sizeof(description), "%s, %s %s: -fsyntax-only takes it, as clang's does", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     scalar ? "scalar" : "vector");
+            check_test_expect(test, syntax_ready && !syntax.rejected, description);
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
+// The lines of `text` that hold an error, each from its path's end on (`path` itself cut), joined in their order.
+static void check_test_driver_error_lines(const char* text, const char* path, char* lines, size_t capacity)
+{
+    size_t used = 0;
+    lines[0] = 0;
+    for (const char* at = text != NULL ? text : ""; *at != 0;)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t length = end != NULL ? (size_t)(end - at) : strlen(at);
+        const char* error = memmem(at, length, ": error: ", 9);
+        const size_t path_length = strlen(path);
+        const bool own = length > path_length && memcmp(at, path, path_length) == 0;
+        if (error != NULL && used + length + 2 < capacity)
+        {
+            const size_t skip = own ? path_length : 0;
+            memcpy(lines + used, at + skip, length - skip);
+            used += length - skip;
+            lines[used++] = '\n';
+            lines[used] = 0;
+        }
+        at = end != NULL ? end + 1 : at + length;
+    }
+}
+
+// #775: every error of the code-generation check, in order, must be clang -c's, which reports them all (without
+// -ferror-limit): the errors of the first externally visible function that has any, and no other's, or where none has
+// any, every deferred function's (in the order clang's emission first refers to them, which the fixtures keep in source
+// order), each by its calls' ends. Through the executable.
+static void check_test_driver_target_feature_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+    } fixtures[] = {
+        { "the first function's errors alone",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e1(int x) { return s(x) + h(x + 1) + h(x + 3); }\nint e2(int x) { return h(x + 2); }\n" },
+        { "a function's errors by their calls' ends",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\n"
+          "int e1(int x) { return h(g(x)) + h(x) + g(h(g(x))); }\n" },
+        { "a deferred function's errors where no other has any",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x) + h(x + 1); }\n"
+          "static int t(int x) { return h(x + 2); }\nint e(int x) { return s(x) + t(x); }\n" },
+        { "an external function's errors before a static one's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e(int x) { return s(x) + h(x + 1); }\n" },
+    };
+    for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[2048];
+        snprintf(source, sizeof(source), "%s/target-feature-errors-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/target-feature-errors-%u.o", directory, i);
+        const bool written = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
+        char* const theirs_arguments[] = { (char*)clang, "-std=gnu17", "-march=x86-64", "-w", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-c", "-o",
+                                           "/dev/null", source, NULL };
+        char* const ours_arguments[] = { (char*)executable, "-std=gnu17", "-march=x86-64", "-w", "-c", "-o", object, source, NULL };
+        char* theirs_text = NULL;
+        char* ours_text = NULL;
+        const int theirs_status = written ? check_test_driver_spawn(theirs_arguments, &theirs_text) : -1;
+        const int ours_status = written ? check_test_driver_spawn(ours_arguments, &ours_text) : -1;
+        char theirs[1024];
+        char ours[1024];
+        check_test_driver_error_lines(theirs_text, source, theirs, sizeof(theirs));
+        check_test_driver_error_lines(ours_text, source, ours, sizeof(ours));
+        snprintf(description, sizeof(description), "%s: -c's errors are clang -c's (status %d and %d)\n-c's:\n%sclang's:\n%s", fixtures[i].name, ours_status,
+                 theirs_status, ours, theirs);
+        check_test_expect(test, written && theirs_status == 1 && ours_status == 1 && theirs[0] != 0 && strcmp(ours, theirs) == 0, description);
+        free(theirs_text);
+        free(ours_text);
+        unlink(object);
+        unlink(source);
+    }
+}
+
 #include "c_check_packed_test.c"
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
@@ -3834,6 +4034,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        check_test_driver_target_features(&test, clang, executable, directory);
+        check_test_driver_target_feature_errors(&test, clang, executable, directory);
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
