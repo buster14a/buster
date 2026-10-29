@@ -642,8 +642,8 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
 }
 
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
-// memory of the links it keeps, the first time the lane takes a unit. False, with the lane failed, if it can't be
-// reserved.
+// memory of the links it keeps (once: the links it kept stay there), the first time the lane takes a unit. False, with
+// the lane failed, if it can't be reserved.
 static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverCommand* command)
 {
     if (!lane->ready && !lane->failed)
@@ -651,13 +651,30 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
         lane->arena = arena_reserve(1ull << 36);
         lane->scratch = arena_reserve(1ull << 36);
         lane->output = arena_reserve(1ull << 36);
-        lane->kept = arena_reserve(1ull << 36);
-        lane->kept_bytes = arena_reserve(1ull << 36);
+        lane->kept = lane->kept.base != 0 ? lane->kept : arena_reserve(1ull << 36);
+        lane->kept_bytes = lane->kept_bytes.base != 0 ? lane->kept_bytes : arena_reserve(1ull << 36);
         lane->ready = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0 && lane->kept.base != 0 && lane->kept_bytes.base != 0 &&
                       intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
         lane->failed = !lane->ready;
     }
     return lane->ready;
+}
+
+// A lane's memory that the link doesn't read, its file cache, intern table and three arenas, released when it has
+// compiled its units (#778): into its pool (arena_pool), when its caller set one, whose MADV_DONTNEED frees an arena's
+// pages under the address space's lock for reading, so that the lanes free theirs at once, at the end of their run,
+// where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
+static void check_units_lane_release(CheckUnitsLane* lane)
+{
+    if (lane->ready)
+    {
+        file_cache_release(&lane->cache);
+        intern_release(&lane->identifiers);
+        lane->ready = false;
+    }
+    arena_release(&lane->output);
+    arena_release(&lane->scratch);
+    arena_release(&lane->arena);
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
@@ -712,7 +729,8 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 
 // A lane of the units' run: takes the units in turn, costliest first, and compiles each as a lane of its own
 // (lane_alone), so that nothing a unit runs takes the group's other lanes for its own. The arenas its units release go
-// to its pool for the next units' reservations, and are unmapped at its end.
+// to its pool for the next units' reservations; at its end it releases its own memory into the pool too
+// (check_units_lane_release), and the pool's arenas, their pages freed, are unmapped.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
@@ -724,6 +742,7 @@ static void check_units_lane(void* argument)
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
+    check_units_lane_release(lane);
     arena_pool = 0;
     arena_pool_release(&lane->pool);
 }
@@ -857,18 +876,31 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .order = order,
                 .lanes = states,
             };
+            // One team of threads for the units' run and the executable's write (lane_team_start, as link-foreign's,
+            // #501), which keep their scratch arenas from one to the other (#778).
+            LaneTeam team = { 0 };
+            if (active > 1 && lane_team_start(&team, active, NULL))
+            {
+                lane_team_keep_scratch(&team);
+            }
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
             // Lanes that couldn't start (lane_run runs none of them then) leave their units untaken: the calling thread
             // compiles those alone, as its own lane 0.
             const bool ran = lane_run(active, check_units_lane, &run, NULL);
             const Lane caller = lane_alone();
             arena_pool = &states->pool;
+            bool alone = false;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 if (!units[order[i]].compiled)
                 {
                     check_units_compile(&run, states, units + order[i]);
+                    alone = true;
                 }
+            }
+            if (alone)
+            {
+                check_units_lane_release(states);
             }
             arena_pool = 0;
             arena_pool_release(&states->pool);
@@ -891,18 +923,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;
             }
-            // The lanes' caches and arenas: the kept links are all the link reads.
+            // The lanes released their caches and arenas as they ended (check_units_lane_release): the kept links are
+            // all the link reads.
             for (uint32_t l = 0; l < active; l += 1)
             {
-                CheckUnitsLane* lane = states + l;
-                if (lane->ready)
-                {
-                    file_cache_release(&lane->cache);
-                    intern_release(&lane->identifiers);
-                }
-                arena_release(&lane->output);
-                arena_release(&lane->scratch);
-                arena_release(&lane->arena);
+                check_units_lane_release(states + l);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
             if (result == 0 && command->link)
@@ -919,6 +944,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 arena_release(&states[l].kept_bytes);
                 arena_release(&states[l].kept);
             }
+            lane_team_stop(&team);
         }
         // The lease's slots go back whatever happened since it was taken.
         if (!worker_budget_release(&lease))
