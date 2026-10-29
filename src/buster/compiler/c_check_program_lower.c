@@ -526,6 +526,9 @@ struct CheckLowerWriter
     uint64_t runtime_mask;
     uint32_t runtime_count;
     uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
+    // until the writer first asks.
+    uint64_t first_classification;
 };
 
 _Static_assert(CHECK_LOWER_RUNTIMES <= 64, "a part's runtime functions are a 64-bit mask");
@@ -1046,14 +1049,147 @@ static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId t
     return feature;
 }
 
-// Why an argument or a parameter of this type can't be passed, or NULL: a value of a class, or a struct or a union.
-static const char* check_lower_passed(const CheckLowerWriter* writer, TypeId type)
+// A transparent union's first member, unqualified, or 0 for another type (#147). clang classifies an argument, a
+// parameter and va_arg's type that is one as that member (useFirstFieldIfTransparentUnion), whose value is the union's
+// bytes; a result keeps the union's own classification. An _Atomic union isn't one.
+static TypeId check_lower_transparent(const CheckLowerWriter* writer, TypeId type)
+{
+    const TypeTable* types = writer->program->types;
+    TypeId first = 0;
+    if (type_is_transparent_union(types, type))
+    {
+        const uint32_t tag = types->types.index[type_index(type_strip_aligned(types, type))];
+        first = type_unqualified(types->members.type[types->tags.member_begin[tag]]);
+    }
+    return first;
+}
+
+// The type an argument, a parameter or va_arg's operand of a struct or a union passes as: a transparent union's first
+// member (check_lower_transparent), or the type itself.
+static TypeId check_lower_passed_as(const CheckLowerWriter* writer, TypeId type)
+{
+    const TypeId first = check_lower_transparent(writer, type);
+    return first != 0 ? first : type;
+}
+
+// The class a transparent union's first member passes in: an integer's or a pointer's (an enum's, _Bool's), or UINT8_MAX
+// for a member passed by its bytes, as an aggregate is, from the union's object: a struct, a union, an array, a 128-bit
+// integer, an _Atomic type or any other.
+static uint8_t check_lower_transparent_class(const CheckLowerWriter* writer, TypeId first)
+{
+    const uint8_t class = check_lower_class(writer, first);
+    const bool value = (check_lower_facts(writer, first) & (BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC)) == 0;
+    return value && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 ? class : UINT8_MAX;
+}
+
+// Whether static object declaration `token`'s initializer names a function (check_lower_first_classification): one of
+// its tokens bound to a function's declaration.
+static bool check_lower_initializer_names_function(const CheckInput* input, uint32_t token)
+{
+    const uint32_t count = input->token_count;
+    const uint32_t end = input->initializer_ends[token] < count ? input->initializer_ends[token] : count;
+    bool named = false;
+    for (uint32_t use = input->initializer_begins[token]; use < end && !named; use += 1)
+    {
+        const uint32_t declaration = input->declarations[use];
+        named = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    }
+    return named;
+}
+
+// The first token where clang's code may classify a function's type, which it keeps for the type's every use
+// (check_lower_transparent_late), or UINT32_MAX for a unit with none: the first function definition's body, or a static
+// object's initializer before it that names a function, whose address clang's code takes where it emits the object, at
+// its definition. clang 23.1.4 passes a union to `int f(union U)` as the union after `int (*p)(union U) = f;`, though a
+// later declaration makes it transparent before any definition. Every such initializer counts, though clang's code
+// emits a static object's when a function first uses it, and so does every function, though only the function's own
+// type keeps its classification: the earliest place clang's code may classify, so that a union it may pass either way
+// is refused. A lane's writer finds it the first time it asks (CheckLowerWriter.first_classification), which only a
+// transparent union whose first member passes otherwise than it makes it do. AVX-512 finds the static objects'
+// declarations with initializers 16 tokens at a time; the rest and the `scalar` path test every token.
+static __attribute__((noinline)) uint32_t check_lower_first_classification(CheckLowerWriter* writer)
+{
+    if (writer->first_classification == 0)
+    {
+        const CheckProgram* program = writer->program;
+        const CheckInput* input = program->input;
+        const uint32_t limit = program->body_count != 0 ? program->bodies[0].opening : input->token_count;
+        const uint32_t none = program->body_count != 0 ? limit : UINT32_MAX;
+        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        uint32_t found = none;
+        uint32_t token = 0;
+        for (; !BUSTER_SCALAR_PATH(writer->scalar) && found == none && limit - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+        {
+            const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
+            const __mmask16 initialized = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
+                                          _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128()) &
+                                          _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_begins + token), _mm512_loadu_si512(input->initializer_ends + token));
+            for (uint32_t bits = initialized; bits != 0 && found == none; bits &= bits - 1)
+            {
+                const uint32_t declaration = token + (uint32_t)__builtin_ctz(bits);
+                found = check_lower_initializer_names_function(input, declaration) ? declaration : none;
+            }
+        }
+        for (; found == none && token < limit; token += 1)
+        {
+            if (input->declarations[token] == token && input->static_objects[token] && input->initializer_begins[token] < input->initializer_ends[token] &&
+                check_lower_initializer_names_function(input, token))
+            {
+                found = token;
+            }
+        }
+        writer->first_classification = (uint64_t)found + 1;
+    }
+    return (uint32_t)(writer->first_classification - 1);
+}
+
+// Whether a transparent union was made so, by a later declaration's attribute (CheckGraph.transparent_unions has its
+// activation's token), after clang's code may have classified a function's type (check_lower_first_classification).
+// clang's code classifies a function's type the first time it meets it and keeps that for the type's every use: a type
+// met before the attribute passes the union as the union, after it too.
+static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t tag = program->types->types.index[type_index(type_strip_aligned(program->types, type))];
+    return graph->transparent_unions != NULL && tag < graph->tag_completion_count && graph->transparent_unions[tag] > check_lower_first_classification(writer);
+}
+
+// Why a struct or a union can't pass as a transparent union's first member (check_lower_passed_as), or NULL (another's
+// passes as itself). A transparent union passes so where it has that member's size and alignment, as it does but by an
+// aligned or packed attribute of its own: clang's code takes such a union's registers from the member and its stack slot
+// from the union (getIndirectResult), which differ. And where the union was made transparent after clang's code may have
+// classified a function's type (check_lower_transparent_late) and its first member passes otherwise than it (its
+// registers, its stack or its extension), clang's code may pass it as either. Out of line: only aggregates ask.
+static __attribute__((noinline)) const char* check_lower_transparent_passed(CheckLowerWriter* writer, TypeId type)
+{
+    const AbiTable* table = writer->abi_table;
+    const uint32_t places = BUSTER_ABI_PASS_REGISTER_CLASSES | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED |
+                            BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO | BUSTER_ABI_PASS_LOW_GENERAL;
+    const uint32_t own = type_index(type);
+    const uint32_t first = type_index(check_lower_passed_as(writer, type));
+    const char* feature = NULL;
+    if (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first])
+    {
+        feature = "transparent unions sized or aligned otherwise than their first member";
+    }
+    else if (first != own && ((table->pass[own] ^ table->pass[first]) & places) != 0 && check_lower_transparent_late(writer, type))
+    {
+        feature = "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
+    }
+    return feature;
+}
+
+// Why an argument or a parameter of this type can't be passed, or NULL: a value of a class, or a struct or a union (and a
+// transparent union as its first member, check_lower_transparent_passed).
+static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;
     const char* feature = NULL;
     if (check_lower_aggregate(writer, type))
     {
         feature = check_lower_by_value(writer, type, false);
+        feature = feature == NULL ? check_lower_transparent_passed(writer, type) : feature;
     }
     else if (check_lower_class(writer, type) == UINT8_MAX)
     {
@@ -3221,6 +3357,61 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
     }
 }
 
+// The first member a call's argument passes as when it is a transparent union's (#147), or 0: a member's value its
+// parameter's union takes (BUSTER_CHECK_CONVERT_TRANSPARENT_UNION), or a union's own value, named or not, but an _Atomic
+// parameter's, which passes as the atomic type.
+static TypeId check_lower_transparent_argument(const CheckLowerWriter* writer, const CheckConversion* conversion, TypeId parameter)
+{
+    TypeId first = 0;
+    // The conversion's flag and the argument's facts first: every call's argument asks, and few are aggregates.
+    if ((conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0)
+    {
+        first = check_lower_transparent(writer, parameter);
+    }
+    else if (check_lower_aggregate(writer, conversion->type) && (parameter == 0 || check_action_kind(writer->program->types, parameter) != BUSTER_TYPE_KIND_ATOMIC))
+    {
+        first = check_lower_transparent(writer, conversion->type);
+    }
+    return first;
+}
+
+// A transparent union's argument as it passes, as its first member `first` (check_lower_transparent_argument): the
+// member's value, of its class (check_lower_transparent_class), or the address of the union's bytes. `member` is the
+// argument's type: the union's, whose value is its object's address, or the member's that a conversion to the union
+// selects, whose value is the union's first bytes, as every member has the first's size. An integer's or a pointer's bits
+// are the first member's value; a struct's, a union's or a complex value's bytes are at its address; any other value's go
+// through a temporary, whose bytes are the union's.
+static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t node, uint32_t operand, TypeId member, TypeId first)
+{
+    const uint8_t first_class = check_lower_transparent_class(writer, first);
+    const uint8_t member_class = check_lower_class(writer, member);
+    const bool address = check_lower_aggregate(writer, member);
+    // The tasks run last pushed first: the operand, then what passes it.
+    if (!address && first_class != UINT8_MAX && member_class >= BUSTER_TYPED_CLASS_I8 && member_class <= BUSTER_TYPED_CLASS_U64)
+    {
+        if (member_class != first_class)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, first_class, 0);
+        }
+    }
+    else if (!address)
+    {
+        const bool object = check_lower_wide(writer, member) || check_lower_vector_of(writer, member) != 0;
+        const uint32_t local = object ? check_lower_temporary_of(writer, member) : check_lower_addressed_temporary(writer, member_class);
+        if (first_class != UINT8_MAX)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, first_class, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, member_class, local);
+    }
+    else if (first_class != UINT8_MAX)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, first_class, 0);
+    }
+    check_lower_operand(writer, node, operand, false, member);
+}
+
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckGraph* graph = &writer->program->input->graph;
@@ -3263,8 +3454,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     }
     for (uint32_t a = 0; a < count && passed == NULL; a += 1)
     {
-        const CheckConversion* conversion = stream->argument_conversions + first + a;
-        passed = (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 ? "transparent unions" : check_lower_passed(writer, conversion->type);
+        passed = check_lower_passed(writer, stream->argument_conversions[first + a].type);
     }
     // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
     // 128-bit integer's and a vector's, which LOCAL then reads.
@@ -3309,21 +3499,38 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         abi->counts[abi->count] = count;
         abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters : count;
         abi->variadic[abi->count++] = variadic;
+        // Whether an argument is a transparent union's, which the operands' loop asks again only then.
+        bool transparent = false;
         for (uint32_t a = 0; a < count; a += 1)
         {
             // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made, and a
             // vector's an object of its bytes.
-            const TypeId argument = stream->argument_conversions[first + a].type;
-            const TypeId passed_type = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC
-                                           ? parameter_types[a]
-                                           : argument;
-            const bool aggregate = check_lower_aggregate(writer, argument);
-            const uint32_t vector = check_lower_vector_of(writer, argument);
-            const bool wide = check_lower_wide(writer, argument) || vector != 0;
+            const CheckConversion* conversion = stream->argument_conversions + first + a;
+            const TypeId argument = conversion->type;
+            TypeId passed_type = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC ? parameter_types[a] : argument;
+            bool aggregate = check_lower_aggregate(writer, argument);
+            uint32_t vector = check_lower_vector_of(writer, argument);
+            bool wide = check_lower_wide(writer, argument) || vector != 0;
+            uint8_t class = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, argument);
+            // A transparent union's passes as its first member: that member's value, or the union's bytes
+            // (check_lower_transparent_class). Only a conversion to one or an aggregate's value may be one.
+            const TypeId member = aggregate || (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0
+                                      ? check_lower_transparent_argument(writer, conversion, a < parameters ? parameter_types[a] : 0)
+                                      : 0;
+            if (member != 0)
+            {
+                const uint8_t member_class = check_lower_transparent_class(writer, member);
+                passed_type = member;
+                aggregate = member_class == UINT8_MAX;
+                vector = 0;
+                wide = false;
+                class = aggregate ? BUSTER_TYPED_CLASS_U64 : member_class;
+                transparent = true;
+            }
             abi->arguments[abi->argument_count++] = passed_type;
             writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, passed_type) : vector != 0 ? vector : wide ? 16 : 0;
             writer->aggregates |= aggregate || wide;
-            writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, argument);
+            writer->argument_classes[writer->argument_count++] = class;
         }
         if (aggregate_result)
         {
@@ -3336,9 +3543,15 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         check_lower_instruction(writer, BUSTER_TYPED_CALL, aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
         for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
-            const TypeId argument = stream->argument_conversions[first + a].type;
+            const CheckConversion* conversion = stream->argument_conversions + first + a;
+            const TypeId argument = conversion->type;
             const bool atomic = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC;
-            if (atomic && check_lower_aggregate(writer, argument))
+            const TypeId member = transparent ? check_lower_transparent_argument(writer, conversion, a < parameters ? parameter_types[a] : 0) : 0;
+            if (member != 0)
+            {
+                check_lower_transparent_value(writer, node, a + 3, argument, member);
+            }
+            else if (atomic && check_lower_aggregate(writer, argument))
             {
                 // The atomic parameter keeps its own ABI classification and storage padding, while its initializer
                 // supplies only the underlying value's bytes. Capture those bytes into a padded argument object.
@@ -4414,7 +4627,8 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
             // whole eightbytes), or read in the overflow area; its value is their address.
             const bool aggregate = check_lower_aggregate(writer, requested);
             const uint64_t size = aggregate || bytes ? type_size(types, requested) : 0;
-            call->plan = abi_va_arg(writer->abi_table, types, requested);
+            // A transparent union's as its first member's (check_lower_passed_as), into the union's object.
+            call->plan = abi_va_arg(writer->abi_table, types, aggregate ? check_lower_passed_as(writer, requested) : requested);
             call->result_class = bytes ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(writer, requested);
             // (An empty one, which the call ignores, still names its object: 1 byte, as its frame object takes.)
             call->size = aggregate && size == 0 ? 1 : (uint32_t)size;
@@ -8082,7 +8296,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
             writer->local_map[input->objects[parameter]] = local;
-            abi->arguments[abi->argument_count++] = parameter_type;
+            // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
+            abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             function->parameter_count += 1;
             declared += 1;
         }
