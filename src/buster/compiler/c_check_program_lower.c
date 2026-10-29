@@ -2714,7 +2714,8 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     const uint64_t size = type_size(types, element);
     const long double parts[2] = { value->floating, value->constant_kind == CHECK_CONSTANT_COMPLEX ? value->imaginary : 0.0L };
     // A complex integer type's (#137): its real part in the integer's low 64 bits and its imaginary one in the high 64, each
-    // masked to the element's width, or a real constant's value alone.
+    // folded to the element's width and extended through 64 bits as its class has them (the checker's), or a real
+    // constant's value alone.
     const bool integer = type_kind(types, element) == BUSTER_TYPE_KIND_INTEGER;
     const uint64_t halves[2] = { (uint64_t)value->integer, value->constant_kind == CHECK_CONSTANT_COMPLEX ? (uint64_t)(value->integer >> 64) : 0 };
     const CheckConstantKind real = integer ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_FLOATING;
@@ -2727,17 +2728,8 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
         const uint32_t result = check_lower_object(writer, 2 * size, type_alignment_log2(types, element));
         for (uint32_t part = 0; part < 2; part += 1)
         {
-            uint64_t bits = halves[part];
-            const uint32_t width = 8u << ((class - 1) / 2);
-            if (integer && width < 64)
-            {
-                // The part's bits, sign- or zero-extended through 64 as its class has them (check_lower_constant).
-                const uint64_t mask = (UINT64_C(1) << width) - 1;
-                bits &= mask;
-                bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
-            }
             check_lower_complex_place(writer, result, part, size);
-            check_lower_emit(writer, BUSTER_TYPED_CONST, class, integer ? bits : check_lower_float_bits(writer, class, parts[part]));
+            check_lower_emit(writer, BUSTER_TYPED_CONST, class, integer ? halves[part] : check_lower_float_bits(writer, class, parts[part]));
             check_lower_emit(writer, BUSTER_TYPED_SET, class, 0);
         }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
