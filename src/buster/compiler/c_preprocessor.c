@@ -92,6 +92,7 @@
 #include <sys/wait.h>
 #include "host_isa.h"
 #include "c_builtin_catalog.c"
+#include "c_builtin_fortify.c"
 #include "c_builtin_source_intrinsics.c"
 #include "buster/compiler/x86_target.c"
 
@@ -16819,7 +16820,8 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
                            : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard) |
-                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) | cbuiltin_source_intrinsic(name, length);
+                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) | cbuiltin_source_intrinsic(name, length) |
+                                 cbuiltin_fortify_source(name, length);
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)

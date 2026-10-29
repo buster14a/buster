@@ -24,7 +24,17 @@ static bool pp_test_source_feature_matrix(void)
         { "nodiscard", 0 }, { "maybe_unused", 0 }, { "deprecated", 0 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };
-    bool result = true;
+    // Independent of the admission table: these exact calls have ordinary checked signatures and Tier 0 consumers.
+    static const char* const fortified[] = {
+        "__builtin___memcpy_chk", "__builtin___memmove_chk", "__builtin___mempcpy_chk", "__builtin___memset_chk",
+        "__builtin___strcpy_chk", "__builtin___stpcpy_chk", "__builtin___strncpy_chk", "__builtin___stpncpy_chk",
+        "__builtin___strcat_chk", "__builtin___strncat_chk", "__builtin___sprintf_chk", "__builtin___snprintf_chk",
+        "__builtin___vsprintf_chk", "__builtin___vsnprintf_chk",
+    };
+    static const char* const refused_fortify[] = {
+        "__builtin___memccpy_chk", "__builtin___memcpy_chkk", "__builtin___memcpy_ch", "__builtin___MEMCPY_chk",
+    };
+    bool result = BUSTER_ARRAY_LENGTH(fortified) == CBUILTIN_FORTIFY_COUNT;
     for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
     {
         for (uint32_t gnu = 0; gnu < 2; gnu += 1)
@@ -49,6 +59,22 @@ static bool pp_test_source_feature_matrix(void)
             {
                 result &= pp_feature(&options, PP_BUILTIN_HAS_C_ATTRIBUTE, (const uint8_t*)c_attributes[i].name,
                                      (uint32_t)strlen(c_attributes[i].name)) == c_attributes[i].value;
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fortified); i += 1)
+            {
+                const uint8_t* name = (const uint8_t*)fortified[i];
+                const uint32_t length = (uint32_t)strlen(fortified[i]);
+                result &= cbuiltin_fortify_source(name, length);
+                result &= pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, length) == 1;
+                result &= pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused_fortify); i += 1)
+            {
+                const uint8_t* name = (const uint8_t*)refused_fortify[i];
+                const uint32_t length = (uint32_t)strlen(refused_fortify[i]);
+                result &= !cbuiltin_fortify_source(name, length);
+                result &= pp_feature(&options, PP_BUILTIN_HAS_BUILTIN, name, length) == 0;
+                result &= pp_feature(&options, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == 0;
             }
             static const char* const unknown_features[] = { "c_static_assert_typo", "cxx_exceptions", "address_sanitizer", "objc_arc", "c_blocks" };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unknown_features); i += 1)
@@ -87,17 +113,33 @@ static bool pp_test_source_feature_matrix(void)
     {
         uint8_t* end = mapping + page_size;
         result &= !cbuiltin_source_intrinsic(end, 0) && !cbuiltin_source_intrinsic(end, UINT32_MAX) && !cbuiltin_source_intrinsic(NULL, 1);
+        result &= !cbuiltin_fortify_source(end, 0) && !cbuiltin_fortify_source(end, UINT32_MAX) && !cbuiltin_fortify_source(NULL, 1);
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(intrinsics); i += 1)
         {
             const uint32_t length = (uint32_t)strlen(intrinsics[i].name);
             memcpy(end - length, intrinsics[i].name, length);
             result &= cbuiltin_source_intrinsic(end - length, length) == intrinsics[i].source;
         }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fortified); i += 1)
+        {
+            const uint32_t length = (uint32_t)strlen(fortified[i]);
+            memcpy(end - length, fortified[i], length);
+            result &= cbuiltin_fortify_source(end - length, length);
+        }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused_fortify); i += 1)
+        {
+            const uint32_t length = (uint32_t)strlen(refused_fortify[i]);
+            memcpy(end - length, refused_fortify[i], length);
+            result &= !cbuiltin_fortify_source(end - length, length);
+        }
     }
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, (size_t)page_size * 2);
     }
-    printf("source feature modes, attributes and guarded intrinsics: %s\n", result ? "as expected" : "WRONG");
+    // Recognition in the frozen oracle remains separate: Clang knows this name, the shipped source path does not.
+    const PPOptions oracle = { .clang_features = true, .language = { .standard = 2017, .gnu = true } };
+    result &= pp_feature(&oracle, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)"__builtin___memccpy_chk", sizeof("__builtin___memccpy_chk") - 1) == 1;
+    printf("source feature modes, attributes and guarded intrinsic/fortify names: %s\n", result ? "as expected" : "WRONG");
     return result;
 }

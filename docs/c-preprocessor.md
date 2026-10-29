@@ -1299,7 +1299,9 @@ decisions in #154 and on #117's configuration):
   capabilities, plus the preprocessor's four `__is_target_*` builtins. Native
   intrinsic names come from the actual x86 lowering rows/leaves, intersected
   with the checker's frozen source scope; the full Clang recognition catalog
-  is not an implementation list.
+  is not an implementation list. The fourteen fortified libc builtins reuse
+  the checker's separate exact-name admission table and ordinary native call
+  path (#803); none has a source constant-expression capability.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.
@@ -1330,7 +1332,8 @@ GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
 unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 
-`test-preprocessor` checks an independent 180-name builtin inventory, old and
+`test-preprocessor` checks an independent 181-name generic builtin inventory,
+the fourteen fortified names and their source/constexpr/refusal boundaries, old and
 new language modes, scoped/underscore/macro spellings, oracle isolation and
 protected input tails. `test-checker` compares intrinsic answers against the
 actual source-scope/lowering intersection, and compiles, links and executes
@@ -1338,7 +1341,10 @@ query-selected layout, constant, memory, atomic, TLS, arithmetic, cleanup and
 overloadable call/address behavior against Clang. The driver symbol fixture
 selects constructor/destructor entries and weak binding through their queries,
 then checks actual startup/shutdown output and strong-symbol overrides against
-Clang on both checker paths. Adding source lowering must update its explicit capability;
+Clang on both checker paths. The fortified driver fixtures also select the
+implemented branch through all fourteen queries, with checked memory and
+formatted-call effects compared against Clang; existing overflow, security-flag
+and invalid-signature controls remain. Adding source lowering must update its explicit capability;
 adding an x86 row or leaf automatically updates the shared inventory.
 
 `__has_warning` and `__has_declspec_attribute` answer as clang does in both
