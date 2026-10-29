@@ -546,6 +546,24 @@ mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
 
+Unnamed parameters in definitions (#792) retain their positions in the complete
+function signature. `CheckInput.parameters` stores the first named parameter at
+a body-opening token and a parameter's full-signature ordinal at its name token;
+these token roles are disjoint. `parameter_next` still links only named tokens,
+so binding, prototype-scope restoration and deferred body readers never see an
+invented identifier. The ordinal reuses existing initialized storage: no new
+per-token column, allocation or scan is added, including for ordinary all-named
+functions. K&R identifier lists publish their source-order ordinals too.
+
+Lowering walks the contiguous type signature and consumes a named token only at
+its ordinal. Every parameter gets an incoming ABI local, including unnamed
+integer, SSE, aggregate and stack-passed parameters; only named parameters enter
+the source-object map. This preserves the contiguous incoming-local prefix,
+hidden result pointer, register-exhaustion rollback and fixed variadic offsets.
+Named parameters keep their qualifiers, alignment and K&R entry conversions.
+`test-checker` covers these paths against Clang, including a Clang-built caller
+of a buster definition. This is a correctness change, not a throughput claim.
+
 K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
 decision has it. The declarator records an identifier list's names as the
 definition's parameters, in the list's order, without a prototype
