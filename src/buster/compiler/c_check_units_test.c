@@ -16,9 +16,11 @@
 //   another unit's global). Each program compiled:
 //   - by clang -O0, whose program's output and exit status are the expected ones (the oracle of what the C means);
 //   - each unit alone with -c, linked by cc: a program that must print and exit as clang's does;
-//   - all units at once with -c, by --lanes 1, 2, 3 and 8, by default, and by 8 with --poison-arenas (the lanes' arenas
-//     overwritten with a pattern between units): each unit's object the same bytes as alone;
-//   - all units at once into an executable, by --lanes 1, 2, 3 and 8, by default and by 8 with --poison-arenas, by each
+//   - all units at once with -c, by --lanes 1, 2, 3 and 8, by default, by 8 with --poison-arenas (the lanes' arenas
+//     overwritten with a pattern between units) and by 8 with --units-walk (#776: the lanes' caches and tables copies of
+//     the walk's): each unit's object the same bytes as alone;
+//   - all units at once into an executable, by --lanes 1, 2, 3 and 8, by default and by 8 with --poison-arenas or
+//     --units-walk, by each
 //     path: the same bytes, a program that prints and exits as clang's does, and that defines the same symbols as cc's
 //     link of the units' objects (nm: each named symbol the objects define, but the compiler's .L labels, with its
 //     binding and its kind: code or data);
@@ -51,8 +53,8 @@
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
-//   --poison-arenas: each file's status and object as with the file alone, and its diagnostics in their place, in the
-//   files' order.
+//   --poison-arenas and with --units-walk: each file's status and object as with the file alone, and its diagnostics in
+//   their place, in the files' order.
 // - With --generate DIR, nothing is tested: a program of synth's shape (--units, 512 by default, of --functions, 200) is
 //   written in DIR, for measurements.
 
@@ -428,18 +430,23 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
     char* reference_symbols = NULL;
     const bool reference_listed = listed && cc_linked && check_units_test_symbols(directory, reference_path, 1, defined, &reference_symbols);
     check_units_test_expect(tally, reference_listed && strcmp(reference_symbols, defined) == 0, "cc's link defines its objects' symbols", detail);
-    // All units at once with -c: each unit's object as alone, and with the lanes' arenas poisoned between units.
-    for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+    // All units at once with -c: each unit's object as alone, with the lanes' arenas poisoned between units, and with the
+    // lanes' caches and tables copies of the walk's (#776).
+    for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts) + 1; c += 1)
     {
         const bool poisoned = c == BUSTER_ARRAY_LENGTH(lane_counts);
-        const char* options[] = { "--lanes", poisoned ? "8" : lane_counts[c], "-c", NULL };
+        const bool walked = c == BUSTER_ARRAY_LENGTH(lane_counts) + 1;
+        const char* options[] = { "--lanes", poisoned || walked ? "8" : lane_counts[c], "-c", NULL };
         const char* poisoned_options[] = { "--poison-arenas", "--lanes", "8", "-c", NULL };
-        check_units_test_command(arguments, names, executable, poisoned ? poisoned_options : lane_counts[c] != NULL ? options : options + 2, count);
+        const char* walked_options[] = { "--units-walk", "--lanes", "8", "-c", NULL };
+        check_units_test_command(arguments, names, executable,
+                                 poisoned ? poisoned_options : walked ? walked_options : lane_counts[c] != NULL ? options : options + 2, count);
         const int status = check_units_test_run(directory, arguments, "/dev/null", errors_path, false);
         uint64_t error_bytes = 0;
         char* error_text = check_units_test_read(errors_path, &error_bytes);
-        snprintf(detail, sizeof(detail), "program %u, %u units, -c by --lanes %s%s", program, count, poisoned ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
-                 poisoned ? ", the lanes' arenas poisoned" : "");
+        snprintf(detail, sizeof(detail), "program %u, %u units, -c by --lanes %s%s", program, count,
+                 poisoned || walked ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
+                 poisoned ? ", the lanes' arenas poisoned" : walked ? ", the units' files walked first" : "");
         check_units_test_expect(tally, status == 0 && error_bytes == 0, "the units at once write their objects, without a diagnostic", detail);
         free(error_text);
         for (uint32_t u = 0; u < count; u += 1)
@@ -455,9 +462,10 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
     // All units at once into an executable, by each path.
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
-        for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts); c += 1)
+        for (uint32_t c = 0; c <= BUSTER_ARRAY_LENGTH(lane_counts) + 1; c += 1)
         {
             const bool poisoned = c == BUSTER_ARRAY_LENGTH(lane_counts);
+            const bool walked = c == BUSTER_ARRAY_LENGTH(lane_counts) + 1;
             char output[64];
             snprintf(output, sizeof(output), "program_%u_%u", scalar, c);
             const char* options[8];
@@ -466,9 +474,9 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
             {
                 options[used++] = "--scalar";
             }
-            if (poisoned)
+            if (poisoned || walked)
             {
-                options[used++] = "--poison-arenas";
+                options[used++] = poisoned ? "--poison-arenas" : "--units-walk";
                 options[used++] = "--lanes";
                 options[used++] = "8";
             }
@@ -483,7 +491,8 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
             check_units_test_command(arguments, names, executable, options, count);
             const int status = check_units_test_run(directory, arguments, "/dev/null", errors_path, false);
             snprintf(detail, sizeof(detail), "program %u, %u units, %s path, --lanes %s%s", program, count, scalar != 0 ? "scalar" : "vector",
-                     poisoned ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default", poisoned ? ", the lanes' arenas poisoned" : "");
+                     poisoned || walked ? "8" : lane_counts[c] != NULL ? lane_counts[c] : "by default",
+                     poisoned ? ", the lanes' arenas poisoned" : walked ? ", the units' files walked first" : "");
             char run[80];
             snprintf(run, sizeof(run), "./%s", output);
             char* run_arguments[] = { run, NULL };
@@ -1364,13 +1373,14 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
         }
         free(text);
     }
-    for (uint32_t poisoned = 0; made && arguments != NULL && statuses != NULL && poisoned < 2; poisoned += 1)
+    // Plainly, with the lanes' arenas poisoned, and with the units' files walked first (#776).
+    for (uint32_t poisoned = 0; made && arguments != NULL && statuses != NULL && poisoned < 3; poisoned += 1)
     {
         uint32_t used = 0;
         arguments[used++] = (char*)executable;
         if (poisoned != 0)
         {
-            arguments[used++] = "--poison-arenas";
+            arguments[used++] = poisoned == 1 ? "--poison-arenas" : "--units-walk";
         }
         arguments[used++] = "--lanes";
         arguments[used++] = "8";
@@ -1387,7 +1397,7 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
         const int status = check_units_test_run(together, arguments, "/dev/null", errors_path, false);
         uint64_t length = 0;
         char* text = check_units_test_read(errors_path, &length);
-        const char* what = poisoned != 0 ? "the corpus at once, the lanes' arenas poisoned" : "the corpus at once";
+        const char* what = poisoned == 1 ? "the corpus at once, the lanes' arenas poisoned" : poisoned == 2 ? "the corpus at once, its files walked first" : "the corpus at once";
         check_units_test_expect(tally, status == (any_failed ? 1 : 0), "the corpus at once exits as its files alone do", what);
         check_units_test_expect(tally, text != NULL && length == diagnostic_length && (length == 0 || memcmp(text, diagnostics, length) == 0),
                                 "the corpus's diagnostics at once are its files' alone, in order", what);
@@ -1408,7 +1418,8 @@ static void check_units_test_corpus(CheckUnitsTestTally* tally, const char* exec
             check_units_test_expect(tally, matched, "a corpus file's object at once is its object alone", files[f]);
             unlink(first);
         }
-        printf("  corpus: %u files, %u compiled, %u objects as alone%s\n", count, compiled, same, poisoned != 0 ? ", the lanes' arenas poisoned" : "");
+        printf("  corpus: %u files, %u compiled, %u objects as alone%s\n", count, compiled, same,
+               poisoned == 1 ? ", the lanes' arenas poisoned" : poisoned == 2 ? ", its files walked first" : "");
     }
     for (uint32_t f = 0; f < count; f += 1)
     {

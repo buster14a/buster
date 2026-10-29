@@ -98,6 +98,10 @@ struct CheckUnitsRun
     // The lanes' board (#777), on which a unit's emission shares its functions' parts with the lanes that have no unit
     // left to take; null on one lane.
     CheckEmitBoard* board;
+    // With --units-walk (#776), the cache and table #150's walk filled from the units' main files, which each lane's
+    // own start as copies of (file_cache_fork, intern_copy); null without the walk.
+    const InternTable* walk_table;
+    const FileCache* walk_cache;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -1425,11 +1429,13 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     return result;
 }
 
-// The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
-// memory of the links it keeps (once: the links it kept stay there), the first time the lane takes a unit. False, with
-// the lane failed, if it can't be reserved.
-static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverCommand* command)
+// The lanes' setup: the intern table and the file cache a lane's units share (with --units-walk, a copy of the walk's
+// table and a fork of its cache, #776), the arenas they take turns with, and the memory of the links it keeps (once: the
+// links it kept stay there), the first time the lane takes a unit. False, with the lane failed, if it can't be
+// reserved.
+static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckUnitsRun* run)
 {
+    const CheckDriverCommand* command = run->command;
     if (!lane->ready && !lane->failed)
     {
         lane->arena = arena_reserve(1ull << 36);
@@ -1438,7 +1444,9 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
         lane->kept = lane->kept.base != 0 ? lane->kept : arena_reserve(1ull << 36);
         lane->kept_bytes = lane->kept_bytes.base != 0 ? lane->kept_bytes : arena_reserve(1ull << 36);
         lane->ready = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0 && lane->kept.base != 0 && lane->kept_bytes.base != 0 &&
-                      intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
+                      (run->walk_cache != NULL ?
+                           intern_copy(&lane->identifiers, run->walk_table) && file_cache_fork(&lane->cache, run->walk_cache, &lane->identifiers) :
+                           intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options)));
         lane->failed = !lane->ready;
     }
     return lane->ready;
@@ -1474,7 +1482,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->unbuffered = errors == NULL;
     unit->status = 1;
     unit->compiled = true;
-    if (errors != NULL && !check_units_lane_ready(lane, command))
+    if (errors != NULL && !check_units_lane_ready(lane, run))
     {
         fprintf(errors, "fatal error: can't reserve checker memory\n");
     }
@@ -1515,6 +1523,12 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         unit->status = 1;
         unit->unbuffered = true;
     }
+}
+
+// A lane of #150's walk of the units' files (--units-walk, #776).
+static void check_units_walk_lane(void* argument)
+{
+    files_run_ahead(argument);
 }
 
 // A lane of the units' run: takes the units in turn, costliest first, and compiles each as a lane of its own
@@ -1705,6 +1719,43 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 lane_team_keep_scratch(&team);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
+            // With --units-walk (#776), the units' files prepared once, by #150's walk from their main files on the
+            // lanes, into the cache and table that each lane's own then start as copies of; without the walk's memory or
+            // lanes, each lane's start empty, as without the option.
+            InternTable walk_table = { 0 };
+            FileCache walk_cache = { 0 };
+            FilesRun walk = { 0 };
+            uint32_t walk_rounds = 0;
+            Preprocessor* search = command->units_walk && active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, Preprocessor, 1) : NULL;
+            const char** roots = search != NULL ? BUSTER_ARENA_PUSH_ARRAY(&arena, const char*, count) : NULL;
+            bool walked = roots != NULL && intern_initialize(&walk_table) &&
+                          file_cache_initialize(&walk_cache, &walk_table, pp_prepare_options(&command->options));
+            if (walked)
+            {
+                memset(search, 0, sizeof(*search));
+                for (uint32_t u = 0; u < count; u += 1)
+                {
+                    roots[u] = units[u].path;
+                }
+                PPOptions with = command->options;
+                with.files = &walk_cache;
+                walked = pp_initialize(search, &with, &walk_table) && files_run_initialize(&walk, &walk_cache, search, roots, count, true, active) &&
+                         lane_run(active, check_units_walk_lane, &walk, NULL) && !walk.failed;
+                walk_rounds = walk.rounds;
+                if (walk.lanes != 0)
+                {
+                    files_run_release(&walk);
+                }
+                pp_release(search);
+            }
+            if (search != NULL && !walked)
+            {
+                file_cache_release(&walk_cache);
+                intern_release(&walk_table);
+            }
+            run.walk_table = walked ? &walk_table : NULL;
+            run.walk_cache = walked ? &walk_cache : NULL;
+            check_clock_mark(stage_clock, CHECK_STAGE_WALK);
             // Lanes that couldn't start (lane_run runs none of them then) leave their units untaken: the calling thread
             // compiles those alone, as its own lane 0.
             const bool ran = lane_run(active, check_units_lane, &run, NULL);
@@ -1748,11 +1799,28 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
             }
+            if (walked && stage_clock != NULL)
+            {
+                uint64_t walk_bytes = 0;
+                for (uint32_t r = 0; r < walk_cache.record_count; r += 1)
+                {
+                    walk_bytes += walk_cache.records[r].prepared ? walk_cache.records[r].length : 0;
+                }
+                fprintf(stderr, "units-walk\trounds\t%u\tfiles\t%llu\tbytes\t%llu\ttokens\t%llu\tids\t%u\n", walk_rounds,
+                        (unsigned long long)walk_cache.prepared_records, (unsigned long long)walk_bytes, (unsigned long long)walk_cache.prepared_tokens,
+                        walk_table.count);
+            }
             // The lanes released their caches and arenas as they ended (check_units_lane_release): the kept links are
             // all the link reads.
             for (uint32_t l = 0; l < active; l += 1)
             {
                 check_units_lane_release(states + l);
+            }
+            // The walk's cache and table, which the lanes' forks and copies borrowed (#776), once they are released.
+            if (walked)
+            {
+                file_cache_release(&walk_cache);
+                intern_release(&walk_table);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
             if (result == 0 && command->link)

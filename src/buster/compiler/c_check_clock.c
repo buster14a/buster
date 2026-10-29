@@ -49,6 +49,9 @@ typedef enum CheckStage
     // The emission's own passes: the access column and the lanes' room, the symbols' attributes, names, the link's room
     // and symbols, and an executable's bind_begin.
     CHECK_STAGE_EMIT_SETUP,
+    // With several source files and --units-walk (#776), #150's walk of the units' files into the cache and table that
+    // every lane's copies start from.
+    CHECK_STAGE_WALK,
     // On several lanes (#151), the lanes' run: every function's lowering, Tier 0 code, sizing, encoding, rows and frame
     // at once, which the stages from `lower` to `unwind` take on one lane. With several source files (#152), the units'
     // run, every unit compiled on the lanes.
@@ -100,6 +103,7 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_LOWER] = "lower",
     [CHECK_STAGE_TIER0] = "tier0",
     [CHECK_STAGE_EMIT_SETUP] = "emit-setup",
+    [CHECK_STAGE_WALK] = "walk",
     [CHECK_STAGE_LANES] = "lanes",
     [CHECK_STAGE_BRANCH_SIZING] = "branch-sizing",
     [CHECK_STAGE_ENCODE] = "encode",

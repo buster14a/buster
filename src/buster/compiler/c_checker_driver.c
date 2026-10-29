@@ -1633,6 +1633,9 @@ struct CheckDriverCommand
     // after each part it takes itself, so that the lanes without units take some, and the command reports how many
     // they took, after the units' diagnostics (c_checker_units.c).
     bool shared_parts;
+    // --units-walk, #776's experiment: with several source files, #150's walk prepares the units' files into one cache
+    // and table before the units, and each lane's starts as a copy of them (c_checker_units.c).
+    bool units_walk;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2112,6 +2115,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
     bool poison_arenas = false;
     bool shared_parts = false;
+    // --units-walk: #776's experiment (CheckDriverCommand.units_walk).
+    bool units_walk = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -2220,6 +2225,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         {
             shared_parts = true;
         }
+        else if (strcmp(arguments[i], "--units-walk") == 0)
+        {
+            units_walk = true;
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -2304,6 +2313,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .id_order = id_order,
         .poison_arenas = poison_arenas,
         .shared_parts = shared_parts,
+        .units_walk = units_walk,
         .emit_object = emit_object,
         .link = link,
         .source_rows = source_rows,
@@ -2317,7 +2327,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--units-walk] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (!check_input_target_supported(&options))

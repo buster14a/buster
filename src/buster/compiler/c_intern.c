@@ -1016,6 +1016,36 @@ static __attribute__((unused)) bool intern_initialize(InternTable* table)
     return intern_initialize_with(table, BUSTER_INTERN_INITIAL_BUCKETS);
 }
 
+// A copy of `source` (#776: a units lane's own table, from the table #150's walk filled for the command's units): its
+// spellings under their ids, the source's buckets and spans at the start of a record arena of its own, as a table of
+// that size starts, and its spellings after them at the same offsets. A spelling new to the copy gets the next id past
+// the source's, in the copy alone. False, with nothing reserved, if its memory can't be.
+static __attribute__((unused)) bool intern_copy(InternTable* table, const InternTable* source)
+{
+    const uint64_t buckets = source->bucket_mask + 1;
+    const uint64_t record_bytes = (uint64_t)(source->record_arena.base + source->record_arena.length - source->records);
+    uint32_t capacity;
+    *table = (InternTable){ 0 };
+    table->record_arena = arena_reserve(intern_layout_bytes(buckets, &capacity) + BUSTER_INTERN_RECORD_BYTES_MAX);
+    bool result = table->record_arena.base != 0 && intern_lay_out(table, &table->record_arena, buckets);
+    table->records = result ? table->record_arena.base + table->record_arena.length : 0;
+    uint8_t* records = result ? arena_push(&table->record_arena, record_bytes, 1) : 0;
+    result = records != 0;
+    if (result)
+    {
+        memcpy(table->buckets, source->buckets, buckets * BUSTER_INTERN_BUCKET_BYTES);
+        memcpy(table->spans, source->spans, (uint64_t)source->count * sizeof(InternSpan));
+        memcpy(records, source->records, record_bytes);
+        table->count = source->count;
+    }
+    else
+    {
+        arena_release(&table->record_arena);
+        *table = (InternTable){ 0 };
+    }
+    return result;
+}
+
 static __attribute__((unused)) void intern_release(InternTable* table)
 {
     arena_release(&table->arena);
