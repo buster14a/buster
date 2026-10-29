@@ -3361,9 +3361,8 @@ static bool pp_test_scalar_reference(const char* directory)
 // c_predefines_test.c's: drops the -dM lines of clang's patch release's version macros and of __BUSTER__.
 static void predefines_test_drop_versions(char* text);
 
-// The macros defined at the end of a file's translation unit (#121), with our own predefines for the options: -dM
-// against `clang -dM -E` with the same arguments, byte for byte but for the version macros of clang's patch release
-// and our __BUSTER__. So the whole table is clang's, the predefines and every definition and #undef.
+// Compare the macros after processing the source, with clang's flag-output macro disabled before the user's options.
+// Later -D/-U options and source directives still affect it normally on both sides.
 static bool pp_test_macros(int argument_count, char** arguments, const PPOptions* base, const char* path)
 {
     PPOptions options = *base;
@@ -3384,7 +3383,18 @@ static bool pp_test_macros(int argument_count, char** arguments, const PPOptions
     {
         fclose(stream);
     }
-    PPClangOutput clang = result ? pp_test_clang_process("clang", arguments, argument_count, path, true) : (PPClangOutput){ 0 };
+    char** clang_arguments = calloc((size_t)argument_count + 1, sizeof(char*));
+    result = result && clang_arguments != 0;
+    if (result)
+    {
+        clang_arguments[0] = "-U__GCC_ASM_FLAG_OUTPUTS__";
+        for (int i = 0; i < argument_count; i += 1)
+        {
+            clang_arguments[i + 1] = arguments[i];
+        }
+    }
+    PPClangOutput clang = result ? pp_test_clang_process("clang", clang_arguments, argument_count + 1, path, true) : (PPClangOutput){ 0 };
+    free(clang_arguments);
     char* theirs = clang.status == PP_CLANG_ACCEPTED ? clang.text : 0;
     result = theirs != 0 && ours != 0;
     if (result)
@@ -3763,8 +3773,8 @@ static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines,
 
 #define BUSTER_PP_TEST_MAX_PREDEFINES 1024
 
-// The built-in predefines for each language mode, and with -ffreestanding and -O2, must be clang's (`clang -dM -E` with
-// the same options) line for line: the cases and the files under --clang read clang's own, so only this checks ours.
+// The built-in predefines match clang's with its unsupported flag-output capability undefined. The cases and files
+// under --clang read clang's own predefines separately.
 static bool pp_test_predefines(const char* directory)
 {
     static const char* const modes[][2] = {
@@ -3804,7 +3814,9 @@ static bool pp_test_predefines(const char* directory)
         passed &= made <= BUSTER_PP_PREDEFINES_BYTES;
         size_t ours_length = passed ? made : 0;
         size_t clang_length = 0;
-        free(pp_test_clang(arguments, count, empty_path, clang_path, &clang_length));
+        char* clang_arguments[3] = { (char*)modes[m][0], (char*)modes[m][1], 0 };
+        clang_arguments[count] = "-U__GCC_ASM_FLAG_OUTPUTS__";
+        free(pp_test_clang(clang_arguments, count + 1, empty_path, clang_path, &clang_length));
         FILE* file = fopen(clang_path, "r");
         char* theirs = malloc(1 << 20);
         clang_length = file != 0 && theirs != 0 ? fread(theirs, 1, (1 << 20) - 1, file) : 0;
@@ -7032,6 +7044,66 @@ static bool pp_test_number(const char* text, uint64_t* value)
 
 // The default capability inventory requires source checking and both required consumers; action folding alone
 // remains private to its action API. Clang's oracle mode retains its independent frozen tables and raw operands.
+static bool pp_test_asm_flag_predefine(const char* directory)
+{
+    static const char source[] = "#ifdef __GCC_ASM_FLAG_OUTPUTS__\nvalue __GCC_ASM_FLAG_OUTPUTS__\n#else\nabsent\n#endif\n";
+    static const struct
+    {
+        const char* option;
+        bool explicit_predefines;
+        const char* expected;
+    } cases[] = {
+        { NULL, false, "absent" },
+        { "--clang-features", false, "absent" },
+        { "-D__GCC_ASM_FLAG_OUTPUTS__=7", false, "value 7" },
+        { "-U__GCC_ASM_FLAG_OUTPUTS__", true, "absent" },
+        { NULL, true, "value 3" },
+        { "-D__GCC_ASM_FLAG_OUTPUTS__=7", true, "value 7" },
+    };
+    char path[4200];
+    char predefines[4200];
+    snprintf(path, sizeof(path), "%s/asm-flag.c", directory);
+    snprintf(predefines, sizeof(predefines), "%s/asm-flag-predefines.h", directory);
+    bool result = pp_test_write_file(path, source) && pp_test_write_file(predefines, "#define __GCC_ASM_FLAG_OUTPUTS__ 3\n");
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+        {
+            char* arguments[3] = { (char*)cases[c].option, path, NULL };
+            const int count = cases[c].option != NULL ? 2 : 1;
+            if (cases[c].option == NULL)
+            {
+                arguments[0] = path;
+            }
+            Arena arena = arena_reserve(1ull << 20);
+            PPOptions options;
+            const char* input;
+            const char* output;
+            bool markers;
+            bool passed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+            options.scalar = scalar != 0;
+            options.predefines_path = cases[c].explicit_predefines ? predefines : NULL;
+            static InternTable table;
+            static Preprocessor pp;
+            PPSpellings ours = { 0 };
+            PPSpellings wanted = { 0 };
+            passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
+                     pp_text_spellings((const uint8_t*)cases[c].expected, strlen(cases[c].expected), pp.split_kinds, pp_test_lex_flags(&pp), &wanted) &&
+                     pp_compare_spellings(&pp, &ours, &wanted, "asm flag predefine", "wanted");
+            pp_release(&pp);
+            intern_release(&table);
+            arena_release(&ours.arena);
+            arena_release(&wanted.arena);
+            arena_release(&arena);
+            result &= passed;
+        }
+    }
+    unlink(path);
+    unlink(predefines);
+    printf("asm flag predefine: %s\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
 static bool pp_test_implemented_features(const char* directory)
 {
     static const char source[] =
@@ -7696,6 +7768,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_semantic_pragmas(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_implemented_features(directory);
+        passed_all &= pp_test_asm_flag_predefine(directory);
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);

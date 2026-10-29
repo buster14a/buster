@@ -1342,8 +1342,9 @@ query:
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
 default, clang's include search, and clang's predefined macros for the same
-options plus `__BUSTER__` defined to 1. `pp_predefines` writes them in three
-parts:
+options plus `__BUSTER__` defined to 1. One capability macro differs: the
+default omits `__GCC_ASM_FLAG_OUTPUTS__` until inline assembly flag-output
+constraints are implemented (#798). `pp_predefines` writes the rest in three parts:
 
 - the fixed part, `pp_predefines_base`: clang 23.1.3's for
   `x86_64-pc-linux-gnu` in gnu17 (`clang -dM -E -x c /dev/null`), without the
@@ -1362,6 +1363,9 @@ parts:
 file runs use it, so that they start from clang's macros alone and compare only
 preprocessing: the 9700X's clang is 23.1.1, whose `__clang_patchlevel__` and
 `__clang_version__` differ from the generator's.
+The file may define `__GCC_ASM_FLAG_OUTPUTS__`; `-D` and `-U` also retain their
+usual order after the chosen predefines. `--clang-features` selects feature
+query answers and does not enable the omitted macro.
 
 `__FLT_EVAL_METHOD__` is a builtin, as in clang: 0, or 1 and 2 with
 `-ffp-eval-method=double` and `extended`, and 2 when SSE is off (x87 math).
@@ -1374,7 +1378,7 @@ written without spaces (`__VA_ARGS__` as `...`, GNU's `x...`), one space before
 the replacement list and one before each token that had whitespace before it,
 each token spelled as clang spells it (an identifier's interned name, or its
 spelling as written when it has a UCN). On an empty file it prints clang's
-output byte for byte, but `__BUSTER__`.
+output byte for byte, apart from `__BUSTER__` and the omitted flag-output macro.
 
 ### The predefined macros
 
@@ -2374,8 +2378,8 @@ full-corpus reproduction and frozen CI subset.
     `c89` with `-fdigraphs`), with `-ffreestanding` and with `-O2`, without
     digraphs in C94 and `gnu89`, the six target profiles and independent tuning,
     26 option sets in all, `pp_predefines` must give `clang -dM -E` line
-    for line. Only the three macros that name clang's patch release are left
-    out.
+    for line after undefining clang's flag-output macro. The three macros that
+    name clang's patch release are also left out.
   - `c_predefines.c`'s generated tables must be what the generator learns from
     clang now, field by field (`c_predefines_test.c`).
   - About 1,300 option sets must give `clang -dM -E`'s macros, and both must
@@ -2386,7 +2390,7 @@ full-corpus reproduction and frozen CI subset.
     state machine, the soft rules, a feature's last flag); and 400 random
     combinations of them (`--seed N`).
   - `-E -dM` of a file with every kind of definition must be clang's byte for
-    byte (but `__BUSTER__`), and `__FLT_EVAL_METHOD__` clang's under
+    byte apart from `__BUSTER__` and the flag-output macro, and `__FLT_EVAL_METHOD__` clang's under
     `-ffp-eval-method=` and without SSE.
   - In each mode, `__is_identifier` of every predefined name (keywords,
     directive names, the preprocessor's names) must give clang's answer, and so
@@ -2503,7 +2507,8 @@ full-corpus reproduction and frozen CI subset.
   token. Then the places its markers give the tokens are compared with ours.
   The first difference is printed with the tokens around it. Last, with our own
   predefines, the macros defined at the file's end must be `clang -dM -E`'s
-  byte for byte, but for the patch release's three macros and `__BUSTER__`
+  byte for byte after undefining clang's flag-output macro before the user's
+  options, but for the patch release's three macros and `__BUSTER__`
   (`pp_test_macros`, #121): the whole table, predefines, definitions and
   `#undef`s. `main.c` ends with 10,894 macros, `sqlite3.c` with 5,596.
 
