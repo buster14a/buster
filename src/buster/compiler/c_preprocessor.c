@@ -16678,18 +16678,22 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 };
 
 // Implemented source capabilities, independent of the frozen Clang oracle. Attribute acceptance alone is not
-// implementation: cleanup, diagnostic-only attributes and unpublished linkage obligations remain zero. These
+// implementation: diagnostic-only attributes and unpublished linkage obligations remain zero. These
 // entries have declaration/type, control, symbol or executable lowering consumers. C23 date codes describe the
 // standardized attribute, not the language mode (the spelling is also accepted as an extension in earlier modes).
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
 static const PPFeature pp_implemented_attribute[] = {
     { "aligned", 1 },
+    { "cleanup", 1 },
+    { "constructor", 1 },
+    { "destructor", 1 },
     { "ext_vector_type", 1 },
     { "fallthrough", 1 },
     { "gnu_inline", 1 },
     { "mode", 1 },
     { "naked", 1 },
+    { "overloadable", 1 },
     { "packed", 1 },
     { "section", 1 },
     { "target", 1 },
@@ -16697,11 +16701,16 @@ static const PPFeature pp_implemented_attribute[] = {
     { "used", 1 },
     { "vector_size", 1 },
     { "visibility", 1 },
+    { "weak", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::ext_vector_type", 1 },
+    { "clang::overloadable", 1 },
     { "fallthrough", 201910 },
     { "gnu::aligned", 1 },
+    { "gnu::cleanup", 1 },
+    { "gnu::constructor", 1 },
+    { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
     { "gnu::gnu_inline", 1 },
     { "gnu::mode", 1 },
@@ -16713,6 +16722,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::used", 1 },
     { "gnu::vector_size", 1 },
     { "gnu::visibility", 1 },
+    { "gnu::weak", 1 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },

@@ -2821,6 +2821,22 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return b[0]+(int)__builtin_popcount((unsigned)n)+__builtin_expect(out,0)+old+value+other+overflow+picked+constant+(int)magnitude+seed+local;}",
         "implemented-feature-query-native", clang);
     check_test_program_unnamed_parameters(test, clang);
+    // The independent Clang build selects these effects too; a stale zero must change observable behavior.
+    check_test_program_source(test,
+        "#if __has_attribute(cleanup) && __has_attribute(__cleanup__) && __has_c_attribute(gnu::cleanup)\n"
+        "#define CLEAN __attribute__((cleanup(finish)))\n#else\n#define CLEAN\n#endif\n"
+        "#if __has_c_attribute(gnu::__cleanup__)\n#define SCOPED_CLEAN [[gnu::cleanup(finish)]]\n#else\n#define SCOPED_CLEAN\n#endif\n"
+        "static int seen;static void finish(int*p){seen+=*p+3;}"
+        "int tested(int n){seen=0;{CLEAN int a=n&7;}{SCOPED_CLEAN int b=n&3;}return seen;}",
+        "cleanup-feature-query-native", clang);
+    check_test_program_source(test,
+        "#if __has_attribute(overloadable) && __has_attribute(__overloadable__)\n"
+        "#define O __attribute__((overloadable))\n"
+        "int pick(int x) O{return x+5;}double pick(double x) O{return x+0.5;}"
+        "static int(*selected)(int)=pick;"
+        "int tested(int n){int x=n&1023;return pick(x)+(int)(pick((double)(n%9))*2)+selected(x);}\n"
+        "#else\nint tested(int n){return n-991;}\n#endif\n",
+        "overloadable-feature-query-native", clang);
     // A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
     check_test_program_source(test,
         "#if __has_attribute(packed) && __has_attribute(__packed__)\n"
