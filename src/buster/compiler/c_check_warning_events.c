@@ -8,43 +8,25 @@
 #ifndef BUSTER_C_CHECK_WARNING_EVENTS_INCLUDED
 #define BUSTER_C_CHECK_WARNING_EVENTS_INCLUDED
 
-typedef enum CheckWarningId
+#include "c_check_warning_ids.c"
+
+_Static_assert(CHECK_WARNING_BASE_ID_COUNT == 25, "sparse warning IDs follow the stable shared prefix");
+
+enum
 {
-    CHECK_WARNING_ID_DISCARDED_QUALIFIERS = 0,
-    CHECK_WARNING_ID_GNU_CONSTANT = 1,
-    CHECK_WARNING_ID_ENUM_TOO_LARGE = 2,
-    CHECK_WARNING_ID_INTEGER_OVERFLOW = 3,
-    CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE = 4,
-    CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW = 5,
-    CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE = 6,
-    CHECK_WARNING_ID_SHIFT_OVERFLOW = 7,
-    CHECK_WARNING_ID_EXCESS_INITIALIZERS = 8,
-    CHECK_WARNING_ID_UNKNOWN_PRAGMA = 9,
-    CHECK_WARNING_ID_IGNORED_ATTRIBUTES = 10,
-    CHECK_WARNING_ID_POINTER_SIGN = 11,
-    CHECK_WARNING_ID_POINTER_INTEGER_COMPARE = 12,
-    CHECK_WARNING_ID_DISTINCT_POINTER_COMPARE = 13,
-    CHECK_WARNING_ID_CONDITIONAL_POINTER_INTEGER = 14,
-    CHECK_WARNING_ID_CONDITIONAL_POINTER_TYPES = 15,
-    CHECK_WARNING_ID_ADDRESS_OF_PACKED_MEMBER = 16,
-    CHECK_WARNING_ID_ARGUMENT_OUTSIDE_RANGE = 17,
-    // Public #701/#710/#711 reservations, even when a child branch does not yet contain their producers.
-    CHECK_WARNING_ID_RETURN_TYPE = 18,
-    CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION = 19,
-    CHECK_WARNING_ID_VISIBILITY_PRAGMA = 20,
-    CHECK_WARNING_ID_NON_LITERAL_NULL = 21,
-    CHECK_WARNING_ID_LITERAL_RANGE = 22,
-    CHECK_WARNING_ID_ORDERED_POINTER_INTEGER = 23,
-    CHECK_WARNING_ID_MISSING_DECLARATIONS = 24,
-    CHECK_WARNING_ID_PLAIN_COMPLEX = 25,
-    CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER = 26,
-    CHECK_WARNING_ID_STATIC_LOCAL_INLINE = 27,
-    CHECK_WARNING_ID_MANY_SCALAR_BRACES = 28,
-    CHECK_WARNING_ID_INITIALIZER_OVERRIDES = 29,
-    CHECK_WARNING_ID_UNDEFINED_INTERNAL = 30,
-    CHECK_WARNING_ID_C23_PARAMETER = 31,
+    CHECK_WARNING_ID_NON_LITERAL_NULL = 25,
+    CHECK_WARNING_ID_LITERAL_RANGE = 26,
+    CHECK_WARNING_ID_ORDERED_POINTER_INTEGER = 27,
+    CHECK_WARNING_ID_MISSING_DECLARATIONS = 28,
+    CHECK_WARNING_ID_PLAIN_COMPLEX = 29,
+    CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER = 30,
+    CHECK_WARNING_ID_STATIC_LOCAL_INLINE = 31,
+    CHECK_WARNING_ID_MANY_SCALAR_BRACES = 32,
+    CHECK_WARNING_ID_INITIALIZER_OVERRIDES = 33,
+    CHECK_WARNING_ID_UNDEFINED_INTERNAL = 34,
+    CHECK_WARNING_ID_C23_PARAMETER = 35,
     CHECK_WARNING_ID_COUNT,
-} CheckWarningId;
+};
 
 typedef enum CheckWarningEventKind
 {
@@ -89,6 +71,8 @@ typedef enum CheckWarningCompletion
 // nonstandard ICE fold can start ignored under the same -Wgnu-folding-constant policy. Completion/lookahead is also
 // independent of the diagnostic location: a later preprocessing diagnostic can precede an earlier source warning.
 #define BUSTER_CHECK_WARNING_DEFAULT_IGNORED 0x01u
+// A semantic proof prevents publication, independently of every requested warning policy (for example sizeof).
+#define BUSTER_CHECK_WARNING_SUPPRESSED 0x02u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 
 typedef struct CheckWarningPayload CheckWarningPayload;
@@ -181,7 +165,7 @@ static __attribute__((unused)) bool check_warning_append(CheckWarningBuffer* buf
 {
     bool valid = buffer != NULL && buffer->arena != NULL && event != NULL && event->id < CHECK_WARNING_ID_COUNT &&
                  event->kind < CHECK_WARNING_EVENT_KIND_COUNT && event->token != UINT32_MAX &&
-                 (event->flags & ~BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
+                 (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 && event->completion_kind < CHECK_WARNING_COMPLETION_COUNT &&
                  ((event->completion_kind == CHECK_WARNING_COMPLETE_TU_END) == (event->completion == UINT32_MAX)) &&
                  buffer->count <= buffer->capacity && (buffer->count == 0 || buffer->events != NULL) &&
                  buffer->note_count <= buffer->note_capacity && (buffer->note_count == 0 || buffer->notes != NULL) &&

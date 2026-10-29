@@ -692,7 +692,7 @@ hash-pins all four inputs before publishing output. Derived LLVM data retains
 its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
 input, tool and output provenance is in
 [`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
-The 1,535-row frozen own-main subset includes explicit `bit_cast` parser and
+The 1,543-row frozen own-main subset includes explicit `bit_cast` parser and
 `va_list` predefined-type gaps. These are not invented function declarations
 and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
 not a general `__has_builtin` answer. Header/language restrictions and custom
@@ -700,7 +700,7 @@ rules remain consumer obligations.
 
 `builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
 two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
-the 1,484 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the 1,492 recorded x86/x86-64 members. Neither a name prefix nor membership in
 the complete installed catalogue attests the audited operand-constraint scope.
 Membership also does not replace successful ordinary prototype checking.
 
@@ -721,10 +721,10 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds the 209 audited SemaX86 constraint facts for the
-207 affected names in the frozen 1,484-name own-main target-builtin scope: 87
+`c_check_builtin_x86.c` adds the 217 audited SemaX86 constraint facts for the
+215 affected names in the frozen 1,492-name own-main target-builtin scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 55 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 63 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -732,7 +732,13 @@ shuffle, rotate and mask-shift builtins, and `executable_benchmark.c`'s
 `scattersiv16si`), with their 17 ranges and 6 scales, and
 `__builtin_unpredictable` and `__builtin_assume`. #619 added
 `__builtin_ia32_ucmpd128_mask`, which `c_check_program_batch.c` reaches through
-`_mm_cmplt_epu32_mask`, with its range. `builtin_intrinsic_own_main_prototype_in_scope` also admits
+`_mm_cmplt_epu32_mask`, with its range. #148 added the SSE builtins that
+stb_image, dr_flac, dr_mp3 and minimp3 call and the scope lacked, with their 8
+ranges: `pshufd`, `pshufhw`, `pshuflw` and `shufps` (0 to 255),
+`psrldqi128_byteshift` and `palignr128` (0 to 255), `vec_ext_v8hi` and
+`vec_set_v8hi` (0 to 7). Their target features (SSE2, and SSSE3 for
+`palignr128`) are no more checked than any x86 builtin's.
+`builtin_intrinsic_own_main_prototype_in_scope` also admits
 the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
 `__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
@@ -747,6 +753,27 @@ prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
 first. Generated ICEs precede hard rounding/SAE sets and cumulative direct
 ranges; both rules for each `rndscale` spelling are retained.
+
+#148's SSE builtins lower through `c_check_program_x86.c`'s table, as the
+other x86 builtins do, where the target has AVX-512F and AVX-512VL, which the
+lowering requires of every vector. A row each in its EVEX form for the 8 above
+but `vec_ext_v8hi` and `vec_set_v8hi`, which had rows; the packs,
+multiplications, `maxps`, `minps` and `cvtps2dq` their intrinsics reach too are
+rows of the families at every width (`BUSTER_CHECK_X86_BINARIES` and
+`BUSTER_CHECK_X86_SSE`). VPSHUFD, VPSHUFHW, VPSHUFLW, VSHUFPS, VPSRLDQ and
+VPALIGNR take the immediate's whole byte, as the instructions do: a byte shift
+or an align past the vector's bytes gives zeros. VMAXPS and VMINPS take the
+builtin's first operand in vvvv, so that a NaN or a pair of zeros gives the
+second, as MAXPS does, and VCVTPS2DQ rounds by MXCSR. `vec_ext_v8hi`'s VPEXTRW
+(C5) takes its general register in reg and its vector in rm, the other
+extracts' forms the other way round. `test-checker`'s x86 programs
+(`c_check_program_x86_test.c`) call them directly, at their immediates' edges
+and on NaNs, zeros of either sign and halfway values, with `cvtps2dq` also
+under each of MXCSR's four rounding modes, set and restored around it, and through
+`<smmintrin.h>`'s intrinsics, by both paths against clang -O0's code for
+znver5. The program that includes the header lowers only what its roots reach,
+as `-c` does (`check_test_program_includes`), since the header's MMX functions
+call builtins no row takes.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these
