@@ -13,6 +13,12 @@ the semantic driver:
 ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
 
+The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
+one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
+target triple. These actions need no source file and accept `-target` or `--target=` for supported x86-64 Linux GNU
+targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
+compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced

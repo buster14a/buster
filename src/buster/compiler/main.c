@@ -597,6 +597,72 @@ int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
+// Driver information actions may follow other options, but a value such as `-o --version` is not an action.
+// Explicit command names are dispatched before this is called. -dumpmachine wins when both actions are present.
+static bool main_information(int count, char** arguments, int* status)
+{
+    const char* target = NULL;
+    bool missing_target = false;
+    bool version = false;
+    bool machine = false;
+    for (int i = 0; i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        if (strcmp(argument, "--") == 0)
+        {
+            break;
+        }
+        if (strcmp(argument, "-target") == 0)
+        {
+            missing_target = i + 1 >= count;
+            target = !missing_target ? arguments[++i] : NULL;
+        }
+        else if (strncmp(argument, "--target=", 9) == 0)
+        {
+            target = argument + 9;
+            missing_target = false;
+        }
+        else if (strcmp(argument, "--version") == 0)
+        {
+            version = true;
+        }
+        else if (strcmp(argument, "-dumpmachine") == 0)
+        {
+            machine = true;
+        }
+        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 ||
+                  strcmp(argument, "--worker-budget") == 0 || strcmp(argument, "--id-order") == 0 ||
+                  strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0) && i + 1 < count)
+        {
+            i += 1;
+        }
+    }
+    const bool found = version || machine;
+    if (found)
+    {
+        if (missing_target || (target != NULL && !predefines_target_valid(target)))
+        {
+            fprintf(stderr, "error: unsupported or missing target for driver information\n");
+            *status = 1;
+        }
+        else
+        {
+            const PredefinesOptions options = { .target = target };
+            uint32_t vendor_length = 0;
+            const char* vendor = predefines_target_vendor(&options, &vendor_length);
+            const char* architecture = target != NULL ? target : "x86_64";
+            const int architecture_length = target != NULL ? (int)(strchr(target, '-') - target) : 6;
+            if (!machine)
+            {
+                printf("buster (development build)\nTarget: ");
+            }
+            printf("%.*s-%.*s-linux-gnu\n", architecture_length, architecture, (int)vendor_length, vendor);
+            *status = 0;
+        }
+    }
+    return found;
+}
+
 // Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
 // options in step with pp_option_takes_value and the C driver's own options.
 static bool main_preprocessing(int count, char** arguments)
@@ -1411,8 +1477,11 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
-                 run_source_check_command(argc - 1, argv + 1);
+        if (!main_information(argc - 1, argv + 1, &result))
+        {
+            result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
+                     run_source_check_command(argc - 1, argv + 1);
+        }
     }
     else
     {
