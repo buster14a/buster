@@ -1125,7 +1125,7 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
              whole.status, (unsigned long long)whole.peak, (unsigned long long)whole.before_size, (unsigned long long)whole.after_size,
              (unsigned long long)base, whole.before_descriptor, whole.after_descriptor,
              whole.clean ? "clean" : "left memory or a descriptor behind", text);
-    printf("  reservations' baseline: %s\n", detail);
+    fprintf(stderr, "  reservations' baseline: %s\n", detail);
     bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
                     rename(objects[1], wholes[1]) == 0;
     check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
