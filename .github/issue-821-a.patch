@@ -1,0 +1,204 @@
+diff --git a/docs/c-checker.md b/docs/c-checker.md
+index 2afedbd..673be78 100644
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -1065,10 +1065,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
+ stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
+ constant digits on the vector path, with guarded independent ordering tests.
+ Initializer plans retain the exact selected overload candidate and object.
+-The standalone source bridge refuses a referenced overloadable symbol until
+-its ABI symbol name is available, before publishing any Link state. An unused
+-overloadable declaration needs no symbol; the lower-level emitter can consume
+-an explicitly supplied object-to-symbol map.
++The standalone source bridge and the program emitter share `c_check_mangle.c`
++for selected overloadable symbols (#821). Calls and contextual addresses retain
++the checker's selected object, and each emitted object receives its Itanium ABI
++name once; explicit asm labels override it. Static inline overloads, including
++Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
++Unmarked overload candidates retain C names, and unused declarations need none.
++
++The mangler uses an explicit worklist and canonical type substitutions, with
++scalar/vector substitution lookup. It covers builtin and complex arithmetic,
++qualified pointers, fixed/incomplete arrays, function pointers, vectors,
++atomics, bit-precise integers and file-scope named tags. Signatures requiring
++local/anonymous tag naming, variable array bounds, or an unsupported calling
++convention still fail before publication unless an asm label supplies the ABI
++name. These refusals do not select a different overload or publish an unmangled
++fallback. The focused `test-checker --program-overloads` suite checks independently
++stated encodings, deep signatures, allocation failures, deterministic emission,
++cross-compiler linkage in both directions and the installed `<tgmath.h>` through
++both object and direct-executable driver paths; the full checker suite runs it too.
+ 
+ The source initializer adapter matches the selected language's warning policy
+ for excess elements and compatible overlong string copies. Ignored tails are
+
+diff --git a/src/buster/compiler/c_check_data_input.c b/src/buster/compiler/c_check_data_input.c
+index 8fb0e31..1e3e386 100644
+--- a/src/buster/compiler/c_check_data_input.c
++++ b/src/buster/compiler/c_check_data_input.c
+@@ -7,6 +7,9 @@
+ // wrapper also supports data-only inspection. String candidates are emitted only when their symbols are used.
+ // Input, typed stream, initializer plans and type table must belong to the same successful source snapshot.
+ 
++// Shared by standalone data and the program emitter: selected overloads have one ABI spelling.
++#include "c_check_mangle.c"
++
+ typedef enum CheckDataInputStatus
+ {
+     CHECK_DATA_INPUT_OK,
+@@ -434,17 +437,78 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput*
+         }
+     }
+     const CheckGraph* graph = stream->graph;
+-    for (uint32_t i = 0; valid && graph != 0 && i < graph->overload_candidate_count; i += 1)
++    const bool overloads = graph != NULL && graph->overload_candidate_count != 0;
++    String8* overload_names = valid && overloads ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)count + 1) : NULL;
++    if (valid && overloads)
++    {
++        valid = overload_names != NULL;
++        result->status = valid ? result->status : CHECK_DATA_INPUT_RESOURCE;
++        if (valid)
++        {
++            memset(overload_names, 0, ((uint64_t)count + 1) * sizeof(String8));
++        }
++    }
++    // Like the program consumer, prefer an explicit asm label, including one on an earlier declaration. The
++    // standalone consumer only needs function names when static data refers to them; ordinary data stays unchanged.
++    for (uint32_t d = 0; valid && overloads && d < prepared.declaration_count; d += 1)
++    {
++        const uint32_t token = (uint32_t)prepared.declaration_keys[d];
++        const uint32_t object = (uint32_t)(prepared.declaration_keys[d] >> 32);
++        const CheckInputAttributes* attributes = input->attributes[token];
++        if (needed[object] && input->declaration_kinds[token] == C_BINDING_FUNCTION && attributes != NULL)
++        {
++            for (uint32_t i = 0; valid && i < attributes->count; i += 1)
++            {
++                const CheckInputAttribute* attribute = attributes->records + i;
++                if (!attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL)
++                {
++                    const String8 previous = overload_names[object];
++                    valid = previous.length == 0 || (previous.length == attribute->text.length &&
++                            memcmp(previous.pointer, attribute->text.pointer, previous.length) == 0);
++                    overload_names[object] = attribute->text;
++                    if (!valid)
++                    {
++                        result->status = CHECK_DATA_INPUT_INVALID;
++                        result->token = attribute->name_token;
++                    }
++                }
++            }
++        }
++    }
++    CheckMangleSource mangling = {
++        .input = input,
++        .parser = parser,
++        .identifiers = identifiers,
++        .types = types,
++        .output = scratch,
++        .scalar = parser->options.scalar,
++    };
++    Scratch mangle_scratch = { 0 };
++    for (uint32_t i = 0; valid && overloads && i < graph->overload_candidate_count; i += 1)
+     {
+         const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+-        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object <= count && needed[candidate->object])
++        const uint32_t object = candidate->object;
++        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && object != 0 && object <= count && needed[object] && overload_names[object].length == 0)
+         {
+-            // A selected overload object still needs its ABI symbol name before standalone publication.
+-            valid = false;
+-            result->status = CHECK_DATA_INPUT_UNSUPPORTED;
+-            result->token = candidate->declaration;
++            if (mangle_scratch.arena == NULL)
++            {
++                mangle_scratch = scratch_begin(scratch);
++            }
++            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
++                                                               mangle_scratch.arena, &overload_names[object]);
++            valid = status == CHECK_MANGLE_OK;
++            if (!valid)
++            {
++                result->status = status == CHECK_MANGLE_RESOURCE ? CHECK_DATA_INPUT_RESOURCE :
++                                 status == CHECK_MANGLE_INVALID ? CHECK_DATA_INPUT_INVALID : CHECK_DATA_INPUT_UNSUPPORTED;
++                result->token = candidate->declaration;
++            }
+         }
+     }
++    if (mangle_scratch.arena != NULL)
++    {
++        scratch_end(mangle_scratch);
++    }
+     if (valid)
+     {
+         LinkCapacity capacity = prepared.capacity;
+@@ -469,7 +533,9 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput*
+             const uint32_t name = !literal ? parser->tokens.names[token] : 0;
+             uint8_t generated_name[48];
+             const int generated_length = compound ? snprintf((char*)generated_name, sizeof(generated_name), ".Lcompound.%u", object) : 0;
++            const String8 renamed = overload_names != NULL ? overload_names[object] : (String8){ 0 };
+             const NameId link_name = compound ? link_add_name(&result->link, generated_name, (uint32_t)generated_length) :
++                                     renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+                                      !literal ? link_add_name(&result->link, intern_bytes(identifiers, name), intern_length(identifiers, name)) : 0;
+             const uint8_t kind = !literal && input->declaration_kinds[token] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
+                                  !literal && input->thread_local[token] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+
+diff --git a/src/buster/compiler/c_check_data_source_test.c b/src/buster/compiler/c_check_data_source_test.c
+index 45c3ecb..4eb4cf9 100644
+--- a/src/buster/compiler/c_check_data_source_test.c
++++ b/src/buster/compiler/c_check_data_source_test.c
+@@ -475,6 +475,34 @@ static __attribute__((noinline)) void check_test_data_sources(CheckTest* test)
+             .size = 4,
+         },
+     };
++    const CheckDataSourceSymbol overload[] = {
++        {
++            .name = "_Z1fv",
++            .flags = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL,
++        },
++        {
++            .name = "p",
++            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
++            .class = BUSTER_LINK_CLASS_DATA,
++            .alignment = 3,
++            .size = 8,
++            .target = 1,
++        },
++    };
++    const CheckDataSourceSymbol renamed_overload[] = {
++        {
++            .name = "named_function",
++            .flags = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL,
++        },
++        {
++            .name = "p",
++            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
++            .class = BUSTER_LINK_CLASS_DATA,
++            .alignment = 3,
++            .size = 8,
++            .target = 1,
++        },
++    };
+     const CheckDataSourceFixture fixtures[] = {
+         {
+             .name = "static-scalars.c",
+@@ -530,10 +558,17 @@ static __attribute__((noinline)) void check_test_data_sources(CheckTest* test)
+             .failed_name = "f",
+         },
+         {
+-            .name = "static-overload-needs-symbol-mangling.c",
++            .name = "static-overload-mangled-symbol.c",
+             .source = "int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
+-            .status = CHECK_DATA_INPUT_UNSUPPORTED,
+-            .failed_name = "f",
++            .symbols = overload,
++            .symbol_count = BUSTER_ARRAY_LENGTH(overload),
++            .capacities = true,
++        },
++        {
++            .name = "static-overload-asm-label.c",
++            .source = "int f(void) __asm__(\"named_function\") __attribute__((overloadable)); int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
++            .symbols = renamed_overload,
++            .symbol_count = BUSTER_ARRAY_LENGTH(renamed_overload),
+         },
+         {
+             .name = "static-unused-overload-needs-no-symbol.c",

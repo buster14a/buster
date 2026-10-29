@@ -1,0 +1,204 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index f1e5da1..97d2742 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1205,19 +1205,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+         result->lowered.output_bytes = output->length - mark;
+     }
+     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
+-    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
+-    {
+-        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
+-        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object < program->object_count &&
+-            program->object_symbols[candidate->object] != 0)
+-        {
+-            // A typed overload selection does not supply the required ABI symbol mangling.
+-            result->status = CHECK_PROGRAM_UNSUPPORTED;
+-            result->reason = "overloadable functions (their mangled names)";
+-            result->token = candidate->declaration;
+-            valid = false;
+-        }
+-    }
+     CheckProgramFileAsm file_asm = { 0 };
+     valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
+     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+@@ -1334,6 +1321,43 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+         }
+     }
+     arena_pop_to(scratch, attributes_mark);
++    // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
++    // asm labels (which override mangling), before external binding, static-local naming and object publication.
++    CheckMangleSource mangling = {
++        .input = program->input,
++        .parser = parser,
++        .identifiers = identifiers,
++        .types = program->types,
++        .output = scratch,
++        .scalar = scalar,
++    };
++    Scratch mangle_scratch = { 0 };
++    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
++    {
++        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
++        const SymbolId symbol = candidate->object != 0 && candidate->object < program->object_count ? program->object_symbols[candidate->object] : 0;
++        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && symbol != 0 && symbol_names[symbol].length == 0)
++        {
++            if (mangle_scratch.arena == NULL)
++            {
++                mangle_scratch = scratch_begin(scratch);
++            }
++            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
++                                                               mangle_scratch.arena, &symbol_names[symbol]);
++            valid = status == CHECK_MANGLE_OK;
++            if (!valid)
++            {
++                result->status = status == CHECK_MANGLE_RESOURCE ? CHECK_PROGRAM_RESOURCE :
++                                 status == CHECK_MANGLE_INVALID ? CHECK_PROGRAM_INVALID : CHECK_PROGRAM_UNSUPPORTED;
++                result->reason = "this overloadable signature's ABI name (local/anonymous tags, variable arrays or calling convention)";
++                result->token = candidate->declaration;
++            }
++        }
++    }
++    if (mangle_scratch.arena != NULL)
++    {
++        scratch_end(mangle_scratch);
++    }
+     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
+     // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
+     uint32_t failed = count;
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 3128ead..487e9bf 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -1694,10 +1694,6 @@ static void check_lower_operand(CheckLowerWriter* writer, uint32_t node, uint32_
+         {
+             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+         }
+-        else if ((selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
+-        {
+-            check_lower_unsupported(writer, "addresses of overloadable functions");
+-        }
+         else
+         {
+             if (!address)
+@@ -4781,13 +4777,11 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+     check_lower_source(writer, graph->tokens[callee]);
+     CheckValue value = stream->values[callee];
+     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+-    bool mangled = false;
+     if (overload != BUSTER_CHECK_NONE)
+     {
+         const CheckOverloadResult* selected = &stream->overloads[overload].selected;
+         value = (CheckValue){ .type = selected->type, .category = CHECK_FUNCTION, .constant_kind = CHECK_CONSTANT_ADDRESS,
+                               .object = selected->object, .flags = BUSTER_CHECK_STATIC_OBJECT };
+-        mangled = (selected->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+     }
+     const uint32_t count = graph->argument_counts[node];
+     const uint32_t first = graph->argument_offsets[node];
+@@ -4825,9 +4819,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+     const bool direct = value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
+                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
+                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+-    if (mangled || passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
++    if (passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
+     {
+-        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" : count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
++        check_lower_unsupported(writer, count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
+                                         passed != NULL ? passed : returned);
+     }
+     else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
+@@ -8112,10 +8106,6 @@ static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart
+         {
+             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+         }
+-        else if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
+-        {
+-            check_lower_unsupported(writer, "addresses of overloadable functions");
+-        }
+         else
+         {
+             check_lower_convert(writer, write->value.type, write->conversion.type);
+diff --git a/src/buster/compiler/c_check_program_select_test.c b/src/buster/compiler/c_check_program_select_test.c
+index 32c8049..3754fd1 100644
+--- a/src/buster/compiler/c_check_program_select_test.c
++++ b/src/buster/compiler/c_check_program_select_test.c
+@@ -334,13 +334,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
+     check_test_program_selection_run(test,
+         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
+         "int tested(int n){return (int)take(pick)+n;}",
+-        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
++        "active-contextual-overload-address-has-mangled-publication", 2, 0, CHECK_PROGRAM_OK, 0, clang, 0, false);
+     check_test_program_selection_case(test,
+         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
+         "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang, true);
+     check_test_program_selection_run(test,
+         "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
+-        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
++        "active-overload-definition-has-mangled-publication", 2, 0, CHECK_PROGRAM_OK, 0, clang, 0, false);
+     check_test_program_selection_case(test,
+         "# 1 \"selection-header.h\" 1 3\n"
+         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"
+diff --git a/src/buster/compiler/c_check_program_test.c b/src/buster/compiler/c_check_program_test.c
+index 442a076..d85dbfd 100644
+--- a/src/buster/compiler/c_check_program_test.c
++++ b/src/buster/compiler/c_check_program_test.c
+@@ -2123,6 +2123,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
+ }
+ 
+ #include "c_check_program_select_test.c"
++#include "c_check_program_overload_test.c"
+ #include "c_check_program_query_test.c"
+ #include "c_check_region_input_test.c"
+ #include "c_check_program_atomic_test.c"
+@@ -2846,6 +2847,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
+     check_test_program_refused(test);
+     check_test_program_type_facts(test);
+     check_test_program_selection(test, clang);
++    check_test_program_overloads(test, clang);
+     check_test_program_queries(test, clang);
+     check_test_program_region_proofs(test, clang);
+     check_test_program_helpers(test);
+diff --git a/src/buster/compiler/c_checker_test.c b/src/buster/compiler/c_checker_test.c
+index 636deae..431d0a4 100644
+--- a/src/buster/compiler/c_checker_test.c
++++ b/src/buster/compiler/c_checker_test.c
+@@ -5169,6 +5169,7 @@ static int run_checker_tests(int argc, char** argv)
+     bool program_initializers = false;
+     bool const_values = false;
+     bool program_vectors = false;
++    bool program_overloads = false;
+     bool embed_initializers = false;
+     bool options = true;
+     for (int i = 0; options && i < argc; i += 1)
+@@ -5189,6 +5190,10 @@ static int run_checker_tests(int argc, char** argv)
+         {
+             const_values = true;
+         }
++        else if (strcmp(argv[i], "--program-overloads") == 0)
++        {
++            program_overloads = true;
++        }
+         else if (strcmp(argv[i], "--program-vectors") == 0)
+         {
+             program_vectors = true;
+@@ -5208,7 +5213,7 @@ static int run_checker_tests(int argc, char** argv)
+         }
+     }
+     CheckTestTypes types = { 0 };
+-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
++    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-overloads|--embed-initializers|--const-values]");
+     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+     OracleCache* oracle = oracle_cache();
+     if (options)
+@@ -5230,6 +5235,11 @@ static int run_checker_tests(int argc, char** argv)
+         {
+             check_test_program_initializers(&test, clang);
+         }
++        else if (initialized && program_overloads)
++        {
++            check_test_program_overloads(&test, clang);
++            check_test_data_sources(&test);
++        }
+         else if (initialized && program_vectors)
+         {
+             check_test_program_vectors(&test, clang);

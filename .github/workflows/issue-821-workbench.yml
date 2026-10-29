@@ -3,19 +3,55 @@ on:
   push:
     branches: [codex/821-workbench]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+  validate:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Prepare a clean implementation commit from the pinned base
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/issue-821-a.patch "$RUNNER_TEMP/a.patch"
+          cp .github/issue-821-b.patch "$RUNNER_TEMP/b.patch"
+          cp src/buster/compiler/c_check_mangle.c "$RUNNER_TEMP/c_check_mangle.c"
+          cp src/buster/compiler/c_check_program_overload_test.c "$RUNNER_TEMP/c_check_program_overload_test.c"
+          git fetch origin 1a9955ab5c3cb85d6ef6e346f1ab422abc995384 --depth=1
+          git checkout --detach 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
+          git apply --index "$RUNNER_TEMP/a.patch" "$RUNNER_TEMP/b.patch"
+          cp "$RUNNER_TEMP/c_check_mangle.c" "$RUNNER_TEMP/c_check_program_overload_test.c" src/buster/compiler/
+          git add src/buster/compiler/c_check_mangle.c src/buster/compiler/c_check_program_overload_test.c
+          git diff --cached --check
+          git diff --cached --stat
+      - name: Install the repository's pinned hosted toolchain
+        run: tools/ci/setup-hosted.sh
+      - name: Build baseline compiler
+        shell: bash
+        run: set -euo pipefail; BUSTER_DEBUG_INFO=0 BUSTER_HOST_ARCH=x86-64 ./build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Run overload and tgmath regressions
+        shell: bash
+        run: set -euo pipefail; ./build/compiler test-checker --program-overloads --seed 821 2>&1 | tee "$RUNNER_TEMP/overloads.log"
+      - name: Run the complete checker suite
+        shell: bash
+        run: set -euo pipefail; ./build/compiler test-checker --seed 821 2>&1 | tee "$RUNNER_TEMP/checker.log"
+      - name: Publish the tested source-only branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git diff --cached --check
+          git commit -m 'fix: lower overloadable functions with Clang-compatible ABI names'
+          git push origin HEAD:refs/heads/codex/fix-821-overload-lowering
+      - name: Retain validation output
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          persist-credentials: false
-      - name: Archive the pinned implementation snapshot
-        run: git archive --format=tar.gz --output=issue-821-source.tar.gz HEAD
-      - uses: actions/upload-artifact@v4
-        with:
-          name: issue-821-source
-          path: issue-821-source.tar.gz
+          name: issue-821-validation
           retention-days: 1
+          path: |
+            ${{ runner.temp }}/*.log
+            /tmp/buster-overload-driver-*/**
+            /tmp/buster-check-program-*/**
