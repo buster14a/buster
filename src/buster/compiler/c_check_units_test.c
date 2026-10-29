@@ -1008,7 +1008,12 @@ struct CheckUnitsTestProbe
     int status;
     uint64_t peak;
     uint64_t before_size;
+    uint64_t after_command_size;
     uint64_t after_size;
+    uint64_t before_stack;
+    uint64_t after_stack;
+    uint64_t before_data;
+    uint64_t after_data;
     int before_descriptor;
     int after_descriptor;
     bool clean;
@@ -1030,11 +1035,17 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
         limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
         alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
         const int before = parse_test_lowest_descriptor();
+        // These observations can themselves change stack use; keep the whole-process cleanup equality unchanged.
+        shared->before_stack = parse_test_status_bytes("VmStk:");
+        shared->before_data = parse_test_status_bytes("VmData:");
         shared->before_size = parse_test_status_bytes("VmSize:");
         const int status = limited ? run_check_command(count, arguments, true) : -1;
+        shared->after_command_size = parse_test_status_bytes("VmSize:");
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
         shared->after_size = parse_test_status_bytes("VmSize:");
+        shared->after_stack = parse_test_status_bytes("VmStk:");
+        shared->after_data = parse_test_status_bytes("VmData:");
         shared->before_descriptor = before;
         shared->after_descriptor = after;
         shared->clean = shared->after_size == base && after == before;
@@ -1126,6 +1137,9 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
              (unsigned long long)base, whole.before_descriptor, whole.after_descriptor,
              whole.clean ? "clean" : "left memory or a descriptor behind", text);
     fprintf(stderr, "  reservations' baseline: %s\n", detail);
+    fprintf(stderr, "  reservations' baseline observations: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+            (unsigned long long)whole.after_command_size, (unsigned long long)whole.before_stack, (unsigned long long)whole.after_stack,
+            (unsigned long long)whole.before_data, (unsigned long long)whole.after_data);
     bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
                     rename(objects[1], wholes[1]) == 0;
     check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
@@ -1152,6 +1166,12 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
                  (unsigned long long)probe.after_size, (unsigned long long)base, probe.before_descriptor, probe.after_descriptor,
                  probe.clean ? "clean" : "left memory or a descriptor behind", text);
         check_units_test_expect(tally, released, "a run whose reservation failed says why or writes the same objects, and releases what it reserved", detail);
+        if (!released)
+        {
+            fprintf(stderr, "  reservations' observations with %llu bytes: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+                    (unsigned long long)limit, (unsigned long long)probe.after_command_size, (unsigned long long)probe.before_stack,
+                    (unsigned long long)probe.after_stack, (unsigned long long)probe.before_data, (unsigned long long)probe.after_data);
+        }
         // A lane's setup that failed fails both units, with its message.
         setups += strstr(text, "can't reserve the lane's memory") != NULL;
         fallbacks += fallen_back;
