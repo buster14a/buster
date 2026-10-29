@@ -1007,6 +1007,10 @@ struct CheckUnitsTestProbe
 {
     int status;
     uint64_t peak;
+    uint64_t before_size;
+    uint64_t after_size;
+    int before_descriptor;
+    int after_descriptor;
     bool clean;
 };
 
@@ -1026,10 +1030,14 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
         limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
         alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
         const int before = parse_test_lowest_descriptor();
+        shared->before_size = parse_test_status_bytes("VmSize:");
         const int status = limited ? run_check_command(count, arguments, true) : -1;
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
-        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        shared->after_size = parse_test_status_bytes("VmSize:");
+        shared->before_descriptor = before;
+        shared->after_descriptor = after;
+        shared->clean = shared->after_size == base && after == before;
         shared->status = status;
         _exit(0);
     }
@@ -1113,8 +1121,11 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, shared) : (CheckUnitsTestProbe){ 0 };
     parse_test_read_capture(capture, text, sizeof(text));
     char detail[1400];
-    snprintf(detail, sizeof(detail), "status %d, peak %llu, %s, printed \"%s\"", whole.status, (unsigned long long)whole.peak,
+    snprintf(detail, sizeof(detail), "status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+             whole.status, (unsigned long long)whole.peak, (unsigned long long)whole.before_size, (unsigned long long)whole.after_size,
+             (unsigned long long)base, whole.before_descriptor, whole.after_descriptor,
              whole.clean ? "clean" : "left memory or a descriptor behind", text);
+    printf("  reservations' baseline: %s\n", detail);
     bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
                     rename(objects[1], wholes[1]) == 0;
     check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
@@ -1136,8 +1147,10 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
         const bool fallen_back = probe.status == 0 && text[0] == 0 && check_test_driver_same_files(objects[0], wholes[0]) &&
                                  check_test_driver_same_files(objects[1], wholes[1]);
         released = (failed || fallen_back) && probe.peak <= limit && probe.clean;
-        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, %s, printed \"%s\"", (unsigned long long)limit, probe.status,
-                 (unsigned long long)probe.peak, probe.clean ? "clean" : "left memory or a descriptor behind", text);
+        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+                 (unsigned long long)limit, probe.status, (unsigned long long)probe.peak, (unsigned long long)probe.before_size,
+                 (unsigned long long)probe.after_size, (unsigned long long)base, probe.before_descriptor, probe.after_descriptor,
+                 probe.clean ? "clean" : "left memory or a descriptor behind", text);
         check_units_test_expect(tally, released, "a run whose reservation failed says why or writes the same objects, and releases what it reserved", detail);
         // A lane's setup that failed fails both units, with its message.
         setups += strstr(text, "can't reserve the lane's memory") != NULL;
