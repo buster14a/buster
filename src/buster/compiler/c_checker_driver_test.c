@@ -1904,6 +1904,71 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// -E is an action at any argument position, but an option's value can spell -E without selecting that action.
+static void check_test_driver_preprocess_action(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#define VALUE 42\nint value = VALUE;\n";
+    char compiler[PATH_MAX];
+    char source[256];
+    char output[256];
+    char operand[256];
+    snprintf(source, sizeof(source), "%s/action.c", directory);
+    snprintf(output, sizeof(output), "%s/action.i", directory);
+    snprintf(operand, sizeof(operand), "%s/-E", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const first[] = { compiler, "-E", "-P", "-o", output, source, NULL };
+    char* const later[] = { compiler, "-O2", "-I", (char*)directory, "-E", "-P", "-o", output, source, NULL };
+    char* const after[] = { compiler, "-c", "-P", source, "-E", "-o", output, NULL };
+    char* const macros[] = { compiler, "-O2", "-E", "-dM", "-o", output, source, NULL };
+    char* const* cases[] = { first, later, after, macros };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        unlink(output);
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn(cases[i], &text) : -1;
+        free(text);
+        char captured[65536] = { 0 };
+        FILE* output_file = status == 0 ? fopen(output, "rb") : NULL;
+        const size_t length = output_file != NULL ? fread(captured, 1, sizeof(captured) - 1, output_file) : 0;
+        const bool read = output_file != NULL && !ferror(output_file) && feof(output_file);
+        captured[length] = 0;
+        if (output_file != NULL)
+        {
+            fclose(output_file);
+        }
+        check_test_expect(test, read && strstr(captured, i == 3 ? "#define VALUE 42" : "int value = 42;") != NULL,
+                          "-E selects preprocessing before or after other options and input, including -c and -dM");
+    }
+    // A separate argument that spells -E is an output name, not the preprocessing action.
+    char* const object[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-E", "action.c", NULL };
+    char* text = NULL;
+    const int status = made ? check_test_driver_spawn(object, &text) : -1;
+    free(text);
+    FILE* file = fopen(operand, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = file != NULL && fread(magic, 1, sizeof(magic), file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    check_test_expect(test, status == 0 && elf, "an option value spelled -E does not select preprocessing");
+    char* const parallel[] = { compiler, "parallel", "-E", NULL };
+    text = NULL;
+    const int parallel_status = check_test_driver_spawn(parallel, &text);
+    check_test_expect(test, parallel_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "an explicit driver command takes precedence over -E");
+    free(text);
+    char* const end_options[] = { compiler, "--", "-E", source, NULL };
+    text = NULL;
+    const int end_status = check_test_driver_spawn(end_options, &text);
+    check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "unknown argument: --") != NULL,
+                      "-E after -- does not select preprocessing; unsupported -- is diagnosed");
+    free(text);
+    unlink(operand);
+    unlink(output);
+    unlink(source);
+}
+
 // Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
 // directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
 // include's macro and a header that only -Lheaders has, and the program runs.
@@ -3854,6 +3919,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_preprocess_action(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }
         rmdir(directory);

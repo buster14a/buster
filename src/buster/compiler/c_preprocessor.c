@@ -20049,7 +20049,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
         }
-        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
+        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-c") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
         {
             options->freestanding &= strcmp(argument, "-fhosted") != 0;
             options->suppress_warnings |= strcmp(argument, "-w") == 0;
