@@ -45,6 +45,28 @@ case "${BUSTER_DEBUG_INFO-1}" in
     0) debug=() ;;
     *) echo "build.sh: BUSTER_DEBUG_INFO must be 0 or 1" >&2; exit 1 ;;
 esac
+# Sanitizer builds keep the production semantics (-fwrapv, unsigned char and
+# aliasing) and instrument every unit and the final link with the same flags.
+# TSan requires PIE; use it for all diagnostic builds. Keep the ordinary fixed
+# address executable and its benchmark layout unchanged.
+sanitizer_flags=()
+link_mode=(-no-pie)
+case "${BUSTER_SANITIZER:-none}" in
+    none) ;;
+    address) sanitizer_flags=(-fsanitize=address,undefined,bounds -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=always) ;;
+    undefined) sanitizer_flags=(-fsanitize=undefined,bounds) ;;
+    thread) sanitizer_flags=(-fsanitize=thread) ;;
+    memory) sanitizer_flags=(-fsanitize=memory -fsanitize-memory-track-origins=2) ;;
+    *) echo 'build.sh: BUSTER_SANITIZER must be none, address, undefined, thread or memory' >&2; exit 1 ;;
+esac
+if [ "${BUSTER_SANITIZER:-none}" != none ]; then
+    [ -z "${BUSTER_HOST_RUNTIME:-}" ] || { echo 'build.sh: sanitizers require the host runtime, not BUSTER_HOST_RUNTIME' >&2; exit 1; }
+    sanitizer_flags+=(-fno-sanitize-recover=all -fno-sanitize-trap=all -fno-omit-frame-pointer -fno-optimize-sibling-calls -fPIE)
+    flags+=("${sanitizer_flags[@]}")
+    optimization=-O1
+    debug=(-gline-tables-only)
+    link_mode=(-pie)
+fi
 # The order the compiles start in, each source's file name once, the longest first by their times on the 9700X (#270):
 # the build runs at most one compile per core (cores, below), so a long one that started late would make it wait for
 # it. A new source goes where its time puts it.
@@ -186,10 +208,10 @@ link_program()
         [ "${BUSTER_HOST_ARCH:-native}" = x86-64 ] || { echo 'build.sh: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64' >&2; return 1; }
         local library="$BUSTER_HOST_RUNTIME/usr/lib/x86_64-linux-gnu"
         local support="$BUSTER_HOST_RUNTIME/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a"
-        clang -no-pie -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
+        clang "${link_mode[@]}" -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
             "$library/libm.so.6" "$library/libc.so.6" "$support" "$library/crtn.o" -o "$output"
     else
-        clang -no-pie "${linker_flags[@]}" "$@" -lm -ldl -o "$output"
+        clang "${link_mode[@]}" "${sanitizer_flags[@]}" "${linker_flags[@]}" "$@" -lm -ldl -o "$output"
     fi
 }
 
@@ -267,6 +289,10 @@ select_linker()
 defines=()
 if [ "$1" = print-compile-flags ]; then
     printf '%s\0' "${debug[@]}" "${flags[@]}" "$optimization" "${defines[@]}"
+elif [ "$1" = print-sanitizer-flags ]; then
+    if [ "${#sanitizer_flags[@]}" -ne 0 ]; then
+        printf '%s\0' -O1 "${debug[@]}" "${sanitizer_flags[@]}" "${link_mode[@]}"
+    fi
 elif [ "$1" = print-sources ]; then
     printf '%s\0' "${sources[@]}"
 elif [ "$1" = check-call-graph ]; then

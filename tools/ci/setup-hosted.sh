@@ -28,7 +28,7 @@ tar -I 'zstd -d --long=30' --extract --file "$RUNNER_TEMP/llvm.tar.zst" \
     --directory "$llvm" --strip-components=1 --no-same-owner --wildcards \
     "$archive/bin/clang" "$archive/bin/clang-23" "$archive/bin/clang++" \
     "$archive/bin/lld" "$archive/bin/ld.lld" "$archive/bin/llvm-config" \
-    "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" \
+    "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" "$archive/bin/llvm-symbolizer" \
     "$archive/include/*" "$archive/lib/clang/23/*" \
     "$archive/lib/libLLVM*.a" "$archive/lib/libPolly*.a" "$archive/lib/libclang-cpp.so*"
 rm "$RUNNER_TEMP/llvm.tar.zst"

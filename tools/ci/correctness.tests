@@ -251,7 +251,8 @@ objcopy -O binary -j .text "$corpus/corpus.o" "$corpus/corpus.text"
 == Test token refinement
 ./build/compiler test-refinement src
 == Test differential harness accounting, subprocesses and failure preservation
-clang -std=c17 -O2 -Wall -Wextra -Werror tests/differential/lifecycle.c -o build/test-differential-lifecycle &&
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/differential/lifecycle.c -o build/test-differential-lifecycle &&
 ./build/test-differential-lifecycle ./build/compiler "$(command -v clang)"
 == Test the independent preprocessor fuzz harness in C23
 ./build/compiler test-preprocessor-fuzz --std c23
