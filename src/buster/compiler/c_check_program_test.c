@@ -2605,6 +2605,19 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "__int128 v=(_BitInt(65))-0x123456789abcdefLL;int c=((_BitInt(100))-5<n)+((_BitInt(72))-9>(_BitInt(72))n)*2;"
         "return (int)((y+n)%1000003)+(int)((u>>64)%1009)*3+(w==-1)*7+(int)(((v>>32)*n)%1009)*11+c*13;}",
         "bit-int-128-bit-negative-constants", clang);
+    // C23's bit-precise constants (#768): each one's type, by _Generic, a weight of its own, and their values past 64 bits
+    // at run time (without digit separators, which C17 doesn't lex: the source fixture "bit-precise constants" has them).
+    check_test_program_source(test,
+        "#define B(x,t,w) _Generic((x),t:(w),default:0)\n"
+        "int tested(int n){int t=B(0wb,_BitInt(2),1)+B(1wb,_BitInt(2),2)+B(2WB,_BitInt(3),4)+B(0uwb,unsigned _BitInt(1),8)+B(5uWB,unsigned _BitInt(3),16)+"
+        "B(5wbu,unsigned _BitInt(3),32)+B(-1wb,_BitInt(2),64)+B(0777wb,_BitInt(10),128)+B(0b10101010wb,_BitInt(9),256)+"
+        "B(0x7fffffffffffffffwb,_BitInt(64),512)+B(0x8000000000000000wb,_BitInt(65),1024)+B(0xffffffffffffffffuwb,unsigned _BitInt(64),2048)+"
+        "B(0x10000000000000000uwb,unsigned _BitInt(65),4096)+B(18446744073709551616wb,_BitInt(66),8192)+"
+        "B(0x7fffffffffffffffffffffffffffffffwb,_BitInt(128),16384)+B(0xffffffffffffffffffffffffffffffffuwb,unsigned _BitInt(128),32768);"
+        "unsigned _BitInt(100) a=0xfffffffffffffffffffffffffuwb;a-=(unsigned _BitInt(100))n;_BitInt(128) b=0x7fffffffffffffffffffffffffffffffwb;b-=n;"
+        "unsigned _BitInt(65) c=0x1ffffffffffffffffuwb>>n;_BitInt(66) d=18446744073709551616wb*n-0x123456789abcdef01wb;"
+        "return t^(int)(a%1000003)^(int)(b%1000033)*3^(int)(c%1000037)*5^(int)(d%1000039)*7;}",
+        "bit-precise-constants", clang);
 }
 
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)

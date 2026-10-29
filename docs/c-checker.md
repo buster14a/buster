@@ -193,6 +193,32 @@ applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
+**Bit-precise constants** (#768, `check_literal_integer`): C23's `wb` and `WB`
+suffixes, alone or with `u` or `U` before or after them, in every radix and with
+digit separators (where the mode lexes them), typed as C23 and clang 23 type
+them in every mode: `_BitInt(N)` of the smallest N above 1 that holds the value
+and a sign bit, or `unsigned _BitInt(N)` of the smallest N above 0 that holds
+it. An ordinary integer constant is read as before, in 64 bits: a spelling that
+reader can't take goes to a cold reader of bit-precise constants
+(`check_literal_bit_precise`), which reads the digits again in 128 bits, the
+most the checker's values hold (`BUSTER_CHECK_LITERAL_BIT_WIDTH`), so that
+every other constant's path is as it was. (A first version that read every
+constant's suffixes for these, with a 128-bit value in every literal, cost
+1.36 million more instructions on `sqlite3.c`'s `-fsyntax-only`, about 25 per
+integer constant; this one about 196,000, in the literal's two new fields.) A
+constant that needs more than 128 bits is refused by
+name, "bit-precise integer constants wider than 128 bits are not supported",
+where clang takes it: a `wb` one of 128 bits with its top bit set is
+`_BitInt(129)`. The literal leaves its type to the reader, which makes the
+`_BitInt` in its table (`CheckLiteral.bit_width`, `check_input_literal`); #658's
+literal tables leave such constants to the ordinary path. `#if` reads them as
+clang does, through the preprocessor's own constants. Two differences from clang
+remain:
+- before C23, clang warns that the suffix is a C23 extension
+  (`-Wc23-extensions`), and the checker doesn't;
+- clang takes an imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't
+  let a program spell otherwise), which the checker refuses, as GCC does.
+
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
 
@@ -2132,6 +2158,13 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Bit-precise constants (#768): their widths, signedness and values from the
+  literal reader (`check_literal_number`) in each radix, case and order of
+  suffix, with digit separators, past 64 bits and at 128 and 129, and the
+  spellings C23 doesn't have; their types by `_Generic` and their values by
+  static assertions in a C23 source fixture, by both paths and against clang,
+  and at run time in a program against clang -O0's
+  (`bit-precise-constants`); and a 129-bit one refused by name.
 - Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
@@ -2254,8 +2287,9 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 `test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
 every Constraints paragraph of C17's 6.4 to 6.10 it has a violation of each of the paragraph's rules and a valid
 twin. Fixtures of the conversions (6.3), the constant expressions (6.6) and the initializers (6.7.9) join them:
-322 fixtures and 644 sources in all, 21 of 6.3, 14 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
-6.9 and 20 of 6.10.
+325 fixtures and 650 sources in all, 21 of 6.3, 17 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
+6.9 and 20 of 6.10. Three of 6.4's are C23's bit-precise suffixes (#768: `wB`, `uwbu` and `wbl`, which clang
+refuses in every mode, beside valid twins).
 
 Each source is checked as the corpus check checks a file (`check_corpus_file`): preprocessing, the parse, the
 checker and the program's control flow, as the driver checks it, by both paths alike. A directive's source (6.10)
@@ -2263,7 +2297,7 @@ runs through the preprocessor's two kernels instead (`check_test_constraint_prep
 from the diagnostics, since the corpus check gives a preprocessing error no place. Every source is also checked by
 `clang -fsyntax-only -std=gnu17`. The acceptance and the first error's line must be clang's and the fixture's own
 record of them. A fixture records clang's verdict on its violation:
-- an error, for 263;
+- an error, for 266;
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
