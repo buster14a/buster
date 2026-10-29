@@ -1857,14 +1857,14 @@ static bool link_test_named(const Link* link, SymbolId symbol, const char* text)
 static char** link_test_environ;
 static int32_t link_test_errno;
 
-static __attribute__((disable_sanitizer_instrumentation)) int64_t link_test_write(int64_t descriptor, const void* bytes, uint64_t count)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION int64_t link_test_write(int64_t descriptor, const void* bytes, uint64_t count)
 {
     int64_t result = 1;
     __asm__ volatile("syscall" : "+a"(result) : "D"(descriptor), "S"(bytes), "d"(count) : "rcx", "r11", "memory");
     return result;
 }
 
-static __attribute__((disable_sanitizer_instrumentation)) uint64_t link_test_strlen(const char* text)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION uint64_t link_test_strlen(const char* text)
 {
     uint64_t result = 0;
     while (text[result] != 0)
@@ -1876,7 +1876,7 @@ static __attribute__((disable_sanitizer_instrumentation)) uint64_t link_test_str
     return result;
 }
 
-static __attribute__((disable_sanitizer_instrumentation)) int32_t* link_test_errno_location(void)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION int32_t* link_test_errno_location(void)
 {
     return &link_test_errno;
 }
@@ -2216,7 +2216,7 @@ static void link_test_start(const LinkTestImage* image, int output)
 // and envp (one argument and one variable); then exits with main's status. Once FS is the program's, it calls nothing
 // that uses TLS, and takes no sanitizer's instrumentation, which would.
 static void link_test_start_libc(const LinkTestImage* image, int output) __attribute__((noreturn));
-static __attribute__((disable_sanitizer_instrumentation)) void link_test_start_libc(const LinkTestImage* image, int output)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION void link_test_start_libc(const LinkTestImage* image, int output)
 {
     typedef int32_t LinkTestMain(int32_t argc, char** argv, char** envp);
     typedef void LinkTestHook(int32_t argc, char** argv, char** envp);

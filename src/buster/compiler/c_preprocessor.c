@@ -9576,6 +9576,11 @@ BUSTER_INLINE bool pp_template_spelled(const uint8_t* bytes, uint32_t length)
 static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PPTemplate* template, const PPArgument* records, uint32_t given,
                                   const PPFileData* file, uint32_t file_base, PPOperators* operators)
 {
+#if __has_feature(memory_sanitizer)
+    // pp_template_write's permutes pick their lanes from whole vectors of these columns, of which MSan's model reads
+    // every lane: those no token fills are zero there.
+    memset(operators, 0, sizeof(*operators));
+#endif
     bool result = file == 0 || template->strings == 0;
     uint32_t size = 0;
     uint32_t joined = 0;

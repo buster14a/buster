@@ -70,6 +70,14 @@ static bool arena_test_reservation_allowed(uint64_t bytes);
 #define BUSTER_SANITIZER_RESOURCES 0
 #endif
 
+// Code that runs while FS is a generated program's TLS block takes no detector's instrumentation, which reaches its
+// thread's state through FS (the tests' native runs).
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define BUSTER_NO_SANITIZER_INSTRUMENTATION __attribute__((disable_sanitizer_instrumentation))
+#else
+#define BUSTER_NO_SANITIZER_INSTRUMENTATION
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Arenas
 

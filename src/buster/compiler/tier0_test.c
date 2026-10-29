@@ -1104,7 +1104,7 @@ typedef uint64_t (*Tier0TestRunEntry)(uint64_t, uint64_t, uint64_t);
 // The entry's call with FS the program's block (`fs`) from its start to its end, then `saved` again: by the system call
 // itself, and without a sanitizer's instrumentation, which reaches its thread's state through FS. The result goes to
 // `value`, whose shadow the caller's initialization made clean.
-static __attribute__((noinline, disable_sanitizer_instrumentation)) void tier0_test_call_tls(Tier0TestRunEntry entry, const uint64_t inputs[3], uint64_t fs, uint64_t saved,
+static __attribute__((noinline)) BUSTER_NO_SANITIZER_INSTRUMENTATION void tier0_test_call_tls(Tier0TestRunEntry entry, const uint64_t inputs[3], uint64_t fs, uint64_t saved,
                                                                                             uint64_t* value)
 {
     int64_t call = SYS_arch_prctl;
