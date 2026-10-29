@@ -94,6 +94,10 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
         { "an integer parameter", "void f(int p);\nvoid g(void) {\nint a __attribute__((cleanup(f)));\n}\n", 0 },
         { "an element's pointer", "void f(int *p);\nvoid g(int n) {\nint a[n] __attribute__((cleanup(f)));\n}\n", 0 },
         { "another struct", "struct S { int x; };\nstruct T { int x; };\nvoid f(struct T *p);\nvoid g(void) {\nstruct S s __attribute__((cleanup(f)));\n}\n", 0 },
+        // An __auto_type variable's, against the deduced type (#745's review), reported where the attribute names the
+        // function.
+        { "an __auto_type double by an int pointer", "void f(int *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) =\n    1.0;\n}\n", 0 },
+        { "an __auto_type int by a double pointer, the specifiers'", "void f(double *p);\nvoid g(void) {\n__attribute__((cleanup(f))) __auto_type a =\n    1;\n}\n", 0 },
         { "undeclared names of several declarations", "void g(void) {\nint a __attribute__((cleanup(missing)));\nint b __attribute__((cleanup(other)));\n}\n"
                                                       "void h(void) {\nint c __attribute__((cleanup((gone))));\n}\n", 0 },
         { "a goto into its scope", "void f(int *p);\nvoid g(int n) {\ngoto l;\nint a __attribute__((cleanup(f)));\nl:;\n}\n", 0 },

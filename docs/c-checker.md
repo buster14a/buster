@@ -1983,10 +1983,14 @@ What the lowering covers past scalars (#145's programs):
   ("'cleanup' function 'f' parameter has incompatible type", the spelling of
   clang's message without its two types). A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
-  an error here. Another count of arguments is "'cleanup' attribute takes one
-  argument" on a variable it applies to (clang checks the subject first). The
-  last of a declaration's cleanup attributes applies (clang warns about the
-  others; the checker doesn't). A cleanup's error, as the reader's errors but
+  an error here. An `__auto_type` variable's parameter type is checked once
+  its initializer gives the type (`check_input_cleanup_deduced`, from the
+  initializer's finish), as clang checks it against the deduced type; the
+  rest, and the variable's record, at its declaration. Another count of
+  arguments is "'cleanup' attribute takes one argument" on a variable it
+  applies to (clang checks the subject first). The last of a declaration's
+  cleanup attributes applies (clang warns about the others; the checker
+  doesn't). A cleanup's error, as the reader's errors but
   an undeclared name's, ends the unit's checking, where clang goes on to the
   later declarations' diagnostics (`check_input_diagnostic_recover`). Each
   applied one is a

@@ -122,6 +122,15 @@ static __attribute__((noinline)) void check_test_cleanup_sources(CheckTest* test
         { .name = "switch into a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { switch (n) {\nint a __attribute__((cleanup(f)));\ncase 1:;\n} }\n", .rejected = true },
         { .name = "computed goto out of a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\ngoto *t[0]; }\nl:;\n}\n", .rejected = true },
         { .name = "computed goto into a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { void *t[] = { &&l };\n{ int a __attribute__((cleanup(f)));\nl:; }\ngoto *t[0];\n}\n", .rejected = true },
+        // An __auto_type variable's cleanup is checked against the deduced type, not its placeholder's int (#745's
+        // review): a double's, by the specifiers too, a decayed array's and a structure's through void *, and
+        // pointers to other types.
+        { .name = "cleanup of an __auto_type double", .source = "void f(double *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) = 1.0;\n}\n" },
+        { .name = "cleanup of an __auto_type double by its specifiers", .source = "void f(double *p);\nvoid g(void) {\n__attribute__((cleanup(f))) __auto_type a = 1.0;\n}\n" },
+        { .name = "cleanup of an __auto_type decayed array", .source = "void f(char **p);\nvoid g(void) {\nchar b[4];\n__auto_type a __attribute__((cleanup(f))) = b;\n}\n" },
+        { .name = "cleanup of an __auto_type structure through void", .source = "void f(void *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) = (struct { int x; }){ 1 };\n}\n" },
+        { .name = "cleanup of an __auto_type double by an int pointer", .source = "void f(int *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) = 1.0;\n}\n", .rejected = true },
+        { .name = "cleanup of an __auto_type int by a double pointer", .source = "void f(double *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) = 1;\n}\n", .rejected = true },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-cleanup-XXXXXX";
@@ -252,6 +261,14 @@ static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* tes
         "int h[3] __attribute__((cleanup(noted_array)))={n,2,n*3};int*i __attribute__((cleanup(noted_pointer)))=&a;"
         "{register int j __attribute__((cleanup(note)))=n*5;}return a+b+d+e+(int)f+g[0]+h[1];}"
         "int tested(int n){trace=0;int r=kinds(n);return (int)trace^r;}", "cleanup-kinds", clang);
+    // An __auto_type variable's cleanup gets the deduced type's address (#745's review): a double's, a structure's and
+    // a pointer's from a decayed array.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "typedef struct P{int a,b;}P;static void noted_d(double*p){trace=trace*31u+(unsigned)(int)*p;*p=-1;}"
+        "static void noted_p(P*p){trace=trace*31u+(unsigned)(p->a*7+p->b);p->a=-1;}static void noted_s(char**p){trace=trace*31u+(unsigned)**p;*p=0;}"
+        "int tested(int n){trace=0;int r=0;char buffer[4]={'a','b','c',0};{__auto_type d __attribute__((cleanup(noted_d)))=n*1.5;"
+        "__auto_type s __attribute__((cleanup(noted_p)))=(P){n,2*n};__auto_type c __attribute__((cleanup(noted_s)))=buffer+(n&1);"
+        "r+=(int)d+s.a+s.b+c[0];}return (int)trace^r;}", "cleanup-auto-type", clang);
     check_test_program_build_release();
 }
 

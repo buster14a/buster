@@ -60,7 +60,8 @@ static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputClean
 // The records are its declaration's specifiers' themselves where it has no attributes of its own
 // (check_input_merge_attributes), which its other declarators read too: what this declarator makes of them is its own,
 // and they stay as they were. clang ignores a function declarator's with a warning, and the variables of the same
-// specifiers still have them: their argument count's error and the last of several.
+// specifiers still have them: their argument count's error and the last of several. An __auto_type variable's
+// parameter type waits for the deduced type (check_input_cleanup_deduced); the rest, and its record, are checked here.
 static bool check_input_cleanup_declaration(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t name, TypeId type, bool applies)
 {
     const CheckInputAttribute* applied = NULL;
@@ -105,7 +106,8 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_PARAMETERS);
             valid = false;
         }
-        else if (applies && function != BUSTER_CHECK_NONE && !check_input_cleanup_parameter(reader, parameter_types[0], type))
+        else if (applies && function != BUSTER_CHECK_NONE && !check_input_auto_type(type) &&
+                 !check_input_cleanup_parameter(reader, parameter_types[0], type))
         {
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_TYPE);
             valid = false;
@@ -126,6 +128,39 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
             // A goto or a case mustn't enter the scope, as a variable-length array's (check_input_vla_finish).
             reader->vla_scope_ends[name] = valid ? cleanup.end : reader->vla_scope_ends[name];
             check_input_lane_refuse(reader, reader->lane, "a body declares a variable with a cleanup");
+        }
+    }
+    return valid;
+}
+
+// An __auto_type variable `declaration`'s cleanup once its initializer gives it type `type`
+// (check_input_initializer_finish), as clang checks the attribute against the deduced type: the parameter's type, which
+// check_input_cleanup_declaration left to it. Whether the declaration is valid: a reported error isn't. Only a variable
+// with a cleanup, whose scope's end the declaration marked, looks for its record: the last one made before those of its
+// initializer's own declarations.
+static bool check_input_cleanup_deduced(CheckInputReader* reader, uint32_t declaration, TypeId type)
+{
+    const CheckInput* input = reader->output;
+    bool valid = true;
+    if (input->cleanup_count != 0 && reader->vla_scope_ends[declaration] != 0)
+    {
+        uint32_t record = input->cleanup_count;
+        while (record != 0 && input->cleanups[record - 1].declaration != declaration)
+        {
+            record -= 1;
+        }
+        if (record != 0)
+        {
+            // The declaration checked that the function has a prototype of one parameter.
+            const CheckInputCleanup* cleanup = input->cleanups + record - 1;
+            const TypeId function_type = type_strip_aligned(reader->types, reader->declared_types[cleanup->function]);
+            uint32_t parameters = 0;
+            const TypeId* parameter_types = type_parameters(reader->types, function_type, &parameters);
+            valid = check_input_cleanup_parameter(reader, parameter_types[0], type);
+            if (!valid)
+            {
+                check_input_report(reader, cleanup->argument, CHECK_INPUT_CLEANUP_TYPE);
+            }
         }
     }
     return valid;
