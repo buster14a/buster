@@ -3187,6 +3187,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
         "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
         "kr-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct T{int a,b,c;};int take(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,p,d)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10)+*p;}"
+        "int tested(int n){struct T t={n&127,5,7};int v=n&63;return f(65539,259,1.25,&v,3.7)+take(t);}",
+        "kr-parenthesized-atomic-and-promoted-parameters", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.

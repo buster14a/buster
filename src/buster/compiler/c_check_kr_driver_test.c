@@ -5,6 +5,8 @@
 static void check_test_driver_kr_policy(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char definition[] = "int f(a)int a;{return a;}\n";
+    static const char atomic_definition[] = "int f(a,b,c,p)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;"
+                                            "{return a+b+(int)c+*p;}\nint g(int *p){return f(65539,259,1.25,p);}\n";
     static const char arity[] = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
                                 "int f(a)int a;{return a;}int g(void){return f(1,2);}\n";
     static const struct
@@ -17,6 +19,9 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
         uint32_t errors;
     } cases[] = {
         { definition, NULL, NULL, false, 1, 0 },
+        { atomic_definition, NULL, NULL, false, 1, 0 },
+        { atomic_definition, "-Wno-deprecated-non-prototype", NULL, false, 0, 0 },
+        { atomic_definition, "-Werror=deprecated-non-prototype", NULL, false, 0, 1 },
         { definition, "-Wno-deprecated-non-prototype", NULL, false, 0, 0 },
         { definition, "-Werror", NULL, false, 0, 1 },
         { definition, "-Werror=deprecated-non-prototype", NULL, false, 0, 1 },

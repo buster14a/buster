@@ -1147,6 +1147,39 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             .standard = 1989,
         },
         {
+            .name = "K&R parenthesized atomic type starts its declaration list",
+            .source = "int f(a,b,c,p)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;"
+                      "{return a+b+(int)c+*p;}int g(int *p){return f(65539,259,1.25,p);}",
+        },
+        {
+            .name = "K&R nested atomic type names retain typedef and typeof lookup",
+            .source = "typedef short T;int f(a,b)const _Atomic(T) a;_Atomic(__typeof__(1.0f)) b;{return a+(int)b;}",
+        },
+        {
+            .name = "K&R atomic aggregate retains its complete type",
+            .source = "struct T{int a,b,c;};int f(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b+v.c;}",
+        },
+        {
+            .name = "K&R parenthesized atomic rejects a qualified inner type",
+            .source = "int f(x)_Atomic(const int) x;{return x;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R parenthesized atomic rejects an array inner type",
+            .source = "int f(x)_Atomic(int[2]) x;{return 0;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R parenthesized atomic rejects a function inner type",
+            .source = "int f(x)_Atomic(int(void)) x;{return 0;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R parenthesized atomic rejects an already atomic inner type",
+            .source = "int f(x)_Atomic(_Atomic int) x;{return x;}",
+            .rejected = true,
+        },
+        {
             .name = "K&R all implicit parameters in C89",
             .source = "int f(a,b){return a+b;} int g(void){return f(3,4);}",
             .standard = 1989,
