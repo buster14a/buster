@@ -71,6 +71,13 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
+        case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
+        case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
+        case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
+        case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
+        case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function parameter has incompatible type"; break;
+        case CHECK_INPUT_CLEANUP_ARGUMENTS: result = "'cleanup' attribute takes one argument"; break;
         case CHECK_INPUT_LABEL_UNDECLARED: result = "use of undeclared label"; break;
         case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
@@ -805,11 +812,24 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     if (source != BUSTER_CHECK_NONE)
                     {
                         const uint32_t publication = completion != 0 ? check_driver_publication_position(parser, pp, completion, publication_end) : source;
-                        if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                        // The input's reports whose messages name their token's identifier.
+                        const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
+                        const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+                        if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
+                        {
+                            // clang's handleCleanupAttr names the argument; of the parameter's type it says what its other
+                            // spelling of the message does, without the two types.
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'cleanup' %s '%.*s' %s",
+                                                 kind == CHECK_INPUT_CLEANUP_FUNCTION ? "argument" : "function", (int)intern_length(pp->table, name),
+                                                 intern_bytes(pp->table, name), kind == CHECK_INPUT_CLEANUP_FUNCTION ? "is not a function" :
+                                                 kind == CHECK_INPUT_CLEANUP_PARAMETERS ? "must take 1 parameter" : "parameter has incompatible type");
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
