@@ -29,6 +29,13 @@
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
 //   --dump-typed, --id-order, -g for an executable, and two units whose objects have one name: exit status 1, the
 //   message, and no output.
+//   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
+//   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
+//   driver read before setting it would release an arena of that address and unmap the child's code.
+// - The jobserver: four units by --lanes 4 under a GNU make jobserver of three tokens (MAKEFLAGS' fifo form), linked into
+//   an executable of more than a megabyte whose path is a FIFO, which the test reads: while the writer writes, the
+//   jobserver holds none of the tokens, which the command's lanes took; once the command ends, it holds every one
+//   again, and the executable the test read runs.
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the first program's objects and executable as by --lanes 1.
 // - With --corpus DIR, every .c file in DIR at once with -c (and each --option), by --lanes 8, and again with
@@ -695,6 +702,64 @@ static void check_units_test_diagnostics(CheckUnitsTestTally* tally, const char*
     printf("  diagnostics: each unit's alone, in the command line's order, by %u lane counts\n", (uint32_t)BUSTER_ARRAY_LENGTH(lane_counts));
 }
 
+// The words of stack check_units_test_poison fills: a quarter of a megabyte below its caller's frame.
+#define BUSTER_CHECK_UNITS_TEST_POISON_WORDS 32768
+
+// Fills the stack below its caller's frame with `pattern`, where the frames of what the caller calls next start: their
+// locals that nothing sets read it.
+static __attribute__((noinline)) void check_units_test_poison(uint64_t pattern)
+{
+    volatile uint64_t words[BUSTER_CHECK_UNITS_TEST_POISON_WORDS];
+    for (uint32_t w = 0; w < BUSTER_CHECK_UNITS_TEST_POISON_WORDS; w += 1)
+    {
+        words[w] = pattern;
+    }
+}
+
+// The driver's command `arguments` (run_check_command's), in this process, over a stack check_units_test_poison filled
+// with `pattern`.
+static __attribute__((noinline)) int check_units_test_poisoned_command(uint64_t pattern, int count, char** arguments)
+{
+    check_units_test_poison(pattern);
+    return run_check_command(count, arguments, true);
+}
+
+// The refusal of two units of one object's name over a poisoned stack (see the file's comment), in `directory`, the
+// refusals'. The pattern is a mapping's address: an arena read uninitialized would have it as its base, its capacity and
+// its mapping's offset, and its release would unmap everything below it, the child's code among it.
+static void check_units_test_poisoned_refusal(CheckUnitsTestTally* tally, const char* directory)
+{
+    char errors_path[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(errors_path, sizeof(errors_path), "%s/poisoned.txt", directory);
+    snprintf(object, sizeof(object), "%s/other.o", directory);
+    unlink(object);
+    fflush(stdout);
+    fflush(stderr);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        void* mapping = mmap(NULL, 1u << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        const struct rlimit limit = { 0 };
+        const int err = open(errors_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (mapping != MAP_FAILED && err >= 0 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0)
+        {
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+            char* arguments[] = { "-c", "other.c", "nested/other.c", NULL };
+            _exit(check_units_test_poisoned_command((uint64_t)(uintptr_t)mapping, 3, arguments));
+        }
+        _exit(127);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    uint64_t length = 0;
+    char* text = check_units_test_read(errors_path, &length);
+    check_units_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 1 && text != NULL && strstr(text, "would both write other.o") != NULL,
+                            "the refusal over a stack poisoned with a mapping's address exits with its message", errors_path);
+    check_units_test_expect(tally, !check_units_test_exists(object), "the refusal over a poisoned stack writes no object", object);
+    free(text);
+}
+
 // The refusals (see the file's comment), in `directory`.
 static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
@@ -749,7 +814,128 @@ static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* ex
         check_units_test_expect(tally, refusals[r].output == NULL || !check_units_test_exists(path), "refused, without an output", refusals[r].name);
         free(text);
     }
-    printf("  refusals: %u commands refused\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
+    check_units_test_poisoned_refusal(tally, directory);
+    printf("  refusals: %u commands refused, and one over a poisoned stack\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
+}
+
+// The jobserver's tokens while the link writes (see the file's comment), in a directory of its own under `directory`.
+static void check_units_test_jobserver(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    static const char main_text[] = "#include <stdio.h>\n"
+                                    "int job_a(int v);\n"
+                                    "int job_b(int v);\n"
+                                    "int job_c(int v);\n"
+                                    "extern const unsigned char job_table[1 << 20];\n"
+                                    "int main(void)\n"
+                                    "{\n"
+                                    "    const int total = job_a(1) + job_b(2) + job_c(3) + job_table[12345];\n"
+                                    "    printf(\"%d\\n\", total);\n"
+                                    "    return total == 19 ? 0 : 1;\n"
+                                    "}\n";
+    static const char a_text[] = "int job_a(int v)\n{\n    return v + 1;\n}\n";
+    static const char b_text[] = "int job_b(int v)\n{\n    return v * 2;\n}\n";
+    static const char c_text[] = "const unsigned char job_table[1 << 20] = { [12345] = 7 };\nint job_c(int v)\n{\n    return v + 3;\n}\n";
+    static const char* const names[] = { "job_main.c", "job_a.c", "job_b.c", "job_c.c" };
+    const char* const texts[] = { main_text, a_text, b_text, c_text };
+    char jobs_directory[PATH_MAX];
+    char path[PATH_MAX];
+    snprintf(jobs_directory, sizeof(jobs_directory), "%s/jobserver", directory);
+    bool written = mkdir(jobs_directory, 0755) == 0;
+    for (uint32_t f = 0; written && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", jobs_directory, names[f]);
+        written = parse_test_write(path, texts[f], strlen(texts[f]));
+    }
+    // The jobserver, a FIFO of three tokens the test holds open both ways, and the executable's path, a FIFO.
+    char jobs[PATH_MAX];
+    char program[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(jobs, sizeof(jobs), "%s/jobs", jobs_directory);
+    snprintf(program, sizeof(program), "%s/program", jobs_directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", jobs_directory);
+    written = written && mkfifo(jobs, 0600) == 0 && mkfifo(program, 0600) == 0;
+    const int read_end = written ? open(jobs, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+    const int write_end = read_end >= 0 ? open(jobs, O_WRONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+    const uint8_t tokens[] = { 'j', 0, 'x' };
+    const bool ready = write_end >= 0 && write(write_end, tokens, sizeof(tokens)) == sizeof(tokens);
+    check_units_test_expect(tally, ready, "write the jobserver's units, its FIFO of three tokens and the executable's FIFO", jobs_directory);
+    char flags[PATH_MAX + 64];
+    snprintf(flags, sizeof(flags), " -j4 --jobserver-auth=fifo:%s", jobs);
+    fflush(stdout);
+    fflush(stderr);
+    const pid_t child = ready ? fork() : -1;
+    if (child == 0)
+    {
+        const struct rlimit limit = { 0 };
+        const int err = open(errors_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (err >= 0 && dup2(err, 1) == 1 && dup2(err, 2) == 2 && chdir(jobs_directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 &&
+            setenv("MAKEFLAGS", flags, 1) == 0)
+        {
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+            char* arguments[] = { (char*)executable, "--lanes", "4", "-o", "program", (char*)names[0], (char*)names[1], (char*)names[2], (char*)names[3], NULL };
+            execv(executable, arguments);
+        }
+        _exit(127);
+    }
+    // The executable's FIFO, read as its writer writes it: its first bytes come while the writer holds the rest.
+    const int output = child > 0 ? open(program, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+    bool writing = false;
+    int status = 0;
+    bool ended = false;
+    for (uint32_t tick = 0; output >= 0 && !writing && !ended && tick < BUSTER_CHECK_UNITS_TEST_SECONDS * 10; tick += 1)
+    {
+        struct pollfd ready_output = { .fd = output, .events = POLLIN };
+        writing = poll(&ready_output, 1, 100) == 1 && (ready_output.revents & POLLIN) != 0;
+        ended = !writing && waitpid(child, &status, WNOHANG) == child;
+    }
+    const int held = writing ? worker_budget_test_available(read_end) : -1;
+    check_units_test_expect(tally, writing && held == 0, "while the link writes, the jobserver holds none of the tokens its lanes took", errors_path);
+    // The rest of the executable, then the command's end.
+    uint64_t length = 0;
+    uint64_t capacity = 4u << 20;
+    uint8_t* bytes = writing ? malloc(capacity) : NULL;
+    bool drained = bytes != NULL && fcntl(output, F_SETFL, 0) == 0;
+    for (ssize_t got = 1; drained && got > 0;)
+    {
+        got = length < capacity ? read(output, bytes + length, capacity - length) : -1;
+        drained = got >= 0 || errno == EINTR;
+        length += got > 0 ? (uint64_t)got : 0;
+    }
+    if (output >= 0)
+    {
+        close(output);
+    }
+    const bool waited = ended || (child > 0 && waitpid(child, &status, 0) == child);
+    check_units_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && drained && length > (1u << 20),
+                            "the link under the jobserver succeeds, its executable of more than a megabyte read whole", errors_path);
+    check_units_test_expect(tally, read_end >= 0 && worker_budget_test_tokens(read_end, tokens, sizeof(tokens)),
+                            "once the command ends, the jobserver holds every token again, each once", jobs);
+    // The executable the test read runs.
+    char copy[PATH_MAX];
+    snprintf(copy, sizeof(copy), "%s/program.copy", jobs_directory);
+    const int copied = drained ? open(copy, O_WRONLY | O_CREAT | O_TRUNC, 0755) : -1;
+    const bool saved = copied >= 0 && write(copied, bytes, length) == (ssize_t)length;
+    if (copied >= 0)
+    {
+        close(copied);
+    }
+    char* run[] = { "./program.copy", NULL };
+    snprintf(path, sizeof(path), "%s/run.txt", jobs_directory);
+    const int ran = saved ? check_units_test_run(jobs_directory, run, path, "/dev/null", false) : -1;
+    uint64_t output_length = 0;
+    char* printed = ran == 0 ? check_units_test_read(path, &output_length) : NULL;
+    check_units_test_expect(tally, ran == 0 && printed != NULL && strcmp(printed, "19\n") == 0, "the executable the jobserver's link wrote runs", copy);
+    free(printed);
+    free(bytes);
+    if (write_end >= 0)
+    {
+        close(write_end);
+    }
+    if (read_end >= 0)
+    {
+        close(read_end);
+    }
+    printf("  jobserver: its tokens held while the link writes, every one back after\n");
 }
 
 // The first program's objects and executable in a child whose lanes can't start (see the file's comment).
@@ -1038,6 +1224,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
+        check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
     }
     if (made && !keep && tally.failures == 0)

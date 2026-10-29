@@ -5156,8 +5156,10 @@ functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
 and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 `clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
 objects defines, and each of whose units' `-c` objects is the unit's alone;
-diagnostics, each unit's alone in the command line's order; refusals; and
-lanes that don't start. With `--corpus DIR` it compiles DIR's `.c` files at
+diagnostics, each unit's alone in the command line's order; refusals, one
+of them over a poisoned stack; the jobserver's tokens held while the link
+writes; and lanes that don't start. With `--corpus DIR` it compiles DIR's
+`.c` files at
 once with `-c`, plainly and poisoned, against each alone, and with
 `--generate DIR` it writes a program of synth's shape (512 units of 200
 functions by default) for measurements, and tests nothing.

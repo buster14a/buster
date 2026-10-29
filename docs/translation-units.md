@@ -50,8 +50,10 @@ every lane busy.
 The driver runs at most one lane per unit, and by default one per CPU the
 process may run on; `--lanes N` runs N, and the worker budget (#673:
 `--worker-budget`, GNU make's jobserver) limits the lanes past the calling
-thread's own as it limits #151's. Lanes that can't start leave their units to
-the calling thread, which compiles them alone: the same outputs.
+thread's own as it limits #151's. Its lease covers the units' lanes and the
+executable's writers, which run on as many, and its slots go back once both
+are done. Lanes that can't start leave their units to the calling thread,
+which compiles them alone: the same outputs.
 
 Before the lanes start, the calling thread builds the tables every unit's code
 reads and the first unit to need them would otherwise build: the parser's
@@ -315,7 +317,16 @@ driver as a process, in a directory of its own:
   writes the objects of the units without errors only, and the link writes
   nothing.
 - **Refusals:** a name two units define, a name none defines, `-c -o`, a dump,
-  `-g` for an executable, two units of one object's name.
+  `-g` for an executable, two units of one object's name; and that last one in
+  a child whose stack was filled with a mapping's address first, which must
+  exit with its message as with a clean stack: a local the driver read before
+  setting it would release an arena of that address and unmap the child's
+  code.
+- **The jobserver:** four units by `--lanes 4` under a GNU make jobserver of
+  three tokens, linked into an executable of more than a megabyte whose path
+  is a FIFO, which the test reads: while the writer writes, the jobserver
+  holds none of the tokens; once the command ends, it holds every one again,
+  and the executable runs.
 - **Lanes that don't start**, in a child limited to the processes it has:
   one lane's outputs.
 - **`--corpus DIR`:** every `.c` file in DIR at once with `-c`, by 8 lanes,

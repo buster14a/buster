@@ -641,7 +641,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         const bool named = !command->emit_object || check_units_objects(units, count, &arena);
         // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
         // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
-        Parser tables_parser;
+        // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release
+        // then releases nothing.
+        Parser tables_parser = { 0 };
         const ParseOptions tables_options = { .scalar = command->scalar, .tree_only = true };
         bool ready = named && parse_initialize(&tables_parser, &tables_options, command->options.language);
         parse_release(&tables_parser);
@@ -654,7 +656,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = unwind_initialize();
         }
-        // A lane per unit, at most, and the lanes past the calling thread's own as the budget gives them (#673).
+        // A lane per unit, at most, and the lanes past the calling thread's own as the budget gives them (#673). The
+        // lease covers the units' lanes and the executable's writers, as many, and goes back once both are done.
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
         const uint32_t wanted = most < count ? most : count;
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
@@ -691,11 +694,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             arena_pool = 0;
             arena_pool_release(&states->pool);
             lane_restore(caller);
-            const bool returned = worker_budget_release(&lease);
             lanes->active = ran ? active : 1;
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
             // The units' diagnostics, in the command line's order.
-            result = returned ? 0 : 1;
+            result = 0;
             for (uint32_t u = 0; u < count; u += 1)
             {
                 if (units[u].diagnostic_bytes != 0)
@@ -709,10 +711,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 free(units[u].diagnostics);
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;
-            }
-            if (!returned)
-            {
-                fprintf(stderr, "error: could not return GNU make worker slots\n");
             }
             // The lanes' caches and arenas: the kept links are all the link reads.
             for (uint32_t l = 0; l < active; l += 1)
@@ -742,6 +740,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 arena_release(&states[l].kept_bytes);
                 arena_release(&states[l].kept);
             }
+        }
+        // The lease's slots go back whatever happened since it was taken.
+        if (!worker_budget_release(&lease))
+        {
+            fprintf(stderr, "error: could not return GNU make worker slots\n");
+            result = 1;
         }
     }
     arena_release(&arena);
