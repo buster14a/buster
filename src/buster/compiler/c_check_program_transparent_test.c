@@ -65,6 +65,21 @@ static const char check_test_program_transparent_stack[] =
     "h^=mine_late(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,ip,(short)-n,(long)n*9,(long)n*3,(__int128)n*5,ip,(struct external_big){n,n,n});"
     "h^=external_transparent_late_apply(mine_late,n);return (int)(h%1000003);}";
 
+// A union of ExternalTF's layout made transparent after initializers that name no function, and before one that does,
+// which clang's code passes as its first member, two floats' bytes in xmm0, where the union's own classes take a general
+// register: called with its value and with its first member, directly and through the pointer, the callee the harness's
+// clang code (check_test_program_harness's external_transparent_first, of ExternalTF).
+static const char check_test_program_transparent_first[] =
+    "union L{struct{float x,y;}p;struct{int a,b;}q;};unsigned long external_transparent_first(union L);"
+    "int seed=3;int*seed_address=&seed;typedef union L TL __attribute__((transparent_union));"
+    "unsigned long(*first)(union L)=external_transparent_first;"
+    "int tested(int n){union L l={.q={n,*seed_address}};"
+    "return (int)(external_transparent_first(l)+first(l)*3+external_transparent_first(l.p)*5+first(l.p)*7);}";
+
+// The reason the lowering refuses a union made transparent after clang's code may have classified a function's type.
+static const char check_test_program_transparent_late[] =
+    "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
+
 static void check_test_program_transparent(CheckTest* test, const char* clang)
 {
     check_test_program_source(test, check_test_program_transparent_calls, "transparent-union-calls", clang);
@@ -89,7 +104,45 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
     check_test_program_boundary_reason(test,
         "union U{struct{float x,y;}p;struct{int a,b;}q;};int f(union U u);int early(union U u){return f(u);}"
         "typedef union U T __attribute__((transparent_union));int tested(int n){return n;}",
-        "transparent-union-made-after-a-definition-apart", true, false, 1, 0, "unions made transparent after a function definition, whose first members pass otherwise");
+        "transparent-union-made-after-a-definition-apart", true, false, 1, 0, check_test_program_transparent_late);
+    // The same after a static object's initializer that names a function, whose address clang's code takes where it emits
+    // the object, before any definition (#801's review): clang 23.1.4 passes `external`'s and `saved`'s arguments as the
+    // union, in a general register, and an aggregate's initializer names it as well. Refused by name, with 0 to 17
+    // declarations before them, which put the initializer's declaration in each lane of the vector path's scan and in its
+    // tail; the same without a function in the initializers is taken (check_test_program_transparent_first runs it).
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        uint32_t references;
+        bool late;
+    } initializers[] =
+    {
+        { "transparent-union-made-after-an-initializer", "int(*saved)(union U)=external;", 2, true },
+        { "transparent-union-made-after-an-aggregate-initializer", "struct S{int(*f)(union U);}s={&external};int(*saved)(union U);", 2, true },
+        { "transparent-union-made-after-other-initializers", "int x=1;int*saved_address=&x;int(*saved)(union U);", 2, false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(initializers); i += 1)
+    {
+        for (uint32_t padding = 0; padding < 18; padding += 1)
+        {
+            char source[1024];
+            char name[160];
+            int length = 0;
+            for (uint32_t p = 0; p < padding; p += 1)
+            {
+                length += snprintf(source + length, sizeof(source) - (size_t)length, "int p%u;", p);
+            }
+            snprintf(source + length, sizeof(source) - (size_t)length,
+                     "union U{struct{float x,y;}p;struct{int a,b;}q;};int external(union U);%stypedef union U T __attribute__((transparent_union));"
+                     "int tested(int n){union U u={.q={n,2}};return external(u)+saved(u);}",
+                     initializers[i].source);
+            snprintf(name, sizeof(name), "%s after %u declarations", initializers[i].name, padding);
+            check_test_program_boundary_reason(test, source, name, true, !initializers[i].late, initializers[i].references, 1,
+                                               initializers[i].late ? check_test_program_transparent_late : NULL);
+        }
+    }
+    check_test_program_source(test, check_test_program_transparent_first, "transparent-union-made-between-initializers", clang);
     // A union aligned past its first member by an attribute of its own: clang's code takes its registers from the member
     // and its stack slot from the union, so the lowering refuses it by name, as a call's argument, a parameter and va_arg's.
     check_test_program_boundary_reason(test,

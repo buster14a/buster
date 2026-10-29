@@ -1348,15 +1348,23 @@ What the lowering covers past scalars (#145's programs):
   with `_GNU_SOURCE`. Two cases are refused by name. A union sized or aligned
   otherwise than its first member, by an `aligned` or `packed` attribute of its
   own: clang's code takes its registers from the member and its stack slot
-  from the union (`getIndirectResult`). And a union made transparent after a
-  function definition, by a later declaration's attribute, whose first member
-  passes otherwise than the union does (its registers, its stack or its
-  extension): clang's code classifies a function's type where it first meets
-  it and keeps that for the type's every use (`check_lower_transparent_late`;
-  clang 23.1.4 passes `void f(union U)` as the union in a call after the
-  attribute when a definition before it met the type). A union only made
-  transparent inside a body is refused so too, though clang's code would pass
-  it as its member. `test-checker`'s programs
+  from the union (`getIndirectResult`). And a union made transparent, by a
+  later declaration's attribute, after a function definition or a static
+  object's initializer that names a function, whose first member passes
+  otherwise than the union does (its registers, its stack or its extension):
+  clang's code classifies a function's type where it first meets it, which an
+  object's initializer does where clang's code emits the object, and keeps
+  that for the type's every use (`check_lower_transparent_late`; clang 23.1.4
+  passes `void f(union U)` as the union in a call after the attribute when a
+  definition before it met the type, or an initializer such as
+  `void (*p)(union U) = f;`). The lowering takes the earliest such place in the
+  unit (`check_lower_first_classification`, the first body or an earlier
+  initializer that names any function), the first time a lane asks, which
+  only such a union makes it do. So a union only made transparent inside a
+  body, or after a static object's initializer, which clang's code emits only
+  once a function uses the object, or after one that names a function of
+  another type, is refused so too, though clang's code would pass it as its
+  member. `test-checker`'s programs
   (`c_check_program_transparent_test.c`) run each kind of member value, union
   values, unnamed arguments and `va_arg`, in registers and on the stack,
   against clang -O0's build of the same source, calling the harness's clang

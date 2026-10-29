@@ -847,6 +847,8 @@ static const char check_test_program_harness[] =
     "int external_short_bits(int bits){return bits;}int external_ushort_bits(int bits){return bits;}int external_bool_bits(int bits){return bits;}\n"
     // An _Atomic one, which isn't transparent: it passes as the atomic type (on the stack, as clang passes this one).
     "unsigned long external_atomic_transparent(_Atomic ExternalTF f){ExternalTF v=f;return (unsigned long)(v.q.a+v.q.b*3);}\n"
+    // Of a union of its layout that a program makes transparent itself (check_test_program_transparent_first).
+    "unsigned long external_transparent_first(ExternalTF f){return (unsigned long)(f.q.a+f.q.b*7);}\n"
     "unsigned long external_transparent_apply(unsigned long(*f)(int,ExternalTF,ExternalTS,ExternalTP,ExternalTQ,ExternalTD,ExternalTW,ExternalTA,ExternalTB),int n){"
     "struct external_ip ip={n,n*2};struct external_big big={n,n+1,n+2};long x=n*5,y=n+6;struct external_w ws={n,n+9};"
     "return f(0,ip,(short)-n,&x,&y,(struct external_dv){n*0.25},(__int128)n*8,ip,big)"

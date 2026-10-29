@@ -487,6 +487,9 @@ struct CheckLowerWriter
     uint64_t runtime_mask;
     uint32_t runtime_count;
     uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
+    // until the writer first asks.
+    uint64_t first_classification;
 };
 
 _Static_assert(CHECK_LOWER_RUNTIMES <= 64, "a part's runtime functions are a 64-bit mask");
@@ -1022,26 +1025,86 @@ static uint8_t check_lower_transparent_class(const CheckLowerWriter* writer, Typ
     return value && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64 ? class : UINT8_MAX;
 }
 
-// Whether a transparent union was made so after the unit's first function definition, by a later declaration's
-// attribute (CheckGraph.transparent_unions has its activation's token). clang's code classifies a function's type the
-// first time it meets it and keeps that for the type's every use: a type met before the attribute passes the union as
-// the union, after it too.
-static bool check_lower_transparent_late(const CheckLowerWriter* writer, TypeId type)
+// Whether static object declaration `token`'s initializer names a function (check_lower_first_classification): one of
+// its tokens bound to a function's declaration.
+static bool check_lower_initializer_names_function(const CheckInput* input, uint32_t token)
+{
+    const uint32_t count = input->token_count;
+    const uint32_t end = input->initializer_ends[token] < count ? input->initializer_ends[token] : count;
+    bool named = false;
+    for (uint32_t use = input->initializer_begins[token]; use < end && !named; use += 1)
+    {
+        const uint32_t declaration = input->declarations[use];
+        named = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+    }
+    return named;
+}
+
+// The first token where clang's code may classify a function's type, which it keeps for the type's every use
+// (check_lower_transparent_late), or UINT32_MAX for a unit with none: the first function definition's body, or a static
+// object's initializer before it that names a function, whose address clang's code takes where it emits the object, at
+// its definition. clang 23.1.4 passes a union to `int f(union U)` as the union after `int (*p)(union U) = f;`, though a
+// later declaration makes it transparent before any definition. Every such initializer counts, though clang's code
+// emits a static object's when a function first uses it, and so does every function, though only the function's own
+// type keeps its classification: the earliest place clang's code may classify, so that a union it may pass either way
+// is refused. A lane's writer finds it the first time it asks (CheckLowerWriter.first_classification), which only a
+// transparent union whose first member passes otherwise than it makes it do. AVX-512 finds the static objects'
+// declarations with initializers 16 tokens at a time; the rest and the `scalar` path test every token.
+static __attribute__((noinline)) uint32_t check_lower_first_classification(CheckLowerWriter* writer)
+{
+    if (writer->first_classification == 0)
+    {
+        const CheckProgram* program = writer->program;
+        const CheckInput* input = program->input;
+        const uint32_t limit = program->body_count != 0 ? program->bodies[0].opening : input->token_count;
+        const uint32_t none = program->body_count != 0 ? limit : UINT32_MAX;
+        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        uint32_t found = none;
+        uint32_t token = 0;
+        for (; !BUSTER_SCALAR_PATH(writer->scalar) && found == none && limit - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+        {
+            const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
+            const __mmask16 initialized = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
+                                          _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128()) &
+                                          _mm512_cmplt_epu32_mask(_mm512_loadu_si512(input->initializer_begins + token), _mm512_loadu_si512(input->initializer_ends + token));
+            for (uint32_t bits = initialized; bits != 0 && found == none; bits &= bits - 1)
+            {
+                const uint32_t declaration = token + (uint32_t)__builtin_ctz(bits);
+                found = check_lower_initializer_names_function(input, declaration) ? declaration : none;
+            }
+        }
+        for (; found == none && token < limit; token += 1)
+        {
+            if (input->declarations[token] == token && input->static_objects[token] && input->initializer_begins[token] < input->initializer_ends[token] &&
+                check_lower_initializer_names_function(input, token))
+            {
+                found = token;
+            }
+        }
+        writer->first_classification = (uint64_t)found + 1;
+    }
+    return (uint32_t)(writer->first_classification - 1);
+}
+
+// Whether a transparent union was made so, by a later declaration's attribute (CheckGraph.transparent_unions has its
+// activation's token), after clang's code may have classified a function's type (check_lower_first_classification).
+// clang's code classifies a function's type the first time it meets it and keeps that for the type's every use: a type
+// met before the attribute passes the union as the union, after it too.
+static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const uint32_t tag = program->types->types.index[type_index(type_strip_aligned(program->types, type))];
-    return graph->transparent_unions != NULL && program->body_count != 0 && tag < graph->tag_completion_count &&
-           graph->transparent_unions[tag] > program->bodies[0].opening;
+    return graph->transparent_unions != NULL && tag < graph->tag_completion_count && graph->transparent_unions[tag] > check_lower_first_classification(writer);
 }
 
 // Why a struct or a union can't pass as a transparent union's first member (check_lower_passed_as), or NULL (another's
 // passes as itself). A transparent union passes so where it has that member's size and alignment, as it does but by an
 // aligned or packed attribute of its own: clang's code takes such a union's registers from the member and its stack slot
-// from the union (getIndirectResult), which differ. And where the union was made transparent after a function's
-// definition (check_lower_transparent_late) and its first member passes otherwise than it (its registers, its stack or
-// its extension), clang's code may pass it as either. Out of line: only aggregates ask.
-static __attribute__((noinline)) const char* check_lower_transparent_passed(const CheckLowerWriter* writer, TypeId type)
+// from the union (getIndirectResult), which differ. And where the union was made transparent after clang's code may have
+// classified a function's type (check_lower_transparent_late) and its first member passes otherwise than it (its
+// registers, its stack or its extension), clang's code may pass it as either. Out of line: only aggregates ask.
+static __attribute__((noinline)) const char* check_lower_transparent_passed(CheckLowerWriter* writer, TypeId type)
 {
     const AbiTable* table = writer->abi_table;
     const uint32_t places = BUSTER_ABI_PASS_REGISTER_CLASSES | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_UNCOUNTED |
@@ -1055,14 +1118,14 @@ static __attribute__((noinline)) const char* check_lower_transparent_passed(cons
     }
     else if (first != own && ((table->pass[own] ^ table->pass[first]) & places) != 0 && check_lower_transparent_late(writer, type))
     {
-        feature = "unions made transparent after a function definition, whose first members pass otherwise";
+        feature = "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
     }
     return feature;
 }
 
 // Why an argument or a parameter of this type can't be passed, or NULL: a value of a class, or a struct or a union (and a
 // transparent union as its first member, check_lower_transparent_passed).
-static const char* check_lower_passed(const CheckLowerWriter* writer, TypeId type)
+static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;
     const char* feature = NULL;
