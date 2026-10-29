@@ -145,8 +145,9 @@ execution ends. Caller-provided global memory retains the program's writes.
 
 `interpreter_native.c` marshals C scalar values into the host SysV x86-64
 integer, SSE and stack argument locations, including mixed variadic calls and
-wide scalar arguments/results. Native function addresses are explicit bindings.
-Calls accept at most 256 scalar arguments. Variadic operands must already have
+wide scalar arguments/results, and with a call's ABI records its aggregates too
+(below). Native function addresses are explicit bindings.
+Calls accept at most 256 arguments. Variadic operands must already have
 their default promotions. Because IR integers have no signedness, native i8/i16
 arguments require explicit extension metadata in `native_extensions`; the typed
 front supplies it from machine classes. Ambiguous narrow native calls fail with
@@ -167,6 +168,58 @@ Later typed reads retain undefined-byte diagnostics; `memset` defines its writte
 bytes. This is the oracle's checking policy, with the language-level questions
 about indeterminate values and padding discussed separately in
 [WG14 DR451](https://open-std.org/jtc1/sc22/wg14/www/docs/dr_451.htm).
+
+### Aggregates by value and variadic definitions
+
+A call with ABI records (#131, [#788](https://github.com/buster14a/buster/issues/788))
+runs as the IR's records say. Between interpreted functions, each named aggregate
+argument's bytes, definedness and all, are copied into an object the callee's frame
+owns (aligned to 64), whose address is the callee's parameter; an `IGNORE`d one, an
+empty record's 1-byte object, gets a fresh undefined object whatever the call
+passes. A callee that returns through a hidden pointer takes the call's destination
+as parameter 0; one that returns in registers returns its bytes' address, from which
+`ret` copies at most the call's room to the destination while the callee's memory
+still holds them. A call that doesn't use such a result has no room for it and
+drops it. The call's and the callee's records must agree (each named aggregate's
+size, the result's kind), and an entry can't have records of its own, since no call
+places them: either is `INTERPRETER_INVALID`.
+
+A variadic definition (#148) is entered from a call, which lays out its anchors:
+the register save area holds the argument registers as the psABI saves them (rdi to
+r9 at 0 to 40, xmm0 to xmm7's low eightbytes from 48), and the overflow area is the
+call's argument area past the named arguments' bytes (its anchor at
+`incoming.stack_bytes`, the area aligned as rsp is at the call). Each argument's
+place is the call's records' or, without records, LLVM's assignment of a scalar: the
+next register of its kind (two general ones for an `i128`), or else an 8-byte stack
+slot (16 bytes aligned to 16 for an `i128` and a long double). Only the bytes the
+arguments write are defined. The named arguments' registers must be the
+definition's `incoming` counts, which `va_start`'s offsets take, and the unnamed
+ones must have their default promotions; a variadic entry, which no call lays out,
+is refused.
+
+A native called with records gets each argument where its location says (its
+registers, its stack slot, a `SPLIT`'s two, nothing for `IGNORE`), an aggregate's
+eightbytes from its bytes, a hidden pointer in rdi and `al` the records' vector
+count. An aggregate result comes from rax, rdx, xmm0's and xmm1's low eightbytes and
+st0's ten bytes, or through the hidden pointer, and its destination's bytes are then
+defined. What the bridge can't place is `INTERPRETER_NATIVE`, before the call: a
+register no argument goes in, a part past its location's registers (a vector
+register's upper half, as an `SSEUP` part takes), an argument area aligned past 16
+or larger than 4096 bytes, and a result in st1 or in parts of other sizes.
+
+`test-ir-interpreter` checks each against values worked out in C: calls with
+records between interpreted functions (a struct in registers whose callee writes its
+copy, one through a hidden pointer, an empty record's), their refusals, and a result
+room smaller than its result; a variadic definition reading back eighteen unnamed
+scalars from its anchors, and another two unnamed structs placed by records; and six
+natives clang compiled, which take and return structs in general and vector
+registers, on the stack, through a hidden pointer and in st0, against calls of them
+from C, with what the bridge refuses. `test-ir-lowering` runs Tier 0's generated
+programs with records (without floating values) and its variadic callees through the
+interpreter against their native code ([the IR guide](ir.md)). Copying an aggregate
+for its callee, the result's bytes, the hidden pointer, the overflow anchor's
+offset, the named registers' check, an `IGNORE`d parameter's fresh object, a native's
+result parts and the vector registers' count were each checked by mutation.
 
 Inline assembly, threads and signals are outside this oracle's scope. Program
 callbacks from libc into interpreted functions and setjmp/longjmp are not an

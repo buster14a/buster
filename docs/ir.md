@@ -536,7 +536,16 @@ reach what it is for (indirect calls; calls with records, aggregate parameters a
 both kinds of result). Each program
 is also compiled by Tier 0 and run natively in a child process
 (`test-tier0`'s harness), and its result and global bytes must equal the IR
-executor's, besides the typed interpreter's. The executor bounds every access
+executor's, besides the typed interpreter's. The records' set runs again without
+floating values (whose out-of-range conversions the shared interpreter refuses, as
+C leaves them undefined) through the shared IR's interpreter (#788), its calls with
+records as [the tools guide](ir-tools.md)'s "Aggregates by value and variadic
+definitions" has them, with undefined-byte checks off: its `COPY` entries carry
+structs' padding, which nothing reads. And `test-tier0-variadic-frame`'s callees
+(`ir_lower_test_variadic_frames`: `va_start`, `va_copy` and `va_arg` over general,
+vector and overflow arguments) are lowered, run natively from clang's caller and by
+the shared interpreter from an IR caller of the same arguments, and every output that
+isn't an address must be the native run's. The executor bounds every access
 by its slot, so a piece past an object's end faults. Two fixtures target the
 new inputs: two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16),
 the first written in pieces of every width and copied into the second, whose

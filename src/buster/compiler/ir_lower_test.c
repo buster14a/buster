@@ -686,7 +686,9 @@ static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* low
 // native code of the same streams (test-tier0's harness, which checks the two of them against each other too): their
 // results and global bytes; and each lowered function promoted to SSA by both paths. `options` choose the shapes;
 // `name` labels the report.
-static uint64_t ir_lower_test_dynamic_interpret(const IrFunction* functions, const Tier0Program* generated, const Tier0TestData* data, uint8_t* globals, const uint64_t* inputs, Arena* execution, bool* fault)
+// The shared IR's interpreter on a generated program, strictly or, with `padding`, without undefined-byte checks: a
+// program's COPY entries carry its structs' padding, which nothing reads.
+static uint64_t ir_lower_test_shared_interpret(const IrFunction* functions, const Tier0Program* generated, const Tier0TestData* data, uint8_t* globals, const uint64_t* inputs, bool padding, Arena* execution, bool* fault)
 {
     IrInterpreterFunction code[BUSTER_TIER0_GENERATE_MAX_FUNCTIONS];
     InterpreterBinding bindings[BUSTER_TIER0_GENERATE_MAX_GLOBALS];
@@ -705,7 +707,9 @@ static uint64_t ir_lower_test_dynamic_interpret(const IrFunction* functions, con
     {
         arguments[a] = (InterpreterValue){ .low = inputs[a] };
     }
-    const InterpreterResult result = ir_interpret(&program, code[generated->function_count - 1].symbol, arguments, 3, 0, execution);
+    InterpreterOptions options = interpreter_default_options();
+    options.check_undefined = !padding;
+    const InterpreterResult result = ir_interpret(&program, code[generated->function_count - 1].symbol, arguments, 3, &options, execution);
     *fault = result.status != INTERPRETER_OK;
     if (*fault)
     {
@@ -846,8 +850,11 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
             const uint64_t expected = tier0_test_interpret(program, sources, &data, globals, arguments[r], &source_fault);
             memcpy(expected_globals, globals, data.size);
             tier0_test_initial(program, &data, globals);
-            const uint64_t actual = options.vlas ? ir_lower_test_dynamic_interpret(functions, program, &data, globals, arguments[r], &execution, &ir_fault)
-                                               : ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
+            // The shared IR's interpreter runs the dynamic stack's programs, and the records' without floating values
+            // (#788: their calls with ABI records), whose out-of-range conversions it refuses as C does.
+            const bool shared = options.vlas || (records && !options.floating);
+            const uint64_t actual = shared ? ir_lower_test_shared_interpret(functions, program, &data, globals, arguments[r], !options.vlas, &execution, &ir_fault)
+                                           : ir_lower_test_interpret(functions, sources->count, sources->count - 1, program->global_count, &data, globals, arguments[r], 3, &execution, &ir_fault);
             ok = ir_lower_test_expect(tally, !source_fault && !ir_fault, "typed and IR execution finish", program_seed, r);
             ok = ir_lower_test_expect(tally, expected == actual && memcmp(expected_globals, globals, data.size) == 0, "typed and IR results and global bytes agree", program_seed, r) && ok;
             ok = ir_lower_test_expect(tally, outcomes[r].result == actual && outcomes[r].globals == tier0_test_hash(globals, data.size), "native and IR results and global bytes agree", program_seed, r) && ok;
@@ -2459,6 +2466,245 @@ static void ir_lower_test_guarded(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
+// A variadic definition's frame through the shared IR's interpreter (#788): test-tier0-variadic-frame's original callees
+// (va_start, va_copy and va_arg's recipes over general, vector and overflow arguments, and kind 4's lists without an
+// incoming frame), lowered by both paths and run natively from clang's caller in a child, onto a shared page, and by the
+// interpreter from an IR caller of the same arguments. Every output that isn't an address must be the native run's: the
+// named parameters, each va_arg's and its copy's, the lists' offsets and how far their overflow cursors moved, the save
+// area's argument slots, the canaries, the object and the result. Kind 3 passes vectors, which the IR has no type for.
+// The stream reads the save area whole, whose other bytes the IR's frame leaves undefined: the interpreter runs without
+// undefined-byte checks.
+static void ir_lower_test_variadic_frames(IrLowerTestTally* tally)
+{
+    static const uint8_t kinds[] = { 0, 1, 2, 4, 5 };
+    static const uint8_t named[] = { 1, 3, 18, 1, 7 };
+    static const uint8_t counts[] = { 11, 21, 26, 1, 15 };
+    // Each kind's arguments as tier0_vf_invoke passes them: 0 the output, 0x100 + i tier0_vf_gp(i), 0x200 + i tier0_vf_fp(i).
+    static const uint16_t arguments[][26] = {
+        { 0, 0x100, 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107, 0x108, 0x109 },
+        { 0, 0x11e, 0x209, 0x100, 0x200, 0x101, 0x201, 0x102, 0x202, 0x103, 0x203, 0x104, 0x204, 0x105, 0x205, 0x106, 0x206, 0x107, 0x207, 0x208, 0x209 },
+        { 0, 0x11e, 0x11f, 0x120, 0x121, 0x122, 0x123, 0x124, 0x200, 0x201, 0x202, 0x203, 0x204, 0x205, 0x206, 0x207, 0x208, 0x209, 0x100, 0x200, 0x101, 0x201, 0x102, 0x202, 0x103, 0x203 },
+        { 0 },
+        { 0, 0x11e, 0x11f, 0x120, 0x121, 0x122, 0x123, 0x100, 0x200, 0x101, 0x201, 0x102, 0x202, 0x103, 0x203 },
+    };
+    Tier0Tables tables =
+    {
+        0
+    };
+    Arena arena = arena_reserve(UINT64_C(1) << 26);
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena twin_output = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    Arena execution = arena_reserve(UINT64_C(1) << 26);
+    Tier0VfStream* stream = calloc(1, sizeof(*stream));
+    Tier0VfOutput* interpreted = calloc(1, sizeof(*interpreted));
+    uint8_t* page = mmap(NULL, BUSTER_TIER0_VF_PAGE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint32_t compared = 0;
+    bool ready = arena.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && stream != 0 && interpreted != 0 && page != MAP_FAILED && tier0_tables_open(&tables);
+    ready = ir_lower_test_expect(tally, ready, "variadic frames' arenas and ABI tables", 0, 0);
+    for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+    {
+        const uint32_t kind = kinds[k];
+        Tier0VfTally vf =
+        {
+            0
+        };
+        Tier0VfNative native =
+        {
+            0
+        };
+        IrFunction callee =
+        {
+            0
+        };
+        bool ok = tier0_vf_fixture(&vf, stream, &tables, kind, false) && tier0_vf_build(&vf, &tables, &arena, kind, &native);
+        ok = ir_lower_test_expect(tally, ok && vf.failures == 0, "Tier 0's variadic callee and its native code", kind, 0);
+        ok = ok && ir_lower_test_lower(tally, &stream->function, IR_I64, 2, &output, &twin_output, &scratch, &callee, kind, 0);
+        // Natively, from clang's caller, in a child: the output and then the result on the shared page.
+        Tier0VfOutput* native_output = (Tier0VfOutput*)(void*)page;
+        uint64_t native_result = 0;
+        if (ok)
+        {
+            memset(page, 0xa5, BUSTER_TIER0_VF_PAGE);
+            fflush(NULL);
+            const pid_t child = fork();
+            if (child == 0)
+            {
+                alarm(15);
+                const uint64_t returned = tier0_vf_invoke(&native.images[0][0], native_output, kind);
+                memcpy(page + sizeof(Tier0VfOutput), &returned, sizeof(returned));
+                _exit(0);
+            }
+            int status = 0;
+            pid_t waited;
+            do
+            {
+                waited = child > 0 ? waitpid(child, &status, 0) : -1;
+            } while (child > 0 && waited < 0 && errno == EINTR);
+            ok = ir_lower_test_expect(tally, child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the native variadic callee returns", kind, 0);
+            memcpy(&native_result, page + sizeof(Tier0VfOutput), sizeof(native_result));
+        }
+        // The IR caller: the output's address and the constants, in a call of the callee as variadic as it is.
+        IrFunction caller =
+        {
+            0
+        };
+        const uint32_t count = counts[k];
+        const IrSizes sizes =
+        {
+            .instruction_count = (uint64_t)count + 3,
+            .block_count = 1,
+            .extra_count = count,
+            .constant_count = count,
+            .call_count = 1,
+            .call_type_count = named[k],
+        };
+        ok = ok && ir_create(&output, &sizes, &caller) == IR_OK;
+        if (ok)
+        {
+            caller.result_type = IR_I64;
+            caller.symbol_count = 8;
+            caller.block_offsets[1] = count + 3;
+            caller.op[0] = IR_SYMBOL_ADDR;
+            caller.type[0] = IR_PTR;
+            caller.a[0] = 4;
+            caller.b[0] = BUSTER_IR_NONE;
+            caller.c[0] = BUSTER_IR_NONE;
+            caller.op[1] = IR_PTRTOINT;
+            caller.type[1] = IR_I64;
+            caller.a[1] = 0;
+            caller.b[1] = BUSTER_IR_NONE;
+            caller.c[1] = BUSTER_IR_NONE;
+            caller.extra[0] = 1;
+            for (uint32_t p = 1; p < count; p += 1)
+            {
+                const uint16_t argument = arguments[k][p];
+                const uint32_t id = 1 + p;
+                const bool floating = argument >= 0x200;
+                caller.constants[p] = (IrConstant){ .low = floating ? tier0_vf_fp_bits(argument - 0x200) : tier0_vf_gp(argument - 0x100) };
+                caller.op[id] = IR_CONST;
+                caller.type[id] = floating ? IR_F64 : IR_I64;
+                caller.a[id] = p;
+                caller.b[id] = BUSTER_IR_NONE;
+                caller.c[id] = BUSTER_IR_NONE;
+                caller.extra[p] = id;
+            }
+            for (uint32_t p = 0; p < named[k]; p += 1)
+            {
+                caller.call_types[p] = caller.type[caller.extra[p]];
+            }
+            caller.calls[0] = (IrCall){
+                .argument_count = count,
+                .parameter_count = named[k],
+                .result_type = IR_I64,
+                .variadic = kind != 4,
+            };
+            caller.op[count + 1] = IR_CALL;
+            caller.type[count + 1] = IR_I64;
+            caller.a[count + 1] = 3;
+            caller.b[count + 1] = 0;
+            caller.c[count + 1] = BUSTER_IR_NONE;
+            caller.op[count + 2] = IR_RET;
+            caller.type[count + 2] = IR_VOID;
+            caller.a[count + 2] = count + 1;
+            caller.b[count + 2] = BUSTER_IR_NONE;
+            caller.c[count + 2] = BUSTER_IR_NONE;
+            memset(interpreted, 0xa5, sizeof(*interpreted));
+            const IrInterpreterFunction functions[] =
+            {
+                { .symbol = 3, .function = &callee },
+                { .symbol = 5, .function = &caller },
+            };
+            const InterpreterBinding binding = { .symbol = 4, .bytes = (uint8_t*)interpreted, .size = sizeof(*interpreted), .writable = true };
+            const InterpreterNativeBinding clobber = { .symbol = 1, .address = (void*)&tier0_vf_clobber };
+            const IrInterpreterProgram program = { .functions = functions, .function_count = 2, .bindings = &binding, .binding_count = 1, .natives = &clobber, .native_count = 1 };
+            InterpreterOptions options = interpreter_default_options();
+            options.check_undefined = false;
+            const InterpreterResult result = ir_interpret(&program, 5, 0, 0, &options, &execution);
+            ok = ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == native_result && native_result == BUSTER_TIER0_VF_RETURN, "the interpreted variadic callee returns the native result", kind, 0);
+            if (result.status != INTERPRETER_OK)
+            {
+                fprintf(stderr, "  shared IR status %u, function %u, instruction %u\n", result.status, result.function, result.entry);
+            }
+        }
+        if (ok)
+        {
+            const Tier0VfOutput* o = interpreted;
+            const Tier0VfOutput* n = native_output;
+            bool same = o->named[0] == (uintptr_t)o && n->named[0] == (uintptr_t)n;
+            for (uint32_t p = 1; p < BUSTER_TIER0_VF_PARAMETERS; p += 1)
+            {
+                same = same && o->named[p] == n->named[p];
+            }
+            ir_lower_test_expect(tally, same, "the named parameters are the native run's", kind, 0);
+            ir_lower_test_expect(tally, memcmp(o->values, n->values, sizeof(o->values)) == 0 && memcmp(o->copy_values, n->copy_values, sizeof(o->copy_values)) == 0,
+                                 "each va_arg and its copy's are the native run's", kind, 0);
+            ir_lower_test_expect(tally, memcmp(o->canaries, n->canaries, sizeof(o->canaries)) == 0 && memcmp(o->object, n->object, sizeof(o->object)) == 0,
+                                 "the canaries and the object are the native run's", kind, 0);
+            if (kind == 4)
+            {
+                ir_lower_test_expect(tally, memcmp(o->initial, n->initial, sizeof(o->initial)) == 0 && memcmp(o->copied, n->copied, sizeof(o->copied)) == 0 &&
+                                                memcmp(o->final, n->final, sizeof(o->final)) == 0 && memcmp(o->copy_final, n->copy_final, sizeof(o->copy_final)) == 0,
+                                     "lists without an incoming frame are the native run's", kind, 0);
+            }
+            else
+            {
+                AbiVaList lists[4];
+                memcpy(&lists[0], o->initial, sizeof(AbiVaList));
+                memcpy(&lists[1], o->final, sizeof(AbiVaList));
+                memcpy(&lists[2], n->initial, sizeof(AbiVaList));
+                memcpy(&lists[3], n->final, sizeof(AbiVaList));
+                ir_lower_test_expect(tally, lists[0].gp_offset == lists[2].gp_offset && lists[0].fp_offset == lists[2].fp_offset && lists[1].gp_offset == lists[3].gp_offset &&
+                                                lists[1].fp_offset == lists[3].fp_offset && lists[1].overflow_arg_area - lists[0].overflow_arg_area == lists[3].overflow_arg_area - lists[2].overflow_arg_area &&
+                                                lists[0].reg_save_area == o->addresses[2] && lists[1].reg_save_area == o->addresses[2] && lists[0].overflow_arg_area == o->addresses[3] &&
+                                                memcmp(o->initial, o->copied, sizeof(o->initial)) == 0 && memcmp(o->final, o->copy_final, sizeof(o->final)) == 0,
+                                     "va_start's offsets and the overflow cursor's moves are the native run's, at the frame's anchors", kind, 0);
+                const uint32_t vectors = kind == 1 || kind == 2 ? 8 : kind == 5 ? 4 : 0;
+                bool saved = o->save_before[0] == (uintptr_t)o;
+                for (uint32_t slot = 1; slot < BUSTER_ABI_INTEGER_ARGUMENTS; slot += 1)
+                {
+                    saved = saved && o->save_before[slot] == n->save_before[slot] && o->save_after[slot] == o->save_before[slot];
+                }
+                for (uint32_t slot = 0; slot < vectors; slot += 1)
+                {
+                    const uint32_t word = BUSTER_ABI_INTEGER_ARGUMENTS + 2 * slot;
+                    saved = saved && o->save_before[word] == n->save_before[word] && o->save_after[word] == o->save_before[word];
+                }
+                ir_lower_test_expect(tally, saved, "the register save area's argument slots are the native run's", kind, 0);
+            }
+            compared += 1;
+        }
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            for (uint32_t encoder = 0; encoder < 2; encoder += 1)
+            {
+                Tier0VfImage* image = &native.images[path][encoder];
+                if (image->bytes != NULL && image->bytes != MAP_FAILED)
+                {
+                    munmap(image->bytes, image->mapping_bytes);
+                }
+            }
+        }
+        arena_pop_to(&arena, 0);
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+    }
+    ir_lower_test_expect(tally, compared == BUSTER_ARRAY_LENGTH(kinds), "every variadic callee runs natively and interpreted", compared, 0);
+    printf("IR lowering variadic frames: %u of Tier 0's variadic callees, native and shared IR alike\n", compared);
+    if (page != MAP_FAILED)
+    {
+        munmap(page, BUSTER_TIER0_VF_PAGE);
+    }
+    tier0_tables_close(&tables);
+    free(interpreted);
+    free(stream);
+    arena_release(&execution);
+    arena_release(&scratch);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&arena);
+}
+
 static int run_ir_lower_tests(int argc, char** argv)
 {
     uint64_t seed = 131;
@@ -2537,6 +2783,10 @@ static int run_ir_lower_tests(int argc, char** argv)
         // Structs and unions passed and returned by value: the IR's ABI records, its aggregate parameters' copies and
         // its results' destinations, run against the typed interpreter and Tier 0's native code.
         ir_lower_test_programs(&tally, seed, count, objects, true, "records");
+        Tier0ProgramOptions plain = objects;
+        plain.floating = false;
+        ir_lower_test_programs(&tally, seed, count, plain, true, "records (shared IR / Tier 0 native)");
+        ir_lower_test_variadic_frames(&tally);
         // Strict execution keeps undefined-byte checking enabled. Full representation COPY can include uninitialized
         // struct padding, and the older generator's FP->integer cases include the documented CVTT oracle boundary.
         // These are independent acceptance gaps, not grounds to weaken the dynamic storage checks.
