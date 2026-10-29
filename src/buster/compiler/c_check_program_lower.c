@@ -9759,13 +9759,19 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         uint32_t declared = 0;
         // A K&R definition's callers pass its parameters' promoted types, its ABI's (CHECK_INPUT_FUNCTION_KR).
         const bool kr = (input->function_flags[body.declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
-        for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+        // ABI locals are the full signature's contiguous prefix, not the compact list of names. An unnamed parameter
+        // still consumes its register(s) or stack slot; only the source object's binding is absent (#792).
+        uint32_t parameter_count = 0;
+        const TypeId* parameter_types = type_parameters(types, type, &parameter_count);
+        uint32_t parameter = input->parameters[body.opening];
+        for (uint32_t p = 0; !bare && p < parameter_count; p += 1)
         {
-            const TypeId declared_type = input->declared_types[parameter];
+            const bool named = parameter != BUSTER_CHECK_NONE && input->parameters[parameter] == p;
+            const TypeId declared_type = named ? input->declared_types[parameter] : parameter_types[p];
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
             const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
             // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
-            const CheckInputAttributes* attributes = promoted ? NULL : input->attributes[parameter];
+            const CheckInputAttributes* attributes = named && !promoted ? input->attributes[parameter] : NULL;
             // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
             // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(writer, parameter_type);
@@ -9776,7 +9782,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
             // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
             const bool object = aggregate || check_lower_memory(writer, parameter_type) || alignment > 3;
-            writer->token = parameter;
+            writer->token = named ? parameter : body.declaration;
             if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
             {
                 check_lower_unsupported(writer, "parameters aligned past 1 GB");
@@ -9792,7 +9798,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
-            writer->local_map[input->objects[parameter]] = local;
+            if (named)
+            {
+                writer->local_map[input->objects[parameter]] = local;
+                parameter = input->parameter_next[parameter];
+            }
             // A transparent union's as its first member (check_lower_passed_as), whose bytes the prologue places.
             abi->arguments[abi->argument_count++] = aggregate ? check_lower_passed_as(writer, parameter_type) : parameter_type;
             function->parameter_count += 1;

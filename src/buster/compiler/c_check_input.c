@@ -289,6 +289,8 @@ struct CheckInput
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
     uint32_t* declaration_bodies;
+    // At a body opening: its first named parameter token. At a parameter name: its zero-based ordinal in the full
+    // parameter list, including unnamed parameters. These token roles are disjoint; no additional column is needed.
     uint32_t* parameters;
     uint32_t* parameter_next;
     uint32_t* control_owners;
@@ -2550,6 +2552,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 reader->output->declarations[token] = token;
                 reader->output->explicit_abis[token] = 0;
                 reader->output->attributes[token] = 0;
+                reader->parameters[token] = function->last_name != BUSTER_CHECK_NONE ? reader->parameters[function->last_name] + 1 : 0;
                 reader->parameter_next[token] = BUSTER_CHECK_NONE;
                 if (function->last_name != BUSTER_CHECK_NONE)
                 {
@@ -2854,6 +2857,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 {
                                     valid &= check_input_attribute_function(reader, reader->output->attributes[token], adjusted);
                                 }
+                                reader->parameters[token] = function->parameter_count - 1;
                                 reader->parameter_next[token] = BUSTER_CHECK_NONE;
                                 if (function->last_name != BUSTER_CHECK_NONE)
                                 {
