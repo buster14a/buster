@@ -524,6 +524,12 @@ struct CheckLowerWriter
     uint32_t* label_entries;
     uint32_t label_entry_count;
     uint32_t label_symbol_capacity;
+    // Each label's jump table (Tier0Function.label_tables, #785): 1 + t for the function's table t's, numbered as its
+    // dispatches come, and 0 for a label whose address the program takes; and each table's JUMP_INDIRECT's entry
+    // (Tier0Function.table_jumps), `table_jump_count` of them, with room for the program's tables.
+    uint32_t* label_tables;
+    uint32_t* table_jumps;
+    uint32_t table_jump_count;
     // The writer's room for the program's label symbols (CheckProgramLowered.label_symbols), which its parts take one after
     // another (check_lower_part): `label_symbol_used` of it kept by the parts before the current one.
     SymbolId* label_symbol_room;
@@ -754,18 +760,21 @@ static bool check_lower_limb_types(const TypeTable* types)
     return found;
 }
 
-// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound): each node that computes,
-// converts or updates one writes up to 64 entries a limb (check_lower_limb_arithmetic and the rest go a limb at a time,
-// an update converting, computing and converting back), the most limbs of its value's, its operands' and their converted
-// types, and takes up to 16 temporaries and frame objects (`locals`).
-static uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
+// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound), none in a unit without
+// one (check_lower_limb_types): each node that computes, converts or updates one writes up to 64 entries a limb
+// (check_lower_limb_arithmetic and the rest go a limb at a time, an update converting, computing and converting back),
+// the most limbs of its value's, its operands' and their converted types, and takes up to 16 temporaries and frame
+// objects (`locals`). Out of line, as few units have such a type: the preparation's own loops compile as they do
+// without it.
+static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
+    const uint32_t count = check_lower_limb_types(types) ? graph->count : 0;
     uint64_t entries = 0;
     *locals = 0;
-    for (uint32_t node = 0; node < graph->count; node += 1)
+    for (uint32_t node = 0; node < count; node += 1)
     {
         const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
         uint32_t limbs = check_lower_limb_type(types, stream->values[node].type).count;
@@ -5088,15 +5097,15 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 
 // Whether operation `op` of an expression of `result` computes on complex values (check_lower_complex_compute), on
 // __float128s (check_lower_quad_compute) or on _BitInts past 128 bits (check_lower_limb_compute): an arithmetic one whose
-// result is one, or a comparison whose operands are (`operand` the first one's converted type).
-static bool check_lower_complex_operation(const CheckLowerWriter* writer, CheckOp op, TypeId result, TypeId operand)
+// result is one, or a comparison whose operands are (`operand` the first one's converted type). Every node that the
+// expansion's earlier cases leave asks it, so it is inline: the operators' range, then one type's facts.
+static inline __attribute__((always_inline)) bool check_lower_complex_operation(const CheckLowerWriter* writer, CheckOp op, TypeId result, TypeId operand)
 {
-    const bool arithmetic = (op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) ||
-                            op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT;
     // An aggregate's arithmetic and comparisons are a complex value's (equality alone), a __float128's or a _BitInt's past
-    // 128 bits (check_lower_aggregate), whose remainders, shifts and bitwise operations C gives no other aggregate.
+    // 128 bits (check_lower_aggregate), whose remainders, shifts and bitwise operations C gives no other aggregate. The
+    // arithmetic operators and the comparisons are the operators from the negation to the exclusive or, but `!`.
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    return (arithmetic && check_lower_aggregate(writer, result)) || (comparison && check_lower_aggregate(writer, operand));
+    return op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT && check_lower_aggregate(writer, comparison ? operand : result);
 }
 
 // The type an operand of a complex operation is evaluated to, from its own type and the computation's (`converted`, the
@@ -8038,6 +8047,7 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     {
         if (status->label_symbol_count < writer->label_symbol_capacity && writer->label_entry_count <= writer->program->control_count)
         {
+            writer->label_tables[writer->label_entry_count] = writer->table_jump_count + 1;
             writer->label_entries[writer->label_entry_count++] = item->labels[j];
             status->label_symbols[status->label_symbol_count++] = BUSTER_CHECK_LOWER_CASE_SYMBOL | (item->first_label + j);
         }
@@ -8065,6 +8075,14 @@ static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table
     check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
     check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
     check_lower_emit(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
+    if (writer->table_jump_count < writer->table_count)
+    {
+        writer->table_jumps[writer->table_jump_count++] = writer->count - 1;
+    }
+    else
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
 }
 
 // A return of a struct or a union (`node` its value, the bytes' address; or none, for the end of the function): through
@@ -8369,6 +8387,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         const SymbolId symbol = program->object_symbols[control.token + 1];
         if (symbol != 0 && writer->output->label_symbol_count < writer->label_symbol_capacity)
         {
+            writer->label_tables[writer->label_entry_count] = 0;
             writer->label_entries[writer->label_entry_count++] = index;
             writer->output->label_symbols[writer->output->label_symbol_count++] = symbol;
         }
@@ -8733,9 +8752,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
     // A unit with a _BitInt past 128 bits (#137) has room for its limbs (check_lower_limb_room).
     uint64_t limb_locals = 0;
-    const uint64_t limb_entries = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 && check_lower_limb_types(types) ?
-                                      check_lower_limb_room(program, &limb_locals) :
-                                      0;
+    const uint64_t limb_entries = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program, &limb_locals) : 0;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
                                 limb_entries + 32;
@@ -8751,6 +8768,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+    // Each lowered function's validation (tier0_validate) reads the effects tables (its X86 entries' forms, #760), which
+    // a lowering of bodies without the emission's setup (check_program_emit's), a test's, builds here: a unit of data
+    // alone leaves the backend cold, as the emission does.
+    if (valid && program->body_count != 0 && !(x86_semantics_initialized || x86_semantics_initialize()))
+    {
+        lowered->status = CHECK_PROGRAM_BACKEND;
+        valid = false;
+    }
     if (valid && !check_program_helpers(&lowered->helpers, program, output, scratch))
     {
         lowered->status = lowered->helpers.status;
@@ -9060,6 +9085,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(label_tables, uint32_t, (uint64_t)program->control_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
     const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
@@ -9164,6 +9191,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         *function = (Tier0Function){ 0 };
         writer->count = 0;
         writer->label_entry_count = 0;
+        writer->table_jump_count = 0;
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
@@ -9605,6 +9633,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->vector_constant_count = writer->vector_constant_count;
         BUSTER_CHECK_LOWER_COPY(label_entries, label_entries, uint32_t, writer->label_entry_count);
         function->label_count = writer->label_entry_count;
+        BUSTER_CHECK_LOWER_COPY(label_tables, label_tables, uint32_t, writer->table_jump_count != 0 ? writer->label_entry_count : 0);
+        BUSTER_CHECK_LOWER_COPY(table_jumps, table_jumps, uint32_t, writer->table_jump_count);
+        function->table_count = writer->table_jump_count;
 #undef BUSTER_CHECK_LOWER_COPY
         if (sources && status->status == CHECK_PROGRAM_OK)
         {

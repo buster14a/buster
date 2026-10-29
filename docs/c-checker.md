@@ -1954,7 +1954,10 @@ What the lowering covers past scalars (#145's programs):
   difference from the lowest case's, unsigned, is past the last entry goes to
   the default or the switch's end, and any other to the table's address plus
   the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
-  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. Its labels and
+  that jump are the function's next table in Tier 0's columns
+  (`label_tables`, `table_jumps`, #785), so that the IR's `br_indirect` for it
+  goes to its own labels alone. The table is a
   `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
   label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
   record as it does `&&label`'s) with the entry's offset as its addend, as
