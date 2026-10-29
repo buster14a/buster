@@ -765,7 +765,8 @@ second, as MAXPS does, and VCVTPS2DQ rounds by MXCSR. `vec_ext_v8hi`'s VPEXTRW
 (C5) takes its general register in reg and its vector in rm, the other
 extracts' forms the other way round. `test-checker`'s x86 programs
 (`c_check_program_x86_test.c`) call them directly, at their immediates' edges
-and on NaNs, zeros of either sign and halfway values, and through
+and on NaNs, zeros of either sign and halfway values, with `cvtps2dq` also
+under each of MXCSR's four rounding modes, set and restored around it, and through
 `<smmintrin.h>`'s intrinsics, by both paths against clang -O0's code for
 znver5. The program that includes the header lowers only what its roots reach,
 as `-c` does (`check_test_program_includes`), since the header's MMX functions

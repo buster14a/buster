@@ -1589,7 +1589,9 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             // #148's SSE builtins: shuffles, the byte shift and the align past their vectors' bytes (zeros, or a's
             // bytes alone), the word's extraction and insertion, packs, multiplications, and the floating ones on
             // random bits (NaNs with payloads, denormals) and on the pairs where MAXPS and MINPS give their second
-            // operand (a NaN in either, zeros of either sign).
+            // operand (a NaN in either, zeros of either sign). CVTPS2DQ rounds by MXCSR: on halfway values in the
+            // default mode, then under each of the four rounding modes, set and restored by ldmxcsr around it, on
+            // values that each mode rounds its own way.
             "x86-sse",
             "int tested(int n){unsigned h=2166136261u;v4si a,b;v8hi w,w2;v16qi c,d;v4sf f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&w,16,n+2);"
             "fill(&w2,16,n+3);fill(&c,16,n+4);fill(&d,16,n+5);fill(&f,16,n+6);fill(&g,16,n+7);"
@@ -1609,6 +1611,10 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "__builtin_ia32_minps(z.v,z2.v),__builtin_ia32_minps(z2.v,z.v)};FOLD(mx);"
             "v4sf half={(float)n+0.5f,-2.5f,(float)n*1e9f,-0.5f};v4si cv[]={__builtin_ia32_cvtps2dq(f),__builtin_ia32_cvtps2dq(half),"
             "__builtin_ia32_cvtps2dq(z.v),__builtin_ia32_cvtps2dq(z2.v)};FOLD(cv);"
+            "unsigned csr,mode;__asm__ volatile(\"stmxcsr %0\":\"=m\"(csr));v4sf q={1.75f,-1.25f,2.5f,-2.5f},q2={(float)n*0.75f,-(float)n-0.5f,"
+            "0.5f,(float)n*-1.25f};for(unsigned rc=0;rc<4;rc++){mode=(csr&~0x6000u)|rc<<13;__asm__ volatile(\"ldmxcsr %0\"::\"m\"(mode):\"memory\");"
+            "v4si rv[]={__builtin_ia32_cvtps2dq(q),__builtin_ia32_cvtps2dq(q2),__builtin_ia32_cvtps2dq(half),__builtin_ia32_cvtps2dq(f)};"
+            "__asm__ volatile(\"ldmxcsr %0\"::\"m\"(csr):\"memory\");FOLD(rv);}"
             "return (int)h;}",
         },
     };
