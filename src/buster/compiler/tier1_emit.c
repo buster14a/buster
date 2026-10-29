@@ -569,7 +569,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
-static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint32_t count = plan->function->instruction_count;
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)result->allocation.fragment_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * 2 + (uint64_t)result->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS;
@@ -581,6 +581,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     Tier1SelectCode* code = &result->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = branch_capacity };
     Tier1EmitTransitions transitions = {0};
+    Tier1SelectRequests requests = { .vector = vector };
     if (error == TIER1_EMIT_OK)
     {
         bool ok = true;
@@ -680,6 +681,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             {
                 error = TIER1_EMIT_INVALID;
             }
+            // A return's epilogue goes before its ret, the last record, after any request's record.
+            const uint32_t first = buffer.count;
             for (uint32_t r = 0; error == TIER1_EMIT_OK && r < selected.count; r += 1)
             {
                 if (returns && r + 1 == selected.count && tier1_frame_emit(&result->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
@@ -691,6 +694,10 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
                     error = TIER1_EMIT_MEMORY;
                 }
             }
+            if (error == TIER1_EMIT_OK)
+            {
+                tier1_select_requests_add(&requests, &selected, first, buffer.records);
+            }
         }
         if (error == TIER1_EMIT_OK && !plan->covered[node] && plan->function->type[node] != IR_VOID)
         {
@@ -700,6 +707,11 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         {
             *error_node = node;
         }
+    }
+    // The function's last immediates' forms, chosen before the records are checked.
+    if (error == TIER1_EMIT_OK)
+    {
+        tier1_select_requests_flush(&requests, buffer.records);
     }
     if (error == TIER1_EMIT_OK && x86_validate(buffer.records, buffer.count) != buffer.count)
     {
@@ -829,7 +841,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK)
     {
-        error = tier1_emit_records(plan, allowed_forms, output, scratch, &emitted, error_node);
+        error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), output, scratch, &emitted, error_node);
     }
     if (arguments)
     {

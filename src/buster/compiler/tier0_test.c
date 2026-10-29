@@ -5756,6 +5756,26 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 
+// The form choice's inc and dec (#181): Tier 0 asks for them where the Zen 5 model's observations of inc and dec at 32 and
+// 64 bits cost no more than add's and sub's with an imm8, as today's do: then a request for add of 1 with CF dead takes
+// inc, and with CF live, add's imm8.
+static void tier0_test_inc_dec(Tier0TestTally* tally)
+{
+    tier0_test_expect(tally, tier0_inc_dec == (tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0) && tier0_inc_dec == BUSTER_X86_CONTEXT_INC_DEC,
+                      "inc and dec", "Tier 0's context %#x, from the model's observations", tier0_inc_dec);
+    const uint16_t row = (uint16_t)x86_choice_row(X86_OPERATION_ADD, 4);
+    const int64_t value = 1;
+    const X86Instruction record = { .form = X86_FORM_ADD_RM32_IMM32, .rm = X86_REGISTER_RBX };
+    for (uint32_t live = 0; live < 2; live += 1)
+    {
+        const uint16_t context = tier0_choice_context(&record, live != 0 ? BUSTER_X86_FLAG_CF : 0);
+        uint16_t form = X86_FORM_NONE;
+        x86_choose_forms_scalar(&row, &value, &context, 1, &form);
+        tier0_test_expect(tally, form == (live != 0 ? X86_FORM_ADD_RM32_IMM8 : X86_FORM_INC_RM32), "inc and dec", "add ebx, 1 with CF %s took form %u",
+                          live != 0 ? "live" : "dead", form);
+    }
+}
+
 static void tier0_test_entry_repetitions(Tier0TestTally* tally)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 27);
@@ -5850,6 +5870,7 @@ static int run_tier0_tests(int argc, char** argv)
         if (tier0_tables_open(&tables))
         {
             tier0_test_entry_repetitions(&total);
+            tier0_test_inc_dec(&total);
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
