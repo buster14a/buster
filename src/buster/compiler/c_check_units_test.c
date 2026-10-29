@@ -22,13 +22,15 @@
 //     path: the same bytes, a program that prints and exits as clang's does, and that defines the same symbols as cc's
 //     link of the units' objects (nm: each named symbol the objects define, but the compiler's .L labels, with its
 //     binding and its kind: code or data);
+//   - all units at once into an executable with -g (#779), by --lanes 1 and 8, by 8 with --poison-arenas and by the
+//     scalar path: the same bytes, a program that prints and exits as clang's does;
+//   - all units at once with -c -g, by --lanes 8: each unit's object the same bytes as with -c -g alone;
 //   - all units at once with -fsyntax-only: exit status 0, and nothing on standard error.
 // - Diagnostics: three units, one with a warning, one with an error and one clean, by --lanes 1, 2, 3 and 8, with -c,
 //   -fsyntax-only and into an executable: standard error is each unit's own alone, in the command line's order, the
 //   exit status 1; -c writes the objects of the units without errors, and the link no executable.
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
-//   --dump-typed, --id-order, -g for an executable, and two units whose objects have one name: exit status 1, the
-//   message, and no output.
+//   --dump-typed, --id-order, and two units whose objects have one name: exit status 1, the message, and no output.
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
 //   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
 //   driver read before setting it would release an arena of that address and unmap the child's code.
@@ -499,6 +501,66 @@ static void check_units_test_one_program(CheckUnitsTestTally* tally, const char*
         snprintf(scalar_path, sizeof(scalar_path), "%s/program_1_0", directory);
         check_units_test_expect(tally, scalar == 0 || check_test_driver_same_files(vector, scalar_path), "both paths link the units into the same bytes", detail);
     }
+    // -g (#779): all units at once into an executable with their DWARF, by --lanes 1 and 8, by 8 with the lanes' arenas
+    // poisoned and by the scalar path: the same bytes, which run as clang's program does.
+    static const char* const debug_options[][8] = {
+        { "-g", "--lanes", "1", "-o", "debug_1", NULL },
+        { "-g", "--lanes", "8", "-o", "debug_8", NULL },
+        { "-g", "--poison-arenas", "--lanes", "8", "-o", "debug_poisoned", NULL },
+        { "-g", "--scalar", "--lanes", "3", "-o", "debug_scalar", NULL },
+    };
+    for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(debug_options); d += 1)
+    {
+        check_units_test_command(arguments, names, executable, debug_options[d], count);
+        const int status = check_units_test_run(directory, arguments, "/dev/null", errors_path, false);
+        const char* output = NULL;
+        for (uint32_t o = 0; debug_options[d][o] != NULL; o += 1)
+        {
+            output = strcmp(debug_options[d][o], "-o") == 0 ? debug_options[d][o + 1] : output;
+        }
+        snprintf(detail, sizeof(detail), "program %u, %u units, -g into %s", program, count, output);
+        char run[80];
+        snprintf(run, sizeof(run), "./%s", output);
+        char* run_arguments[] = { run, NULL };
+        const int run_status = status == 0 ? check_units_test_run(directory, run_arguments, actual_path, "/dev/null", false) : -1;
+        actual = status == 0 ? check_units_test_read(actual_path, &actual_length) : NULL;
+        check_units_test_expect(tally, status == 0 && run_status == expected_status && actual != NULL && expected != NULL && actual_length == expected_length &&
+                                           memcmp(actual, expected, expected_length) == 0,
+                                "the units' executable with -g runs as clang's program", detail);
+        free(actual);
+        char path[PATH_MAX];
+        char first[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", directory, output);
+        snprintf(first, sizeof(first), "%s/debug_1", directory);
+        check_units_test_expect(tally, d == 0 || check_test_driver_same_files(path, first), "the units' executable with -g is the same bytes by every lane count and path",
+                                detail);
+    }
+    // -c -g of all units at once by 8 lanes: each unit's object, with its DWARF, the same bytes as with -c -g alone.
+    bool debug_alone = true;
+    for (uint32_t u = 0; debug_alone && u < count; u += 1)
+    {
+        char source[32];
+        char object[32];
+        snprintf(source, sizeof(source), "unit_%u.c", u);
+        snprintf(object, sizeof(object), "alone_g_%u.o", u);
+        char* unit_arguments[] = { (char*)executable, "-c", "-g", "-o", object, source, NULL };
+        debug_alone = check_units_test_run(directory, unit_arguments, "/dev/null", errors_path, false) == 0;
+    }
+    snprintf(detail, sizeof(detail), "program %u, %u units, -c -g by --lanes 8", program, count);
+    check_units_test_expect(tally, debug_alone, "each unit alone writes its object with -c -g", detail);
+    const char* debug_objects[] = { "-c", "-g", "--lanes", "8", NULL };
+    check_units_test_command(arguments, names, executable, debug_objects, count);
+    const bool debug_written = debug_alone && check_units_test_run(directory, arguments, "/dev/null", errors_path, false) == 0;
+    check_units_test_expect(tally, debug_written, "the units at once write their objects with -c -g", detail);
+    for (uint32_t u = 0; debug_written && u < count; u += 1)
+    {
+        char together[PATH_MAX];
+        char apart[PATH_MAX];
+        snprintf(together, sizeof(together), "%s/unit_%u.o", directory, u);
+        snprintf(apart, sizeof(apart), "%s/alone_g_%u.o", directory, u);
+        check_units_test_expect(tally, check_test_driver_same_files(together, apart), "each unit's object with -c -g at once is its object alone", detail);
+        unlink(together);
+    }
     // -fsyntax-only.
     const char* syntax[] = { "-fsyntax-only", NULL };
     check_units_test_command(arguments, names, executable, syntax, count);
@@ -796,8 +858,6 @@ static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* ex
         { "-c with -o", "cannot specify -o when generating multiple output files", "refused.o", { (char*)executable, "-c", "-o", "refused.o", "other.c", "second.c", NULL } },
         { "a dump", "take one source file", NULL, { (char*)executable, "--dump-typed", "other.c", "second.c", NULL } },
         { "--id-order", "take one source file", NULL, { (char*)executable, "--id-order", "153", "-c", "other.c", "second.c", NULL } },
-        { "-g for an executable", "unsupported: -g for an executable of several translation units", "refused",
-          { (char*)executable, "-g", "-o", "refused", "first.c", "other.c", NULL } },
         { "two units of one object's name", "would both write other.o", "other.o", { (char*)executable, "-c", "other.c", "nested/other.c", NULL } },
     };
     for (uint32_t r = 0; written && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)

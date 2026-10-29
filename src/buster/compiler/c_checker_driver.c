@@ -940,7 +940,8 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
 
 // A unit's link kept for the link of several units (c_checker_units.c), which check_driver_object fills.
 typedef struct CheckUnitsKept CheckUnitsKept;
-static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp);
+static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
+                             const ObjectDebug* debug);
 
 // The checked program's code and data, as -c writes them: its object at `output_path`, or with `kept` (one of several
 // units that link into one executable, c_checker_units.c), its link, kept for theirs. Its functions compile on `lanes`
@@ -1000,7 +1001,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);
-        valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp);
+        valid = checked == LINK_ERROR_NONE && check_units_keep(kept, &code.link, program, parser, pp, debug ? &dwarf.object : NULL);
         if (checked != LINK_ERROR_NONE)
         {
             fprintf(errors, "internal compiler error: the unit's link isn't valid (link error %u)\n", (uint32_t)checked);
@@ -1210,7 +1211,8 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 // The units of a command that links several (c_checker_units.c): their kept links, which check_units_merge joins into
 // one, in the units' order, binding them as an emission's (check_program_emit) binds its link.
 typedef struct CheckUnitsUnit CheckUnitsUnit;
-static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, Arena* output, Arena* bytes, Arena* scratch);
+static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
+                              Arena* bytes, Arena* scratch);
 static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t count, const Link* link, NameId name);
 
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
@@ -1221,7 +1223,8 @@ static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t co
 // c_check_debug.c); and with `unwind`, its functions' unwind tables, which .eh_frame_hdr indexes with the runtime's. The
 // functions compile on `lanes` (check_program_emit_lanes). With `units` (#152), the program is theirs: their kept links,
 // merged (check_units_merge), take the place of `program`'s emission, which is null, as are `data`, `parser`, `pp` and
-// `types`, and the executable is written on `lanes`' count of lanes.
+// `types`, and the executable is written on `lanes`' count of lanes; with `debug`, its DWARF is their units', one each,
+// which the merge joins (#779).
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
                                      bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock,
@@ -1276,7 +1279,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
         // The units' links merged report their own failures (check_units_merge), but binding's.
-        const bool emitted = !valid || (units != NULL ? check_units_merge(&code.link, units, unit_count, &binding, &output, &bytes, scratch) :
+        const bool emitted = !valid || (units != NULL ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                         check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
                                                                                  &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
         if (units != NULL)
@@ -1297,7 +1300,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
         }
         check_driver_lower_report(&code, stage_clock);
-        if (valid && debug)
+        // The units' DWARF is in the merge's (check_units_merge_debug).
+        if (valid && debug && units == NULL)
         {
             valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
             if (!valid)

@@ -371,14 +371,15 @@ designs and the compilers already built this way.
   tokens pay for, up to one per CPU the process may run on, and with
   `--lanes N` N of them; the output is one lane's, byte for byte. An
   executable carries the program's symbols in `.symtab` (but `.L` labels; with
-  `-g`, its DWARF unit's functions'). With several source files (#152,
+  `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](docs/translation-units.md))
   the units compile on lanes instead, one unit a lane at a time (`--lanes N`
   then counts those lanes), each from preprocessing to code as alone
   (`check_driver_unit`), and their diagnostics are printed in the command
   line's order: `-fsyntax-only` checks each, `-c` writes each one's object in
   the current directory as clang names it (`-o` refused), and the link merges
-  the units' links (`check_units_merge`) into one executable.
+  the units' links (`check_units_merge`) into one executable, with `-g` of
+  their DWARF units, one each (#779).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -5145,8 +5146,9 @@ write would show. A link keeps each unit's link
 (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes
-it as it does one unit's. `-c -o`, the dumps, `--id-order`, `-g` for an
-executable and two units of one object's name are refused.
+it as it does one unit's; with `-g`, each unit keeps its DWARF as `-c -g`
+writes it, and the merge joins them (`check_units_merge_debug`, #779). `-c
+-o`, the dumps, `--id-order` and two units of one object's name are refused.
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
 [--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
@@ -5158,11 +5160,12 @@ and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 objects defines, and each of whose units' `-c` objects is the unit's alone;
 diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the jobserver's tokens held while the link
-writes; and lanes that don't start. With `--corpus DIR` it compiles DIR's
-`.c` files at
-once with `-c`, plainly and poisoned, against each alone, and with
-`--generate DIR` it writes a program of synth's shape (512 units of 200
-functions by default) for measurements, and tests nothing.
+writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
+and 8, poisoned and by each path the same bytes, and each unit's `-c -g`
+object its own alone. With `--corpus DIR` it compiles DIR's `.c` files at once
+with `-c`, plainly and poisoned, against each alone, and with `--generate DIR`
+it writes a program of synth's shape (512 units of 200 functions by default)
+for measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
 measurements.
 
