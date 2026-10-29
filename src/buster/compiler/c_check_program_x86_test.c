@@ -1544,6 +1544,21 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             0,
             true,
         },
+        {
+            // VP2INTERSECT's pairs of masks at each width, of vectors that share some elements: each mask stored at its
+            // pointer, the bytes around it left.
+            "x86-intersections",
+            "int tested(int n){unsigned h=2166136261u;v4si a4,b4;v8si a8,b8;v16si a16,b16;v2di c2,d2;v4di c4,d4;v8di c8,d8;fill(&a4,16,n);"
+            "fill(&b4,16,n+1);fill(&a8,32,n+2);fill(&b8,32,n+3);fill(&a16,64,n+4);fill(&b16,64,n+5);fill(&c2,16,n+6);fill(&d2,16,n+7);fill(&c4,32,n+8);"
+            "fill(&d4,32,n+9);fill(&c8,64,n+10);fill(&d8,64,n+11);for(int i=0;i<16;i++){a16[i]&=7;b16[i]=(b16[i]&7)+(n&1);}for(int i=0;i<8;i++){a8[i]&=3;"
+            "b8[i]&=3;c8[i]&=7;d8[i]=(d8[i]&7)^(n&2);}for(int i=0;i<4;i++){a4[i]&=3;b4[i]&=3;c4[i]&=3;d4[i]&=3;}for(int i=0;i<2;i++){c2[i]&=1;d2[i]&=1;}"
+            "unsigned char m[14]={0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a,0x5a};unsigned short w[4]={0x5a5a,0x5a5a,0x5a5a,"
+            "0x5a5a};__builtin_ia32_vp2intersect_d_128(a4,b4,&m[1],&m[2]);__builtin_ia32_vp2intersect_d_256(a8,b8,&m[4],&m[5]);"
+            "__builtin_ia32_vp2intersect_d_512(a16,b16,&w[1],&w[2]);__builtin_ia32_vp2intersect_q_128(c2,d2,&m[7],&m[8]);"
+            "__builtin_ia32_vp2intersect_q_256(c4,d4,&m[10],&m[11]);__builtin_ia32_vp2intersect_q_512(c8,d8,&m[12],&m[13]);FOLD(m);FOLD(w);return (int)h;"
+            "}",
+            BUSTER_X86_FEATURE(AVX512VP2INTERSECT),
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

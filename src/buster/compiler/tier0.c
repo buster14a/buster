@@ -8466,6 +8466,13 @@ static bool tier0_operation_form_valid(uint32_t form)
     return valid;
 }
 
+// Whether a form's operand is no pair or block of registers, but an opmask pair (VP2INTERSECT's k and k + 1), which writes
+// two of the opmask registers no value keeps between entries.
+static bool tier0_operation_single(uint16_t operand)
+{
+    return (operand & (BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK)) == 0 || operand == BUSTER_X86_OPERAND_KP;
+}
+
 // Whether a role may be in a field of register class `class` of `operation`'s records: in a vector register's, VECTOR(j)
 // for any j below 16, FLOATING(j) for a floating operand j and FLOATING_RESULT for a floating result, those two in an XMM
 // field; in a general register's (8, 16, 32 or 64 bits: a memory operand's base or index too), INTEGER(j) for an integer
@@ -8505,8 +8512,9 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
 // Whether a machine operation's row is one Tier 0 places and emits as Tier0Operation has it: its counts within their
 // bounds; its operands integers, floating values and VECTORs of 16, 32 or 64 bytes; its result VOID or one of those; and
 // each record of a form tier0_operation_form_valid takes, with its fields' roles as tier0_operation_role_valid has them,
-// no pair or block of registers, a memory operand's address from a base and an optional index (no RIP-relative or
-// absolute one), and then, with its roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
+// no pair or block of registers but an opmask pair (tier0_operation_single), a memory operand's address from a base and
+// an optional index (no RIP-relative or absolute one), and then, with its roles placed somewhere (VECTOR(j) as register
+// j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
     bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
@@ -8536,10 +8544,9 @@ static bool tier0_operation_valid(const Tier0Operation* operation)
         if (valid)
         {
             const X86FormDescription* description = x86_form_description(record.form);
-            const uint16_t pairs = BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK;
             const bool memory = record.mode != BUSTER_X86_REGISTER_DIRECT;
-            valid = ((description->reg | description->vvvv | description->rm) & pairs) == 0 && (!memory || (record.mode & BUSTER_X86_MODE_BASE) != 0) &&
-                    (record.mode & BUSTER_X86_MODE_RIP) == 0;
+            valid = tier0_operation_single(description->reg) && tier0_operation_single(description->vvvv) && tier0_operation_single(description->rm) &&
+                    (!memory || (record.mode & BUSTER_X86_MODE_BASE) != 0) && (record.mode & BUSTER_X86_MODE_RIP) == 0;
             const Tier0Fields fields = tier0_operation_fields(&record);
             for (uint32_t k = 0; valid && k < fields.count; k += 1)
             {

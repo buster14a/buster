@@ -1455,7 +1455,8 @@ What the lowering covers past scalars (#145's programs):
     KANDN of the mask and 1, as no scalar move of 16 bits is AVX-512F's);
   - the floating reductions of 64 bytes, two rows in clang's order: the
     halvings to 16 bytes, then to the element, the start the last operation's
-    first operand where the reduction has one.
+    first operand where the reduction has one;
+  - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer.
 
   A rounding control, a builtin's last immediate (CheckX86LowerRounding),
   picks the rule's form for 4 (`_MM_FROUND_CUR_DIRECTION`), its form that

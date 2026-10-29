@@ -467,7 +467,7 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
 
 `tier0_operation_valid` checks each row: VEX and EVEX forms, their operands in their fields (no implicit
 register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
-registers), and the legacy forms `tier0_operation_legacy_forms` lists, for the x86 builtins VEX and EVEX have no form
+registers but VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the legacy forms `tier0_operation_legacy_forms` lists, for the x86 builtins VEX and EVEX have no form
 of (#148: the flags' tests' `mov` and `cmovcc`, `adc`, `sbb`, `neg`, `crc32`, `rdrand`, the FS and GS bases,
 the non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
 values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are); no branch, symbol or RIP-relative address, each field's role of its class (an

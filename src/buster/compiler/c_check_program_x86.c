@@ -121,6 +121,9 @@ typedef enum CheckX86LowerFamily
     // halvings in clang's order, with start the first operand of the last one where the reduction has one: two rows,
     // check_x86_lower_row_of's of a's 64 bytes to 16 and check_x86_lower_reduce_row's of those to the element.
     CHECK_X86_LOWER_REDUCE,
+    // (vector a, vector b, mask* p, mask* q): VP2INTERSECT's pair of masks, of a's elements found in b (k2, the pair's even
+    // register) and of b's found in a (k3), stored at p and at q.
+    CHECK_X86_LOWER_INTERSECT,
 } CheckX86LowerFamily;
 
 // FLAGS' conditions, CMOVcc's (and the x86 conditions' order), and its second condition's value.
@@ -1074,6 +1077,13 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_ONE("sha1nexte", BINARY, 4, 16, SHA1NEXTE_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha256msg1", BINARY, 4, 16, SHA256MSG1_X_XM128, BUSTER_X86_FEATURE(SHA))
     BUSTER_CHECK_X86_ONE("sha256msg2", BINARY, 4, 16, SHA256MSG2_X_XM128, BUSTER_X86_FEATURE(SHA))
+    // The intersections' pairs of masks, stored by KMOVB (AVX512-DQ's) or, of 16 lanes, KMOVW.
+    BUSTER_CHECK_X86_ONE("vp2intersect_d_128", INTERSECT, 4, 16, VP2INTERSECTD_K_X_XM128, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("vp2intersect_d_256", INTERSECT, 4, 32, VP2INTERSECTD_K_Y_YM256, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("vp2intersect_d_512", INTERSECT, 4, 64, VP2INTERSECTD_K_Z_ZM512, BUSTER_X86_FEATURE(AVX512VP2INTERSECT))
+    BUSTER_CHECK_X86_ONE("vp2intersect_q_128", INTERSECT, 8, 16, VP2INTERSECTQ_K_X_XM128, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("vp2intersect_q_256", INTERSECT, 8, 32, VP2INTERSECTQ_K_Y_YM256, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("vp2intersect_q_512", INTERSECT, 8, 64, VP2INTERSECTQ_K_Z_ZM512, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))
 };
 
 #undef BUSTER_CHECK_X86_ROUNDED_IMMEDIATE
@@ -2011,6 +2021,24 @@ static const char* check_x86_lower_row_of(uint64_t target, const CheckX86LowerRu
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
             row->result_bytes = 16;
+        }
+        else if (rule->family == CHECK_X86_LOWER_INTERSECT)
+        {
+            // VP2INTERSECT zeroes its masks' bits past the lanes, so 8 bits hold a mask of 2, 4 or 8.
+            const uint16_t store = lanes <= 8 ? X86_FORM_KMOVB_M8_K : X86_FORM_KMOVW_M16_K;
+            row->records[0] = check_x86_lower_record(rule->form, 2, v0, v1);
+            row->records[1] = check_x86_lower_memory(store, 2, BUSTER_TIER0_ROLE_INTEGER(2));
+            row->records[2] = check_x86_lower_memory(store, 3, BUSTER_TIER0_ROLE_INTEGER(3));
+            row->record_count = 3;
+            row->operand_count = 4;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = rule->bytes;
+            row->operand_classes[2] = BUSTER_TYPED_CLASS_U64;
+            row->operand_classes[3] = BUSTER_TYPED_CLASS_U64;
+            row->result_class = BUSTER_TYPED_CLASS_VOID;
+            row->result_bytes = 0;
         }
         else
         {
