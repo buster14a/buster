@@ -1032,6 +1032,30 @@ static __attribute__((unused)) bool intern_reset(InternTable* table)
     return intern_add_names(table);
 }
 
+// #153's check that nothing depends on the ids' order: primes `table`, fresh, so that the names of `names` (a first
+// run's table) get other ids than they had there, as test-files and test-preprocessor prime theirs. First names no unit
+// has, 17 to 47 of them by `seed`, then every other name of `names` past the predefined ones, whose fixed ids are the
+// table's contract, in reverse from a place `seed` picks. A run with the table finds those, and gives the others ids
+// after them. Returns false if a name doesn't fit.
+static __attribute__((unused)) bool intern_prime_reordered(InternTable* table, const InternTable* names, uint64_t seed)
+{
+    const uint32_t padding = 17 + (uint32_t)(seed % 31);
+    bool result = true;
+    for (uint32_t i = 0; result && i < padding; i += 1)
+    {
+        char text[48];
+        const int length = snprintf(text, sizeof(text), "__buster_determinism_unused_%u", i);
+        result = intern_find_or_add(table, (const uint8_t*)text, (uint32_t)length) != 0;
+    }
+    const uint32_t count = names->count - C_NAME_COUNT;
+    for (uint32_t i = 0; result && i < count; i += 2)
+    {
+        const IdentId id = C_NAME_COUNT + (uint32_t)((seed % count + count - 1ull - i) % count);
+        result = intern_find_or_add(table, intern_bytes(names, id), intern_length(names, id)) != 0;
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Spellings added from several lanes
 //

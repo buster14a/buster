@@ -96,6 +96,7 @@ struct CheckDeferredLinked
 typedef struct CheckDeferredResult CheckDeferredResult;
 struct CheckDeferredResult
 {
+    CheckWarningEvents warning_events;
     TypeChanges changes;
     uint32_t types;
     uint32_t tags;
@@ -583,6 +584,8 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->types = &lane->types;
     reader->arena = &arenas->output;
     reader->scratch = &arenas->scratch;
+    reader->warning_events = (CheckWarningBuffer){ .arena = &arenas->output };
+    input->warning_events = (CheckWarningEvents){ 0 };
     reader->deferred = 0;
     reader->lane = true;
     // Token columns are shared over disjoint bodies; interval summaries have shared ancestors and must be private.
@@ -940,6 +943,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->declarator_overloadable = false;
     reader->lane_unsupported = false;
     reader->lane_reason = 0;
+    reader->warning_events = (CheckWarningBuffer){ .arena = reader->arena };
+    input->warning_events = (CheckWarningEvents){ 0 };
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
     input->report_count = 0;
@@ -1019,6 +1024,13 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         const uint32_t base = reader->bindings.base;
         const uint32_t events = reader->bindings.count - base;
         bool kept = true;
+        const CheckWarningEvents warnings = check_warning_view(&reader->warning_events);
+        result->warning_events = (CheckWarningEvents){
+            .events = check_deferred_keep(arena, warnings.events, warnings.count, sizeof(CheckWarningEvent), &kept),
+            .count = warnings.count,
+            .notes = check_deferred_keep(arena, warnings.notes, warnings.note_count, sizeof(CheckWarningNote), &kept),
+            .note_count = warnings.note_count,
+        };
         // The body's changes, packed: the record's arrays are the lane's, which its next body takes back.
         result->changes = *changes;
         result->changes.items = check_deferred_keep(arena, changes->items, changes->count, sizeof(TypeChange), &kept);
@@ -1259,6 +1271,35 @@ static uint32_t check_deferred_layout(const CheckDeferred* deferred, uint64_t cu
 static TypeId check_deferred_type(const TypeReplayPart* part, TypeId type)
 {
     return type != 0 ? type_replay_type(part, type) : 0;
+}
+
+// The only TypeIds in sparse diagnostic payloads are explicit fields. Located tokens, completion boundaries and
+// identifier IDs remain translation-unit identities. Attached notes are copied privately before remapping.
+static bool check_deferred_warnings(CheckWarningBuffer* output, const CheckWarningEvents* input, const TypeReplayPart* part, Arena* scratch)
+{
+    bool valid = (input->count == 0 || input->events != NULL) && (input->note_count == 0 || input->notes != NULL);
+    const uint64_t mark = scratch->length;
+    for (uint32_t i = 0; valid && i < input->count; i += 1)
+    {
+        CheckWarningEvent event = input->events[i];
+        valid = event.note_first <= input->note_count && event.note_count <= input->note_count - event.note_first;
+        CheckWarningNote* notes = valid && event.note_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckWarningNote, event.note_count) : NULL;
+        valid = valid && (event.note_count == 0 || notes != NULL);
+        if (valid)
+        {
+            event.payload.first_type = check_deferred_type(part, event.payload.first_type);
+            event.payload.second_type = check_deferred_type(part, event.payload.second_type);
+            for (uint32_t n = 0; n < event.note_count; n += 1)
+            {
+                notes[n] = input->notes[event.note_first + n];
+                notes[n].payload.first_type = check_deferred_type(part, notes[n].payload.first_type);
+                notes[n].payload.second_type = check_deferred_type(part, notes[n].payload.second_type);
+            }
+            valid = check_warning_append(output, &event, notes, event.note_count);
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
 }
 
 // Maps an id + 1 (0 for none) through check_deferred_id.
@@ -2046,9 +2087,14 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         reader->file_function_name_ids[i] = reader->file_function_name_ids[i] != BUSTER_CHECK_NONE ? string_map[reader->file_function_name_ids[i]] : BUSTER_CHECK_NONE;
     }
+    CheckWarningBuffer warnings = { .arena = reader->arena };
+    valid = valid && check_deferred_warnings(&warnings, &top_input.warning_events, &parts[0], reader->scratch);
+    for (uint32_t b = 0; valid && b < bodies; b += 1)
+    {
+        valid = check_deferred_warnings(&warnings, &deferred->results[b].warning_events, &parts[1 + b], reader->scratch);
+    }
     if (valid)
     {
-        (void)top_input;
         if (intrinsics)
         {
             input->intrinsic_declarations = intrinsic_declarations;
@@ -2056,6 +2102,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             input->intrinsic_calls = intrinsic_calls;
             input->intrinsic_call_count = call_total;
         }
+        reader->warning_events = warnings;
+        input->warning_events = check_warning_view(&warnings);
         input->constant_warnings_prepared = true;
         // Literal tables belong to the top-level reader; their retained array type must follow the same replay as
         // declared_types, particularly for tables after bodies that insert new types into the merged table.

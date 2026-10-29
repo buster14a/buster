@@ -733,6 +733,21 @@ static const char check_test_program_harness[] =
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
     "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
     "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
+    "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
+    "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
+    "_Atomic(ExternalAtomic4) external_atomic4(_Atomic(ExternalAtomic4) x){ExternalAtomic4 v=x;return v+3;}"
+    "int external_apply_atomic4(_Atomic(ExternalAtomic4)(*f)(_Atomic(ExternalAtomic4)),int n){ExternalAtomic4 v={0};"
+    "for(int i=0;i<4;i++)v[i]=n+i;_Atomic(ExternalAtomic4) out=f(v);ExternalAtomic4 r=out;int h=0;for(int i=0;i<4;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic8 __attribute__((vector_size(32)));"
+    "_Atomic(ExternalAtomic8) external_atomic8(_Atomic(ExternalAtomic8) x){ExternalAtomic8 v=x;return v+3;}"
+    "int external_apply_atomic8(_Atomic(ExternalAtomic8)(*f)(_Atomic(ExternalAtomic8)),int n){ExternalAtomic8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=n+i;_Atomic(ExternalAtomic8) out=f(v);ExternalAtomic8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic16 __attribute__((vector_size(64)));"
+    "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
+    "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
+    "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
@@ -940,6 +955,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         oracle,
         object,
         "-lm",
+        "-latomic",
         "-o",
         executable,
         0,
@@ -1940,6 +1956,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
 #include "c_check_program_vector_test.c"
+#include "c_check_program_x86_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2388,6 +2405,14 @@ static void check_test_program_builtin_scratch(CheckTest* test, const char* clan
         "int s=__builtin_add_overflow(y,(__builtin_mul_overflow(x,x,&c),(unsigned __int128)c),&b);"
         "return (int)((unsigned __int128)a%97+b%101+(unsigned __int128)c%103)+r*1000+s*2000;}",
         "nested-wide-operand-objects-and-signedness", clang, false, -1, 0, 96);
+    check_test_program_source(test,
+        "int tested(int n){_Atomic unsigned long cell=(unsigned long)(unsigned)n+1;"
+        "unsigned shift=__builtin_ctzll(__c11_atomic_load(&cell,5)|8UL);"
+        "unsigned long value=__builtin_bswap64(__c11_atomic_load(&cell,5)+1);"
+        "cell+=__builtin_popcountll(value);"
+        "unsigned long old=__c11_atomic_fetch_xor(&cell,__builtin_bswap64(value),5);"
+        "return (int)((old^__c11_atomic_load(&cell,5))&0x7fffff00UL)+(int)shift;}",
+        "atomic-captures-and-integer-recipe-scratch", clang);
 }
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
@@ -2443,6 +2468,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_atomics(test, clang);
     check_test_program_diagnostics(test, clang);
     check_test_program_vectors(test, clang);
+    check_test_program_x86(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
@@ -2863,6 +2889,56 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
         "return (int)y+x+__builtin_constant_p(n++);}", "builtin-hints-and-unevaluated-query", clang);
+    // __builtin_alloca (#148), as clang -O0's dynamic alloca: sizes rounded up to 16 (the second allocation 32 bytes below
+    // the first), one among a call's stack arguments, one of no bytes, in a loop, and the first's bytes intact after them.
+    check_test_program_source(test,
+        "int sink(long a,long b,long c,long d,long e,long f,long g,long h){return (int)(a+b*2+c*3+d*4+e*5+f*6+g*7+h*8);}"
+        "int tested(int n){unsigned k=(unsigned)(n+3)*5+1;char*p=__builtin_alloca(k);for(unsigned i=0;i<k;i++)p[i]=(char)(i*7+n);"
+        "char*q=__builtin_alloca(17);q[16]=(char)n;int r=(int)(((unsigned long)p|(unsigned long)q)&15)+(int)(p-q)+q[16];"
+        "r+=sink(1,2,3,4,5,6,p[0],(long)((unsigned long)__builtin_alloca(32)&15));"
+        "for(int i=0;i<3;i++){char*t=__builtin_alloca(64);t[63]=(char)(i+n);r+=t[63];}"
+        "long s=0;for(unsigned i=0;i<k;i++)s+=p[i];r+=(int)((unsigned long)__builtin_alloca(0)&15);return r*7+(int)s;}",
+        "alloca-runtime", clang);
+    // An allocation after a block's first variable-length array is released with it, at the block's end and at a
+    // continue, a break or a goto out of it, as clang's stackrestore releases it: each loop of 20,000 allocations of 8 KB
+    // would take 160 MB of stack without the releases.
+    check_test_program_source(test,
+        "int tested(int n){long s=0;for(int i=0;i<20000;i++){char v[(n&7)+1];v[0]=(char)i;char*p=__builtin_alloca(8192);"
+        "p[0]=(char)(i*3);p[8191]=v[0];s+=p[0]+p[8191];if(i==n+5)continue;}"
+        "for(int i=0;i<30000;i++){char v[(n&3)+2];char*p=__builtin_alloca(8192);p[1]=v[0]=(char)i;s+=p[1];if(i==20000+n)break;}"
+        "int j=0;again:{char v[(n&3)+1];char*p=__builtin_alloca(8192);p[2]=(char)j;v[0]=p[2];s+=v[0];if(++j<20000)goto again;}"
+        "return (int)(s&0x7fffffff);}",
+        "alloca-released-with-variable-length-arrays", clang);
+    // Allocations in a realigned frame (an object aligned to 64) and in a variadic definition, whose va_arg reads the
+    // incoming areas the allocation moved rsp past.
+    check_test_program_source(test,
+        "long vsum(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);char*b=__builtin_alloca((unsigned)count*8+3);long s=0;"
+        "for(int i=0;i<count;i++){long x=__builtin_va_arg(ap,long);b[i*8]=(char)x;s+=x+b[i*8];}__builtin_va_end(ap);return s+(long)((unsigned long)b&15);}"
+        "int tested(int n){_Alignas(64) char a[64];a[0]=(char)n;char*p=__builtin_alloca((unsigned)(n+3)*3+1);p[0]=a[0];"
+        "int r=(int)(((unsigned long)a&63)|((unsigned long)p&15));long v=vsum(9,1L,2L,3L,(long)n,5L,6L,7L,8L,(long)p[0]);"
+        "return r+(int)v+(int)((unsigned long)__builtin_alloca(40)&15);}",
+        "alloca-realigned-and-variadic", clang);
+    // __builtin_frame_address(0) and __builtin_return_address(0) (#148), as clang -O0's frame has them: the frame
+    // address a multiple of 16 above the locals, the return address the word above it, a callee's saved rbp the caller's
+    // frame address (in a realigned frame too), a callee's frame below its caller's, return addresses the same at one call
+    // and different at two, after the caller's start, and the frame address unmoved by an allocation.
+    check_test_program_source(test,
+        "void*caller_frame(void){return *(void**)__builtin_frame_address(0);}void*where(void){return __builtin_return_address(0);}"
+        "char*inner(void){return __builtin_frame_address(0);}"
+        "int aligned(int n){_Alignas(64) char a[64];a[0]=(char)n;char*f=__builtin_frame_address(0);"
+        "return ((unsigned long)a&63)==0&&caller_frame()==f&&*(void**)(f+8)==__builtin_return_address(0)&&f>a&&a[0]==(char)n;}"
+        "int tested(int n){char*f=__builtin_frame_address(0);char local=(char)n;int r=((unsigned long)f&15)==0;r|=(f>&local)<<1;"
+        "r|=(*(void**)(f+8)==__builtin_return_address(0))<<2;r|=(inner()<f)<<3;void*a=where();void*b=where();r|=(a!=b)<<4;"
+        "void*prev=0;for(int i=0;i<2;i++){void*c=where();if(i)r|=(c==prev)<<5;prev=c;}r|=(caller_frame()==f)<<6;"
+        "r|=((char*)where()>(char*)tested)<<7;r|=(__builtin_extract_return_addr(__builtin_return_address(0))==__builtin_return_address(0))<<8;"
+        "char*p=__builtin_alloca((unsigned)(n+3)*16);r|=(__builtin_frame_address(0)==f)<<9;r|=(p<f)<<10;r|=aligned(n)<<11;"
+        "r|=(__builtin_frob_return_addr(where())!=0)<<12;return r+local;}",
+        "frame-builtins", clang);
+    // A caller's frame, which clang -O0's code finds through the frame pointers' chain, is refused by name.
+    check_test_program_boundary_reason(test, "int tested(int n){return (__builtin_frame_address(1)!=0)+n;}", "frame-address-caller", true, false, 0, 0,
+                                       "__builtin_frame_address and __builtin_return_address of a caller's frame");
+    check_test_program_boundary_reason(test, "int tested(int n){return (__builtin_return_address(2)!=0)+n;}", "return-address-caller", true, false, 0, 0,
+                                       "__builtin_frame_address and __builtin_return_address of a caller's frame");
     check_test_program_source(test,
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",

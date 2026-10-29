@@ -244,8 +244,26 @@ in freestanding and no-builtin modes; the existing policy for recognizing
 ordinary function names is unchanged. The compiler's masked vector publication
 and scalar publication produce the same typed columns. Hints and baseline x86
 return-address extraction use the documented identity/no-op behavior.
-Dynamic stack allocation and genuine frame addresses remain explicit refusals
-in this adapter. Terminal helpers require a separate terminal source-graph
+
+The stack's and the frame's builtins are clang -O0's code (#148):
+
+- `__builtin_alloca`, which glibc's `<alloca.h>` makes of `alloca`, is Tier 0's
+  `ALLOCA` of its size: rounded up to 16 bytes and taken from the stack. A
+  variable-length array's scope releases it at its end exactly where clang's
+  `stackrestore` would: an allocation after the block's first array goes with
+  the arrays, one before it stays until the function returns.
+- `__builtin_frame_address(0)` is Tier 0's `FRAME_ADDRESS`, the frame pointer,
+  which the entry gives its function as the stack's kinds do. The address
+  points at the caller's saved rbp, 16 bytes below the incoming arguments.
+  `__builtin_return_address(0)` is the word 8 bytes above it. Their level is a
+  constant of their own, which nothing evaluates, so the recipes take no
+  arguments.
+- A level past 0 is a caller's frame, which clang -O0 reaches through the frame
+  pointers' chain. Tier 0's functions keep a frame pointer only where they need
+  one, so the lowering refuses those levels by name: "unsupported:
+  `__builtin_frame_address` and `__builtin_return_address` of a caller's frame".
+
+Terminal helpers require a separate terminal source-graph
 path. The native recipe tests retain independent libc comparisons, exact
 guarded tails, every small size across the expansion cutoffs, close overlap in
 both directions, high-bit bytes, and operations through 1 MiB. The checker
@@ -452,6 +470,43 @@ argument clears the flags, including quiet-NaN/signaling-NaN pairs.
 
 ## Atomic and terminal helper calls
 
+`c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
+both `<stdatomic.h>` implementations. Its pointer must address `_Atomic(T)`;
+load removes the atomic wrapper, writes reject const objects, compare-exchange
+takes a pointer to plain `T`, and pointer fetch-add/sub scales by the pointee's
+stride. Init and the weak/strong forms retain their source arities. Every source
+argument, including dynamic orders, is evaluated once. Constant lock-free
+queries for zero and 1/2/4/8 bytes retain Clang's integer-constant-expression
+proof; other sizes use the runtime query.
+
+The C11 scalar forms use the existing GNU raw-bit leaves. Small record and
+complex representations use those same leaves through an owned byte buffer,
+including zeroed atomic storage padding. Other widths or insufficient alignment
+use libatomic's generic size-and-pointer load, store, exchange and compare-exchange
+ABI. Objects wider than eight bytes therefore require `-latomic` when linked;
+this implementation does not advertise a lock-free 16-byte path. The ordinary
+value representation limits still apply to `_Float16`, `_Float128` and arbitrary
+`_BitInt` values.
+
+`c_check_program_atomic.c` also lowers ordinary `_Atomic` lvalue reads, assignment,
+compound assignments and increments. Accesses use sequential consistency;
+compound updates snapshot the address and RHS before a compare-exchange loop,
+including an owned copy of a complex RHS. Failed attempts refresh the expected
+representation without reevaluating source operands. Integer promotions,
+pointer strides, prefix/postfix results, complex arithmetic and 128-bit division
+reuse the ordinary lowering's type and runtime contracts. Atomic locals remain
+addressable, and static-data emission retains the atomic storage size/alignment
+separately from its unwrapped value type.
+Atomic parameters retain their declared ABI classification while argument values
+are captured in padded objects. Atomic aggregate returns similarly copy only the
+underlying value's bytes into zeroed atomic storage. Compatible atomic rvalues
+retain their identity for initialization, assignment and calls.
+
+Floating updates follow Clang's current compare-exchange loop behavior. Clang
+23.1.1's `CGExprScalar.cpp` explicitly leaves saving/restoring floating exceptions
+across retries as a FIXME; this implementation likewise does not claim full C
+floating-environment conformance for failed retries.
+
 `c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,
 sync fence and atomic thread/signal-fence slice. It retains actual object and
 value types, qualifiers, all argument effects, ordinary `int` order conversions,
@@ -459,7 +514,7 @@ and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
 integer objects. Read/modify/write checking and runtime leaves are separate
-modules described below; other recognized atomic/sync families remain
+modules described below; other recognized GNU atomic/sync families remain
 explicit refusals.
 The source-domain rules follow the approved Clang 23.1.1 release: real and
 floating-complex `_n` objects are valid, while direct x87 long double and

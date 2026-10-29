@@ -251,9 +251,10 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     }
     uint32_t cutoff = valid ? input->token_count : 0;
     cutoff = before_token < cutoff ? before_token : cutoff;
-    for (uint32_t i = 0; valid && i < input->report_count; i += 1)
+    for (uint32_t i = valid ? input->diagnostic_report_count : 0; valid && i < input->report_count; i += 1)
     {
-        cutoff = input->reports[i].token < cutoff ? input->reports[i].token : cutoff;
+        const uint32_t position = input->reports[i].completion != 0 ? input->reports[i].completion : input->reports[i].token;
+        cutoff = position < cutoff ? position : cutoff;
     }
     for (uint32_t i = 0; valid && i < stream->report_count; i += 1)
     {
@@ -281,7 +282,9 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     for (uint32_t node = 0; valid && node < stream->count; node += 1)
     {
         const CheckGraph* graph = &input->graph;
-        bool checked = graph->tokens[node] < cutoff && (graph->source_positions == 0 || graph->source_positions[node] <= cutoff) &&
+        const uint32_t local = check_input_diagnostic_limit(input, graph->tokens[node]);
+        const uint32_t limit = local < cutoff ? local : cutoff;
+        bool checked = graph->tokens[node] < limit && (graph->source_positions == 0 || graph->source_positions[node] <= limit) &&
                        stream->diagnostics[node] == CHECK_DIAG_NONE && type_is_valid(types, stream->values[node].type);
         const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
         for (uint32_t i = 0; checked && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
@@ -305,8 +308,9 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     for (uint32_t token = 0; valid && token < cutoff; token += 1)
     {
         const uint32_t end = parser->tree.parents[token];
-        const bool selection = parser->tokens.kinds[token] == PARSE_KIND_SWITCH && end < cutoff && parser->tree.roles[end] == PARSE_ROLE_CLOSE_CONDITION;
-        const bool label = parser->tree.roles[token] == PARSE_ROLE_OPEN_CASE && end < cutoff && parser->tree.roles[end] == PARSE_ROLE_CLOSE_CASE;
+        const uint32_t local = check_input_diagnostic_limit(input, token);
+        const bool selection = parser->tokens.kinds[token] == PARSE_KIND_SWITCH && end < cutoff && end < local && parser->tree.roles[end] == PARSE_ROLE_CLOSE_CONDITION;
+        const bool label = parser->tree.roles[token] == PARSE_ROLE_OPEN_CASE && end < cutoff && end < local && parser->tree.roles[end] == PARSE_ROLE_CLOSE_CASE;
         if (selection || label)
         {
             const uint32_t owner = selection ? end : input->control_owners[end];
@@ -319,7 +323,7 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
                 {
                     check_program_constraint(&program, owner);
                 }
-                else if (label && ends != 0 && ends[owner] < cutoff)
+                else if (label && ends != 0 && ends[owner] < cutoff && ends[owner] < local)
                 {
                     const uint32_t node = input->token_nodes[end];
                     const uint32_t high = input->case_ranges[end] != BUSTER_CHECK_NONE ? input->case_ranges[end] : node;

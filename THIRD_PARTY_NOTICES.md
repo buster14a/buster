@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
+(`c_check_program_atomic.c`) and the added semantic, native and static-data
+fixtures (#671) are original project material under the default terms. Exact
+Clang/LLVM `llvmorg-23.1.1` Sema and code-generation sources supply behavioral
+facts; Clang and system libatomic run externally as oracles/runtime consumers.
+No external implementation, corpus fixture or generated data is incorporated.
+
 `c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
 associated declaration/ELF integration (#620) are original project material
 under the default terms. Clang is an external behavior and object-format oracle;
@@ -49,6 +56,14 @@ default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
 and Clang runs externally as an independent oracle. No external implementation
 or fixture is copied.
 
+The source-driver collection and independent-declaration diagnostic recovery
+(#698, #699), `c_checker_driver_recovery_test.c`, and sparse warning completion
+facts in `c_check_warning_events.c` and its model tests are original project
+material under the default terms. They reuse this project's arenas, parser
+forest, binding history, diagnostic gate and deferred type replay. Installed
+Clang 23.1.4 supplies independent behavior and diagnostic-order observations;
+no compiler implementation, external fixture or generated corpus is imported.
+
 The deep aggregate-call setup, argument bound and extended generated/guarded
 native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
 `tier0_validate_test.c` and `c_check_program_test.c` (#668/#663) are original
@@ -75,6 +90,7 @@ Paths below are relative to the repository root. "Default" means
 
 | Paths or portions | Origin and disposition |
 | --- | --- |
+| `src/buster/compiler/calling_convention_builtins.c`, its focused tests in `calling_convention_test.c`, and `tools/generate_builtin_abi.c` | Original immutable projection of this project's builtin type and ABI classification rules, bounded initialization and independent scalar recomputation; Default. The initial input is project revision `e7f89091648f68940b595aadd648841c1ffc3ec5`, `c_types.c` and `calling_convention.c`. No external implementation or generated data is imported. The generator includes the existing `lane.c` module, which retains its MIT notice and grant. Reproduction and ownership limits are in `docs/calling-convention.md`. |
 | `src/buster/compiler/c_check_clock.c`, `src/buster/compiler/compile_measure.c`, `docs/compile-time.md` and the `--time-stages` additions to `src/buster/compiler/c_checker_driver.c`, `src/buster/compiler/c_check_program_emit.c` and `src/buster/compiler/c_checker_driver_test.c` | Original opt-in stage clock, whole-process compile harness, driver tests and attribution notes (#518); Default. Reuses this repository's profiling helpers (`profile.c`) and the preprocessor's phase timers. tcc, perf and the frozen SQLite amalgamation run or are read externally; no external implementation or data is imported. |
 | `src/buster/compiler/tier1_select.c`, `src/buster/compiler/tier1_select_test.c`, `src/buster/compiler/tier1_select_benchmark.c`, `src/buster/compiler/tier1_liveness.c`, `src/buster/compiler/tier1_liveness_test.c`, `src/buster/compiler/tier1_emit.c`, `src/buster/compiler/tier1_emit_test.c`, `src/buster/compiler/tier1_call_test.c`, `src/buster/compiler/tier1_narrow_test.c`, `src/buster/compiler/tier1_terminal_test.c`, `src/buster/compiler/tier1_pipeline_test.c`, `docs/tier1.md`, `docs/tier1-selection.md`, `docs/tier1-liveness.md`, `docs/tier1-pipeline.md` | Original selection, selected-use analysis, native fragment/call consumer, hostile native call helpers, guarded narrow-value and bounded terminal fixtures, typed-stream fixtures, independent Clang formulas, process supervisor and measurement helpers; Default. Existing project IR/SSA, dataflow, allocator, frame, encoder, target and model APIs are consumed under their retained provenance. Clang runs externally; no external implementation or corpus is imported. |
 | `src/buster/compiler/tier1_model_measure.c`, `src/buster/compiler/tier1_model_measure_test.c`, `docs/tier1-model-measurements.md` | Original emitted-case inventory, register-normalized experiments and reader regression fixtures; Default. Uses the original project selector manifest, encoder/effects and Zen 5 counter helpers; introduces no third-party timing data or new model observations. |
