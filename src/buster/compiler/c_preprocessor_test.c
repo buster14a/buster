@@ -7040,11 +7040,12 @@ static bool pp_test_implemented_features(const char* directory)
         "__is_identifier(int) __is_target_arch(x86_64)\n"
         "#define CLZ __builtin_clz\n#define __builtin_clz 0\nB __has_constexpr_builtin(CLZ) __has_constexpr_builtin(__builtin_clz)\n"
         "#define OWN_BUILTIN __is_target_arch\nC __has_builtin(OWN_BUILTIN) __has_builtin(__is_target_arch)\n"
-        "#define __builtin_expect 0\nD __has_builtin(__builtin_expect) __has_builtin(__builtin_expect_typo)\n";
+        "#define __builtin_expect 0\nD __has_builtin(__builtin_expect) __has_builtin(__builtin_expect_typo)\n"
+        "E __has_attribute(packed_typo) __has_c_attribute(other::packed) __has_c_attribute(packed) __has_c_attribute(gnu::__packed__)\n";
     static const char* const expected[2] =
     {
-        "A 0 0 0 0 0 0 0 1 0 1 B 0 0 C 0 1 D 0 0\n",
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0\n",
+        "A 0 0 0 0 1 1 1 1 0 1 B 0 0 C 0 1 D 0 0 E 0 0 0 1\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1\n",
     };
     static const uint32_t standards[] =
     {

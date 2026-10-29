@@ -1699,6 +1699,8 @@ static void check_test_program_x86_rows(CheckTest* test)
     static const uint64_t immediates[] = { 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 63, 0x1b, 0x80, 0xff };
     static const uint64_t rounds[] = { 4, 8, 9, 10, 11, 12, 15 };
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    // tier0_operation_valid asks the effects tables (#760).
+    check_test_expect(test, x86_encoder_initialize() && tier0_initialize(), "the encoder's, the effects' and Tier 0's tables");
     uint32_t rows = 0;
     uint32_t invalid = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
