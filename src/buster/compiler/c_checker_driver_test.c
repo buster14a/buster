@@ -134,9 +134,9 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return check_test_driver_run_with(executable, source, object, scalar, dump_static, quiet, lazy, NULL, 0, outcome, warnings);
 }
 
-// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
-// the caller frees: its exit status, or -1 if it didn't exit.
-static int check_test_driver_spawn(char* const* arguments, char** text)
+// Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
+// The caller frees *text. Returns the exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
 {
     FILE* errors = tmpfile();
     int status = 0;
@@ -150,7 +150,8 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         if (child == 0)
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            if (output >= 0 && dup2(stdout_capture ? fileno(errors) : output, STDOUT_FILENO) >= 0 &&
+                dup2(stdout_capture ? output : fileno(errors), STDERR_FILENO) >= 0)
             {
                 execvp(arguments[0], arguments);
             }
@@ -169,6 +170,11 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         fclose(errors);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    return check_test_driver_spawn_stream(arguments, text, false);
 }
 
 // Whether the files at `a` and `b` can be read and have the same bytes.
@@ -538,6 +544,188 @@ static void check_test_driver_target_selection(CheckTest* test, const char* exec
 
 static bool check_test_driver_capture(const char* path, char* captured, size_t capacity);
 static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* length);
+
+// MMX's intrinsics by the driver (#136): a program of every kind of their functions (arithmetic, comparisons, packs and
+// unpacks, shifts, conversions between them and integers, floats and doubles, halves' loads and stores, the stream, the
+// masked move, SSSE3's and SSE2's), which clang 23's <immintrin.h> writes as builtins of generic 8-byte vectors, linked
+// for znver5 by both paths into the same bytes (its 8-bit shuffles take AVX-512 VBMI), and printing, where the host has
+// the AVX-512 features its rows take, what clang -O0's build of it for x86-64-v4 prints.
+static void check_test_driver_mmx(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <immintrin.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
+                                  "static void show(const char* name, __m64 v) { long long x; memcpy(&x, &v, 8); printf(\"%s %016llx\\n\", name, x); }\n"
+                                  "static void show128(const char* name, __m128i v) { long long x[2]; memcpy(x, &v, 16); printf(\"%s %016llx %016llx\\n\", name, x[1], x[0]); }\n"
+                                  "static void showps(const char* name, __m128 v) { float x[4]; memcpy(x, &v, 16); printf(\"%s %g %g %g %g\\n\", name, x[0], x[1], x[2], x[3]); }\n"
+                                  "static void showpd(const char* name, __m128d v) { double x[2]; memcpy(x, &v, 16); printf(\"%s %g %g\\n\", name, x[0], x[1]); }\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int n = argc + 6;\n"
+                                  "    __m64 a = _mm_set_pi8((char)n, 2, 3, 4, (char)(n * 7), 6, 7, (char)-n);\n"
+                                  "    __m64 b = _mm_set_pi16((short)(n * 1000), -3, 7, (short)n);\n"
+                                  "    __m128 f = _mm_setr_ps(1.5f, -2.25f, (float)n, 100.75f);\n"
+                                  "    __m128d d = _mm_setr_pd(-7.5, (double)n * 3.25);\n"
+                                  "    show(\"add8\", _mm_add_pi8(a, b));\n"
+                                  "    show(\"add16\", _mm_add_pi16(a, b));\n"
+                                  "    show(\"add32\", _mm_add_pi32(a, b));\n"
+                                  "    show(\"sub8\", _mm_sub_pi8(a, b));\n"
+                                  "    show(\"adds8\", _mm_adds_pi8(a, b));\n"
+                                  "    show(\"addsu8\", _mm_adds_pu8(a, b));\n"
+                                  "    show(\"subs16\", _mm_subs_pi16(a, b));\n"
+                                  "    show(\"madd\", _mm_madd_pi16(a, b));\n"
+                                  "    show(\"mulhi\", _mm_mulhi_pi16(a, b));\n"
+                                  "    show(\"mullo\", _mm_mullo_pi16(a, b));\n"
+                                  "    show(\"and\", _mm_and_si64(a, b));\n"
+                                  "    show(\"andnot\", _mm_andnot_si64(a, b));\n"
+                                  "    show(\"or\", _mm_or_si64(a, b));\n"
+                                  "    show(\"xor\", _mm_xor_si64(a, b));\n"
+                                  "    show(\"cmpeq8\", _mm_cmpeq_pi8(a, a));\n"
+                                  "    show(\"cmpgt16\", _mm_cmpgt_pi16(a, b));\n"
+                                  "    show(\"cmpgt32\", _mm_cmpgt_pi32(b, a));\n"
+                                  "    show(\"packs16\", _mm_packs_pi16(a, b));\n"
+                                  "    show(\"packs32\", _mm_packs_pi32(a, b));\n"
+                                  "    show(\"packsu16\", _mm_packs_pu16(a, b));\n"
+                                  "    show(\"unpackhi8\", _mm_unpackhi_pi8(a, b));\n"
+                                  "    show(\"unpacklo8\", _mm_unpacklo_pi8(a, b));\n"
+                                  "    show(\"unpackhi32\", _mm_unpackhi_pi32(a, b));\n"
+                                  "    show(\"unpacklo16\", _mm_unpacklo_pi16(a, b));\n"
+                                  "    show(\"sll16\", _mm_sll_pi16(a, _mm_cvtsi32_si64(3)));\n"
+                                  "    show(\"slli32\", _mm_slli_pi32(a, 5));\n"
+                                  "    show(\"sllsi64\", _mm_sll_si64(a, _mm_cvtsi32_si64(9)));\n"
+                                  "    show(\"srai16\", _mm_srai_pi16(b, 2));\n"
+                                  "    show(\"sra32\", _mm_sra_pi32(b, _mm_cvtsi32_si64(4)));\n"
+                                  "    show(\"srli64\", _mm_srli_si64(a, 12));\n"
+                                  "    show(\"srl16\", _mm_srl_pi16(b, _mm_cvtsi32_si64(1)));\n"
+                                  "    show(\"cvt\", _mm_cvtsi32_si64(n * 3));\n"
+                                  "    printf(\"to32 %d\\n\", _mm_cvtsi64_si32(a));\n"
+                                  "    printf(\"to64 %lld\\n\", _mm_cvtm64_si64(b));\n"
+                                  "    show(\"from64\", _mm_cvtsi64_m64((long long)n << 40));\n"
+                                  "    show(\"set1\", _mm_set1_pi16((short)n));\n"
+                                  "    show(\"set1b\", _mm_set1_pi8((char)(n + 100)));\n"
+                                  "    show(\"setr\", _mm_setr_pi32(n, -n));\n"
+                                  "    show(\"zero\", _mm_setzero_si64());\n"
+                                  "    show(\"avg8\", _mm_avg_pu8(a, b));\n"
+                                  "    show(\"avg16\", _mm_avg_pu16(a, b));\n"
+                                  "    showps(\"cvtpi32ps\", _mm_cvtpi32_ps(f, b));\n"
+                                  "    show(\"cvtps32\", _mm_cvtps_pi32(f));\n"
+                                  "    show(\"cvttps32\", _mm_cvttps_pi32(f));\n"
+                                  "    showps(\"cvtpi8\", _mm_cvtpi8_ps(a));\n"
+                                  "    showps(\"cvtpu8\", _mm_cvtpu8_ps(a));\n"
+                                  "    showps(\"cvtpi16\", _mm_cvtpi16_ps(b));\n"
+                                  "    showps(\"cvtpu16\", _mm_cvtpu16_ps(b));\n"
+                                  "    showps(\"cvtpi32x2\", _mm_cvtpi32x2_ps(a, b));\n"
+                                  "    show(\"cvtps16\", _mm_cvtps_pi16(f));\n"
+                                  "    show(\"cvtps8\", _mm_cvtps_pi8(f));\n"
+                                  "    __m64 mem[2] = { a, b };\n"
+                                  "    showps(\"loadh\", _mm_loadh_pi(f, &mem[0]));\n"
+                                  "    showps(\"loadl\", _mm_loadl_pi(f, &mem[1]));\n"
+                                  "    _mm_storeh_pi(&mem[0], f);\n"
+                                  "    _mm_storel_pi(&mem[1], f);\n"
+                                  "    show(\"storeh\", mem[0]);\n"
+                                  "    show(\"storel\", mem[1]);\n"
+                                  "    show(\"max16\", _mm_max_pi16(a, b));\n"
+                                  "    show(\"maxu8\", _mm_max_pu8(a, b));\n"
+                                  "    show(\"min16\", _mm_min_pi16(a, b));\n"
+                                  "    show(\"minu8\", _mm_min_pu8(a, b));\n"
+                                  "    printf(\"movemask %d\\n\", _mm_movemask_pi8(a));\n"
+                                  "    show(\"mulhu16\", _mm_mulhi_pu16(a, b));\n"
+                                  "    show(\"sad\", _mm_sad_pu8(a, b));\n"
+                                  "    __m64 stream;\n"
+                                  "    _mm_stream_pi(&stream, a);\n"
+                                  "    show(\"stream\", stream);\n"
+                                  "    char bytes[16] = { 0 };\n"
+                                  "    _mm_maskmove_si64(a, _mm_set_pi8(-1, 0, -1, 0, -1, 0, -1, -1), bytes + 3);\n"
+                                  "    printf(\"maskmove\");\n"
+                                  "    for (int i = 0; i < 16; i++)\n"
+                                  "    {\n"
+                                  "        printf(\" %d\", bytes[i]);\n"
+                                  "    }\n"
+                                  "    printf(\"\\n\");\n"
+                                  "    show(\"shuffle16\", _mm_shuffle_pi16(b, 0x1b));\n"
+                                  "    show(\"abs8\", _mm_abs_pi8(a));\n"
+                                  "    show(\"abs16\", _mm_abs_pi16(b));\n"
+                                  "    show(\"abs32\", _mm_abs_pi32(b));\n"
+                                  "    show(\"hadd16\", _mm_hadd_pi16(a, b));\n"
+                                  "    show(\"hadd32\", _mm_hadd_pi32(a, b));\n"
+                                  "    show(\"hadds16\", _mm_hadds_pi16(a, b));\n"
+                                  "    show(\"hsub16\", _mm_hsub_pi16(a, b));\n"
+                                  "    show(\"hsub32\", _mm_hsub_pi32(a, b));\n"
+                                  "    show(\"hsubs16\", _mm_hsubs_pi16(a, b));\n"
+                                  "    show(\"maddubs\", _mm_maddubs_pi16(a, b));\n"
+                                  "    show(\"mulhrs\", _mm_mulhrs_pi16(a, b));\n"
+                                  "    show(\"shuffle8\", _mm_shuffle_pi8(a, b));\n"
+                                  "    show(\"sign8\", _mm_sign_pi8(a, b));\n"
+                                  "    show(\"sign16\", _mm_sign_pi16(a, b));\n"
+                                  "    show(\"sign32\", _mm_sign_pi32(a, b));\n"
+                                  "    show(\"addsi64\", _mm_add_si64(a, b));\n"
+                                  "    show(\"subsi64\", _mm_sub_si64(a, b));\n"
+                                  "    show(\"mulsu32\", _mm_mul_su32(a, b));\n"
+                                  "    show(\"cvtpd32\", _mm_cvtpd_pi32(d));\n"
+                                  "    show(\"cvttpd32\", _mm_cvttpd_pi32(d));\n"
+                                  "    showpd(\"cvtpi32pd\", _mm_cvtpi32_pd(b));\n"
+                                  "    show(\"movepi64\", _mm_movepi64_pi64(_mm_set_epi64x(n, -n)));\n"
+                                  "    show128(\"movpi64\", _mm_movpi64_epi64(a));\n"
+                                  "    show128(\"set1epi64\", _mm_set1_epi64(b));\n"
+                                  "    show128(\"setepi64\", _mm_set_epi64(a, b));\n"
+                                  "    show128(\"setrepi64\", _mm_setr_epi64(a, b));\n"
+                                  "    _mm_empty();\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[3][256];
+    snprintf(source, sizeof(source), "%s/mmx.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/mmx", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/mmx-scalar", directory);
+    snprintf(outputs[2], sizeof(outputs[2]), "%s/mmx-clang", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the MMX intrinsics' program written");
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=znver5", "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=znver5", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "MMX's intrinsics link" : "MMX's intrinsics link, scalar");
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        linked = linked && status == 0;
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable of MMX's intrinsics");
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) | BUSTER_X86_FEATURE(AVX512DQ) |
+                              BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512VBMI) | BUSTER_X86_FEATURE(AVX512VBMI2) |
+                              BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
+    if (linked && (x86_target_native().features & required) == required)
+    {
+        char* text = NULL;
+        char* const reference[] = { (char*)clang, "-O0", "-march=x86-64-v4", "-o", outputs[2], source, NULL };
+        const int built = check_test_driver_spawn(reference, &text);
+        free(text);
+        static char expected[8192];
+        static char captured[8192];
+        const bool ran = built == 0 && check_test_driver_capture(outputs[2], expected, sizeof(expected)) &&
+                         check_test_driver_capture(outputs[0], captured, sizeof(captured));
+        check_test_expect(test, ran && strlen(expected) > 2000 && strcmp(captured, expected) == 0, "MMX's intrinsics compute what clang's build of them does");
+        if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "MMX's intrinsics:\n%s\nclang's build:\n%s\n", captured, expected);
+        }
+    }
+    else if (linked)
+    {
+        printf("  MMX's intrinsics: native execution skipped (the host lacks the AVX-512 features their rows take); the program links\n");
+    }
+    unlink(source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(outputs[2]);
+}
+
 
 // The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
 // driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
@@ -1917,6 +2105,191 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Compiler identification is an action, while an option operand that spells an action is still an operand.
+static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
+{
+    char compiler[PATH_MAX];
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/identity.c", directory);
+    snprintf(object, sizeof(object), "%s/--version", directory);
+    static const char program[] = "int value = 42;\n";
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const version[] = { compiler, "-O2", "--version", source, NULL };
+    char* const machine[] = { compiler, "-dumpmachine", NULL };
+    char* const target[] = { compiler, "-target", "x86_64-acme-linux-gnu", "-dumpmachine", NULL };
+    char* const target_last[] = { compiler, "--target=x86_64-first-linux-gnu", "-target", "x86_64-linux-gnu", "-dumpmachine", NULL };
+    char* const both[] = { compiler, "--version", "-dumpmachine", NULL };
+    char* const invalid[] = { compiler, "-target", "aarch64-linux-gnu", "-dumpmachine", NULL };
+    char* const missing[] = { compiler, "-dumpmachine", "-target", NULL };
+    char* const* cases[] = { version, machine, target, target_last, both, invalid, missing };
+    const char* const expected[] = { "buster (development build)\nTarget: ", "x86_64-", "x86_64-acme-linux-gnu\n",
+                                     "x86_64-unknown-linux-gnu\n", "x86_64-", "", "" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(cases[i], &text, true) : -1;
+        const bool prefix = text != NULL && strncmp(text, expected[i], strlen(expected[i])) == 0;
+        check_test_expect(test, i < 5 ? status == 0 && prefix : status != 0 && text != NULL && text[0] == 0,
+                          "compiler identification selects the correct target and refuses unsupported targets");
+        free(text);
+    }
+    char* const compile[] = { "env", "-C", (char*)directory, compiler, "-pipe", "-c", "-o", "--version", "identity.c", NULL };
+    char* text = NULL;
+    const int compiled = made ? check_test_driver_spawn(compile, &text) : -1;
+    free(text);
+    FILE* output = fopen(object, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output != NULL && fread(magic, 1, sizeof(magic), output) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output != NULL)
+    {
+        fclose(output);
+    }
+    check_test_expect(test, compiled == 0 && elf, "-pipe compiles and an output named --version remains an operand");
+    char* const preprocess[] = { compiler, "-pipe", "-E", "-P", source, NULL };
+    text = NULL;
+    const int preprocessed = made ? check_test_driver_spawn_stream(preprocess, &text, true) : -1;
+    check_test_expect(test, preprocessed == 0 && text != NULL && strstr(text, "int value = 42;") != NULL,
+                      "-pipe is accepted in preprocessing mode");
+    free(text);
+    char* const command[] = { compiler, "parallel", "--version", NULL };
+    text = NULL;
+    const int command_status = made ? check_test_driver_spawn(command, &text) : -1;
+    check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "named commands take precedence over compiler identification");
+    free(text);
+    char* const assembly_version[] = { compiler, "-c", "--version", "missing.s", NULL };
+    char* const assembly_machine[] = { compiler, "-c", "-dumpmachine", "missing.s", NULL };
+    char* const* assembly_queries[] = { assembly_version, assembly_machine };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(assembly_queries); i += 1)
+    {
+        text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(assembly_queries[i], &text, true) : -1;
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, i == 0 ? "buster (development build)" : "x86_64-") != NULL,
+                          "information actions take precedence over implicit assembly compilation");
+        free(text);
+    }
+    char missing_assembly[256];
+    snprintf(missing_assembly, sizeof(missing_assembly), "%s/missing.s", directory);
+    char* const assembly_operand[] = { compiler, "-c", "-o", "--version", missing_assembly, NULL };
+    text = NULL;
+    const int operand_status = made ? check_test_driver_spawn_stream(assembly_operand, &text, true) : -1;
+    check_test_expect(test, operand_status != 0 && text != NULL && text[0] == 0,
+                      "an assembly output named --version does not select compiler identification");
+    free(text);
+    unlink(object);
+    unlink(source);
+}
+
+// Layout flags not implemented by the checker must not silently produce objects with another ABI.
+static void check_test_driver_layout_options(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "enum E { A, B }; struct S { char c; int i; }; int value;\n";
+    static const char sentinel[] = "existing output";
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/layout.c", directory);
+    snprintf(object, sizeof(object), "%s/layout.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    static const struct
+    {
+        const char* first;
+        const char* second;
+        bool reject;
+        const char* diagnostic;
+    } cases[] = {
+        { "-fshort-enums", NULL, true, "-fshort-enums" },
+        { "-fpack-struct", NULL, true, "-fpack-struct" },
+        { "-fpack-struct=2", NULL, true, "-fpack-struct=2" },
+        { "-fpack-struct=abc", "-fno-pack-struct", true, "-fpack-struct=abc" },
+        { "-fpack-struct=08", "-fno-pack-struct", true, "-fpack-struct=08" },
+        { "-fpack-struct=4294967296", "-fno-pack-struct", true, "-fpack-struct=4294967296" },
+        { "-fshort-enums", "-fno-short-enums", false, NULL },
+        { "-fno-short-enums", "-fshort-enums", true, "-fshort-enums" },
+        { "-fpack-struct=2", "-fno-pack-struct", true, "-fpack-struct=2" },
+        { "-fpack-struct", "-fno-pack-struct", false, NULL },
+        { "-fpack-struct", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct=0", "-fpack-struct", false, NULL },
+        { "-fpack-struct=bad", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct=2", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct", "-fpack-struct=0x0", false, NULL },
+        { "-fpack-struct=0", "-fpack-struct=2", true, "-fpack-struct=2" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* arguments[] = { (char*)executable, "-c", "-o", object, source, (char*)cases[i].first, (char*)cases[i].second, NULL };
+        char* text = NULL;
+        const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
+        const int status = written && prior ? check_test_driver_spawn(arguments, &text) : -1;
+        if (cases[i].reject)
+        {
+            FILE* file = fopen(object, "rb");
+            char bytes[sizeof(sentinel) + 1] = { 0 };
+            const size_t length = file != NULL ? fread(bytes, 1, sizeof(bytes), file) : 0;
+            if (file != NULL)
+            {
+                fclose(file);
+            }
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, cases[i].diagnostic) != NULL &&
+                                    length == sizeof(sentinel) && memcmp(bytes, sentinel, sizeof(sentinel)) == 0,
+                              "unsupported ABI layout option is named and preserves the output");
+        }
+        else
+        {
+            FILE* file = fopen(object, "rb");
+            unsigned char magic[4] = { 0 };
+            const bool elf = file != NULL && fread(magic, 1, sizeof(magic), file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+            if (file != NULL)
+            {
+                fclose(file);
+            }
+            check_test_expect(test, status == 0 && elf, "a resolved default ABI layout permits ordinary object output");
+        }
+        free(text);
+    }
+    char* const syntax[] = { (char*)executable, "check", "-fsyntax-only", "-fshort-enums", source, NULL };
+    char* text = NULL;
+    const int syntax_status = check_test_driver_spawn(syntax, &text);
+    check_test_expect(test, syntax_status == 1 && text != NULL && strstr(text, "-fshort-enums") != NULL,
+                      "the check command refuses unsupported layout options");
+    free(text);
+    char* const preprocess[] = { (char*)executable, "-E", "-fshort-enums", "-fpack-struct=2", source, NULL };
+    text = NULL;
+    const int preprocess_status = check_test_driver_spawn(preprocess, &text);
+    check_test_expect(test, preprocess_status == 0, "preprocessing accepts layout flags that do not affect its output");
+    free(text);
+    static const char* const value_options[] = { "--lanes", "--worker-budget", "--id-order", "-l", "-L" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(value_options); i += 1)
+    {
+        char* const valued[] = { (char*)executable, (char*)value_options[i], "-fshort-enums", "-fsyntax-only", source, NULL };
+        text = NULL;
+        const int valued_status = check_test_driver_spawn(valued, &text);
+        check_test_expect(test, text != NULL && strstr(text, "the checker does not implement its ABI layout") == NULL &&
+                                (i >= 3 || valued_status != 0),
+                          "a driver option's operand is not interpreted as a layout option");
+        free(text);
+    }
+    char compiler[PATH_MAX];
+    char output_value[256];
+    snprintf(output_value, sizeof(output_value), "%s/-fshort-enums", directory);
+    const bool absolute = realpath(executable, compiler) != NULL;
+    char* const named[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-fshort-enums", "layout.c", NULL };
+    text = NULL;
+    const int named_status = absolute ? check_test_driver_spawn(named, &text) : -1;
+    FILE* output_file = fopen(output_value, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output_file != NULL && fread(magic, 1, sizeof(magic), output_file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output_file != NULL)
+    {
+        fclose(output_file);
+    }
+    check_test_expect(test, named_status == 0 && elf, "an output operand spelled as a layout option remains a filename");
+    free(text);
+    unlink(output_value);
+    unlink(object);
+    unlink(source);
+}
+
 // Diagnostic examples include missing indices: the writer does not attach an atom to every failure.
 static void check_test_driver_link_failure_messages(CheckTest* test)
 {
@@ -3273,6 +3646,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_transparent_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -4464,7 +4838,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_sockets(&test, clang, executable, directory);
             check_test_driver_target_selection(&test, executable, directory);
+            check_test_driver_mmx(&test, clang, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
@@ -4475,8 +4851,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_identification(&test, executable, directory);
             check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
+            check_test_driver_layout_options(&test, executable, directory);
             check_test_driver_link_layout_error(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }

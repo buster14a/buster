@@ -112,14 +112,14 @@ static bool ir_rebuild_owners(const IrFunction* source, const IrRebuildPlan* pla
     {
         const void* pointers[] = { source, source->op, source->type, source->flags, source->alignment_log2,
             source->a, source->b, source->c, source->block_offsets, source->extra, source->constants, source->slots,
-            source->addresses, source->calls, source->call_types, source->parameter_types };
+            source->addresses, source->calls, source->call_types, source->parameter_types, source->vector_constants };
         const uint64_t bytes[] = { sizeof(*source), source->instruction_count, source->instruction_count,
             source->instruction_count, source->instruction_count, (uint64_t)source->instruction_count * 4,
             (uint64_t)source->instruction_count * 4, (uint64_t)source->instruction_count * 4,
             ((uint64_t)source->block_count + 1) * 4, (uint64_t)source->extra_count * 4,
             (uint64_t)source->constant_count * sizeof(IrConstant), (uint64_t)source->slot_count * sizeof(IrSlot),
             (uint64_t)source->address_count * sizeof(IrAddress), (uint64_t)source->call_count * sizeof(IrCall),
-            source->call_type_count, source->parameter_count };
+            source->call_type_count, source->parameter_count, (uint64_t)source->vector_constant_count * sizeof(IrSimdValue) };
         const void* out_tail = (void*)((uintptr_t)output->base + output->length);
         const void* temp_tail = (void*)((uintptr_t)scratch->base + scratch->length);
         valid = !ir_rebuild_overlap(out_tail, output->capacity - output->length, scratch->base, scratch->capacity) &&
@@ -176,7 +176,11 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
     {
         const bool paired = plan == NULL || ((plan->blocks == NULL) == (plan->rows == NULL) &&
                             (plan->rows == NULL || plan->offsets != NULL));
-        if (!paired || blocks > source->block_count || rows > source->instruction_count || source->result_type > IR_PTR)
+        if (ir_function_has_simd(source))
+        {
+            check.error = IR_ERROR_TYPE;
+        }
+        else if (!paired || blocks > source->block_count || rows > source->instruction_count || source->result_type > IR_PTR)
         {
             check.error = IR_ERROR_STRUCTURE;
         }

@@ -134,8 +134,9 @@ arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
 SSE4 operations; scalar AVX moves, arithmetic and conversions; the FMA
 families in VEX and EVEX; and Tier 0's vector values' 128- and 256-bit
 `vmovdqu64` moves and `vpxord` (AVX512F and AVX512VL, #221: their slots' moves
-through zmm16, and its zeroing); and the front end's X86 rows' VEX and EVEX
-forms with their families (#760: VEX's 256-bit integer forms and those AVX2
+through zmm16, and its zeroing), and EVEX's `vmovd` and `vmovq` (AVX512F: the
+loads and stores of its vectors of 4 and 8 bytes); and the front end's X86 rows'
+VEX and EVEX forms with their families (#760: VEX's 256-bit integer forms and those AVX2
 has at every length, the broadcasts, permutes, masked moves, variable shifts
 and gathers, by AVX2; the opmask registers' forms and their tests by their
 sizes' AVX512F, DQ and BW; the byte and word elements' BW, the quadwords'

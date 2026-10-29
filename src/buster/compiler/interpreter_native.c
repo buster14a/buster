@@ -270,7 +270,7 @@ static void interpreter_native_returned(const InterpreterNativeFrame* frame, Abi
 
 static bool interpreter_native_type(uint16_t type, bool result)
 {
-    const bool valid = type < IR_TYPE_COUNT && (result || type != IR_VOID);
+    const bool valid = type <= IR_PTR && (result || type != IR_VOID);
     return valid;
 }
 
