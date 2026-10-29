@@ -117,13 +117,27 @@ failures in place of process-wide address-space/process limits, which can preven
 the detector from allocating shadow/fake-stack memory or starting its own threads.
 Ordinary builds and standalone UBSan retain the actual OS-limit tests. No detector
 is disabled for these cases; the injection controls are absent from normal builds.
+The injected limits are process-wide, since lanes reserve their arenas and start
+on their own threads.
+A few fixtures run generated programs with FS pointing at the program's own TLS
+block. The detectors reach their per-thread state through FS, so the code that runs
+in that window (the link tests' libc stand-ins and C-runtime startup, and Tier 0's
+call of a program with thread-locals, which switches FS by system calls of its own)
+takes no sanitizer instrumentation. Outside that window the fixtures stay fully
+instrumented.
+Under TSan alone, the parser driver's walk that fails each reservation in turn is
+not run: TSan maps shadow for each new mapping and keeps it, so the address space
+neither returns to its base nor bounds the run's own reservations. ASan, MSan,
+UBSan and ordinary builds still run it.
 
 `tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
 policy and matching symbolizer. Deliberate faults prove each enabled detector,
 its failure exit code and source symbolization before the full suite starts.
 These proofs use a separate directory. An unconditional report audit rejects
 diagnostics from the actual suite even when a negative test expected its child
-to fail. No suppression file or reduced sanitizer suite is used. Reports,
+to fail. The libFuzzer crash-replay proof's planted abort writes its stack traces
+to a directory of its own, and each one must name the probe's source. No
+suppression file or reduced sanitizer suite is used. Reports,
 detector proofs and compile commands are retained as workflow artifacts.
 
 For example, on a supported Linux host:

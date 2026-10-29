@@ -415,10 +415,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
           printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
           # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
-          # audit below still rejects any other diagnostic. configure writes log_path last.
-          planted="${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report"
+          # audit below still rejects any other diagnostic. configure writes log_path last, and the combined runtime
+          # takes it from whichever of these options it parses last.
+          planted() { env "ASAN_OPTIONS=${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
+              "UBSAN_OPTIONS=${UBSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
+              "LSAN_OPTIONS=${LSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" "$@"; }
           status=0
-          ASAN_OPTIONS="$planted" ./build/compiler --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+          planted ./build/compiler --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
             "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
           test "$status" -eq 77
           grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
@@ -426,7 +429,7 @@ jobs:
           test "${#artifacts[@]}" -eq 1
           cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
           status=0
-          ASAN_OPTIONS="$planted" ./build/compiler --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
+          planted ./build/compiler --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
             "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
           test "$status" -eq 77
           grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
