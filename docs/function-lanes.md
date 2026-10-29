@@ -247,6 +247,17 @@ address space past the caller's arenas. `test-check-lanes` checks both in a
 child whose address space it limits, and that an emission whose caller's
 scratch has room for all but lane 0's columns makes its object.
 
+### On the units' lanes
+
+With several source files (#152) each unit runs on one lane of the units' group,
+where `lane_run` can't start a group of the unit's own. Its emission shares its
+parts on the units' board instead (#777, `CheckProgramLanes.board`): cut by the
+same rule for the board's lanes, while one of them has no unit left to take, and
+taken by its own lane and by those (`check_program_emit_help`), each with its
+writer and arenas, and merged as above. [The translation units
+guide](translation-units.md)'s "The functions on the units' lanes" has the
+protocol.
+
 ## The lane rule
 
 One lane, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the bodies'

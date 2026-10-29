@@ -168,6 +168,13 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
 // and the merge Tier 0's, then the link's and its bindings', then the encodings'). A part that fails stops, but past a
 // failure after Tier 0 it goes on with Tier 0 alone, whose failures come first. With one lane its bodies are one part,
 // and the emission takes source order's steps in source order's order.
+//
+// With several source files the units run on lanes (c_checker_units.c), each unit on one, where a unit's emission can't
+// run lanes of its own: lane_run refuses a group inside the units' group. The units' lanes are a board instead (#777,
+// CheckEmitBoard): a unit's emission that starts while one of them has no unit left to take cuts its bodies into parts
+// as lanes of its own would (parts_by_cost), shares them on its lane's share and takes them itself, and the lanes that
+// take no units take them too (check_program_emit_help), each with a writer and arenas of its own in that emission,
+// until no lane takes units. The parts are the same steps, merged the same way, so the outputs are one lane's.
 
 // The most lanes an emission runs.
 #define BUSTER_CHECK_EMIT_MAX_LANES 64
@@ -192,6 +199,37 @@ typedef enum CheckProgramAgain
     CHECK_PROGRAM_AGAIN_TIER0,
     CHECK_PROGRAM_AGAIN_CODE,
 } CheckProgramAgain;
+
+// A lane's share on the units' board (#777): the emission its unit shares, one at a time, each an epoch of the share.
+// The epoch's next part to take (low 32 bits of `ticket`) and its parts' count (low 32 bits of `limit`), each beside the
+// epoch (their high 32 bits): a take is a compare-and-swap of the ticket, whose epoch must be the limit's, so that a lane
+// that read an epoch's ticket takes none of the next's. Its owner sets the epoch's `run` and `order` (its parts, the
+// costliest first) before its ticket and waits, before the epoch's emission goes on, until `done` counts every part,
+// the last of which publishes `complete` (lane_publish, lane_wait): no lane reads the epoch's run after it.
+typedef struct CheckEmitShare CheckEmitShare;
+struct CheckEmitShare
+{
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint64_t ticket;
+    uint64_t limit;
+    uint32_t done;
+    uint32_t complete;
+    struct CheckEmitRun* run;
+    const uint32_t* order;
+};
+
+// The units' lanes as one board (#777): how many there are, how many still take units (a lane that takes no more helps,
+// check_program_emit_help, until none takes any), the word that advances (lane_advance) when a share opens and when a
+// lane stops taking units, which the helping lanes wait on, the parts that lanes other than the owner's took (a test's
+// count), and a share per lane.
+typedef struct CheckEmitBoard CheckEmitBoard;
+struct CheckEmitBoard
+{
+    uint32_t lanes;
+    uint32_t taking;
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t generation;
+    _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint64_t others;
+    CheckEmitShare shares[BUSTER_LANE_MAX_COUNT];
+};
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
@@ -229,6 +267,13 @@ struct CheckProgramLanes
     uint32_t squeeze_body;
     uint32_t squeeze_arenas;
     uint64_t squeeze_room;
+    // With several source files (#777), the units' lanes' board, on which the emission shares its parts with the lanes
+    // that have no unit left to take rather than run lanes of its own, and its lane's place there; and a test's pause
+    // after each part the sharing lane takes itself, in microseconds, so that the other lanes take parts. Their lanes'
+    // states and arenas are their places plus one: the first is the sharing lane's, with the caller's arenas.
+    CheckEmitBoard* board;
+    uint32_t board_lane;
+    uint32_t board_pause_microseconds;
     // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
     // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
     // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
@@ -676,6 +721,119 @@ static void check_program_emit_alone(CheckEmitRun* run)
     }
 }
 
+// Takes the next part of `share`'s open epoch: its place in the epoch's order into *taken and true, or false when the
+// epoch has none left or none is open. A failed exchange loads the ticket's latest value, another lane's take or a new
+// epoch's, which the loop reads against the limit again.
+static bool check_program_share_take(CheckEmitShare* share, uint64_t* taken)
+{
+    uint64_t ticket = __atomic_load_n(&share->ticket, __ATOMIC_ACQUIRE);
+    bool open = true;
+    bool took = false;
+    while (open && !took)
+    {
+        const uint64_t limit = __atomic_load_n(&share->limit, __ATOMIC_ACQUIRE);
+        open = (limit >> 32) == (ticket >> 32) && (uint32_t)ticket < (uint32_t)limit;
+        took = open && __atomic_compare_exchange_n(&share->ticket, &ticket, ticket + 1, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE);
+    }
+    *taken = (uint32_t)ticket;
+    return took;
+}
+
+// The part `taken` of `share`'s epoch, on its run's lane state `state` (a writer and arenas made at the state's first
+// part, as a lane's: check_program_emit_lane_prepare), then counted done; the last part done publishes the epoch
+// complete.
+static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint32_t state)
+{
+    CheckEmitRun* run = share->run;
+    CheckEmitLane* lane = run->lane_states + state;
+    CheckEmitPart* part = run->parts + share->order[taken];
+    lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, state);
+    lane->prepared = true;
+    if (lane->ready)
+    {
+        check_program_emit_part(run, lane, part);
+    }
+    else
+    {
+        check_program_emit_part_refused(part);
+    }
+    if (__atomic_add_fetch(&share->done, 1, __ATOMIC_ACQ_REL) == run->part_count)
+    {
+        lane_publish(&share->complete, 2);
+    }
+}
+
+// The bodies' parts shared on the units' board (#777, CheckProgramLanes.board): cut for `active` lanes as lanes of its
+// own would cut them (parts_by_cost), opened as a new epoch of lane `index`'s share, taken by this lane (its run's first
+// state, with the caller's arenas) and by the board's lanes that take no units, and waited for.
+static void check_program_emit_shared(CheckEmitRun* run, CheckEmitBoard* board, uint32_t index, uint32_t active, uint32_t pause_microseconds)
+{
+    const uint64_t parts = parts_by_cost(run->costs, run->body_count, active, run->boundaries, run->orders[0]);
+    for (uint64_t p = 0; p < parts; p += 1)
+    {
+        run->parts[p].lower.first = (uint32_t)run->boundaries[p];
+        run->parts[p].lower.end = (uint32_t)run->boundaries[p + 1];
+    }
+    run->part_count = (uint32_t)parts;
+    CheckEmitShare* share = board->shares + index;
+    const uint64_t epoch = (__atomic_load_n(&share->ticket, __ATOMIC_RELAXED) >> 32) + 1;
+    share->run = run;
+    share->order = run->orders[0];
+    __atomic_store_n(&share->done, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&share->complete, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&share->limit, epoch << 32 | parts, __ATOMIC_RELEASE);
+    __atomic_store_n(&share->ticket, epoch << 32, __ATOMIC_RELEASE);
+    lane_advance(&board->generation);
+    uint64_t taken = 0;
+    while (check_program_share_take(share, &taken))
+    {
+        check_program_share_run(share, taken, 0);
+        if (pause_microseconds != 0)
+        {
+            const struct timespec pause = { .tv_sec = 0, .tv_nsec = (long)pause_microseconds * 1000 };
+            nanosleep(&pause, NULL);
+        }
+    }
+    // The parts the other lanes took, which the last of them publishes done.
+    if (__atomic_load_n(&share->done, __ATOMIC_ACQUIRE) != parts)
+    {
+        lane_wait(&share->complete, 0);
+    }
+}
+
+// A lane of the units' board with no unit left to take (#777): takes the parts that the other lanes' emissions share,
+// any lane's, until no lane takes units any more and no share has a part left. Its state in each emission is its place
+// plus one (its arenas CheckProgramLanes.arenas' of the sharing lane, which that lane releases after its unit); a lane
+// whose state would be past an emission's room takes none.
+static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
+{
+    const uint32_t state = index + 1;
+    bool helping = state < BUSTER_CHECK_EMIT_MAX_LANES;
+    while (helping)
+    {
+        const uint32_t generation = __atomic_load_n(&board->generation, __ATOMIC_ACQUIRE) & ~1u;
+        bool took = false;
+        for (uint32_t i = 1; i <= board->lanes; i += 1)
+        {
+            CheckEmitShare* share = board->shares + (index + i) % board->lanes;
+            uint64_t taken = 0;
+            while (check_program_share_take(share, &taken))
+            {
+                check_program_share_run(share, taken, state);
+                __atomic_add_fetch(&board->others, 1, __ATOMIC_RELAXED);
+                took = true;
+            }
+        }
+        // A share that opens, and a lane that stops taking units, advance the word after this lane read it. The wait is
+        // for another lane's front end, a unit's preprocessing to its selection: long enough to sleep at once.
+        helping = took || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) != 0;
+        if (!took && helping)
+        {
+            lane_sleep(&board->generation, generation);
+        }
+    }
+}
+
 // The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: a label's a local symbol of its
 // own, which the merge defines where its template's code puts it; another name's the program's symbol of that link name
 // (its asm label or its identifier: a name the emission makes is no template's to know), found in one pass over the
@@ -1094,8 +1252,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         run.costs[b] = total;
     }
     // One lane, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest body's; no
-    // more than the bodies, which are at least as many as the parts.
-    const uint32_t most = lanes != NULL && lanes->lanes > 1 ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
+    // more than the bodies, which are at least as many as the parts. On the units' board (#777), only while one of its
+    // lanes takes no units: an emission that starts while every lane still takes units runs alone, its bodies one part.
+    CheckEmitBoard* board = lanes != NULL && lanes->board != NULL && lanes->board_lane < lanes->board->lanes ? lanes->board : NULL;
+    const bool sharing = board == NULL || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) < board->lanes;
+    const uint32_t most = lanes != NULL && lanes->lanes > 1 && sharing ? (lanes->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? lanes->lanes : BUSTER_CHECK_EMIT_MAX_LANES) : 1;
     const uint64_t paid = lanes != NULL && lanes->every_lane ? UINT64_MAX : 1 + (total > 2 * largest ? total - 2 * largest : 0) / BUSTER_CHECK_EMIT_LANE_TOKENS;
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;
@@ -1106,10 +1267,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         active = worker_budget_acquire(lanes->budget, active, &lease);
     }
     const uint64_t part_room = active > 1 ? (uint64_t)BUSTER_LANE_PARTS_PER_LANE * active : 1;
+    // On the board, a state for the sharing lane and one for each lane that may take its parts, its place plus one.
+    const uint32_t states = board != NULL && active > 1 ? (board->lanes < BUSTER_CHECK_EMIT_MAX_LANES ? board->lanes + 1 : BUSTER_CHECK_EMIT_MAX_LANES) : active;
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
-    run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, active) : 0;
+    run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, states) : 0;
     run.boundaries = valid && active > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, part_room + 1) : 0;
-    for (uint32_t lane = 0; valid && active > 1 && lane < active; lane += 1)
+    // Each lane's order of the parts, or on the board the one order every lane takes them in.
+    for (uint32_t lane = 0; valid && active > 1 && lane < (board != NULL ? 1 : active); lane += 1)
     {
         run.orders[lane] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, part_room + 1);
         valid = run.orders[lane] != 0;
@@ -1124,7 +1288,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
     if (valid && count != 0)
     {
-        memset(run.lane_states, 0, (uint64_t)active * sizeof(CheckEmitLane));
+        memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
         // The lanes' run, or the calling thread's alone; lanes that couldn't start, or a part that ran out of room, go
         // again on the calling thread alone, from the arenas as they were (each body sets what it reads of the shared
         // tables before it reads it, and puts local_map's entries back).
@@ -1134,7 +1298,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint64_t columns_before = columns->length;
         if (active > 1)
         {
-            again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            if (board != NULL)
+            {
+                check_program_emit_shared(&run, board, lanes->board_lane, active, lanes->board_pause_microseconds);
+            }
+            else
+            {
+                again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            }
             valid = worker_budget_release(&lease);
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
