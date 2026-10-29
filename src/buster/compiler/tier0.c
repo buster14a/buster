@@ -82,13 +82,14 @@
 
 // An entry's machine class: what a value is to the code generator. Integers by width and signedness (a pointer is U64),
 // the two SSE floating types, long double's x87 extended type (F80), the 128-bit integers (I128 and U128) and vectors
-// (VECTOR: 16, 32 or 64 bytes, GNU C's vector types and the intrinsics' __m128 to __m512i). A value of a class narrower
-// than its register holds its value in the register's low bits; the rest are unspecified, so a consumer reads only the
-// class's width (a 32-bit operation, a movsx). An F80, I128 or U128 value (a memory class's, tier0_class_memory) takes an
-// integer depth, as an integer would, and lives in that depth's 16-byte frame slot (Tier0Frame.memory_area), not in its
-// register: calls and the arms of ?: then need nothing of their own for it. A VECTOR value does too, in that depth's
-// 64-byte frame slot (Tier0Frame.vector_area), its bytes from the slot's first; its width is the entry's (LOAD's value,
-// an object's size, a constant's), which tier0_validate follows from depth to depth, as a class.
+// (VECTOR: 4, 8, 16, 32 or 64 bytes, GNU C's vector types and the intrinsics' __m64 and __m128 to __m512i). A value of
+// a class narrower than its register holds its value in the register's low bits; the rest are unspecified, so a
+// consumer reads only the class's width (a 32-bit operation, a movsx). An F80, I128 or U128 value (a memory class's,
+// tier0_class_memory) takes an integer depth, as an integer would, and lives in that depth's 16-byte frame slot
+// (Tier0Frame.memory_area), not in its register: calls and the arms of ?: then need nothing of their own for it. A
+// VECTOR value does too, in that depth's 64-byte frame slot (Tier0Frame.vector_area), its bytes from the slot's first;
+// its width is the entry's (LOAD's value, an object's size, a constant's), which tier0_validate follows from depth to
+// depth, as a class.
 #define BUSTER_TYPED_CLASS_VOID 0
 #define BUSTER_TYPED_CLASS_I8 1
 #define BUSTER_TYPED_CLASS_U8 2
@@ -181,12 +182,13 @@
 // and passes and returns them through calls of its runtime's functions and objects: an argument, a parameter or a result
 // of one is a 16-byte object, two INTEGER eightbytes as the convention passes it.
 // Vectors (VECTOR) take CONST (`value` an index into Tier0Function.vector_constants), DUP, LOAD, STORE and SET (`value`
-// the vector's bytes at the address: 16, 32 or 64), LOCAL, STORE_LOCAL and SET_LOCAL (of an object of the vector's size,
-// all of whose bytes they read or write), DISCARD and JUMP_VALUE, in a function that says it has them
+// the vector's bytes at the address: 4, 8, 16, 32 or 64), LOCAL, STORE_LOCAL and SET_LOCAL (of an object of the
+// vector's size, all of whose bytes they read or write), DISCARD and JUMP_VALUE, in a function that says it has them
 // (Tier0Function.vectors). Their operations are X86 entries, whose rows may also take and push integers and floating
 // values. Their globals are reached through their addresses, as long double's are, and a front end passes and returns
 // them through calls as aggregates: an argument, a parameter or a result of one is an object whose bytes one vector
-// register holds whole (an XMM, YMM or ZMM register), as the convention passes it, or the stack.
+// register holds whole (an XMM, YMM or ZMM register) or a vector of 4 or 8 bytes an XMM register's low bytes, as the
+// convention passes it, or the stack.
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it. A label of label_entries is a target JUMP_INDIRECT may reach, with
@@ -397,12 +399,12 @@ struct Tier0Operation
 //
 // The vectors' constants and the machine operations are optional columns too, 0 for a function without them:
 // vector_constants holds vector_constant_count constants of 64 bytes each (eight words, the vector's first bytes first,
-// those past its bytes unread), vector_constant_bytes each one's bytes (16, 32 or 64), and a CONST of class VECTOR is the
-// one its value indexes; operations holds operation_count rows (Tier0Operation), the one an X86 entry's value indexes.
-// `vectors` says whether the function has VECTOR values or X86 entries. A function with them has the vectors' slots in
-// its frame, and only its compile looks for their entries, as long double's are looked for; and it runs on a processor
-// with AVX-512 (F, VL, BW and DQ), whose EVEX forms Tier 0's own records for its vectors are: a front end gives one to a
-// unit whose target has them, as the intrinsics that make vectors of 64 bytes need.
+// those past its bytes unread), vector_constant_bytes each one's bytes (4, 8, 16, 32 or 64), and a CONST of class
+// VECTOR is the one its value indexes; operations holds operation_count rows (Tier0Operation), the one an X86 entry's
+// value indexes. `vectors` says whether the function has VECTOR values or X86 entries. A function with them has the
+// vectors' slots in its frame, and only its compile looks for their entries, as long double's are looked for; and it
+// runs on a processor with AVX-512 (F, VL, BW and DQ), whose EVEX forms Tier 0's own records for its vectors are: a
+// front end gives one to a unit whose target has them, as the intrinsics that make vectors of 64 bytes need.
 //
 // The labels whose addresses the code takes (GNU C's labels as values, which JUMP_INDIRECT goes to) are an optional
 // column too, 0 for a function without them: label_entries holds label_count entries' indices, each a statement's start
@@ -789,10 +791,20 @@ static uint32_t tier0_class_bytes(uint32_t class)
     return bytes[class & (BUSTER_TYPED_CLASS_LIMIT - 1)];
 }
 
-// Whether a vector's bytes are a width Tier 0 has: 16, 32 or 64, an XMM, YMM or ZMM register's.
+// Whether a vector's bytes are a whole vector register's: 16, 32 or 64, an XMM, YMM or ZMM register's, as a call passes
+// and returns one (tier0_aggregate_result_valid).
 static bool tier0_vector_bytes_valid(uint64_t bytes)
 {
     return bytes == 16 || bytes == 32 || bytes == 64;
+}
+
+// Whether a VECTOR value's bytes are a width Tier 0 has: a whole vector register's (tier0_vector_bytes_valid), or 4 or
+// 8, an XMM register's low bytes (MMX's __m64, and the narrow vectors of shuffles and conversions), which its loads and
+// stores move alone (vmovd and vmovq: tier0_vector_load) and which a row's operand has with the register's bytes past
+// them zero.
+static bool tier0_vector_value_bytes_valid(uint64_t bytes)
+{
+    return bytes == 4 || bytes == 8 || tier0_vector_bytes_valid(bytes);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3517,10 +3529,10 @@ static bool tier0_memory_function(const Tier0Function* function)
 }
 
 // Whether LOCAL, STORE_LOCAL and SET_LOCAL of a VECTOR may name local `local` (below the count): an object of the
-// vector's bytes (16, 32 or 64), all of which the entries read or write, but an address-only one.
+// vector's bytes (4, 8, 16, 32 or 64), all of which the entries read or write, but an address-only one.
 static bool tier0_vector_object(const Tier0Function* function, uint64_t local)
 {
-    return tier0_is_object(function, local) && tier0_vector_bytes_valid(function->local_sizes[local]) &&
+    return tier0_is_object(function, local) && tier0_vector_value_bytes_valid(function->local_sizes[local]) &&
            (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
 }
 
@@ -5909,15 +5921,31 @@ static X86Instruction tier0_vector_slot(uint32_t form, const Tier0Frame* frame, 
 // that no value of the floating stack's is in it.
 #define BUSTER_TIER0_VECTOR_SCRATCH 16
 
-// vmovdqu64's load and store of `bytes` (16, 32 or 64), which take any address and any of the 32 vector registers.
+// The load and store of a vector's `bytes`, which take any address and any of the 32 vector registers: vmovdqu64's of
+// 16, 32 or 64, and the EVEX forms of vmovd and vmovq of 4 and 8, whose loads zero the register past them.
 static uint32_t tier0_vector_load(uint32_t bytes)
 {
-    return bytes == 16 ? X86_FORM_VMOVDQU64_X_XM128 : bytes == 32 ? X86_FORM_VMOVDQU64_Y_YM256 : X86_FORM_VMOVDQU64_Z_ZM512;
+    return bytes == 4    ? X86_FORM_VMOVD_X_RM32_EVEX
+           : bytes == 8  ? X86_FORM_VMOVQ_X_XM64_EVEX
+           : bytes == 16 ? X86_FORM_VMOVDQU64_X_XM128
+           : bytes == 32 ? X86_FORM_VMOVDQU64_Y_YM256
+                         : X86_FORM_VMOVDQU64_Z_ZM512;
 }
 
 static uint32_t tier0_vector_store(uint32_t bytes)
 {
-    return bytes == 16 ? X86_FORM_VMOVDQU64_XM128_X : bytes == 32 ? X86_FORM_VMOVDQU64_YM256_Y : X86_FORM_VMOVDQU64_ZM512_Z;
+    return bytes == 4    ? X86_FORM_VMOVD_RM32_X_EVEX
+           : bytes == 8  ? X86_FORM_VMOVQ_XM64_X_EVEX
+           : bytes == 16 ? X86_FORM_VMOVDQU64_XM128_X
+           : bytes == 32 ? X86_FORM_VMOVDQU64_YM256_Y
+                         : X86_FORM_VMOVDQU64_ZM512_Z;
+}
+
+// The 8-byte words of vector constant k that its bytes reach: a constant of 4 bytes has its word's low half, and the
+// slot's bytes past a value's are unspecified, so its word is stored whole.
+static uint32_t tier0_vector_words(const Tier0Function* function, uint64_t k)
+{
+    return (function->vector_constant_bytes[k] + 7) / 8;
 }
 
 // Whether constant k's word w is a sign-extended imm32, which one mov qword [slot], imm32 stores; any other takes two
@@ -5931,7 +5959,7 @@ static bool tier0_vector_word_fits(const Tier0Function* function, uint64_t k, ui
 static bool tier0_vector_zero(const Tier0Function* function, uint64_t k)
 {
     uint64_t bits = 0;
-    for (uint32_t w = 0; w < function->vector_constant_bytes[k] / 8; w += 1)
+    for (uint32_t w = 0; w < tier0_vector_words(function, k); w += 1)
     {
         bits |= function->vector_constants[8 * k + w];
     }
@@ -5961,7 +5989,7 @@ static void tier0_emit_vector_value(const Tier0Function* function, const Tier0En
     }
     else if (kind == BUSTER_TYPED_CONST)
     {
-        for (uint32_t w = 0; w < function->vector_constant_bytes[value] / 8; w += 1)
+        for (uint32_t w = 0; w < tier0_vector_words(function, value); w += 1)
         {
             const uint64_t word = function->vector_constants[8 * value + w];
             const bool fits = tier0_vector_word_fits(function, value, w);
@@ -6020,7 +6048,7 @@ static uint32_t tier0_count_vector_value(const Tier0Function* function, const Ti
     if (kind == BUSTER_TYPED_CONST && !tier0_vector_zero(function, value))
     {
         count = 0;
-        for (uint32_t w = 0; w < function->vector_constant_bytes[value] / 8; w += 1)
+        for (uint32_t w = 0; w < tier0_vector_words(function, value); w += 1)
         {
             count += tier0_vector_word_fits(function, value, w) ? 1 : 2;
         }
@@ -8444,9 +8472,9 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
     }
 }
 
-// A VECTOR value in tier0_validate's stack: its bytes in a byte of its own past the classes (17, 18 and 20 for 16, 32
-// and 64), so that a vector's width follows it from depth to depth, and a join compares it, as a class.
-#define BUSTER_TIER0_STACK_VECTOR(bytes) (BUSTER_TYPED_CLASS_LIMIT | ((bytes) >> 4))
+// A VECTOR value in tier0_validate's stack: its bytes in a byte of its own past the classes (17, 18, 20, 24 and 32 for
+// 4, 8, 16, 32 and 64), so that a vector's width follows it from depth to depth, and a join compares it, as a class.
+#define BUSTER_TIER0_STACK_VECTOR(bytes) (BUSTER_TYPED_CLASS_LIMIT + ((bytes) >> 2))
 
 // The class of a byte of tier0_validate's stack: VECTOR for a vector's, the class itself otherwise.
 static uint32_t tier0_stack_class(uint32_t entry)
@@ -8570,22 +8598,22 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
 }
 
 // Whether a machine operation's row is one Tier 0 places and emits as Tier0Operation has it: its counts within their
-// bounds; its operands integers, floating values and VECTORs of 16, 32 or 64 bytes; its result VOID or one of those; and
-// each record of a form tier0_operation_form_valid takes, with its fields' roles as tier0_operation_role_valid has them,
-// no pair or block of registers but an opmask pair (tier0_operation_single), a memory operand's address from a base and
-// an optional index (no RIP-relative or absolute one), and then, with its roles placed somewhere (VECTOR(j) as register
-// j), a record x86_validate takes.
+// bounds; its operands integers, floating values and VECTORs of 4, 8, 16, 32 or 64 bytes; its result VOID or one of
+// those; and each record of a form tier0_operation_form_valid takes, with its fields' roles as
+// tier0_operation_role_valid has them, no pair or block of registers but an opmask pair (tier0_operation_single), a
+// memory operand's address from a base and an optional index (no RIP-relative or absolute one), and then, with its
+// roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
     bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
     for (uint32_t j = 0; valid && j < operation->operand_count; j += 1)
     {
         const uint32_t class = operation->operand_classes[j];
-        valid = tier0_class_integer(class) || tier0_class_floating(class) || (tier0_class_vector(class) && tier0_vector_bytes_valid(operation->operand_bytes[j]));
+        valid = tier0_class_integer(class) || tier0_class_floating(class) || (tier0_class_vector(class) && tier0_vector_value_bytes_valid(operation->operand_bytes[j]));
     }
     const uint32_t result = operation->result_class;
     valid = valid && (result == BUSTER_TYPED_CLASS_VOID || tier0_class_integer(result) || tier0_class_floating(result) ||
-                      (tier0_class_vector(result) && tier0_vector_bytes_valid(operation->result_bytes)));
+                      (tier0_class_vector(result) && tier0_vector_value_bytes_valid(operation->result_bytes)));
     Tier0Placement sample;
     memset(&sample, 0, sizeof(sample));
     for (uint32_t j = 0; j < BUSTER_TIER0_OPERATION_OPERANDS; j += 1)
@@ -8676,17 +8704,17 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
     }
     else if (kind == BUSTER_TYPED_LOAD)
     {
-        if (tier0_pop(validator, i) != BUSTER_TYPED_CLASS_U64 || !tier0_vector_bytes_valid(value))
+        if (tier0_pop(validator, i) != BUSTER_TYPED_CLASS_U64 || !tier0_vector_value_bytes_valid(value))
         {
-            tier0_reject(validator, i, "a vector's LOAD from something that isn't U64, or of 16, 32 or 64 bytes");
+            tier0_reject(validator, i, "a vector's LOAD from something that isn't U64, or of 4, 8, 16, 32 or 64 bytes");
         }
-        tier0_push(validator, BUSTER_TIER0_STACK_VECTOR(tier0_vector_bytes_valid(value) ? value : 16));
+        tier0_push(validator, BUSTER_TIER0_STACK_VECTOR(tier0_vector_value_bytes_valid(value) ? value : 16));
     }
     else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
     {
         const uint32_t stored = tier0_pop(validator, i);
         const uint32_t address = tier0_pop(validator, i);
-        if (address != BUSTER_TYPED_CLASS_U64 || !tier0_vector_bytes_valid(value) || stored != BUSTER_TIER0_STACK_VECTOR(value))
+        if (address != BUSTER_TYPED_CLASS_U64 || !tier0_vector_value_bytes_valid(value) || stored != BUSTER_TIER0_STACK_VECTOR(value))
         {
             tier0_reject(validator, i, "a vector's store's address, or a value of other bytes than its own");
         }
@@ -8701,7 +8729,7 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
         const uint32_t entry = object ? BUSTER_TIER0_STACK_VECTOR(function->local_sizes[value]) : 0;
         if (!object || (kind != BUSTER_TYPED_LOCAL && tier0_pop(validator, i) != entry))
         {
-            tier0_reject(validator, i, "a vector's local that isn't an object of its bytes (16, 32 or 64)");
+            tier0_reject(validator, i, "a vector's local that isn't an object of its bytes (4, 8, 16, 32 or 64)");
         }
         if (kind != BUSTER_TYPED_SET_LOCAL)
         {
@@ -8765,7 +8793,7 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
             tier0_reject(validator, 0, "a vector local that isn't an object");
         }
     }
-    // The vectors' constants, 16, 32 or 64 bytes each, and the machine operations' rows (tier0_operation_valid).
+    // The vectors' constants, 4, 8, 16, 32 or 64 bytes each, and the machine operations' rows (tier0_operation_valid).
     if ((function->vector_constant_count != 0 && (function->vector_constants == 0 || function->vector_constant_bytes == 0)) ||
         (function->operation_count != 0 && function->operations == 0))
     {
@@ -8773,9 +8801,9 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
     }
     for (uint32_t k = 0; k < function->vector_constant_count && validator->check.error == TIER0_OK; k += 1)
     {
-        if (!tier0_vector_bytes_valid(function->vector_constant_bytes[k]))
+        if (!tier0_vector_value_bytes_valid(function->vector_constant_bytes[k]))
         {
-            tier0_reject(validator, 0, "a vector constant of other than 16, 32 or 64 bytes");
+            tier0_reject(validator, 0, "a vector constant of other than 4, 8, 16, 32 or 64 bytes");
         }
     }
     for (uint32_t k = 0; k < function->operation_count && validator->check.error == TIER0_OK; k += 1)

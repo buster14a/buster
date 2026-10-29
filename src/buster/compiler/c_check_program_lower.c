@@ -519,17 +519,18 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
     check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
 }
 
-// A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended vectors
-// of 16, 32 or 64 bytes, as the intrinsics' __m128 to __m512i, of elements other than bool (whose extended vectors pack
-// a bit per element); 0 for any other type. Atomic wrappers use these value bytes; ABI rows retain their declared
-// atomic type, storage size and alignment separately.
+// A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended
+// vectors of 4, 8, 16, 32 or 64 bytes, as the intrinsics' __m64 and __m128 to __m512i and the narrow vectors of their
+// shuffles and conversions, of elements other than bool (whose extended vectors pack a bit per element); 0 for any
+// other type. Atomic wrappers use these value bytes; ABI rows retain their declared atomic type, storage size and
+// alignment separately.
 static uint32_t check_lower_vector_bytes(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_conversion_operand(types, type);
     const uint8_t kind = type_kind(types, base);
     const uint64_t size = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? type_size(types, base) : 0;
     const bool boolean = size != 0 && type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_BOOL;
-    return (size == 16 || size == 32 || size == 64) && !boolean ? (uint32_t)size : 0;
+    return (size == 4 || size == 8 || size == 16 || size == 32 || size == 64) && !boolean ? (uint32_t)size : 0;
 }
 
 // The value of a LOAD, STORE or SET of a class's value of a type: a vector's bytes, which Tier 0 takes the width of a
@@ -900,7 +901,7 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
         feature = type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_BOOL ? "vectors of bool" :
-                  "vector types of other than 16, 32 or 64 bytes";
+                  "vector types of other than 4, 8, 16, 32 or 64 bytes";
     }
     else if (kind == BUSTER_TYPE_KIND_ATOMIC)
     {
@@ -918,7 +919,7 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
 }
 
 // Whether a type is a vector of other than bool that check_lower_class has no class for (check_lower_type_feature's
-// "vector types of other than 16, 32 or 64 bytes").
+// "vector types of other than 4, 8, 16, 32 or 64 bytes").
 static bool check_lower_classless_vector(const CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;
@@ -2178,11 +2179,76 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
     }
 }
 
-// A conversion from or to a vector (#136), of the value on top of the stack: a cast between vectors of the same bytes is
-// nothing, as their bits are the same; to void, a DISCARD; a scalar's splat converts it to the element's type first, then
-// sets every element to it (a row's, check_vector_lower_row), an element of 1 or 2 bytes from an int's of its signedness:
-// vpbroadcastb and vpbroadcastw read a 32-bit register's low byte or word, and a row's integer operand is no narrower
-// than its field (tier0_operation_role_valid). A cast between a vector and an integer of its bytes isn't lowered.
+// The row of a cast between a vector of 4 or 8 bytes and an integer of its bytes (check_vector_cast's), or of a bit
+// cast between it and an integer, a float or a double of its bytes, of the scalar's class: its bits moved between the
+// vector's XMM register and a general one (vmovd, vmovq) or the scalar's XMM register (vmovq), into the vector (`into`)
+// or out of it.
+static void check_lower_vector_bits(CheckLowerWriter* writer, uint8_t class, uint32_t bytes, bool into)
+{
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    const bool wide = bytes == 8;
+    const bool floating = class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64;
+    row.record_count = 1;
+    row.operand_count = 1;
+    if (into && floating)
+    {
+        // The register's first 8 bytes: past a float's 4 they are the vector's past its 4, which nothing reads.
+        row.records[0] = check_vector_lower_record(X86_FORM_VMOVQ_X_XM64_EVEX, BUSTER_TIER0_ROLE_VECTOR(0), 0, BUSTER_TIER0_ROLE_FLOATING(0));
+    }
+    else if (into)
+    {
+        row.records[0] = check_vector_lower_record(wide ? X86_FORM_VMOVQ_X_RM64_EVEX : X86_FORM_VMOVD_X_RM32_EVEX, BUSTER_TIER0_ROLE_VECTOR(0), 0,
+                                                   BUSTER_TIER0_ROLE_INTEGER(0));
+    }
+    else if (floating)
+    {
+        row.records[0] = check_vector_lower_record(X86_FORM_VMOVQ_X_XM64_EVEX, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, BUSTER_TIER0_ROLE_VECTOR(0));
+    }
+    else
+    {
+        row.records[0] = check_vector_lower_record(wide ? X86_FORM_VMOVQ_RM64_X_EVEX : X86_FORM_VMOVD_RM32_X_EVEX, BUSTER_TIER0_ROLE_VECTOR(0), 0,
+                                                   BUSTER_TIER0_ROLE_INTEGER_RESULT);
+    }
+    if (into)
+    {
+        row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+        row.result_bytes = (uint8_t)bytes;
+        row.operand_classes[0] = class;
+    }
+    else
+    {
+        row.result_class = class;
+        row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_bytes[0] = (uint8_t)bytes;
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, check_lower_operation_index(writer, &row));
+    writer->vectors = true;
+}
+
+// Whether node `node` is a cast of an integer to a GNU C vector of 4 or 8 bytes, which the checker takes of the
+// vector's bytes alone (check_vector_cast): its bits (check_lower_vector_bits), where an ext_vector_type vector's cast
+// and an operator's conversion of a scalar splat it. check_lower_expand lowers it on both paths (check_lower_plain
+// leaves it).
+static bool check_lower_vector_bit_cast(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeId type = program->stream->values[node].type;
+    const uint32_t bytes = graph->ops[node] == CHECK_OP_CAST ? check_lower_vector_of(writer, type) : 0;
+    return bytes != 0 && bytes < 16 && check_action_kind(types, type) == BUSTER_TYPE_KIND_VECTOR &&
+           check_action_is_integer(types, program->stream->values[graph->operand0[node]].type);
+}
+
+// A conversion from or to a vector (#136), of the value on top of the stack: a cast between vectors of the same bytes
+// is nothing, as their bits are the same; to void, a DISCARD; a scalar's splat converts it to the element's type first,
+// then sets every element to it (a row's, check_vector_lower_row), an element of 1 or 2 bytes from an int's of its
+// signedness: vpbroadcastb and vpbroadcastw read a 32-bit register's low byte or word, and a row's integer operand is
+// no narrower than its field (tier0_operation_role_valid). A cast of a vector of 4 or 8 bytes to an integer of its
+// bytes is its bits (check_lower_vector_bits), and so is one of such an integer to a GNU C vector, which the cast's own
+// lowering takes (an operator's conversion of the scalar splats it); of the other vectors, a cast between one and an
+// integer isn't lowered.
 static __attribute__((noinline)) void check_lower_vector_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
     const TypeTable* types = writer->program->types;
@@ -2208,6 +2274,10 @@ static __attribute__((noinline)) void check_lower_vector_conversion(CheckLowerWr
             check_lower_convert(writer, element, wide);
         }
         check_lower_convert(writer, from, element);
+    }
+    else if (source != 0 && source < 16 && target == 0 && check_action_is_integer(types, to) && type_size(types, to) == source)
+    {
+        check_lower_vector_bits(writer, check_lower_class(writer, to), source, false);
     }
     else
     {
@@ -4617,8 +4687,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const bool b_effects = !b_undefined && (stream->values[b].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         uint32_t indices[BUSTER_CHECK_VECTOR_SHUFFLE_LANES];
         CheckVectorShuffle plan;
-        // A shuffle of a conversion into a vector narrower than 16 bytes: its row reads the conversion's operand, and
-        // the second vector's constant bytes where it permutes (check_vector_narrow_shuffle_row).
+        // A shuffle of a conversion into a vector Tier 0 has no class for (of 2 bytes): its row reads the conversion's
+        // operand, and the second vector's constant bytes where it permutes (check_vector_narrow_shuffle_row).
         const uint32_t a = graph->argument_nodes[first];
         const uint32_t converted = a < stream->count && graph->ops[a] == CHECK_OP_BUILTIN_VECTOR && graph->argument_counts[a] >= 1 ?
                                    check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), a) : BUSTER_CHECK_NONE;
@@ -4629,7 +4699,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const TypeId operand = fused ? stream->argument_conversions[graph->argument_offsets[a]].type : source;
         if (!fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0))
         {
-            reason = "vector types of other than 16, 32 or 64 bytes";
+            reason = "vector types of other than 4, 8, 16, 32 or 64 bytes";
         }
         else if (!check_lower_shuffle_indices(program, node, count - 2, check_builtin_vector_lanes(types, source), b_undefined, indices))
         {
@@ -4700,7 +4770,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         }
         if (check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0)
         {
-            reason = "vector types of other than 16, 32 or 64 bytes";
+            reason = "vector types of other than 4, 8, 16, 32 or 64 bytes";
         }
         else
         {
@@ -4742,7 +4812,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     else if (builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR)
     {
         const TypeId source = stream->argument_conversions[first].type;
-        reason = check_lower_vector_of(writer, source) == 0 ? "vector types of other than 16, 32 or 64 bytes" :
+        reason = check_lower_vector_of(writer, source) == 0 ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
                                                                 check_vector_reduce_rows(types, target, builtin, source, rows, &row_count);
         if (reason == NULL && row_count != 0)
         {
@@ -4833,9 +4903,10 @@ static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId
 }
 
 // __builtin_bit_cast(T, x): x's bytes as a T, of x's size. One the checker folded is its bytes, a floating T's constant
-// (an integer T's is its value's, which the constants take before this). At run time, between integers or pointers, or
-// between vectors, the bits are the value already; between an integer and a float or a double they go through a frame
-// temporary, as clang -O0's go through memory.
+// or a vector T's (an integer T's is its value's, which the constants take before this). At run time, between integers
+// or pointers, or between vectors, the bits are the value already; between a vector of 4 or 8 bytes and a scalar of its
+// size they move between their registers (check_lower_vector_bits); between an integer and a float or a double they go
+// through a frame temporary, as clang -O0's go through memory.
 static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckStream* stream = writer->program->stream;
@@ -4854,12 +4925,26 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
     }
     else if (effect->folded)
     {
-        uint64_t bits = 0;
-        for (uint32_t i = 0; i < effect->payload_count && i < 8; i += 1)
+        uint64_t words[8] = { 0 };
+        for (uint32_t i = 0; i < effect->payload_count && i < sizeof(effect->bytes); i += 1)
         {
-            bits |= (uint64_t)effect->bytes[i] << (8 * i);
+            words[i / 8] |= (uint64_t)effect->bytes[i] << (8 * (i % 8));
         }
-        check_lower_instruction(writer, BUSTER_TYPED_CONST, to, bits);
+        if (to == BUSTER_TYPED_CLASS_VECTOR)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, to, check_lower_vector_constant(writer, words, check_lower_vector_of(writer, result)));
+            writer->vectors = true;
+        }
+        else
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, to, words[0]);
+        }
+    }
+    else if ((from == BUSTER_TYPED_CLASS_VECTOR) != (to == BUSTER_TYPED_CLASS_VECTOR))
+    {
+        const bool into = to == BUSTER_TYPED_CLASS_VECTOR;
+        check_lower_vector_bits(writer, into ? from : to, check_lower_vector_of(writer, into ? result : effect->source_type), into);
+        check_lower_operand(writer, node, 3, false, effect->source_type);
     }
     else if (from == to || (from <= BUSTER_TYPED_CLASS_U64 && to <= BUSTER_TYPED_CLASS_U64))
     {
@@ -5182,6 +5267,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (class == BUSTER_TYPED_CLASS_VECTOR && op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT)
     {
         check_lower_vector_operation(writer, node);
+    }
+    else if (op == CHECK_OP_CAST && check_lower_vector_bit_cast(writer, node))
+    {
+        check_lower_vector_bits(writer, check_lower_class(writer, stream->values[a].type), check_lower_vector_of(writer, value->type), true);
+        check_lower_operand(writer, node, 0, false, stream->values[a].type);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {

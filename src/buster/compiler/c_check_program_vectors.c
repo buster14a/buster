@@ -144,7 +144,8 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
     const CheckVectorElement element = check_vector_lower_element(types, vector);
     const bool half = element.floating && element.bytes == 2;
     const uint64_t bytes = type_size(types, type_unqualified(type_strip_aligned(types, vector)));
-    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    // A vector of 4 or 8 bytes takes the 16-byte forms, in an XMM register whose bytes past it Tier 0 zeroes.
+    const uint32_t width = bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const bool compare = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;

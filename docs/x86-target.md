@@ -65,8 +65,8 @@ change to the 16-byte `X86Instruction` or the encoder's templates.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
 builder reads the compact32 table (33,408 bytes). The independent scalar
-reference keeps all 64 feature bits densely for 1,667 classified rows (13,336
-bytes), with their form indices (3,334 bytes). It clears all 8,352 output bytes
+reference keeps all 64 feature bits densely for 1,681 classified rows (13,448
+bytes), with their form indices (3,362 bytes). It clears all 8,352 output bytes
 then checks those complete requirements directly. Its loop stays scalar to
 avoid widening and extracting indices for byte stores.
 
@@ -74,7 +74,7 @@ A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
 canonical dense slot plus one. Zero means unknown, and the bounded query returns
 zero for out-of-range forms. Forward/inverse/requirement/projection checks cover
 every form; independent named-form expectations and external ISA checks remain.
-The four arrays contain 66,782 payload bytes before alignment, replacing 116,894
+The four arrays contain 66,922 payload bytes before alignment, replacing 116,894
 bytes of sparse64, compact32 and dense-reference data. A new requirement outside
 the 32-bit projection or without the classified marker fails at compile time.
 
@@ -126,7 +126,8 @@ arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
 SSE4 operations; scalar AVX moves, arithmetic and conversions; the FMA
 families in VEX and EVEX; and Tier 0's vector values' 128- and 256-bit
 `vmovdqu64` moves and `vpxord` (AVX512F and AVX512VL, #221: their slots' moves
-through zmm16, and its zeroing). `FISTTP` requires SSE3 even though its encoding uses
+through zmm16, and its zeroing), and EVEX's `vmovd` and `vmovq` (AVX512F: the
+loads and stores of its vectors of 4 and 8 bytes). `FISTTP` requires SSE3 even though its encoding uses
 x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that

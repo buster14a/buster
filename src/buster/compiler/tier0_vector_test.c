@@ -4,12 +4,12 @@
 // test-tier0's vectors check (#136): VECTOR values and X86 entries in Tier 0. Functions over them are compiled by both
 // paths, which must give the same records, encoded by both encoders, which must give the same bytes, and, when the host
 // supports the emitted instructions, run natively in a child process, called from C through function pointers:
-//   - random programs: statements that each write a vector of 16, 32 or 64 bytes, an integer or a float into an output,
-//     or a masked store's bytes, or drop a vector, from inputs, constants (zero ones and words past a sign-extended
-//     imm32), frame objects of each width (LOCAL, STORE_LOCAL and SET_LOCAL), DUP, STORE's kept value and ?:, and the
-//     rows of tier0_test_vector_kinds (VECTOR, integer and floating operands and results, masks, scratch registers, /is4,
-//     memory and VSIB operands, a row of no records), under live values on both stacks (an integer and a float under a
-//     statement, stored after it), against this file's own stack machine over the same stream
+//   - random programs: statements that each write a vector of 4, 8, 16, 32 or 64 bytes, an integer or a float into an
+//     output, or a masked store's bytes, or drop a vector, from inputs, constants (zero ones and words past a
+//     sign-extended imm32), frame objects of each width (LOCAL, STORE_LOCAL and SET_LOCAL), DUP, STORE's kept value and
+//     ?:, and the rows of tier0_test_vector_kinds (VECTOR, integer and floating operands and results, masks, scratch
+//     registers, /is4, memory and VSIB operands, a row of no records), under live values on both stacks (an integer and
+//     a float under a statement, stored after it), against this file's own stack machine over the same stream
 //     (tier0_test_vector_interpret), whose rows' model is plain C (tier0_test_vector_model);
 //   - placement: each row under as many floating values as leave its VECTOR registers room, past 16 for the EVEX ones,
 //     and one past the room of a VEX form's, which both paths refuse (TIER0_ERROR_DEPTH), and a scratch register past the
@@ -26,8 +26,9 @@
 
 #define BUSTER_TIER0_TEST_VECTOR_PROGRAMS 300
 #define BUSTER_TIER0_TEST_VECTOR_STATEMENTS 8
-// The programs' frame objects, of 16, 32 and 64 bytes: locals 4 to 6 after their four pointer parameters.
-#define BUSTER_TIER0_TEST_VECTOR_OBJECTS 3
+// The programs' frame objects, one per vector type (of 16, 32, 64, 8 and 4 bytes): locals 4 to 8 after their four
+// pointer parameters.
+#define BUSTER_TIER0_TEST_VECTOR_OBJECTS 5
 // Each statement's two output slots (its value's, and its live values' under it), then each object's.
 #define BUSTER_TIER0_TEST_VECTOR_OUTPUTS (2 * BUSTER_TIER0_TEST_VECTOR_STATEMENTS + BUSTER_TIER0_TEST_VECTOR_OBJECTS)
 #define BUSTER_TIER0_TEST_VECTOR_IN 8
@@ -38,29 +39,32 @@
 #define BUSTER_TIER0_TEST_VECTOR_TASKS 512
 #define BUSTER_TIER0_TEST_VECTOR_PATCHES 128
 
-// The values the generator makes and the rows take: vectors of 16, 32 and 64 bytes, integers of four classes, floats,
-// and three kinds of U64 a row takes as an address: one of an input's 64 bytes, one of an output slot's, and the inputs'
-// first byte (a gather's base), with a gather's indices: a 64-byte vector of dwords below 128, which index the inputs.
+// The values the generator makes and the rows take: vectors of 16, 32, 64, 8 and 4 bytes (the first five types, each
+// with a frame object of its own), integers of four classes, floats, and three kinds of U64 a row takes as an address:
+// one of an input's 64 bytes, one of an output slot's, and the inputs' first byte (a gather's base), with a gather's
+// indices: a 64-byte vector of dwords below 128, which index the inputs.
 #define BUSTER_TIER0_TEST_VECTOR_V16 0
 #define BUSTER_TIER0_TEST_VECTOR_V32 1
 #define BUSTER_TIER0_TEST_VECTOR_V64 2
-#define BUSTER_TIER0_TEST_VECTOR_I32 3
-#define BUSTER_TIER0_TEST_VECTOR_U16 4
-#define BUSTER_TIER0_TEST_VECTOR_U32 5
-#define BUSTER_TIER0_TEST_VECTOR_U64 6
-#define BUSTER_TIER0_TEST_VECTOR_F32 7
-#define BUSTER_TIER0_TEST_VECTOR_INPUT 8
-#define BUSTER_TIER0_TEST_VECTOR_OUTPUT 9
-#define BUSTER_TIER0_TEST_VECTOR_BASE 10
-#define BUSTER_TIER0_TEST_VECTOR_INDICES 11
-#define BUSTER_TIER0_TEST_VECTOR_NONE 12
+#define BUSTER_TIER0_TEST_VECTOR_V8 3
+#define BUSTER_TIER0_TEST_VECTOR_V4 4
+#define BUSTER_TIER0_TEST_VECTOR_I32 5
+#define BUSTER_TIER0_TEST_VECTOR_U16 6
+#define BUSTER_TIER0_TEST_VECTOR_U32 7
+#define BUSTER_TIER0_TEST_VECTOR_U64 8
+#define BUSTER_TIER0_TEST_VECTOR_F32 9
+#define BUSTER_TIER0_TEST_VECTOR_INPUT 10
+#define BUSTER_TIER0_TEST_VECTOR_OUTPUT 11
+#define BUSTER_TIER0_TEST_VECTOR_BASE 12
+#define BUSTER_TIER0_TEST_VECTOR_INDICES 13
+#define BUSTER_TIER0_TEST_VECTOR_NONE 14
 
 static uint32_t tier0_test_vector_type_class(uint32_t type)
 {
     static const uint8_t classes[BUSTER_TIER0_TEST_VECTOR_NONE + 1] = {
-        BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_U16,
-        BUSTER_TYPED_CLASS_U32,    BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_F32,    BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64,
-        BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VECTOR,
+        BUSTER_TYPED_CLASS_I32,    BUSTER_TYPED_CLASS_U16,    BUSTER_TYPED_CLASS_U32,    BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_F32,
+        BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_U64,    BUSTER_TYPED_CLASS_VECTOR, BUSTER_TYPED_CLASS_VOID,
     };
     return classes[type];
 }
@@ -68,7 +72,8 @@ static uint32_t tier0_test_vector_type_class(uint32_t type)
 // A vector type's bytes (0 for the others).
 static uint32_t tier0_test_vector_type_bytes(uint32_t type)
 {
-    return type <= BUSTER_TIER0_TEST_VECTOR_V64 ? 16u << type : type == BUSTER_TIER0_TEST_VECTOR_INDICES ? 64 : 0;
+    static const uint8_t bytes[BUSTER_TIER0_TEST_VECTOR_NONE + 1] = { 16, 32, 64, 8, 4, [BUSTER_TIER0_TEST_VECTOR_INDICES] = 64 };
+    return bytes[type];
 }
 
 // The rows this file's programs and fixtures use, each a Tier0Operation built by tier0_test_vector_row, modelled by
@@ -93,7 +98,15 @@ static uint32_t tier0_test_vector_type_bytes(uint32_t type)
 #define BUSTER_TIER0_TEST_VECTOR_MASK_STORE 17
 #define BUSTER_TIER0_TEST_VECTOR_GATHER 18
 #define BUSTER_TIER0_TEST_VECTOR_SUB_Q 19
-#define BUSTER_TIER0_TEST_VECTOR_KINDS 20
+#define BUSTER_TIER0_TEST_VECTOR_ADD_W8 20
+#define BUSTER_TIER0_TEST_VECTOR_XOR_4 21
+#define BUSTER_TIER0_TEST_VECTOR_ADD_Q8 22
+#define BUSTER_TIER0_TEST_VECTOR_EXTEND_B4 23
+#define BUSTER_TIER0_TEST_VECTOR_LOW_8 24
+#define BUSTER_TIER0_TEST_VECTOR_IN_8 25
+#define BUSTER_TIER0_TEST_VECTOR_OUT_8 26
+#define BUSTER_TIER0_TEST_VECTOR_OUT_4 27
+#define BUSTER_TIER0_TEST_VECTOR_KINDS 28
 
 // A row's shape, as this file has it apart from the row: its operands' and result's types, one past the highest VECTOR
 // register its VEX forms name (which the placement fixtures' expectations take), and whether random programs use it
@@ -135,6 +148,14 @@ static const Tier0TestVectorKind tier0_test_vector_kinds[BUSTER_TIER0_TEST_VECTO
     BUSTER_TIER0_TEST_VECTOR_KIND("kmovw, vmovdqu32 [r]{k}", OUTPUT, U32, V64, NONE, 3, NONE, 0, false),
     BUSTER_TIER0_TEST_VECTOR_KIND("kxnorw, vpgatherdd zmm{k}", BASE, INDICES, NONE, NONE, 2, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpsubq xmm", V16, V16, NONE, NONE, 2, V16, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpaddw xmm, 8 bytes", V8, V8, NONE, NONE, 2, V8, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpxord xmm, 4 bytes", V4, V4, NONE, NONE, 2, V4, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpaddq xmm, 8 bytes to 16", V8, V8, NONE, NONE, 2, V16, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpmovzxbd xmm, 4 bytes to 16", V4, NONE, NONE, NONE, 1, V16, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("no records (the low 8 bytes)", V16, NONE, NONE, NONE, 1, V8, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vmovq xmm, r64", U64, NONE, NONE, NONE, 1, V8, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vmovq r64, xmm", V8, NONE, NONE, NONE, 1, U64, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vmovd r32, xmm, 4 bytes", V4, NONE, NONE, NONE, 1, U32, 0, true),
 };
 #undef BUSTER_TIER0_TEST_VECTOR_KIND
 
@@ -216,6 +237,16 @@ static Tier0Operation tier0_test_vector_row(uint32_t k)
                                  .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 5 };
         count = 2;
         break;
+    // Narrow vectors in XMM forms, their registers' bytes past them zero: VPADDQ's second qwords and VPMOVZXBD's dwords
+    // past the first 4 bytes show it.
+    case BUSTER_TIER0_TEST_VECTOR_ADD_W8: r[0] = tier0_test_vector_record(X86_FORM_VPADDW_X_X_XM128_EVEX, v0, v0, v1); break;
+    case BUSTER_TIER0_TEST_VECTOR_XOR_4: r[0] = tier0_test_vector_record(X86_FORM_VPXORD_X_X_XM128, v0, v0, v1); break;
+    case BUSTER_TIER0_TEST_VECTOR_ADD_Q8: r[0] = tier0_test_vector_record(X86_FORM_VPADDQ_X_X_XM128_EVEX, v0, v0, v1); break;
+    case BUSTER_TIER0_TEST_VECTOR_EXTEND_B4: r[0] = tier0_test_vector_record(X86_FORM_VPMOVZXBD_X_XM32_EVEX, v0, 0, v0); break;
+    case BUSTER_TIER0_TEST_VECTOR_LOW_8: count = 0; break;
+    case BUSTER_TIER0_TEST_VECTOR_IN_8: r[0] = tier0_test_vector_record(X86_FORM_VMOVQ_X_RM64_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER(0)); break;
+    case BUSTER_TIER0_TEST_VECTOR_OUT_8: r[0] = tier0_test_vector_record(X86_FORM_VMOVQ_RM64_X_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT); break;
+    case BUSTER_TIER0_TEST_VECTOR_OUT_4: r[0] = tier0_test_vector_record(X86_FORM_VMOVD_RM32_X_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT); break;
     default: r[0] = tier0_test_vector_record(X86_FORM_VPSUBQ_X_X_XM128_EVEX, v0, v0, v1); break;
     }
     (void)v3;
@@ -415,15 +446,43 @@ static Tier0TestVectorValue tier0_test_vector_model(uint32_t k, const Tier0TestV
         }
         break;
     }
+    case BUSTER_TIER0_TEST_VECTOR_ADD_W8:
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            uint16_t x = 0;
+            uint16_t y = 0;
+            memcpy(&x, a->bytes + 2 * i, 2);
+            memcpy(&y, b->bytes + 2 * i, 2);
+            const uint16_t sum = (uint16_t)(x + y);
+            memcpy(result.bytes + 2 * i, &sum, 2);
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_XOR_4:
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            result.bytes[i] = a->bytes[i] ^ b->bytes[i];
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_EXTEND_B4:
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            tier0_test_vector_set_dword(&result, i, a->bytes[i]);
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_LOW_8:
+    case BUSTER_TIER0_TEST_VECTOR_IN_8: memcpy(result.bytes, a->bytes, 8); break;
+    case BUSTER_TIER0_TEST_VECTOR_OUT_8: result = tier0_test_vector_integer(BUSTER_TYPED_CLASS_U64, tier0_test_vector_bits(a)); break;
+    case BUSTER_TIER0_TEST_VECTOR_OUT_4: result = tier0_test_vector_integer(BUSTER_TYPED_CLASS_U32, tier0_test_vector_dword(a, 0)); break;
     default:
+        // SUB_Q's differences, and ADD_Q8's sums (its operands' second qwords, past their 8 bytes, are zero).
         for (uint32_t i = 0; i < 2; i += 1)
         {
             uint64_t x = 0;
             uint64_t y = 0;
             memcpy(&x, a->bytes + 8 * i, 8);
             memcpy(&y, b->bytes + 8 * i, 8);
-            const uint64_t difference = x - y;
-            memcpy(result.bytes + 8 * i, &difference, 8);
+            const uint64_t value = k == BUSTER_TIER0_TEST_VECTOR_ADD_Q8 ? x + y : x - y;
+            memcpy(result.bytes + 8 * i, &value, 8);
         }
         break;
     }
@@ -507,8 +566,10 @@ static void tier0_test_vector_constant(Tier0TestVectorProgram* program, uint32_t
         for (uint32_t w = 0; w < 8; w += 1)
         {
             // A gather's indices: dwords below 128, which index the inputs' 512 bytes.
+            // A 4-byte constant's word has its low half alone.
             const uint64_t random = indices ? (tier0_generate_random(state) & 0x0000007f0000007full) : tier0_test_vector_word(state);
-            program->constants[8 * k + w] = zero || 8 * w >= bytes ? 0 : random;
+            const uint64_t kept = bytes - 8 * w >= 8 ? random : random & 0xffffffffull;
+            program->constants[8 * k + w] = zero || 8 * w >= bytes ? 0 : kept;
         }
         program->constant_bytes[k] = (uint8_t)bytes;
         tier0_test_vector_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, k);
@@ -668,7 +729,11 @@ static void tier0_test_vector_run_tasks(Tier0TestVectorProgram* program, Tier0Te
             else if (class == BUSTER_TYPED_CLASS_VECTOR && choice < 8)
             {
                 // A row of two operands of the type, both the same value: DUP.
-                const uint32_t k = bytes == 64 ? BUSTER_TIER0_TEST_VECTOR_ADD_D : bytes == 32 ? BUSTER_TIER0_TEST_VECTOR_SUB_B : BUSTER_TIER0_TEST_VECTOR_XOR_Q;
+                const uint32_t k = bytes == 64   ? BUSTER_TIER0_TEST_VECTOR_ADD_D
+                                   : bytes == 32 ? BUSTER_TIER0_TEST_VECTOR_SUB_B
+                                   : bytes == 16 ? BUSTER_TIER0_TEST_VECTOR_XOR_Q
+                                   : bytes == 8  ? BUSTER_TIER0_TEST_VECTOR_ADD_W8
+                                                 : BUSTER_TIER0_TEST_VECTOR_XOR_4;
                 tier0_test_vector_push(program, tasks, tier0_test_vector_entry(BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, k));
                 tier0_test_vector_push(program, tasks, tier0_test_vector_entry(BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_VECTOR, 0));
                 tier0_test_vector_push(program, tasks, tier0_test_vector_expression(type, budget));
@@ -733,9 +798,9 @@ static void tier0_test_vector_run_tasks(Tier0TestVectorProgram* program, Tier0Te
 // (DISCARD).
 static void tier0_test_vector_statement(Tier0TestVectorProgram* program, uint32_t s, uint64_t* state)
 {
-    static const uint8_t types[8] = {
-        BUSTER_TIER0_TEST_VECTOR_V16, BUSTER_TIER0_TEST_VECTOR_V32, BUSTER_TIER0_TEST_VECTOR_V64, BUSTER_TIER0_TEST_VECTOR_V64,
-        BUSTER_TIER0_TEST_VECTOR_I32, BUSTER_TIER0_TEST_VECTOR_U32, BUSTER_TIER0_TEST_VECTOR_U64, BUSTER_TIER0_TEST_VECTOR_F32,
+    static const uint8_t types[10] = {
+        BUSTER_TIER0_TEST_VECTOR_V16, BUSTER_TIER0_TEST_VECTOR_V32, BUSTER_TIER0_TEST_VECTOR_V64, BUSTER_TIER0_TEST_VECTOR_V8,  BUSTER_TIER0_TEST_VECTOR_V4,
+        BUSTER_TIER0_TEST_VECTOR_V64, BUSTER_TIER0_TEST_VECTOR_I32, BUSTER_TIER0_TEST_VECTOR_U32, BUSTER_TIER0_TEST_VECTOR_U64, BUSTER_TIER0_TEST_VECTOR_F32,
     };
     Tier0TestVectorTasks tasks;
     tasks.count = 0;
@@ -754,14 +819,14 @@ static void tier0_test_vector_statement(Tier0TestVectorProgram* program, uint32_
     }
     else if (shape == 1)
     {
-        const uint32_t type = types[tier0_generate_below(state, 3)];
+        const uint32_t type = types[tier0_generate_below(state, 5)];
         tier0_test_vector_push(program, &tasks, tier0_test_vector_entry(BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_VECTOR, 0));
         tier0_test_vector_push(program, &tasks, tier0_test_vector_expression(type, budget));
         tier0_test_vector_run_tasks(program, &tasks, state);
     }
     else
     {
-        const uint32_t type = types[tier0_generate_below(state, 8)];
+        const uint32_t type = types[tier0_generate_below(state, 10)];
         const uint32_t class = tier0_test_vector_type_class(type);
         tier0_test_vector_address(program, 3, 64 * (uint64_t)(2 * s));
         tier0_test_vector_push(program, &tasks, tier0_test_vector_expression(type, budget));
@@ -779,7 +844,7 @@ static void tier0_test_vector_program(Tier0TestVectorProgram* program, uint64_t*
     memset(program, 0, sizeof(*program));
     for (uint32_t k = 0; k < BUSTER_TIER0_TEST_VECTOR_OBJECTS; k += 1)
     {
-        tier0_test_vector_constant(program, 16u << k, state, false);
+        tier0_test_vector_constant(program, tier0_test_vector_type_bytes(k), state, false);
         tier0_test_vector_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 4 + k);
     }
     const uint32_t statements = 1 + tier0_generate_below(state, BUSTER_TIER0_TEST_VECTOR_STATEMENTS);
@@ -809,21 +874,23 @@ static void tier0_test_vector_program(Tier0TestVectorProgram* program, uint64_t*
     {
         tier0_test_vector_address(program, 3, 64 * (uint64_t)(2 * BUSTER_TIER0_TEST_VECTOR_STATEMENTS + k));
         tier0_test_vector_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 4 + k);
-        tier0_test_vector_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, 16u << k);
+        tier0_test_vector_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, tier0_test_vector_type_bytes(k));
     }
     tier0_test_vector_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
 }
 
 // The programs' and fixtures' locals: four pointer parameters (the inputs, the integers, the floats and the outputs) in
-// rdi, rsi, rdx and rcx, and the frame objects of 16, 32 and 64 bytes, aligned to 16.
+// rdi, rsi, rdx and rcx, and the frame objects of 16, 32, 64, 8 and 4 bytes, aligned to 16.
 static const uint8_t tier0_test_vector_local_classes[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = {
-    BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
+    BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64,  BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID,
+    BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
 };
 static const uint8_t tier0_test_vector_local_flags[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = {
-    0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+    0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+    BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
 };
-static const uint32_t tier0_test_vector_local_sizes[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = { 0, 0, 0, 0, 16, 32, 64 };
-static const uint8_t tier0_test_vector_local_alignments[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = { 0, 0, 0, 0, 4, 4, 4 };
+static const uint32_t tier0_test_vector_local_sizes[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = { 0, 0, 0, 0, 16, 32, 64, 8, 4 };
+static const uint8_t tier0_test_vector_local_alignments[4 + BUSTER_TIER0_TEST_VECTOR_OBJECTS] = { 0, 0, 0, 0, 4, 4, 4, 4, 4 };
 static const AbiLocation tier0_test_vector_parameters[4] = {
     { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } },
     { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RSI, BUSTER_ABI_REGISTER_NONE } },
@@ -861,11 +928,11 @@ static Tier0Function tier0_test_vector_function(const Tier0TestVectorProgram* pr
 // What the programs reach in the interpreter, which the default count must cover whole. When native execution is
 // available, include only programs whose native run matched it. A bit per VECTOR kind and width, a bit per row,
 // the arms of a ?: of a vector, and a CONST of zeros and one of a word past a sign-extended imm32.
-#define BUSTER_TIER0_TEST_VECTOR_WIDTH(bytes) ((bytes) == 16 ? 0u : (bytes) == 32 ? 1u : 2u)
+#define BUSTER_TIER0_TEST_VECTOR_WIDTH(bytes) ((bytes) == 16 ? 0u : (bytes) == 32 ? 1u : (bytes) == 64 ? 2u : (bytes) == 8 ? 3u : 4u)
 typedef struct Tier0TestVectorReach Tier0TestVectorReach;
 struct Tier0TestVectorReach
 {
-    uint64_t kinds[3];
+    uint64_t kinds[BUSTER_TIER0_TEST_VECTOR_OBJECTS];
     uint32_t rows;
     uint8_t arms;
     uint8_t constants;
@@ -908,7 +975,7 @@ static bool tier0_test_vector_interpret(const Tier0Function* function, const uin
             reach->kinds[BUSTER_TIER0_TEST_VECTOR_WIDTH(bytes)] |= 1ull << kind;
             bool zero = true;
             bool wide = false;
-            for (uint32_t w = 0; w < bytes / 8; w += 1)
+            for (uint32_t w = 0; w < (bytes + 7) / 8; w += 1)
             {
                 zero = zero && function->vector_constants[8 * value + w] == 0;
                 wide = wide || !tier0_fits_int32((int64_t)function->vector_constants[8 * value + w]);
@@ -1015,6 +1082,11 @@ static bool tier0_test_vector_interpret(const Tier0Function* function, const uin
                 const uint32_t from = tier0_class_floating(row->operand_classes[j - 1]) ? 1 : 0;
                 taken[from] += 1;
                 operands[j - 1] = stack[from][depths[from] - taken[from]];
+                // A VECTOR operand's register has zeros past its bytes, as Tier 0 loads it.
+                if (tier0_class_vector(row->operand_classes[j - 1]))
+                {
+                    memset(operands[j - 1].bytes + row->operand_bytes[j - 1], 0, 64 - row->operand_bytes[j - 1]);
+                }
             }
             depths[0] -= taken[0];
             depths[1] -= taken[1];
@@ -1171,7 +1243,7 @@ static bool tier0_test_vector_check(Tier0TestTally* tally, const char* name, con
     }
     if (same && reached != 0)
     {
-        for (uint32_t w = 0; w < 3; w += 1)
+        for (uint32_t w = 0; w < BUSTER_TIER0_TEST_VECTOR_OBJECTS; w += 1)
         {
             reached->kinds[w] |= reach.kinds[w];
         }
@@ -1240,20 +1312,19 @@ static void tier0_test_vector_programs(Tier0TestTally* tally, uint64_t seed, uin
     // Each VECTOR kind at each width it takes from its entries (DUP, DISCARD and JUMP_VALUE at the first's alone).
     const uint64_t valued = 1ull << BUSTER_TYPED_CONST | 1ull << BUSTER_TYPED_LOAD | 1ull << BUSTER_TYPED_STORE | 1ull << BUSTER_TYPED_SET |
                             1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL;
-    const uint64_t wanted[3] = {
-        valued | 1ull << BUSTER_TYPED_DUP | 1ull << BUSTER_TYPED_DISCARD | 1ull << BUSTER_TYPED_JUMP_VALUE,
-        valued,
-        valued,
+    const uint64_t wanted[BUSTER_TIER0_TEST_VECTOR_OBJECTS] = {
+        valued | 1ull << BUSTER_TYPED_DUP | 1ull << BUSTER_TYPED_DISCARD | 1ull << BUSTER_TYPED_JUMP_VALUE, valued, valued, valued, valued,
     };
     uint32_t wanted_rows = 0;
     for (uint32_t k = 0; k < BUSTER_TIER0_TEST_VECTOR_KINDS; k += 1)
     {
         wanted_rows |= tier0_test_vector_kinds[k].random || k == BUSTER_TIER0_TEST_VECTOR_MASK_STORE ? 1u << k : 0;
     }
-    for (uint32_t w = 0; w < 3; w += 1)
+    for (uint32_t w = 0; w < BUSTER_TIER0_TEST_VECTOR_OBJECTS; w += 1)
     {
         tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || (wanted[w] & ~reached.kinds[w]) == 0, "vectors",
-                          "the checked programs' interpreter runs don't reach every kind of %u-byte vectors (missing %#" PRIx64 ")", 16u << w, wanted[w] & ~reached.kinds[w]);
+                          "the checked programs' interpreter runs don't reach every kind of %u-byte vectors (missing %#" PRIx64 ")", tier0_test_vector_type_bytes(w),
+                          wanted[w] & ~reached.kinds[w]);
     }
     tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || ((wanted_rows & ~reached.rows) == 0 && reached.arms == 3 && reached.constants == 3), "vectors",
                       "the checked programs' interpreter runs don't reach every row (missing %#x), both arms (%#x) and both kinds of constants (%#x)", wanted_rows & ~reached.rows,
@@ -2042,7 +2113,7 @@ static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
         row.records[1].mode = BUSTER_X86_MEMORY_RIP;
         break;
     case 7: row.operand_count = BUSTER_TIER0_OPERATION_OPERANDS + 1; break;
-    case 8: row.operand_bytes[1] = 8; break;
+    case 8: row.operand_bytes[1] = 12; break;
     case 9: row.result_bytes = 0; break;
     case 10:
         // A block of registers (V4FMADDPS's four in vvvv), which a row can't name; an opmask pair it can (below).
@@ -2131,7 +2202,7 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         { "an X86 entry of another class than its row's result", 6 },
         { "an X86 entry's operand of another width", 6 },
         { "a vector constant past vector_constants", 1 },
-        { "a vector constant of 8 bytes", 0 },
+        { "a vector constant of 12 bytes", 0 },
         { "LOAD of 48 bytes", 4 },
         { "SET of 16 bytes of a 32-byte vector", 5 },
         { "LOCAL of an object of 24 bytes", 2 },
@@ -2276,7 +2347,7 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         }
         tier0_test_vector_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
         const bool vectors = b != 1;
-        constant_bytes[2] = b == 6 ? 8 : 16;
+        constant_bytes[2] = b == 6 ? 12 : 16;
         const uint32_t locals = b == 16 ? 6 : 5;
         if (b == 18)
         {

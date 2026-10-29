@@ -88,13 +88,15 @@ static bool check_lower_batch_proof(const CheckValue* value, CheckOp op)
 }
 
 // These nodes only schedule one checked operand. Their operation-specific helpers own all conversions,
-// truth tests and effects; unrelated expression classes and operands need not be loaded first.
+// truth tests and effects; unrelated expression classes and operands need not be loaded first. A cast of an integer to
+// a vector's bits is check_lower_expand's (check_lower_vector_bit_cast).
 static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWriter* writer, uint32_t node, bool address)
 {
     const CheckStream* stream = writer->program->stream;
     const CheckGraph* graph = &writer->program->input->graph;
     const CheckOp op = graph->ops[node];
-    const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
+    const bool wrapper = (op == CHECK_OP_CAST && !check_lower_vector_bit_cast(writer, node)) || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ||
+                         op == CHECK_OP_SELECT;
     const bool truth = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION;
     const bool plain = (wrapper || truth) && stream->values[node].constant_kind == CHECK_CONSTANT_NONE;
     if (plain)

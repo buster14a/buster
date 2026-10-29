@@ -421,8 +421,8 @@ of the classes in a function without `int128`. `interpreter.c` and `ir_lower.c` 
 
 ## Vectors (#136)
 
-GNU C's vector types and the intrinsics' (`__m128`, `__m256i`, `__m512d` and the rest) are one class, VECTOR
-(`BUSTER_TYPED_CLASS_VECTOR`, 14), of 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
+GNU C's vector types and the intrinsics' (`__m64`, `__m128`, `__m256i`, `__m512d` and the rest) are one class, VECTOR
+(`BUSTER_TYPED_CLASS_VECTOR`, 14), of 4, 8, 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
 lives in that depth's slot (`Tier0Frame.vector_area`, 64 bytes per depth), its bytes from the slot's first, so that
 calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (one class was left
 below the vector path's 16): each entry that makes or moves one has its own, and `tier0_validate` follows each depth's
@@ -436,14 +436,16 @@ miscompiled.
   double's are.
 - **Their code,** every entry deferred (`tier0_emit_vector_value`, counted by `tier0_count_vector_value`), through zmm16,
   which no value of the floating stack's is in: `vmovdqu64` of the value's bytes between memory (the address, the
-  object) and zmm16, and of all 64 between zmm16 and a slot, whose bytes past the value's are then unspecified, as a
-  narrow integer's register's are; a constant of zeros by `vpxord` and a store, any other by its words as immediates
-  (`mov qword` of a sign-extended imm32, or two `mov dword`); `DISCARD` and `JUMP_VALUE` nothing.
+  object) and zmm16 (EVEX's `vmovd` and `vmovq` of 4 and 8 bytes), and of all 64 between zmm16 and a slot, whose bytes
+  past the value's are then unspecified, as a narrow integer's register's are; a constant of zeros by `vpxord` and a
+  store, any other by its words as immediates (`mov qword` of a sign-extended imm32, or two `mov dword`; a constant of
+  4 bytes its word whole, of which its bytes are the low half); `DISCARD` and `JUMP_VALUE` nothing.
 - **Calls pass and return them as aggregates,** as `__int128`'s: an argument is an object passed by its address
   (`argument_sizes` its bytes), a call's result comes back into its result object, and a function returns one by its
   object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
-  register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too), or on the stack.
-  A parameter is an object the prologue stores its register in.
+  register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too; one of 4 or 8 bytes
+  an SSE eightbyte's part in an XMM register's first bytes, as a struct of floats is), or on the stack. A parameter is
+  an object the prologue stores its register in.
 - **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
   the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
   entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
@@ -455,7 +457,8 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
 (`BUSTER_TIER0_ROLE_*`), never by number, and Tier 0 places each role at the entry (`tier0_operation_placement`):
 
 - `VECTOR(j)`, the row's vector register j, which holds VECTOR operand j (loaded from its slot at its width, the
-  register's bytes past the operand's zero, so that a form that reads it wider reads zeros) when the records start, and
+  register's bytes past the operand's zero, so that a form that reads it wider reads zeros: an XMM form reads one of 4
+  or 8 bytes, as clang's code of `__m64` does) when the records start, and
   whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others are free. The
   VECTOR registers are the floating stack's free ones from its depth on (one further past a floating result's where no
   floating operand takes its place), so a VEX form (which names registers below 16) reaches them where the floating
@@ -483,7 +486,7 @@ Tier 0 keeps; which forms a unit's target allows is the front end's to decide (#
 of its rows is.
 
 `tier0_validate` refuses a vector entry in a function without `vectors`, a local of the class that isn't an object, a
-`LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
+`LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 4, 8, 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
 other bytes or of a value of other bytes, a constant past `vector_constants` or of other bytes, an `X86` entry past
 the operations, of another class than its row's result or of an operand of another class or width, the arms of a
 `?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a

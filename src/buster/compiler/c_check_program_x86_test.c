@@ -1339,10 +1339,13 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "FOLD(bc);return (int)h;}",
         },
         {
-            // SSE4A's bit fields (each field's length and index below 32, so that their sum is within the quadword) and non-
-            // temporal scalar stores, and CLZERO's line: AMD's.
+            // SSE4A's bit fields (each field's length and index below 32, so that their sum is within the quadword) and
+            // nontemporal scalar stores, a vector of 8 bytes of floats stored nontemporally (which clang's code stores with
+            // SSE4A's MOVNTSD, ours with MOVNTI), and CLZERO's line: AMD's.
             "x86-sse4a-clzero",
+            "typedef float v2sf8 __attribute__((vector_size(8)));"
             "int tested(int n){unsigned h=2166136261u;v2di a,b,c;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);"
+            "v2sf8 g,o[2];fill(&g,8,n+5);fill(o,16,n+6);__builtin_nontemporal_store(g,&o[1]);FOLD(o);"
             "b[0]=(long long)(((n*3)&31)|(((n*5)&31)<<8));c[1]=(long long)(((n*7)&31)|(((n*11)&31)<<8));v2di e=__builtin_ia32_extrq(a,(v16qi)b);FOLD(e);"
             "v2di i=__builtin_ia32_insertq(a,c);FOLD(i);double d[3]={1.5,2.5,3.5};float f[3]={4.5f,5.5f,6.5f};v2df x;v4sf y;fill(&x,16,n+3);"
             "fill(&y,16,n+4);__builtin_ia32_movntsd(&d[1],x);__builtin_ia32_movntss(&f[1],y);FOLD(d);FOLD(f);struct{_Alignas(64) unsigned char b[128];}z;"

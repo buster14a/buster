@@ -588,8 +588,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
   each of their five shapes; fchs and fabs; fcmovcc of the 8 conditions; fcomi,
   fcomip, fucomi and fucomip; fldcw and fnstcw.
 - **VEX and EVEX**, the forms Tier 0's own vector code emits: vmovdqu (128 and
-  256 bits), vmovdqu64 (128, 256 and 512), vpxord (each width, and its
-  broadcasts) and vzeroupper.
+  256 bits), vmovdqu64 (128, 256 and 512), EVEX's vmovd and vmovq (between an
+  XMM register and a general one or memory, the narrow vectors' loads and
+  stores), vpxord (each width, and its broadcasts) and vzeroupper.
 
 The other VEX and EVEX forms are uncovered (#180's levels will bring them, with
 their merges from vvvv, their zeroed upper lanes and their masks), the front

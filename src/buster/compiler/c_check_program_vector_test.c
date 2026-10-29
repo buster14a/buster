@@ -5,8 +5,10 @@
 // every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
 // elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of vector type.
 // Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign its frame
-// (#552). Then what the lowering refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other
-// sizes. Include after c_check_program_test.c's runners.
+// (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their operators, calls,
+// members, arrays, globals, casts to and from integers of their bytes and nontemporal stores. Then what the lowering
+// refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other sizes. Include after
+// c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
     "typedef signed char v64qi __attribute__((vector_size(64),aligned(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -145,6 +147,40 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "int x=((v4si)a)[n&3];v4si c=(0,a);int y=c[(n+1)&3];FOLD(b);FOLD(x);FOLD(y);return (int)h;}",
         },
         {
+            // Vectors of 8 and 4 bytes, in XMM registers whose bytes past them are zero: operators at each element, a
+            // scalar's splat (5LL into two ints, a constant that fits), calls passing and returning them as clang's
+            // ABI classes them (8 bytes in XMM registers, 4 in general ones, a vector of one double in memory),
+            // members and arrays, globals, ?:, casts to and from integers of their bytes (bit casts, as GNU C's
+            // vectors cast; an ext_vector_type's cast splats), elements, nontemporal stores and loads.
+            "vector-narrow",
+            "typedef int v2si __attribute__((vector_size(8)));typedef unsigned v2su __attribute__((vector_size(8)));"
+            "typedef short v4hi __attribute__((vector_size(8)));typedef signed char v8qi __attribute__((vector_size(8)));"
+            "typedef signed char v4qi __attribute__((vector_size(4)));typedef unsigned char v4qu __attribute__((vector_size(4)));"
+            "typedef short v2hi __attribute__((vector_size(4)));typedef float v2sf __attribute__((vector_size(8)));"
+            "typedef long long v1di __attribute__((vector_size(8)));typedef float f2 __attribute__((ext_vector_type(2)));"
+            "typedef double v1df __attribute__((vector_size(8)));"
+            "struct holder{char tag;v2si pair;v4qi quad;};static v2si global2={7,-9};static v4qi global4={1,2,3,4};"
+            "static __attribute__((noinline)) v2si mix(v2si a,v4qi b,v2sf c){v2si r=a+(v2si){b[0],b[3]};r[1]+=(int)c[1];return r;}"
+            "static __attribute__((noinline)) v4qi quad(v4qi a,int k){return (a+(v4qi){(signed char)k,2,3,4})^a;}"
+            "static __attribute__((noinline)) v1df scale(v1df a,v1di b,v4qu c){return a*(double)b[0]+(double)c[2];}"
+            "int tested(int n){unsigned h=2166136261u;v2si a={n,n*3},b={-n,11};v2su u={(unsigned)n,0xffffffffu};"
+            "v4hi w4={(short)n,-2,300,(short)(n*1000)};v8qi q={1,2,3,(signed char)n,5,6,7,-8};v4qi s={(signed char)n,-1,64,9};"
+            "v4qu t={200,(unsigned char)n,3,255};v2hi w={(short)-n,1234};v2sf f={1.5f,(float)n};"
+            "v2si r1[]={a+b,a*b-(a>>1),a==b,a<(v2si){n,100},a+5LL,(v2si)(v4hi)a};FOLD(r1);"
+            "v2su r2=u>>3;v4hi r3[]={w4<<2,-w4,w4*(short)3};v8qi r4[]={q+q,~q&(v8qi){15,15,15,15,127,127,127,127}};FOLD(r2);FOLD(r3);FOLD(r4);"
+            "v4qi r5=s^(v4qi){85,85,85,85};v4qu r6=t+5;v2hi r7=w*(short)3;v2sf r8[]={f*2.0f+f,-f};FOLD(r5);FOLD(r6);FOLD(r7);FOLD(r8);"
+            "long long bits=(long long)a;v2si back=(v2si)(bits+1);int four=(int)s;v4qi from4=(v4qi)(four^0x01010101);v1di one=(v1di)(bits*3);"
+            "FOLD(bits);FOLD(back);FOLD(four);FOLD(from4);FOLD(one);v1df sc=scale((v1df){1.5*n},one,t);FOLD(sc);"
+            "a[1]=77;s[2]+=3;int e=q[3]+w4[2]+t[1];FOLD(a);FOLD(s);FOLD(e);"
+            "struct holder hold={'x',a,s};hold.pair+=b;hold.quad[1]=(signed char)n;FOLD(hold.pair);FOLD(hold.quad);"
+            "v2si array[3]={a,b,{1,2}};array[(unsigned)n%3u]=array[((unsigned)n+1)%3u]*2;v2si*p=&array[2];*p=*p+1;FOLD(array);"
+            "global2=global2-a;global4=global4+s;FOLD(global2);FOLD(global4);"
+            "v2si pick=(n&1)?a:b;v2si called=mix(a,s,f);v4qi q2=quad(s,n);f2 ext=(f2)3.0f;FOLD(pick);FOLD(called);FOLD(q2);FOLD(ext);"
+            "__builtin_nontemporal_store(a,&array[0]);v2si nt=__builtin_nontemporal_load(&array[1]);v4qi nt4;__builtin_nontemporal_store(s,&nt4);"
+            "FOLD(array);FOLD(nt);FOLD(nt4);"
+            "return (int)h;}",
+        },
+        {
             "vector-aligned-locals",
             "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
             "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
@@ -194,9 +230,9 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-of-8-bytes",
-            "typedef int v2si __attribute__((vector_size(8)));int tested(int n){v2si a={n},b={2};a=b;return a[0];}",
-            "vector types of other than 16, 32 or 64 bytes",
+            "vector-of-2-bytes",
+            "typedef char v2qi __attribute__((vector_size(2)));int tested(int n){v2qi a={(char)n},b={2};a=b;return a[0];}",
+            "vector types of other than 4, 8, 16, 32 or 64 bytes",
             2,
         },
         {
