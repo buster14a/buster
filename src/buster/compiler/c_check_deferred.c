@@ -499,9 +499,10 @@ static void check_deferred_lane_commit(CheckDeferredLane* lane, uint32_t names)
 //   - Then the stamps, which only grow from body to body and reading to reading (check_deferred_heads).
 //   - Then the linked declarations and types and the intrinsics' and builtins' caches, which each body sets for the names
 //     it spells before its walk reads them (check_deferred_heads, check_deferred_name_state).
-// A reading with more names than the places have room for lays them out again, on zero pages. The entries of a reading's
-// names are committed before its bodies (check_deferred_lane_commit). The tests' poison (check_deferred_poison) leaves
-// the columns that start as none dirty, and the next reading clears them. Whether the columns fit.
+// A reading with more names than the places have room for lays them out again, on zero pages, or on the old ones cleared
+// where the kernel doesn't take them back. The entries of a reading's names are committed before its bodies
+// (check_deferred_lane_commit). The tests' poison (check_deferred_poison) leaves the columns that start as none dirty,
+// and the next reading clears them. Whether the columns fit.
 static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferredLane* lane, uint32_t names)
 {
     CheckDeferredArenas* arenas = lane->arenas;
@@ -515,9 +516,11 @@ static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferr
         {
             room *= 2;
         }
-        if (arenas->name_bytes != 0)
+        if (arenas->name_bytes != 0 && madvise(arena->base, arenas->name_bytes, MADV_DONTNEED) != 0)
         {
-            madvise(arena->base, arenas->name_bytes, MADV_DONTNEED);
+            // The kernel kept the pages (it refuses the advice for a locked range): the new layout reads its columns
+            // that start as none as zero, so the old one is cleared.
+            memset(arena->base, 0, arenas->name_bytes);
         }
         arenas->name_bytes = 0;
         arenas->names_committed = 0;

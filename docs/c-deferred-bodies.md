@@ -68,9 +68,11 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    (`check_deferred_lane_names`). Before its walk, a body sets them for the
    names it spells (step 4). After the walk it takes the ones that start as
    none back to none, so that no reading clears them. A reading with more
-   names than the places have room for lays them out again, on zero pages.
-   Before its bodies, the pages of its names' entries are committed, each
-   column's in one call (`MADV_POPULATE_WRITE`, `check_deferred_lane_commit`):
+   names than the places have room for lays them out again, on zero pages, or
+   on the old ones cleared where the kernel keeps them (it refuses
+   `MADV_DONTNEED` for a locked range). Before its bodies, the pages of its
+   names' entries are committed, each column's in one call
+   (`MADV_POPULATE_WRITE`, `check_deferred_lane_commit`):
    a body's position checks set a few entries of every column for the names
    it spells, far apart, and their faults, a page at a time, took the position
    checks to up to 7 times main's on one lane and 14 times on eight ("A
@@ -363,7 +365,9 @@ passes every checker test.
   start as none cleared, with the stamp, after a poisoned reading, and the
   others left to the bodies, which set them before they read them; laid out
   again on zero pages for more names than the room, their entries committed
-  again; and refused for more names than the arena holds.
+  again, and on the old pages cleared where the kernel keeps them (the names
+  arena's first page locked, where the test may lock one); and refused for more
+  names than the arena holds.
   Mutants of the change, each built at `-O1` from it merged with main and run
   on the 9700X (the record's `logs/mutants2`), fail. Of the rule: the largest
   body counted twice, as #448's rule did, 27 checks; the largest body alone

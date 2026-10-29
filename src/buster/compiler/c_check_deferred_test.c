@@ -477,8 +477,9 @@ static bool check_deferred_test_populates(void)
 // zero; at the same places for a reading of fewer names and for the next reading, with what the last left in them, but
 // for the columns that start as none where a reading was poisoned (check_deferred_poison), which are cleared with the
 // stamp; the intrinsics' cache only where the top level has one; laid out again on zero pages for more names than the
-// room, their entries committed again; and refused for more than the arena holds, after which a reading of fewer names
-// takes the places of the room it had.
+// room, their entries committed again; refused for more than the arena holds, after which a reading of fewer names
+// takes the places of the room it had; and laid out again for more names with the arena's first page locked, where the
+// test may lock one, so that the kernel refuses MADV_DONTNEED: the columns that start as none zero all the same.
 static bool check_deferred_test_lane_names(void)
 {
     static CheckDeferred state;
@@ -552,6 +553,33 @@ static bool check_deferred_test_lane_names(void)
     valid = valid && !check_deferred_lane_names(&state, &lane, UINT32_MAX) && arenas->name_room == 8192;
     valid = valid && check_deferred_lane_names(&state, &lane, 100) && arenas->name_room == 8192 && reader->bindings.heads == (uint32_t*)arenas->names.base &&
             lane.stamps[100] == 0 && arenas->stamp == 0;
+    // A layout for more names whose old pages the kernel keeps (MADV_DONTNEED is refused for a locked range): what the
+    // last reading left in the old places, in the columns that start as none and in the others, is in the new places of
+    // the columns that start as none, which must be zero all the same.
+    if (valid && mlock(arenas->names.base, BUSTER_ARENA_PAGE_BYTES) == 0)
+    {
+        const uint32_t room = arenas->name_room;
+        reader->bindings.heads[5] = 7;
+        reader->member_seen[room - 1] = 1;
+        lane.stamps[room - 1] = 1;
+        reader->linked_declarations[room - 1] = 11;
+        reader->builtin_names[room - 1] = 13;
+        valid = check_deferred_lane_names(&state, &lane, room + 1) && arenas->name_room == room * 2;
+        const uint64_t bytes[4] = { (uint64_t)room * 2 * C_BINDING_NAMESPACES * 4, (uint64_t)room * 2 * 4, (uint64_t)room * 2 * 4, (uint64_t)room * 2 * 4 };
+        const uint8_t* columns[4] = { (uint8_t*)reader->bindings.heads, (uint8_t*)reader->parameter_seen, (uint8_t*)reader->member_seen, (uint8_t*)lane.stamps };
+        for (uint32_t c = 0; valid && c < 4; c += 1)
+        {
+            for (uint64_t b = 0; valid && b < bytes[c]; b += 1)
+            {
+                valid = columns[c][b] == 0;
+            }
+        }
+        munlock(arenas->names.base, BUSTER_ARENA_PAGE_BYTES);
+    }
+    else if (valid)
+    {
+        fprintf(stderr, "test-checker-deferred: the per-name columns' layout over pages the kernel keeps wasn't checked (mlock: %s)\n", strerror(errno));
+    }
     check_deferred_release(&state);
     return valid;
 }

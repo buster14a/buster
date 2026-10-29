@@ -4968,7 +4968,8 @@ lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 A lane's per-name columns must be laid out with their names' entries
 committed, kept, cleared after a poisoned reading and laid out again for more
-names (`check_deferred_test_lane_names`), and the lanes' mappings and the
+names, cleared where the kernel keeps their old pages
+(`check_deferred_test_lane_names`), and the lanes' mappings and the
 state's own arenas must be base pages (`check_deferred_test_memory`).
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
