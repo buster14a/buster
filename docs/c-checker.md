@@ -1089,10 +1089,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
 stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
 constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
-The standalone source bridge refuses a referenced overloadable symbol until
-its ABI symbol name is available, before publishing any Link state. An unused
-overloadable declaration needs no symbol; the lower-level emitter can consume
-an explicitly supplied object-to-symbol map.
+The standalone source bridge and the program emitter share `c_check_mangle.c`
+for selected overloadable symbols (#821). Calls and contextual addresses retain
+the checker's selected object, and each emitted object receives its Itanium ABI
+name once; explicit asm labels override it. Static inline overloads, including
+Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
+Unmarked overload candidates retain C names, and unused declarations need none.
+
+The mangler uses an explicit worklist and canonical type substitutions, with
+scalar/vector substitution lookup. It covers builtin and complex arithmetic,
+qualified pointers, fixed/incomplete arrays, function pointers, vectors,
+atomics, bit-precise integers and file-scope named tags. Signatures requiring
+local/anonymous tag naming, variable array bounds, or an unsupported calling
+convention still fail before publication unless an asm label supplies the ABI
+name. These refusals do not select a different overload or publish an unmangled
+fallback. The focused `test-checker --program-overloads` suite checks independently
+stated encodings, deep signatures, allocation failures, deterministic emission,
+cross-compiler linkage in both directions and the installed `<tgmath.h>` through
+both object and direct-executable driver paths; the full checker suite runs it too.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
@@ -3211,3 +3225,33 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+## Ignorable and unsupported pragmas
+
+The checker consumes retained pragmas after their existing semantic handlers. An
+unknown directive is not an unsupported C construct: it is ignored, with
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
+Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
+`#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
+is not an implementation of COFF linker directives or automatic library loading.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
+`optimize` use the unknown-pragma policy, as in the Clang oracle.
+
+OpenMP directives are ignored when OpenMP was not requested, with the separately
+enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
+not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
+active `-fopenmp` request, including alternate runtime selections, is refused
+until execution semantics are implemented; it must not silently produce serial
+code. A subsequent `-fno-openmp` restores the ignore behavior.
+
+Known unsupported semantic effects remain hard, named errors, including
+`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
+`align=packed`. Warning suppression cannot approve these directives. Already
+supported directives keep their original handlers and syntax validation.
+
+Directive warnings are sparse lexical facts with independent preprocessing
+source coordinates. Command-line policy, source-ordered diagnostic push/pop,
+macro invocation locations, system headers, parser recovery, and EOF directives
+use the same warning machinery. A warning promoted to an error prevents object
+emission. Neither classification nor warning policy changes `-E` output.

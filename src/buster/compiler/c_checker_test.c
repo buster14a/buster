@@ -5170,6 +5170,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_initializers = false;
     bool const_values = false;
     bool program_vectors = false;
+    bool program_overloads = false;
     bool embed_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -5190,6 +5191,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             const_values = true;
         }
+        else if (strcmp(argv[i], "--program-overloads") == 0)
+        {
+            program_overloads = true;
+        }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
             program_vectors = true;
@@ -5209,7 +5214,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-overloads|--embed-initializers|--const-values]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5230,6 +5235,11 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_initializers)
         {
             check_test_program_initializers(&test, clang);
+        }
+        else if (initialized && program_overloads)
+        {
+            check_test_program_overloads(&test, clang);
+            check_test_data_sources(&test);
         }
         else if (initialized && program_vectors)
         {

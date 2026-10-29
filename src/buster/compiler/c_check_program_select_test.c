@@ -334,13 +334,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "int pick(int x){return x+5;}double pick(double) __attribute__((overloadable));double take(double(*)(double));"
         "int tested(int n){return (int)take(pick)+n;}",
-        "active-contextual-overload-address-needs-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-contextual-overload-address-has-mangled-publication", 2, 0, CHECK_PROGRAM_OK, 0, clang, 0, false);
     check_test_program_selection_case(test,
         "static int dead(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
         "dropped-overload-definition-needs-no-mangled-publication", 1, 0, clang, true);
     check_test_program_selection_run(test,
         "int pick(int x) __attribute__((overloadable)){return x+1;}int tested(int n){return n;}",
-        "active-overload-definition-requires-mangled-publication", 2, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-overload-definition-has-mangled-publication", 2, 0, CHECK_PROGRAM_OK, 0, clang, 0, false);
     check_test_program_selection_case(test,
         "# 1 \"selection-header.h\" 1 3\n"
         "static int leaf(int n){return n+3;}static int middle(int n){return leaf(n);}"

@@ -89,6 +89,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
     }
     return result;
 }
@@ -861,6 +862,20 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0)
+                        {
+                            const uint32_t start = parser->tokens.pragma_sources[input->reports[index].pragma - 1];
+                            const CheckInputReader names = { .pp = pp, .parser = parser };
+                            const String8 first = check_driver_warning_name(pp, check_input_pragma_name(&names, start + 2));
+                            const bool vendor = pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "GCC") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "clang") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "STDC");
+                            const String8 second = vendor && start + 3 < pp->output.count ?
+                                check_driver_warning_name(pp, check_input_pragma_name(&names, start + 3)) : (String8){ .pointer = "" };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
+                                "unsupported semantic '#pragma %.*s%s%.*s' directive",
+                                (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
                         else
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
@@ -882,8 +897,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
         }
     }
+    const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
+    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
-    return ready;
+    return pragma_ready;
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -2122,6 +2140,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     uint32_t promoted_source = BUSTER_CHECK_NONE;
                     const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                     const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
+                    promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
@@ -2285,6 +2304,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
                 check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                {
+                    fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                }
             }
             if (!pp->fatal)
             {
@@ -2358,11 +2381,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
-    Arena arena = arena_reserve(1ull << 36);
-    Arena scratch = arena_reserve(1ull << 36);
-    Arena output_arena = arena_reserve(1ull << 36);
+    const uint64_t reservation_bytes = UINT64_C(1) << 36;
+    Arena arena = arena_reserve(reservation_bytes);
+    Arena scratch = arena_reserve(reservation_bytes);
+    Arena output_arena = arena_reserve(reservation_bytes);
     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
-    const bool reserved = arena.base != 0 && scratch.base != 0 && output_arena.base != 0;
+    const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
@@ -2608,7 +2632,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
+    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+                        pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
     // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
     const char* unsupported_pic = parsed && (emit_object || link) ?
@@ -2656,7 +2682,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!reserved)
     {
-        fprintf(stderr, "fatal error: can't reserve the driver's memory\n");
+        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
+    }
+    else if (!arguments_ready)
+    {
+        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
     }
     else if (unsupported_codegen != NULL)
     {

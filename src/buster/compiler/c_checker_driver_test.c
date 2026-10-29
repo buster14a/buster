@@ -177,6 +177,62 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
     return check_test_driver_spawn_stream(arguments, text, false);
 }
 
+// Exercise the real reservation failure in a child so its address-space limit cannot affect the test process.
+static void check_test_driver_reservation_failure(CheckTest* test)
+{
+#if (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)) && !defined(BUSTER_SANITIZER_RESOURCES)
+    // Until the resource-failure injection is available, a detector's shadow memory must not be constrained.
+    (void)test;
+#else
+    for (uint32_t command = 0; command < 2; command += 1)
+    {
+        FILE* errors = tmpfile();
+        pid_t child = -1;
+        int status = 0;
+        if (errors != NULL)
+        {
+            fflush(NULL);
+            child = fork();
+            if (child == 0)
+            {
+                const bool prepared = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0;
+#if defined(BUSTER_SANITIZER_RESOURCES) && BUSTER_SANITIZER_RESOURCES
+                lane_test_resources.arena_limited = true;
+                lane_test_resources.arena_limit = 0;
+                const bool limited = true;
+#else
+                const struct rlimit limit = { 0, 0 };
+                const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
+                const bool ready = prepared && limited;
+                char* arguments[] = { (char*)"-fsyntax-only", (char*)"missing.c" };
+                const int code = ready ? run_check_command(2, arguments, command != 0) : 126;
+                fflush(stderr);
+                _exit(code);
+            }
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        char* output = NULL;
+        size_t length = 0;
+        const bool read = errors != NULL && waited == child && pp_test_read_output(errors, &output, &length);
+        check_test_expect(test, read && WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+                                strstr(output, "fatal error: can't reserve checker memory") != NULL &&
+                                strstr(output, "68719476736 bytes") != NULL && strstr(output, "usage:") == NULL,
+                          "driver reservation failures report the requested size instead of usage");
+        free(output);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+    }
+#endif
+}
+
 // Whether the files at `a` and `b` can be read and have the same bytes.
 static bool check_test_driver_same_files(const char* a, const char* b)
 {
@@ -3773,6 +3829,7 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
+#include "c_check_ignored_pragma_driver_test.c"
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
@@ -4946,6 +5003,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_reservation_failure(&test);
         check_test_driver_link_failure_messages(&test);
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
@@ -4964,6 +5022,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
+            check_test_driver_ignored_pragmas(&test, clang, executable, directory);
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_symbols(&test, clang, executable, directory);

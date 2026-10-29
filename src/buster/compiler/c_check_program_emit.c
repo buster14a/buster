@@ -1205,19 +1205,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->lowered.output_bytes = output->length - mark;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
-    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
-    {
-        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
-        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object < program->object_count &&
-            program->object_symbols[candidate->object] != 0)
-        {
-            // A typed overload selection does not supply the required ABI symbol mangling.
-            result->status = CHECK_PROGRAM_UNSUPPORTED;
-            result->reason = "overloadable functions (their mangled names)";
-            result->token = candidate->declaration;
-            valid = false;
-        }
-    }
     CheckProgramFileAsm file_asm = { 0 };
     valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
@@ -1352,6 +1339,44 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
+    // asm labels (which override mangling), before external binding, static-local naming and object publication.
+    CheckMangleSource mangling = {
+        .input = program->input,
+        .parser = parser,
+        .identifiers = identifiers,
+        .types = program->types,
+        .output = scratch,
+        .scalar = scalar,
+    };
+    Scratch mangle_scratch = { 0 };
+    for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
+        const SymbolId symbol = candidate->object != 0 && candidate->object < program->object_count ? program->object_symbols[candidate->object] : 0;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && symbol != 0 && symbol_names[symbol].length == 0)
+        {
+            if (mangle_scratch.arena == NULL)
+            {
+                mangle_scratch = scratch_begin(scratch);
+            }
+            mangling.internal = program->input->linkage[candidate->declaration] == 1;
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+                                                               mangle_scratch.arena, &symbol_names[symbol]);
+            valid = status == CHECK_MANGLE_OK;
+            if (!valid)
+            {
+                result->status = status == CHECK_MANGLE_RESOURCE ? CHECK_PROGRAM_RESOURCE :
+                                 status == CHECK_MANGLE_INVALID ? CHECK_PROGRAM_INVALID : CHECK_PROGRAM_UNSUPPORTED;
+                result->reason = "this overloadable signature's ABI name (local/anonymous tags, variable arrays or calling convention)";
+                result->token = candidate->declaration;
+            }
+        }
+    }
+    if (mangle_scratch.arena != NULL)
+    {
+        scratch_end(mangle_scratch);
+    }
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
     // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
     uint32_t failed = count;
