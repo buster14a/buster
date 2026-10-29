@@ -456,7 +456,7 @@ static bool x86_target_test_matcher_admission(void)
 {
     Arena arena = arena_reserve(1ull << 20);
     X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&arena, X86MatchIndex, 1);
-    bool passed = index != 0;
+    bool passed = index != 0 && x86_semantics_initialize();
     static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
     uint32_t configurations = 0;
     uint8_t allowed[X86_FORM_COUNT];

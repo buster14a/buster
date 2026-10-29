@@ -88,8 +88,9 @@ static void check_test_program_scans(CheckTest* test)
     CheckTestTypes types = { 0 };
     ready = check_test_types_open(&types) && ready;
     check_test_expect(test, ready, "check_program's scanned columns have protected tails");
-    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked).
-    CheckInputAttribute records[3] = {
+    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked);
+    // and a target attribute, one ignored and target_clones (CheckProgramTargetEvents).
+    CheckInputAttribute records[6] = {
         {
             .kind = CHECK_ATTRIBUTE_NAKED,
         },
@@ -100,8 +101,18 @@ static void check_test_program_scans(CheckTest* test)
         {
             .kind = CHECK_ATTRIBUTE_NO_STACK_PROTECTOR,
         },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET,
+            .ignored = true,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET_CLONES,
+        },
     };
-    CheckInputAttributes kinds_of_attributes[3] = {
+    CheckInputAttributes kinds_of_attributes[6] = {
         {
             .records = records,
             .count = 1,
@@ -112,6 +123,18 @@ static void check_test_program_scans(CheckTest* test)
         },
         {
             .records = records + 1,
+            .count = 2,
+        },
+        {
+            .records = records + 3,
+            .count = 1,
+        },
+        {
+            .records = records + 4,
+            .count = 1,
+        },
+        {
+            .records = records + 4,
             .count = 2,
         },
     };
@@ -155,8 +178,8 @@ static void check_test_program_scans(CheckTest* test)
             kinds[token] = (uint8_t)((draw >> 26) % 4 == 0 ? PARSE_KIND_SWITCH : PARSE_KIND_IDENTIFIER);
             declared_types[token] = (draw >> 28) % 2 == 0 ? runtime : BUSTER_TYPE_INT;
             parents[token] = (draw >> 29) % 4 == 0 ? BUSTER_CHECK_NONE : (draw >> 10) % count;
-            const uint32_t attribute = (draw >> 16) % 8;
-            attributes[token] = attribute < 3 ? &kinds_of_attributes[attribute] : NULL;
+            const uint32_t attribute = (draw >> 16) % 12;
+            attributes[token] = attribute < 6 ? &kinds_of_attributes[attribute] : NULL;
         }
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
@@ -224,25 +247,51 @@ static void check_test_program_scans(CheckTest* test)
             uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             bool rooms[2];
-            // The naked column in an arena of its own, every other time one with no room for it.
+            // The naked column in an arena of its own, every other time one with no room for it; and the target attributes'
+            // keys in one of their own, which grows them by doubling, every other time one with no room.
             _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
+            _Alignas(64) uint8_t event_bytes[2][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
+            CheckProgramTargetEvents events[2];
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 Arena naked = {
                     .base = naked_bytes[path],
                     .capacity = variant == 0 ? sizeof(naked_bytes[path]) : 0,
                 };
+                Arena event_arena = {
+                    .base = event_bytes[path],
+                    .capacity = variant == 0 ? sizeof(event_bytes[path]) : 0,
+                };
+                events[path] = (CheckProgramTargetEvents){ .scratch = &event_arena, .room = true };
                 programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path] };
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
-                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0);
+                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0, &events[path]);
+                events[path].scratch = NULL;
             }
             const bool naked_same = (programs[0].object_naked == 0) == (programs[1].object_naked == 0) &&
                                     (programs[0].object_naked == 0 || memcmp(programs[0].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            // Each function's declaration with a target or target_clones attribute not ignored is its object's key, in token
+            // order, as the test's own walk finds them.
+            uint32_t expected_events = 0;
+            bool events_right = true;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t object = objects[token];
+                const bool event = declarations[token] == token && static_objects[token] && object != 0 && object <= count &&
+                                   declaration_kinds[token] == C_BINDING_FUNCTION &&
+                                   (attributes[token] == &kinds_of_attributes[3] || attributes[token] == &kinds_of_attributes[5]);
+                events_right &= !event || expected_events >= events[0].count || events[0].keys[expected_events] == (((uint64_t)object << 32) | token);
+                expected_events += event;
+            }
+            const bool limited = variant != 0 && expected_events != 0;
+            events_right &= limited ? !events[0].room && events[0].count == 0 : events[0].room && events[0].count == expected_events;
+            const bool events_same = events[0].room == events[1].room && events[0].count == events[1].count &&
+                                     (events[0].count == 0 || memcmp(events[0].keys, events[1].keys, events[0].count * sizeof(uint64_t)) == 0);
             check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
-                                   rooms[0] == rooms[1] && naked_same,
-                              "check_program's static objects and naked functions agree with their scalar twin at every guarded tail");
+                                   rooms[0] == rooms[1] && naked_same && events_same && events_right,
+                              "check_program's static objects, naked functions and target attributes agree with their scalar twin at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
             {
                 uint64_t cases = 0;
@@ -791,6 +840,13 @@ static CheckTestProgramBuild check_test_program_build;
 // The -march of the oracle's and the harness's compiles and of the link: x86-64's, or a section's own while it runs
 // (check_test_program_vectors, which releases the build around it).
 static const char* check_test_program_march = "-march=x86-64";
+
+// The target options a program's functions' target attributes resolve against (CheckProgramOptions.predefines): the
+// oracle's -march, whose X86Target the section gives the harness (x86_target_parse's profile of the same name).
+static PredefinesOptions check_test_program_predefines(void)
+{
+    return (PredefinesOptions){ .march = check_test_program_march + strlen("-march=") };
+}
 
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
 // oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
@@ -1364,6 +1420,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     uint8_t* needs[2] = { 0 };
     CheckProgram reduced[2] = { *program, *program };
     bool rooms[2] = { false, false };
+    CheckProgramTargetEvents events[2] = { { .scratch = scratch, .room = true }, { .scratch = scratch, .room = true } };
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
         needs[path] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
@@ -1374,14 +1431,25 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         {
             memset(needs[path], 0, (uint64_t)count + 1);
             memset(reduced[path].object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true) :
-                                     check_program_static_prepared(reduced + path, data, needs[path], output);
+            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true, &events[path]) :
+                                     check_program_static_prepared(reduced + path, data, needs[path], output, &events[path]);
         }
+    }
+    // The target attributes' keys: in token order and in each object's declarations' order, the same once sorted by
+    // object, as check_program_targets sorts them.
+    uint64_t* sorted[2] = { events[0].keys, events[1].keys };
+    for (uint32_t path = 0; same && path < 2 && events[0].count == events[1].count && events[path].count != 0; path += 1)
+    {
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, events[path].count);
+        same = temporary != NULL;
+        sorted[path] = same ? c_bindings_sort(events[path].keys, temporary, events[path].count, false, UINT32_MAX) : NULL;
     }
     same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
            memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
            (reduced[0].object_naked == NULL) == (reduced[1].object_naked == NULL) &&
-           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0) &&
+           events[0].room && events[1].room && events[0].count == events[1].count &&
+           (events[0].count == 0 || memcmp(sorted[0], sorted[1], events[0].count * sizeof(uint64_t)) == 0);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return same;
@@ -1401,6 +1469,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         .predefines.char_unsigned = char_unsigned,
         .target = target != NULL ? *target : (X86Target){ 0 },
     };
+    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "executable source preprocessing");
@@ -1436,7 +1505,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
             .return_flow_work = &return_flow_work,
-            .target_features = pp_options.target.features,
+            .target = pp_options.target,
+            .predefines = &predefines,
         };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch);
         if (ready && strcmp(name, "many-aggregate-return-bodies") == 0)
@@ -1755,6 +1825,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
     static Parser parser;
     const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true,
                                    .target = target != NULL ? *target : (X86Target){ 0 } };
+    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
                         pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "program boundary source preprocessing");
@@ -1786,7 +1857,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
         if (ready)
         {
             const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0,
-                                                  .target_features = pp_options.target.features };
+                                                  .target = pp_options.target, .predefines = &predefines };
             CheckProgram program = { 0 };
             const bool built = check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch);
             snprintf(description, sizeof(description), "%s: checked control acceptance matches the independent C constraint", name);
@@ -1955,8 +2026,11 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
+#include "c_check_program_folds_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
+#include "c_check_program_vector_builtins_test.c"
+#include "c_check_program_fp16_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2421,6 +2495,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_literal_tables(test, clang);
     check_test_program_builtin_scratch(test, clang);
     check_test_program_copies(test, clang);
+    check_test_program_folds(test, clang);
     check_test_program_batch(test);
     check_test_program_many_arguments(test, clang);
     check_test_program_many_aggregate_returns(test, clang);
@@ -2469,6 +2544,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_diagnostics(test, clang);
     check_test_program_vectors(test, clang);
     check_test_program_x86(test, clang);
+    check_test_program_vector_builtins(test, clang);
+    check_test_program_fp16(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
@@ -2943,13 +3020,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",
         "floating-builtin-runtime-classification", clang);
+    // Which of fpclassify's selectors run for each category, and how often, and its argument's effect: mark counts each
+    // selector's evaluations in a 3-bit field of its own (the argument's seen++ in the lowest), not their order, since
+    // clang evaluates the normal and subnormal ones in an order its own build decides (check_lower_floating_prepare).
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}",
         "fpclassify-conditional-selector-effects", clang);
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
         "fpclassify-known-category-effects", clang);
     // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the

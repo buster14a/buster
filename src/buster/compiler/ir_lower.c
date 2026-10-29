@@ -24,6 +24,10 @@ struct IrTypedPlan
     uint64_t* stack_offsets;
     uint32_t maximum_depth;
     uint32_t maximum_spill_depth;
+    // The depth slots' bytes and alignment: 16 for a function with values of the memory classes, else 8.
+    uint32_t spill_bytes;
+    // The JUMP_INDIRECT entries, which all go through the function's one dispatch block (the emitter's last).
+    uint32_t indirect;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -68,8 +72,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// (before X86, the last) must be lowered (or refused, as JUMP_INDIRECT, FRAME_ADDRESS and X86 are) here before
-// tier0_validate accepts it.
+// (before X86, the last) must be lowered (or refused, as FRAME_ADDRESS and X86 are) here before tier0_validate accepts
+// it.
 _Static_assert(BUSTER_TYPED_KINDS == 48 && BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
@@ -101,15 +105,20 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint8_t kind = input->kinds[i];
-            if (ir_typed_control(kind))
+            if (ir_typed_control(kind) || kind == BUSTER_TYPED_JUMP_INDIRECT)
             {
                 leaders[i + 1] = 1;
-                if (kind != BUSTER_TYPED_RETURN)
+                if (kind != BUSTER_TYPED_RETURN && kind != BUSTER_TYPED_JUMP_INDIRECT)
                 {
                     // tier0_validate already established values[i] <= count.
                     leaders[input->values[i]] = 1;
                 }
             }
+        }
+        // Every label starts a block, which an indirect jump may reach (tier0_validate: each entry at most count).
+        for (uint32_t k = 0; k < input->label_count; k += 1)
+        {
+            leaders[input->label_entries[k]] = 1;
         }
         for (uint32_t i = 0; i <= count; i += 1)
         {
@@ -125,6 +134,11 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 
         uint32_t depth = 0;
         bool reachable = true;
+        plan.spill_bytes = 8;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            plan.spill_bytes = tier0_class_memory(input->classes[i]) ? 16 : plan.spill_bytes;
+        }
         for (uint32_t i = 0; i <= count && ok; i += 1)
         {
             const uint32_t block = plan.entry_blocks[i];
@@ -187,7 +201,8 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     depth -= 2;
                     break;
                 case BUSTER_TYPED_CALL:
-                    depth -= input->call_argument_counts[value];
+                    // An indirect call's address (a calls table's target 0) is under its arguments.
+                    depth -= input->call_argument_counts[value] + (input->call_targets[value] == 0);
                     if (class != BUSTER_TYPED_CLASS_VOID)
                     {
                         stack[depth] = class;
@@ -209,6 +224,17 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     break;
                 case BUSTER_TYPED_RETURN:
                     depth -= class != BUSTER_TYPED_CLASS_VOID;
+                    reachable = false;
+                    break;
+                case BUSTER_TYPED_JUMP_INDIRECT:
+                    // At statement level: the address popped. Every indirect jump goes to the dispatch block, which
+                    // arrives at every label with the stacks empty, once.
+                    depth -= 1;
+                    for (uint32_t k = 0; ok && plan.indirect == 0 && k < input->label_count; k += 1)
+                    {
+                        ok = ir_typed_plan_arrive(&plan, scratch, plan.entry_blocks[input->label_entries[k]], stack, depth, i);
+                    }
+                    plan.indirect += 1;
                     reachable = false;
                     break;
                 default:
@@ -251,12 +277,17 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 //    fallthrough must either emit an explicit undef return under an agreed
 //    contract or diagnose unsupported; never silently map void fallthrough to
 //    UNREACHABLE.
-// 6. Verify the IR and build compact CFG arrays after construction. #134 can
+// 6. An indirect jump stores its address in the dispatch slot and branches to
+//    the dispatch block, the last, which loads it and is the function's one
+//    br_indirect, so that its CFG has an edge per jump and per label.
+// 7. Verify the IR and build compact CFG arrays after construction. #134 can
 //    promote both ordinary local slots and the expression-depth slots later.
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Classification and the two-pass emission sink
 
+// Each class's IR type: long double's F80 and the 128-bit integers' I128 and U128 are values in the IR, which Tier 0 keeps
+// in its frame slots. A vector's (VECTOR) has none: the adapter refuses vectors and X86 rows.
 static const uint8_t ir_typed_types[16] = {
     IR_VOID,
     IR_I8,
@@ -269,7 +300,36 @@ static const uint8_t ir_typed_types[16] = {
     IR_I64,
     IR_F32,
     IR_F64,
+    IR_F80,
+    IR_I128,
+    IR_I128,
 };
+
+// Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
+// out the memory classes (I128 signed, F80 floating), which it compiles apart.
+static const uint8_t ir_typed_signed_classes[16] = {
+    [BUSTER_TYPED_CLASS_I8] = 1,
+    [BUSTER_TYPED_CLASS_I16] = 1,
+    [BUSTER_TYPED_CLASS_I32] = 1,
+    [BUSTER_TYPED_CLASS_I64] = 1,
+    [BUSTER_TYPED_CLASS_I128] = 1,
+};
+
+static const uint8_t ir_typed_floating_classes[16] = {
+    [BUSTER_TYPED_CLASS_F32] = 1,
+    [BUSTER_TYPED_CLASS_F64] = 1,
+    [BUSTER_TYPED_CLASS_F80] = 1,
+};
+
+static bool ir_typed_signed(uint8_t class)
+{
+    return ir_typed_signed_classes[class & 15] != 0;
+}
+
+static bool ir_typed_floating(uint8_t class)
+{
+    return ir_typed_floating_classes[class & 15] != 0;
+}
 
 static const uint8_t ir_typed_integer_ops[64] = {
     [BUSTER_TYPED_NEG] = IR_NEG,
@@ -322,6 +382,8 @@ static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t*
         const __m512i signed_ops = _mm512_loadu_si512(ir_typed_signed_ops);
         const __m512i floating_ops = _mm512_loadu_si512(ir_typed_floating_ops);
         const __m128i type_table = _mm_loadu_si128((const __m128i*)ir_typed_types);
+        const __m128i signed_table = _mm_loadu_si128((const __m128i*)ir_typed_signed_classes);
+        const __m128i floating_table = _mm_loadu_si128((const __m128i*)ir_typed_floating_classes);
         for (uint32_t i = 0; i < input->count; i += 16)
         {
             const uint32_t remaining = input->count - i;
@@ -333,8 +395,8 @@ static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t*
             const __m128i integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, integer_ops));
             const __m128i signed_integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, signed_ops));
             const __m128i floating = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, floating_ops));
-            const __mmask16 is_signed = _mm_cmpneq_epi8_mask(_mm_and_si128(classes, _mm_set1_epi8(1)), _mm_setzero_si128());
-            const __mmask16 is_floating = _mm_cmpgt_epu8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_U64));
+            const __mmask16 is_signed = _mm_test_epi8_mask(_mm_shuffle_epi8(signed_table, classes), _mm_set1_epi8(1));
+            const __mmask16 is_floating = _mm_test_epi8_mask(_mm_shuffle_epi8(floating_table, classes), _mm_set1_epi8(1));
             const __m128i integral = _mm_mask_blend_epi8(is_signed, integer, signed_integer);
             _mm_mask_storeu_epi8(ops + i, active, _mm_mask_blend_epi8(is_floating, integral, floating));
             _mm_mask_storeu_epi8(types + i, active, _mm_shuffle_epi8(type_table, classes));
@@ -347,8 +409,7 @@ static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t*
             const uint8_t kind = input->kinds[i];
             const uint8_t class = input->classes[i];
             types[i] = ir_typed_types[class];
-            ops[i] = tier0_class_floating(class) ? ir_typed_floating_ops[kind]
-                   : tier0_class_signed(class) ? ir_typed_signed_ops[kind] : ir_typed_integer_ops[kind];
+            ops[i] = ir_typed_floating(class) ? ir_typed_floating_ops[kind] : ir_typed_signed(class) ? ir_typed_signed_ops[kind] : ir_typed_integer_ops[kind];
         }
     }
 }
@@ -379,7 +440,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
     return id;
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_constant(IrTypedSink* sink, IrType type, uint64_t bits)
+// A constant of `type`: `bits` its low 64 bits, `high` the rest (an i128's high half, an f80's sign and exponent).
+static __attribute__((always_inline)) inline uint32_t ir_typed_wide_constant(IrTypedSink* sink, IrType type, uint64_t bits, uint64_t high)
 {
     const uint32_t constant = (uint32_t)sink->sizes.constant_count;
     if (sink->output != 0)
@@ -387,11 +449,16 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_constant(IrTypedS
         const uint32_t width = ir_type_bits[type];
         sink->output->constants[constant] = (IrConstant){
             .low = width < 64 ? bits & ((1ull << width) - 1) : bits,
-            .high = 0,
+            .high = width > 64 ? high & (width < 128 ? (1ull << (width - 64)) - 1 : UINT64_MAX) : 0,
         };
     }
     sink->sizes.constant_count += 1;
     return ir_typed_emit(sink, IR_CONST, type, constant, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+}
+
+static __attribute__((always_inline)) inline uint32_t ir_typed_constant(IrTypedSink* sink, IrType type, uint64_t bits)
+{
+    return ir_typed_wide_constant(sink, type, bits, 0);
 }
 
 static uint8_t ir_typed_alignment(uint8_t class)
@@ -409,7 +476,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSi
     {
         if (ir_integer(from) && ir_integer(to))
         {
-            op = ir_type_bits[from] > ir_type_bits[to] ? IR_TRUNC : tier0_class_signed(from_class) ? IR_SEXT : IR_ZEXT;
+            op = ir_type_bits[from] > ir_type_bits[to] ? IR_TRUNC : ir_typed_signed(from_class) ? IR_SEXT : IR_ZEXT;
         }
         else if (ir_floating(from) && ir_floating(to))
         {
@@ -417,11 +484,11 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSi
         }
         else if (ir_integer(from))
         {
-            op = tier0_class_signed(from_class) ? IR_SITOFP : IR_UITOFP;
+            op = ir_typed_signed(from_class) ? IR_SITOFP : IR_UITOFP;
         }
         else
         {
-            op = tier0_class_signed(to_class) ? IR_FPTOSI : IR_FPTOUI;
+            op = ir_typed_signed(to_class) ? IR_FPTOSI : IR_FPTOUI;
         }
         value = ir_typed_emit(sink, op, to, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
@@ -483,10 +550,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_offset(IrTypedSin
 // COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
 // fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
 // before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
-static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+static __attribute__((always_inline)) inline void ir_typed_copy_pointers(IrTypedSink* sink, uint32_t destination, uint32_t source, uint64_t bytes)
 {
-    const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     uint64_t offset = 0;
     while (offset < bytes)
     {
@@ -499,12 +564,59 @@ static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sin
     }
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments)
+static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+{
+    const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    ir_typed_copy_pointers(sink, destination, source, bytes);
+}
+
+// Whether the function takes or returns an aggregate by value (an object parameter, a result in registers from its bytes
+// or through a hidden pointer): its IR function then has its own ABI records.
+static bool ir_typed_own_records(const Tier0Function* input)
+{
+    bool own = input->result_size != 0 || input->result.kind == BUSTER_ABI_RESULT_MEMORY;
+    for (uint32_t p = 0; p < input->parameter_count; p += 1)
+    {
+        own |= tier0_is_object(input, p);
+    }
+    return own;
+}
+
+// Whether call `call` passes or returns an aggregate by value (Tier0Function.argument_sizes, call_result_objects): its
+// IR call then has ABI records.
+static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call)
+{
+    bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
+    for (uint32_t a = 0; input->argument_sizes != 0 && a < input->call_argument_counts[call]; a += 1)
+    {
+        aggregate |= input->argument_sizes[input->call_first[call] + a] != 0;
+    }
+    return aggregate;
+}
+
+// Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
+// BUSTER_IR_NONE) an indirect one through it. An aggregate argument (its address on the stack) is a ptr, converted in
+// place in `arguments` (the stack's, which the call pops), and a call that passes or returns an aggregate has its ABI
+// records: each argument's location and size, the call's totals and result, and its result object's slot address as the
+// destination (c) of an aggregate result, its bytes the object's.
+static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, uint32_t* arguments, uint32_t callee)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
     const uint32_t count = input->call_argument_counts[call];
     const uint32_t first = (uint32_t)sink->sizes.extra_count;
     const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
+    const bool aggregate = ir_typed_aggregate_call(input, call);
+    const uint32_t abi = aggregate ? (uint32_t)sink->sizes.abi_call_count : BUSTER_IR_NONE;
+    const uint32_t passed = (uint32_t)sink->sizes.passed_count;
+    const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
+    for (uint32_t a = 0; input->argument_sizes != 0 && a < count; a += 1)
+    {
+        if (input->argument_sizes[input->call_first[call] + a] != 0)
+        {
+            arguments[a] = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, arguments[a], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+    }
     if (sink->output != 0)
     {
         IrFunction* output = sink->output;
@@ -515,17 +627,39 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
             .parameter_count = count,
             .result_type = (uint8_t)result_type,
             .variadic = input->call_variadic[call] != 0,
+            .abi = aggregate ? abi + 1 : 0,
         };
         for (uint32_t a = 0; a < count; a += 1)
         {
+            const uint32_t argument = input->call_first[call] + a;
+            const uint32_t size = input->argument_sizes != 0 ? input->argument_sizes[argument] : 0;
             output->extra[first + a] = arguments[a];
-            output->call_types[type_first + a] = ir_typed_types[input->argument_classes[input->call_first[call] + a]];
+            output->call_types[type_first + a] = size != 0 ? IR_PTR : ir_typed_types[input->argument_classes[argument]];
+            if (aggregate)
+            {
+                output->passed[passed + a] = (IrPassed){
+                    .location = input->argument_locations[argument],
+                    .size = size,
+                };
+            }
+        }
+        if (aggregate)
+        {
+            output->abi_calls[abi] = (IrAbiCall){
+                .call = input->calls[call],
+                .passed = passed,
+                .result_size = object != 0 ? input->local_sizes[object - 1] : 0,
+            };
         }
     }
     sink->sizes.call_count += 1;
     sink->sizes.extra_count += count;
     sink->sizes.call_type_count += count;
-    return ir_typed_emit(sink, IR_CALL, result_type, input->call_targets[call], descriptor, BUSTER_IR_NONE, 0);
+    sink->sizes.abi_call_count += aggregate;
+    sink->sizes.passed_count += aggregate ? count : 0;
+    // The result object's slot address is its local's preheader instruction.
+    return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor,
+                         object != 0 ? object - 1 : BUSTER_IR_NONE, 0);
 }
 
 // Expose the existing count/fill output contracts before the compiler makes inlining decisions. All construction
@@ -552,7 +686,8 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = {0};
-    const bool supported_result = result_type == IR_VOID || result_type == IR_I8 || result_type == IR_I16 || result_type == IR_I32 || result_type == IR_I64 || result_type == IR_F32 || result_type == IR_F64;
+    const bool supported_result = result_type == IR_VOID || result_type == IR_I8 || result_type == IR_I16 || result_type == IR_I32 || result_type == IR_I64 || result_type == IR_F32 || result_type == IR_F64 ||
+                                  result_type == IR_F80;
     if (output == scratch || result == 0 || input == 0 || !supported_result || symbol_count == 0)
     {
         check.error = IR_ERROR_STRUCTURE;
@@ -564,50 +699,10 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     else if ((input->count != 0 && (input->kinds == 0 || input->classes == 0 || input->values == 0)) ||
              (input->local_count != 0 && (input->local_classes == 0 || input->local_flags == 0)) ||
              (input->parameter_count != 0 && input->parameters == 0) ||
-             (input->call_count != 0 && (input->call_targets == 0 || input->call_first == 0 || input->call_argument_counts == 0 || input->call_variadic == 0)) ||
-             (input->argument_count != 0 && input->argument_classes == 0))
+             (input->call_count != 0 && (input->call_targets == 0 || input->call_first == 0 || input->call_argument_counts == 0 || input->call_variadic == 0 || input->calls == 0)) ||
+             (input->argument_count != 0 && (input->argument_classes == 0 || input->argument_locations == 0)))
     {
         check.error = IR_ERROR_STRUCTURE;
-    }
-    // An incoming variadic frame (its pointer compared, never read) and a
-    // local flag other than ADDRESS_TAKEN (BUSTER_TYPED_LOCAL_ADDRESS_ONLY's
-    // anchors and va_list objects, or a later role) are frame state this
-    // adapter doesn't model: lowering a role as an ordinary slot would size
-    // and place it wrongly, so they are refused before the stream is
-    // validated or anything is allocated. Objects (a local with a size in
-    // local_sizes) get slots of their own size and alignment.
-    if (check.error == IR_OK && input->incoming_variadic != 0)
-    {
-        check.error = IR_ERROR_METADATA;
-        check.instruction = BUSTER_IR_NONE;
-        check.detail = BUSTER_IR_NONE;
-    }
-    // Aggregates passed and returned by value (#137): an argument's bytes read through its address, a call's result
-    // stored in its object, a result's registers loaded from its address. The adapter would pass, store and return the
-    // addresses themselves. Their columns are read only when the checks before them found nothing.
-    bool aggregates = check.error == IR_OK && input->result_size != 0;
-    for (uint32_t a = 0; check.error == IR_OK && input->argument_sizes != 0 && a < input->argument_count; a += 1)
-    {
-        aggregates |= input->argument_sizes[a] != 0;
-    }
-    for (uint32_t c = 0; check.error == IR_OK && input->call_result_objects != 0 && c < input->call_count; c += 1)
-    {
-        aggregates |= input->call_result_objects[c] != 0;
-    }
-    if (aggregates)
-    {
-        check.error = IR_ERROR_METADATA;
-        check.instruction = BUSTER_IR_NONE;
-        check.detail = BUSTER_IR_NONE;
-    }
-    for (uint32_t l = 0; check.error == IR_OK && l < input->local_count; l += 1)
-    {
-        if ((input->local_flags[l] & ~BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0)
-        {
-            check.error = IR_ERROR_METADATA;
-            check.instruction = BUSTER_IR_NONE;
-            check.detail = l;
-        }
     }
     if (check.error == IR_OK)
     {
@@ -629,23 +724,21 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
+        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] >= symbol_count)
         {
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86 || kind == BUSTER_TYPED_FRAME_ADDRESS)
+        else if (kind == BUSTER_TYPED_X86 || kind == BUSTER_TYPED_FRAME_ADDRESS)
         {
-            // An indirect jump to a label (#133), a machine operation (#136) and a frame's address (#148), which this
-            // adapter doesn't lower yet and the plan and the emitter would take for a binary operation.
+            // A machine operation (#136) and a frame's address (#148), which this adapter doesn't lower and the plan and
+            // the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
-        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80 || input->classes[i] == BUSTER_TYPED_CLASS_I128 || input->classes[i] == BUSTER_TYPED_CLASS_U128 ||
-                 input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
-            // Typed long double, the 128-bit integers and vectors (#136) aren't lowered by this adapter. Tier0 keeps their
-            // values in frame slots of its own; every such value has an entry of its class, including a conversion's operand.
+            // Vectors (#136) have no IR type: their operations are X86 rows, which this adapter refuses too.
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }

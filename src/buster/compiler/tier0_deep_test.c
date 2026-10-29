@@ -467,6 +467,7 @@ static void tier0_test_deep(Tier0TestTally* tally)
                                                       branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                           BRANCH_SIZING_OK,
                                            "deep", "%s: an invalid record, a reference or an invalid branch column", name);
+        ready = ready && tier0_test_covered(tally, "deep", name, &function, &scalar);
         uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
         const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets)
                                                  : (BranchSizing){ 0 };
