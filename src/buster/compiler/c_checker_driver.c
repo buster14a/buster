@@ -2086,6 +2086,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     Arena arena = arena_reserve(1ull << 36);
     Arena scratch = arena_reserve(1ull << 36);
     Arena output_arena = arena_reserve(1ull << 36);
+    // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
+    const bool reserved = arena.base != 0 && scratch.base != 0 && output_arena.base != 0;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
@@ -2314,6 +2316,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     if (worker_budget.dry_run)
     {
         result = 0;
+    }
+    else if (!reserved)
+    {
+        fprintf(stderr, "fatal error: can't reserve the driver's memory\n");
     }
     else if (!parsed)
     {
