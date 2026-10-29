@@ -1492,9 +1492,11 @@ and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
 bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
-(#133's lowering, as aggregates of their two parts) and GNU's complex integer
-types of up to 64 bits (`_Complex char` to `_Complex unsigned long long`, the
-same), at 64 bytes the vectors
+(#133's lowering, as aggregates of their two parts), GNU's complex integer
+types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
+`__int128` spelled as the usual arithmetic conversions make them, #137) and,
+in clang's runs, complex `_BitInt`s of 13 to 128 bits, spelled so too, at 64
+bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
 `char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
 clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
@@ -1508,7 +1510,7 @@ object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
 no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
-`__int128` or complex `_BitInt`, `_Atomic` of another type, and none of the
+`_BitInt` past 128 bits, `_Atomic` of another type, and none of the
 record runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
