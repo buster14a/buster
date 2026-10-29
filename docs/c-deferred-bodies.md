@@ -973,3 +973,35 @@ several units with one state.
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
 test corpus is copied into this change.
+
+## The shared sparse arena's pages (#764)
+
+`check_input_run` reserves its rare token columns and binding table afresh
+for every reading, independently of the deferred state's reusable arenas.
+`check_input_sparse_arena` gives this mapping base pages throughout when
+the reader will revisit bodies on deferred lanes. The policy is selected
+before either the top level or a body touches it, not after a huge zero
+page might already have been installed. It is the same on one or many
+lanes and on a state's first or later reading.
+
+Source order keeps its existing small prefix (the scope stacks and enum
+values) and huge-page tail. This includes a deferred reading's fallback
+and the lazy path that never revisits its skipped bodies: the policy
+tests the deferred reader, not merely the deferred-token mask. No new
+pre-touch pass, per-token branch, lane synchronization or merge copy is
+introduced. Existing vector and scalar walks are unchanged.
+
+`test-checker-deferred` checks the allocator's Linux `nh`/`hg` mapping
+flags at the beginning, both sides of the small-prefix boundary and the
+last byte. It covers repeated fresh mappings, sub-page and non-page-sized
+capacities, minimum-prefix clamping, initially uncommitted demand-zero
+storage, writable endpoints, release and refused capacities. The existing
+deferred fixture suite compares source order with one, two, three and
+eight lanes, delayed/held lanes and reused or poisoned states.
+
+This removes eligibility for competing transparent-huge-page allocations
+in this mapping where Linux accepts the arena's page-size advice. It is
+not by itself the performance acceptance for #764: five-round walk
+spreads on diag9 and A2's 43 units, source-order timings including SQLite,
+and a cold lane-rule refit on A2 are still required on the locked 9700X.
+The lane-rule constants are deliberately unchanged until that refit.
