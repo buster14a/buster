@@ -4662,16 +4662,23 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     }
     else if (builtin >= CBUILTIN_ELEMENTWISE_ABS && builtin <= CBUILTIN_ELEMENTWISE_SUB_SAT)
     {
+        // Of vectors, or of float or double scalars of one class.
         const uint32_t arguments = effect->evaluated_argument_count;
+        const uint8_t scalar = check_lower_class(writer, result);
         bool vectors = check_lower_vector_of(writer, result) != 0 && arguments >= 1 && arguments <= 3 && arguments <= count;
-        for (uint32_t a = 0; vectors && a < arguments; a += 1)
+        bool scalars = !vectors && (scalar == BUSTER_TYPED_CLASS_F32 || scalar == BUSTER_TYPED_CLASS_F64) && arguments >= 1 && arguments <= 3 && arguments <= count;
+        for (uint32_t a = 0; (vectors || scalars) && a < arguments; a += 1)
         {
-            vectors = check_lower_vector_of(writer, stream->argument_conversions[first + a].type) == check_lower_vector_of(writer, result);
+            const TypeId argument = stream->argument_conversions[first + a].type;
+            vectors = vectors && check_lower_vector_of(writer, argument) == check_lower_vector_of(writer, result);
+            scalars = scalars && check_lower_class(writer, argument) == scalar;
         }
-        reason = !vectors ? "elementwise builtins of scalars" : check_vector_elementwise_row(types, target, builtin, result, arguments, rows);
+        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, rows) :
+                 scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
+                           "elementwise builtins of scalars";
         if (reason == NULL)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows));
+            check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
             for (uint32_t a = arguments; a-- > 0;)
             {
                 check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
@@ -4717,13 +4724,106 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             reason = "nondeterministic values of this type";
         }
     }
+    else if (builtin == CBUILTIN_NONTEMPORAL_LOAD || builtin == CBUILTIN_NONTEMPORAL_STORE)
+    {
+        // A vector's, at an address aligned to its bytes (the pointer's element type's alignment, its typedef's among
+        // them), a store's value of the vector's bytes.
+        const bool store = builtin == CBUILTIN_NONTEMPORAL_STORE;
+        const uint32_t arguments = store ? 2 : 1;
+        const TypeId memory = type_element(types, type_strip_aligned(types, stream->argument_conversions[first + arguments - 1].type));
+        const uint32_t bytes = check_lower_vector_bytes(types, memory);
+        if (bytes == 0 || count != arguments)
+        {
+            reason = "nontemporal builtins of scalars";
+        }
+        else if (((uint64_t)1 << type_alignment_log2(types, memory)) < bytes)
+        {
+            reason = "nontemporal vector builtins at underaligned addresses";
+        }
+        else if (store && check_lower_vector_bytes(types, stream->argument_conversions[first].type) != bytes)
+        {
+            reason = "nontemporal stores of other than a vector of the stored type";
+        }
+        else
+        {
+            check_vector_nontemporal_row(types, memory, store, rows);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, store ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows));
+            for (uint32_t a = arguments; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+            writer->vectors = true;
+        }
+    }
     else
     {
-        reason = builtin == CBUILTIN_NONTEMPORAL_LOAD || builtin == CBUILTIN_NONTEMPORAL_STORE ? "nontemporal vector builtins" : "this vector builtin";
+        reason = "this vector builtin";
     }
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
+    }
+}
+
+// A __builtin_bit_cast side's class where its bits are the value of a register: an integer's, an enum's or a pointer's, a
+// float's or a double's, or a vector's; UINT8_MAX for any other (aggregates, arrays, long double, 128-bit integers and
+// the half-precision floats), whose bits the lowering doesn't move.
+static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId type)
+{
+    const uint8_t kind = check_action_kind(writer->program->types, type);
+    const uint8_t class = check_lower_aggregate(writer, type) ? UINT8_MAX : check_lower_class(writer, type);
+    const bool integer = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER) && class >= BUSTER_TYPED_CLASS_I8 &&
+                         class <= BUSTER_TYPED_CLASS_U64;
+    const bool real = kind == BUSTER_TYPE_KIND_FLOATING && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64);
+    const bool vector = class == BUSTER_TYPED_CLASS_VECTOR && check_lower_vector_of(writer, type) != 0;
+    return integer || real || vector ? class : UINT8_MAX;
+}
+
+// __builtin_bit_cast(T, x): x's bytes as a T, of x's size. One the checker folded is its bytes, a floating T's constant
+// (an integer T's is its value's, which the constants take before this). At run time, between integers or pointers, or
+// between vectors, the bits are the value already; between an integer and a float or a double they go through a frame
+// temporary, as clang -O0's go through memory.
+static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckStream* stream = writer->program->stream;
+    const uint32_t selected = check_program_builtin_index(stream->bit_casts, stream->bit_cast_count, sizeof(CheckBuiltinBitCastEffect), node);
+    const CheckBuiltinBitCastEffect* effect = selected != BUSTER_CHECK_NONE ? stream->bit_casts + selected : NULL;
+    const TypeId result = stream->values[node].type;
+    const uint8_t from = effect != NULL ? check_lower_bit_cast_class(writer, effect->source_type) : UINT8_MAX;
+    const uint8_t to = result != 0 ? check_lower_bit_cast_class(writer, result) : UINT8_MAX;
+    if (effect == NULL)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (from == UINT8_MAX || to == UINT8_MAX)
+    {
+        check_lower_unsupported(writer, "bit-cast builtins of types other than integers, pointers, floats, doubles and vectors");
+    }
+    else if (effect->folded)
+    {
+        uint64_t bits = 0;
+        for (uint32_t i = 0; i < effect->payload_count && i < 8; i += 1)
+        {
+            bits |= (uint64_t)effect->bytes[i] << (8 * i);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, to, bits);
+    }
+    else if (from == to || (from <= BUSTER_TYPED_CLASS_U64 && to <= BUSTER_TYPED_CLASS_U64))
+    {
+        // A vector's bytes are its register's, whatever its elements; an integer's of the size keep their bits.
+        if (to != BUSTER_TYPED_CLASS_VECTOR)
+        {
+            check_lower_convert(writer, effect->source_type, result);
+        }
+        check_lower_operand(writer, node, 3, false, effect->source_type);
+    }
+    else
+    {
+        const uint32_t local = check_lower_addressed_temporary(writer, from);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, to, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, from, local);
+        check_lower_operand(writer, node, 3, false, effect->source_type);
     }
 }
 
@@ -4926,7 +5026,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_BUILTIN_BIT_CAST)
     {
-        check_lower_unsupported(writer, "bit-cast builtins");
+        check_lower_bit_cast(writer, node);
     }
     else if (op == CHECK_OP_BUILTIN_FLOAT)
     {
