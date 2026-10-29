@@ -356,13 +356,15 @@ measurement path; it does not establish a performance gain.
 
 #141's batched choice and load fold, against main `0dd6fbc3` over six
 placements of the benchmark's unit
-([the record](https://github.com/buster14a/buster-performance/blob/62402e97b4f747070865ba29c9f773828880f82e/docs/measurements/tier1-select-141-2026-10-29/README.md)):
-the plan 1.5% to 2.5% faster on every shape and path, the whole pipeline 0.3% to
-2.1% (medians; one placement's executable misses its op cache). The fold's
-barriers kept inside the plan's pass over the nodes had made the plan up to 10%
-slower, 37 to 42 instructions more per node, which their pass of their own
-doesn't cost. The shapes hold no loads, so these are the costs, not the fold's
-gains.
+([the record](https://github.com/buster14a/buster-performance/blob/6441e0df565d3c21ee4413848f75ce2a3927a7d3/docs/measurements/tier1-select-141-2026-10-29/README.md)),
+each placement against each of main's as `docs/profiling.md` compares builds:
+the plan's medians 1.5% to 2.5% lower on every shape and path, outside the
+comparison's floor on four rows (the vector path's three shapes and `wide`'s
+scalar twin); the whole pipeline's 0.3% to 2.1% lower, within the floor (one
+placement of the head's executable misses its op cache). The fold's barriers
+kept inside the plan's pass over the nodes had made the plan up to 10% slower,
+37 to 42 instructions more per node, which their pass of their own doesn't
+cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 
