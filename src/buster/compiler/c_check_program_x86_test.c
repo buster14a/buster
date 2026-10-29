@@ -1489,6 +1489,17 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             BUSTER_X86_FEATURE(SHA),
         },
         {
+            // SHA-256's rounds, a vector leaf's calls: chained as a hash's rounds are, with floating and integer values live
+            // across them, one in another's arguments, and two in one initializer.
+            "x86-sha256-rounds",
+            "int tested(int n){unsigned h=2166136261u;v4si a,b,k,t;fill(&a,16,n);fill(&b,16,n+1);fill(&k,16,n+2);fill(&t,16,n+3);"
+            "double d=n*0.75-2.0;float f=(float)n*-1.25f;unsigned long long z=mask(n);v4si r0=__builtin_ia32_sha256rnds2(a,b,k);FOLD(r0);"
+            "for(int i=0;i<4;i++){v4si s=__builtin_ia32_sha256rnds2(b,a,k);a=b;b=s;k=k+t;d=d*1.5+f;f=f-(float)d;z^=z<<7;}"
+            "FOLD(a);FOLD(b);FOLD(k);FOLD(d);FOLD(f);FOLD(z);v4si u=__builtin_ia32_sha256rnds2(a+t,b^t,__builtin_ia32_sha256rnds2(k,t,a))+t;FOLD(u);"
+            "v4si v[2]={__builtin_ia32_sha256rnds2(t,k,b),__builtin_ia32_sha256rnds2(k,t,b)};FOLD(v);return (int)h;}",
+            BUSTER_X86_FEATURE(SHA),
+        },
+        {
             // The leaves of the rotates of each width, of the x87 and SSE state's saves and restores (whose control words, the
             // same in both, it folds), of the time stamp, the flags and the vector registers' clearing; and the cache lines'
             // and non-temporal stores' rows.

@@ -3,8 +3,9 @@
 //
 // #148's x86 builtins that no Tier 0 row takes (c_check_program_x86.c), as per-unit leaves (c_check_program_helpers.c):
 // their instructions name fixed registers (rdtsc and xgetbv write edx:eax, monitorx reads rax, ecx and edx, mwaitx eax,
-// ebx and ecx) or have legacy encodings (pause, and tzcnt). Each leaf takes its arguments as the helpers' raw SysV
-// integers (unsigned long, in rdi, rsi and rdx) and returns its result in rax, an unsigned long the caller converts:
+// ebx and ecx, sha256rnds2 xmm0) or have legacy encodings (pause, and tzcnt). Each leaf but sha256rnds2's takes its
+// arguments as the helpers' raw SysV integers (unsigned long, in rdi, rsi and rdx) and returns its result in rax, an
+// unsigned long the caller converts:
 //
 // - __rdtsc: rdtsc's edx:eax as one value;
 // - __builtin_ia32_pause: pause;
@@ -31,7 +32,10 @@
 // - __builtin_ia32_readeflags_u64 and writeeflags_u64: pushfq and popfq, in a frame of rbp (Tier0Code.frame_pointer),
 //   whose CFA the pushes don't move;
 // - __builtin_ia32_clzero (rax's line), monitor (rax, ecx and edx), mwait (eax and ecx), vzeroall and vzeroupper, whose
-//   registers no value of the caller keeps across the call.
+//   registers no value of the caller keeps across the call;
+// - __builtin_ia32_sha256rnds2(a, b, k): sha256rnds2 of a's state and b's, whose third operand, the round keys k, is
+//   xmm0. Its vectors come and go as a function's of __v4si do (CBuiltinX86HelperInfo.vector): a, b and k in xmm0, xmm1
+//   and xmm2, the result in xmm0.
 //
 // Output owns exactly the leaf's records; invalid kinds, malformed arenas and exhaustion leave the arena as it was.
 // Include after tier0.c.
@@ -85,6 +89,7 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_MWAIT,
     CBUILTIN_X86_HELPER_VZEROALL,
     CBUILTIN_X86_HELPER_VZEROUPPER,
+    CBUILTIN_X86_HELPER_SHA256RNDS2,
     CBUILTIN_X86_HELPER_COUNT,
 } CBuiltinX86HelperKind;
 
@@ -93,7 +98,7 @@ struct CBuiltinX86Helper
 {
     Tier0Code code;
     uint32_t parameter_count;
-    // U64, or VOID for a leaf of no result.
+    // U64, VECTOR for a vector leaf's (CBuiltinX86HelperInfo.vector), or VOID for a leaf of no result.
     uint32_t result_class;
 };
 
@@ -309,9 +314,19 @@ static const X86Instruction cbuiltin_x86_helper_vzeroupper[] = {
     { .form = X86_FORM_RET },
 };
 
+// a (xmm0) to xmm3, k (xmm2) to xmm0, the rounds into xmm3, and xmm3 to xmm0.
+static const X86Instruction cbuiltin_x86_helper_sha256rnds2[] = {
+    { .reg = 3, .rm = 0, .form = X86_FORM_MOVAPS_X_XM },
+    { .reg = 0, .rm = 2, .form = X86_FORM_MOVAPS_X_XM },
+    { .reg = 3, .rm = 1, .form = X86_FORM_SHA256RNDS2_X_XM128_XMM0 },
+    { .reg = 0, .rm = 3, .form = X86_FORM_MOVAPS_X_XM },
+    { .form = X86_FORM_RET },
+};
+
 // Each kind's builtin's name, its parameters, whether it has a result, its records, the target's features it takes and
-// the refusal on a target without them, and its frame: the callee-saved registers it pushes (Tier0Frame.saved's) and
-// whether it keeps rbp's frame.
+// the refusal on a target without them, its frame (the callee-saved registers it pushes, Tier0Frame.saved's, and whether
+// it keeps rbp's frame), and whether its parameters and result are its builtin's 16-byte vectors, which a call passes in
+// the XMM registers and returns in xmm0, rather than unsigned longs.
 typedef struct CBuiltinX86HelperInfo CBuiltinX86HelperInfo;
 struct CBuiltinX86HelperInfo
 {
@@ -325,21 +340,22 @@ struct CBuiltinX86HelperInfo
     const char* refusal;
     uint32_t saved;
     bool pointer;
+    bool vector;
 };
 
 #define BUSTER_CBUILTIN_X86_HELPER(name, parameters, result, records, features) \
-    { name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false }
+    { name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false, false }
 
 static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER_COUNT] = {
     [CBUILTIN_X86_HELPER_RDTSC] = BUSTER_CBUILTIN_X86_HELPER("__rdtsc", 0, true, cbuiltin_x86_helper_rdtsc, 0),
     [CBUILTIN_X86_HELPER_PAUSE] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0),
     [CBUILTIN_X86_HELPER_XGETBV] = { "__builtin_ia32_xgetbv", sizeof("__builtin_ia32_xgetbv") - 1, 1, true, cbuiltin_x86_helper_xgetbv,
-                                     BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false },
+                                     BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_xgetbv), BUSTER_X86_FEATURE(XSAVE), "xgetbv without XSAVE", 0, false, false },
     [CBUILTIN_X86_HELPER_MONITORX] = { "__builtin_ia32_monitorx", sizeof("__builtin_ia32_monitorx") - 1, 3, false, cbuiltin_x86_helper_monitorx,
-                                       BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_monitorx), BUSTER_X86_FEATURE(MWAITX), "monitorx or mwaitx without MWAITX", 0, false },
+                                       BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_monitorx), BUSTER_X86_FEATURE(MWAITX), "monitorx or mwaitx without MWAITX", 0, false, false },
     // mwaitx's leaf saves rbx (Tier0Frame.saved's first register) around its body.
     [CBUILTIN_X86_HELPER_MWAITX] = { "__builtin_ia32_mwaitx", sizeof("__builtin_ia32_mwaitx") - 1, 3, false, cbuiltin_x86_helper_mwaitx,
-                                     BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_mwaitx), BUSTER_X86_FEATURE(MWAITX), "monitorx or mwaitx without MWAITX", 1, false },
+                                     BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_mwaitx), BUSTER_X86_FEATURE(MWAITX), "monitorx or mwaitx without MWAITX", 1, false, false },
     [CBUILTIN_X86_HELPER_TZCNT16] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_tzcnt_u16", 1, true, cbuiltin_x86_helper_tzcnt16, 0),
     [CBUILTIN_X86_HELPER_TZCNT32] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_tzcnt_u32", 1, true, cbuiltin_x86_helper_tzcnt32, 0),
     [CBUILTIN_X86_HELPER_TZCNT64] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_tzcnt_u64", 1, true, cbuiltin_x86_helper_tzcnt64, 0),
@@ -374,14 +390,17 @@ static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER
     [CBUILTIN_X86_HELPER_RDPRU] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_rdpru", 1, true, cbuiltin_x86_helper_rdpru, BUSTER_X86_FEATURE(RDPRU)),
     [CBUILTIN_X86_HELPER_RDTSCP] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_rdtscp", 1, true, cbuiltin_x86_helper_rdtscp, 0),
     [CBUILTIN_X86_HELPER_READEFLAGS] = { "__builtin_ia32_readeflags_u64", sizeof("__builtin_ia32_readeflags_u64") - 1, 0, true, cbuiltin_x86_helper_readeflags,
-                                         BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_readeflags), 0, "x86 builtins whose instructions the target hasn't", 0, true },
+                                         BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_readeflags), 0, "x86 builtins whose instructions the target hasn't", 0, true, false },
     [CBUILTIN_X86_HELPER_WRITEEFLAGS] = { "__builtin_ia32_writeeflags_u64", sizeof("__builtin_ia32_writeeflags_u64") - 1, 1, false, cbuiltin_x86_helper_writeeflags,
-                                          BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_writeeflags), 0, "x86 builtins whose instructions the target hasn't", 0, true },
+                                          BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_writeeflags), 0, "x86 builtins whose instructions the target hasn't", 0, true, false },
     [CBUILTIN_X86_HELPER_CLZERO] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_clzero", 1, false, cbuiltin_x86_helper_clzero, BUSTER_X86_FEATURE(CLZERO)),
     [CBUILTIN_X86_HELPER_MONITOR] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_monitor", 3, false, cbuiltin_x86_helper_monitor, BUSTER_X86_FEATURE(SSE3)),
     [CBUILTIN_X86_HELPER_MWAIT] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_mwait", 2, false, cbuiltin_x86_helper_mwait, BUSTER_X86_FEATURE(SSE3)),
     [CBUILTIN_X86_HELPER_VZEROALL] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_vzeroall", 0, false, cbuiltin_x86_helper_vzeroall, BUSTER_X86_FEATURE(AVX)),
     [CBUILTIN_X86_HELPER_VZEROUPPER] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_vzeroupper", 0, false, cbuiltin_x86_helper_vzeroupper, BUSTER_X86_FEATURE(AVX)),
+    [CBUILTIN_X86_HELPER_SHA256RNDS2] = { "__builtin_ia32_sha256rnds2", sizeof("__builtin_ia32_sha256rnds2") - 1, 3, true, cbuiltin_x86_helper_sha256rnds2,
+                                          BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_sha256rnds2), BUSTER_X86_FEATURE(SHA), "x86 builtins whose instructions the target hasn't", 0, false,
+                                          true },
 };
 
 // The kind of a builtin's name, CBUILTIN_X86_HELPER_NONE for a builtin no leaf computes.
@@ -423,7 +442,7 @@ static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* 
             result.code.frame_saved = info->saved;
             result.code.frame_pointer = info->pointer;
             result.parameter_count = info->parameter_count;
-            result.result_class = info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
+            result.result_class = info->vector ? BUSTER_TYPED_CLASS_VECTOR : info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
         }
     }
     return result;

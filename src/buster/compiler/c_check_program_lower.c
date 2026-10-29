@@ -2817,14 +2817,23 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             abi->variadic[abi->count++] = 0;
             for (uint32_t a = 0; a < parameters; a += 1)
             {
+                // A vector leaf's vector (c_builtin_x86_helpers.c) is an object of its bytes, whose address the entry
+                // passes, as a call's is (check_lower_call).
                 const TypeId type = helper->parameter_types[a];
+                const uint32_t vector = check_lower_vector_of(writer, type);
                 abi->arguments[abi->argument_count++] = type;
-                writer->argument_sizes[writer->argument_count] = 0;
-                writer->argument_classes[writer->argument_count++] = check_lower_class(writer, type);
+                writer->argument_sizes[writer->argument_count] = vector;
+                writer->argument_classes[writer->argument_count++] = vector != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
+                writer->aggregates |= vector != 0;
             }
             // A floating value crosses an atomic helper's integer registers as its bits, through a frame temporary, as the
-            // math helpers' do: the helpers move bits, so a numeric conversion would change the value.
+            // math helpers' do: the helpers move bits, so a numeric conversion would change the value. A vector leaf's
+            // result lands in a frame object of the call's own, which LOCAL then reads.
             const uint8_t result_class = check_lower_class(writer, stream->values[node].type);
+            const bool vector_result = check_lower_vector_of(writer, helper->result_type) != 0;
+            const uint32_t object = vector_result ? check_lower_temporary_of(writer, helper->result_type) : BUSTER_CHECK_NONE;
+            writer->call_result_objects[call] = vector_result ? object + 1 : 0;
+            writer->aggregates |= vector_result;
             if (helper->terminates)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
@@ -2836,11 +2845,15 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, result);
             }
+            else if (vector_result)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, result_class, object);
+            }
             else
             {
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
-            check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, helper->result_type), call);
+            check_lower_instruction(writer, BUSTER_TYPED_CALL, vector_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, helper->result_type), call);
             for (uint32_t a = parameters; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
                 const bool inserted = (compare && a == 3) || (init && a == 2);
@@ -2855,6 +2868,13 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
                     }
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else if (check_lower_vector_of(writer, helper->parameter_types[a]) != 0)
+                {
+                    // The object of a vector leaf's argument, its value set into it after it is made.
+                    const uint32_t local = check_lower_temporary_of(writer, checked);
                     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
                 }

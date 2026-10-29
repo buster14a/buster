@@ -1479,7 +1479,10 @@ What the lowering covers past scalars (#145's programs):
   XSAVE family's saves and restores and FXRSTOR, RDPKRU and WRPKRU, RDPMC,
   RDPRU and RDTSCP, the flags' read and write (pushfq and popfq in a frame of
   rbp, whose CFA the pushes don't move), CLZERO, MONITOR, MWAIT, VZEROALL and
-  VZEROUPPER. Each leaf requires its instructions' features of the output
+  VZEROUPPER. `sha256rnds2`, whose round keys are xmm0's, is a leaf of
+  vectors: its arguments and result are its builtin's 16-byte vectors, which
+  its calls pass and return as a function's (frame objects, in xmm0 to xmm2
+  and xmm0). Each leaf requires its instructions' features of the output
   target (XGETBV XSAVE's, MONITORX and MWAITX MWAITX's, the others theirs);
   the baseline target still takes PAUSE, RDTSC, the BSF- and BSR-based counts
   and the rotates.
