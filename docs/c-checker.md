@@ -1823,6 +1823,18 @@ What the lowering covers past scalars (#145's programs):
     TERNARY's), each extension's (`X86Extension`'s MOVRS and AVX512BMM). No host
     of the tests runs any of these AVX10.2, MOVRS or AVX512-BMM instructions,
     and `test-x86-intrinsics` compares them all with clang's code;
+  - the extensions' system instructions (SYSTEM, each of its extension:
+    `X86Extension`'s RAOINT to USERMSR): RAO-INT's atomic operations of memory
+    (`aadd32` to `axor64`), CLDEMOTE, SERIALIZE, UINTR's (`clui`, `stui`,
+    `testui`'s CF and `senduipi`), PTWRITE, WAITPKG's UMONITOR, LWP's control
+    block (`llwpcb`, `slwpcb`), MOVRS's integer loads (a byte's and a word's
+    through a scratch register's low bytes, zero-extended) and its prefetch,
+    RTM's XEND and XTEST's ZF, TSXLDTRK's, AMX-TILE's configuration
+    (`ldtilecfg`, `sttilecfg`, `tilerelease`), ENQCMD's ZF and USER_MSR's
+    register forms; a flag is SETcc's int, as FLAGS' is. No host of the tests
+    has their extensions, or their effects are on the machine's state (a
+    transaction's, the user interrupts', the tiles' configuration, MSRs), and
+    `test-x86-intrinsics` compares them all with clang's code;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -2698,7 +2710,10 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 
 The executable programs check a builtin's lowering by running it, which XOP's,
 AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and AVX512-BMM's
-instructions can't be: no host of the tests has them (Zen 5 has none of them).
+instructions can't be: no host of the tests has them (Zen 5 has none of them);
+nor can the extensions' system instructions, whose extensions no host has or
+whose effects are the machine's (a transaction's, the user interrupts', the
+tiles' configuration, MSRs).
 `test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
 code of their intrinsics with clang -O0's instead, as the values each
 instruction computes:
@@ -2725,14 +2740,19 @@ instruction computes:
   function and calls of the object's other functions (the compiler's code calls
   the definitions clang inlines).
 - A case's result (its return register's bytes of the intrinsic's type) and
-  its stores through pointers must be the same expressions in both objects.
+  its stores through pointers must be the same expressions in both objects, and
+  so must its effects, in order among the stores: each instruction that writes
+  no register, memory or flag (a fence, a system instruction) as its node, and
+  each prefetch's and cache line's hint as its form and its address. A memory
+  operand the form's table gives no size reads or writes its effects' width
+  (`ldtilecfg`'s, `sttilecfg`'s and `enqcmd`'s 64 bytes).
 - Controls: intrinsics that the executable programs run already, unmasked,
   merged and zeroed (`_mm_add_epi32`, `_mm256_dpbusd_avx_epi32` and their masked
   forms), and two XOP compares, whose code is AVX-512's, must agree too, and so
   must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
   a result stored through a pointer; and one intrinsic called with its two
   operands in each order must give different expressions in each object.
-- The cases, 386 of them: the intrinsics of XOP's own instructions (VFRCZ's
+- The cases, 421 of them: the intrinsics of XOP's own instructions (VFRCZ's
   fractions, the horizontal sums and differences, the multiply-accumulates,
   VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
   AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
@@ -2740,7 +2760,10 @@ instruction computes:
   AVX10.2's saturating conversions, bf16 operations and compares, conversions
   to and from 8-bit floats and of two vectors of floats to halves, and dot
   products of halves, MOVRS's vector loads and AVX512-BMM's products of bit
-  matrices, each unmasked, merged and zeroed where the headers have them.
+  matrices, each unmasked, merged and zeroed where the headers have them; and
+  the system instructions of RAO-INT, CLDEMOTE, SERIALIZE, UINTR, PTWRITE,
+  WAITPKG's UMONITOR, LWP, MOVRS (its integer loads and prefetch), RTM's XEND
+  and XTEST, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR.
 
 The comparison is of the instructions' data flow, not of their meaning: code
 that computes the same values with other instructions differs, and a case would
@@ -2750,8 +2773,8 @@ horizontal sum for a signed one and a packed fraction for a scalar one, each
 make their own case differ and no other.
 
 `--cases FILE` takes other cases, a line each: `X`, `Y` or `Z` for a vector
-result of 16, 32 or 64 bytes, `I` or `L` for an integer of 4 or 8, `V` for
-none, then the intrinsic's name. `--print NAME` prints each object's trace of a
+result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
+8, `V` for none, then the intrinsic's name. `--print NAME` prints each object's trace of a
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
 

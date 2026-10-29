@@ -487,7 +487,10 @@ VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the
 `tier0_operation_legacy_forms` lists, for the x86 builtins VEX and EVEX have no form of (#148: `mov`, the flags' tests'
 `setcc`, `and` and `or` of bytes and `movzx`, `adc`, `sbb`, `neg`, `crc32`, `rdrand`, the FS and GS bases, the
 non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
-values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are); no branch,
+values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are, and the
+extensions' system instructions: RAO-INT's atomic operations, `cldemote`, `serialize`, UINTR's, `ptwrite`, `umonitor`,
+MOVRS's loads, RTM's `xend` and `xtest`, TSXLDTRK's, ENQCMD's and USER_MSR's register forms); a VEX form without
+operands only where its effects name no register either (`tilerelease`, not `vzeroupper` or `vzeroall`); no branch,
 symbol or RIP-relative address, each field's role of its class (an integer operand's no narrower than its field, the
 integer result's in a field of 32 or 64 bits), and each record `x86_validate` takes with its roles placed. So a row
 reads and writes its operands, its result, its scratch registers, the opmask registers, the flags and memory through its

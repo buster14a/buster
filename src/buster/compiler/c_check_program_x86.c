@@ -167,7 +167,9 @@ typedef enum CheckX86LowerLayout
     // memory at p (CLWB, FXSAVE); (void* p, a) a stored at p (MOVNTI, MOVDIRI); (a, void* p) the same (WRSS); (void* p,
     // const void* q) p's register, q's memory (MOVDIR64B); (unsigned a, void* p) a zero-extended into a 64-bit register, p's
     // memory (INVPCID); (a) -> a's register's (RDSSP, which keeps it without a shadow stack); (a, b) -> a's, then the
-    // form's of it and b (CRC32).
+    // form's of it and b (CRC32); () -> the form's flags' condition (the rule's `fixed`), an int (XTEST, TESTUI); (void* p,
+    // const void* q) the same of POINTERS' (ENQCMD); (const void* p) -> the integer of the rule's bytes at p, a narrower
+    // one's zero-extended (MOVRS); (a) -> the form's register of a's (URDMSR); (a, b) a's register and b's (UWRMSR).
     CHECK_X86_LAYOUT_NONE,
     CHECK_X86_LAYOUT_READ,
     CHECK_X86_LAYOUT_WRITE,
@@ -178,6 +180,11 @@ typedef enum CheckX86LowerLayout
     CHECK_X86_LAYOUT_WIDENED,
     CHECK_X86_LAYOUT_MODIFY,
     CHECK_X86_LAYOUT_ACCUMULATE,
+    CHECK_X86_LAYOUT_CONDITION,
+    CHECK_X86_LAYOUT_POINTERS_CONDITION,
+    CHECK_X86_LAYOUT_LOAD_INTEGER,
+    CHECK_X86_LAYOUT_FROM,
+    CHECK_X86_LAYOUT_REGISTERS,
     // VECTOR_MEMORY's: (const void* p, vector m) -> the elements at p where m's are negative, zeros elsewhere (VMASKMOV's
     // load); (void* p, vector m, vector a) a's elements stored where m's are negative; (const void* p) -> the vector at p
     // (VLDDQU); (void* p, vector a) a's first element stored at p (MOVNTSD); (vector a, vector m, void* p) a's bytes
@@ -366,6 +373,10 @@ _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word
 #define BUSTER_CHECK_X86_SYSTEM(name, bytes, form, layout, features) \
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_" name, CHECK_X86_LOWER_SYSTEM, bytes, bytes, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form, \
                                 CHECK_X86_LAYOUT_##layout, features)
+// The same of an extension's instruction, with the flags' condition a CONDITION layout's int is (CHECK_X86_CC_*).
+#define BUSTER_CHECK_X86_SYSTEM_OF(name, bytes, form, layout, condition, extension) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_SYSTEM, bytes, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, CHECK_X86_LAYOUT_##layout, false, 0, 0, CHECK_X86_ROUND_NONE, condition, BUSTER_X86_EXTENSION(extension) },
 #define BUSTER_CHECK_X86_MEMORY(name, element, bytes, form, layout, features) \
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_" name, CHECK_X86_LOWER_VECTOR_MEMORY, element, bytes, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form, \
                                 CHECK_X86_LAYOUT_##layout, features)
@@ -1128,6 +1139,44 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_SYSTEM("wbnoinvd", 4, WBNOINVD, NONE, BUSTER_X86_FEATURE(WBNOINVD))
     BUSTER_CHECK_X86_SYSTEM("saveprevssp", 4, SAVEPREVSSP, NONE, BUSTER_X86_FEATURE(SHSTK))
     BUSTER_CHECK_X86_SYSTEM("setssbsy", 4, SETSSBSY, NONE, BUSTER_X86_FEATURE(SHSTK))
+    // The extensions' system instructions: RAO-INT's atomic operations of memory, CLDEMOTE, SERIALIZE, UINTR's,
+    // PTWRITE, WAITPKG's UMONITOR, LWP's control block's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST,
+    // TSXLDTRK's, AMX-TILE's configuration's, ENQCMD's and USER_MSR's.
+    BUSTER_CHECK_X86_SYSTEM_OF("aadd32", 4, AADD_M32_R32, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("aadd64", 8, AADD_M64_R64, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("aand32", 4, AAND_M32_R32, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("aand64", 8, AAND_M64_R64, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("aor32", 4, AOR_M32_R32, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("aor64", 8, AOR_M64_R64, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("axor32", 4, AXOR_M32_R32, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("axor64", 8, AXOR_M64_R64, STORE, 0, RAOINT)
+    BUSTER_CHECK_X86_SYSTEM_OF("cldemote", 8, CLDEMOTE_M8, MEMORY, 0, CLDEMOTE)
+    BUSTER_CHECK_X86_SYSTEM_OF("serialize", 4, SERIALIZE, NONE, 0, SERIALIZE)
+    BUSTER_CHECK_X86_SYSTEM_OF("clui", 4, CLUI, NONE, 0, UINTR)
+    BUSTER_CHECK_X86_SYSTEM_OF("stui", 4, STUI, NONE, 0, UINTR)
+    BUSTER_CHECK_X86_SYSTEM_OF("testui", 4, TESTUI, CONDITION, CHECK_X86_CC_B, UINTR)
+    BUSTER_CHECK_X86_SYSTEM_OF("senduipi", 8, SENDUIPI_R64, WRITE, 0, UINTR)
+    BUSTER_CHECK_X86_SYSTEM_OF("ptwrite32", 4, PTWRITE_RM32, WRITE, 0, PTWRITE)
+    BUSTER_CHECK_X86_SYSTEM_OF("ptwrite64", 8, PTWRITE_RM64, WRITE, 0, PTWRITE)
+    BUSTER_CHECK_X86_SYSTEM_OF("umonitor", 8, UMONITOR_R64, WRITE, 0, WAITPKG)
+    BUSTER_CHECK_X86_SYSTEM_OF("llwpcb", 8, LLWPCB_R64, WRITE, 0, LWP)
+    BUSTER_CHECK_X86_SYSTEM_OF("slwpcb", 8, SLWPCB_R64, READ, 0, LWP)
+    BUSTER_CHECK_X86_SYSTEM_OF("movrsqi", 1, MOVRS_R8_M8, LOAD_INTEGER, 0, MOVRS)
+    BUSTER_CHECK_X86_SYSTEM_OF("movrshi", 2, MOVRS_R16_M16, LOAD_INTEGER, 0, MOVRS)
+    BUSTER_CHECK_X86_SYSTEM_OF("movrssi", 4, MOVRS_R32_M32, LOAD_INTEGER, 0, MOVRS)
+    BUSTER_CHECK_X86_SYSTEM_OF("movrsdi", 8, MOVRS_R64_M64, LOAD_INTEGER, 0, MOVRS)
+    BUSTER_CHECK_X86_SYSTEM_OF("prefetchrs", 8, PREFETCHRST2_M8, MEMORY, 0, MOVRS)
+    BUSTER_CHECK_X86_SYSTEM_OF("xend", 4, XEND, NONE, 0, RTM)
+    BUSTER_CHECK_X86_SYSTEM_OF("xtest", 4, XTEST, CONDITION, CHECK_X86_CC_NE, RTM)
+    BUSTER_CHECK_X86_SYSTEM_OF("xsusldtrk", 4, XSUSLDTRK, NONE, 0, TSXLDTRK)
+    BUSTER_CHECK_X86_SYSTEM_OF("xresldtrk", 4, XRESLDTRK, NONE, 0, TSXLDTRK)
+    BUSTER_CHECK_X86_SYSTEM_OF("tile_loadconfig", 8, LDTILECFG_M512, MEMORY, 0, AMXTILE)
+    BUSTER_CHECK_X86_SYSTEM_OF("tile_storeconfig", 8, STTILECFG_M512, MEMORY, 0, AMXTILE)
+    BUSTER_CHECK_X86_SYSTEM_OF("tilerelease", 4, TILERELEASE, NONE, 0, AMXTILE)
+    BUSTER_CHECK_X86_SYSTEM_OF("enqcmd", 8, ENQCMD_R64_M512, POINTERS_CONDITION, CHECK_X86_CC_E, ENQCMD)
+    BUSTER_CHECK_X86_SYSTEM_OF("enqcmds", 8, ENQCMDS_R64_M512, POINTERS_CONDITION, CHECK_X86_CC_E, ENQCMD)
+    BUSTER_CHECK_X86_SYSTEM_OF("urdmsr", 8, URDMSR_R64_R64, FROM, 0, USERMSR)
+    BUSTER_CHECK_X86_SYSTEM_OF("uwrmsr", 8, UWRMSR_R64_R64, REGISTERS, 0, USERMSR)
     // The random numbers, stored with whether they are (CF), and the sums and differences with carries.
     BUSTER_CHECK_X86_ONE("rdrand16_step", RANDOM, 2, 2, RDRAND_R16, BUSTER_X86_FEATURE(RDRND))
     BUSTER_CHECK_X86_ONE("rdrand32_step", RANDOM, 4, 4, RDRAND_R32, BUSTER_X86_FEATURE(RDRND))
@@ -2408,6 +2457,42 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
                 row->operand_count = 1;
                 row->operand_classes[0] = integer;
                 row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_CONDITION:
+            case CHECK_X86_LAYOUT_POINTERS_CONDITION:
+            {
+                const bool pointers = rule->other == CHECK_X86_LAYOUT_POINTERS_CONDITION;
+                row->records[0] = pointers ? check_x86_lower_memory(form, i0, i1) : (X86Instruction){ .form = form };
+                row->record_count = (uint8_t)check_x86_lower_condition(row, 1, rule->fixed, 0);
+                row->operand_count = pointers ? 2 : 0;
+                row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+                row->operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+                row->result_class = BUSTER_TYPED_CLASS_I32;
+                break;
+            }
+            case CHECK_X86_LAYOUT_LOAD_INTEGER:
+                // A narrower integer through a scratch register's low bytes, the result's field 32 bits at least.
+                row->records[0] = check_x86_lower_memory(form, rule->bytes >= 4 ? result : BUSTER_TIER0_ROLE_SCRATCH(0), i0);
+                row->records[1] = check_x86_lower_record(rule->bytes == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, result, 0,
+                                                         BUSTER_TIER0_ROLE_SCRATCH(0));
+                row->record_count = rule->bytes >= 4 ? 1 : 2;
+                row->operand_count = 1;
+                row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+                row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_FROM:
+                row->records[0] = check_x86_lower_record(form, i0, 0, result);
+                row->record_count = 1;
+                row->operand_count = 1;
+                row->operand_classes[0] = integer;
+                row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_REGISTERS:
+                row->records[0] = check_x86_lower_record(form, i0, 0, i1);
+                row->record_count = 1;
+                row->operand_count = 2;
+                row->operand_classes[0] = integer;
+                row->operand_classes[1] = integer;
                 break;
             default:
                 // ACCUMULATE: CRC32 of the value into the accumulator.
