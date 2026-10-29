@@ -480,6 +480,8 @@ static const bool bind_test_binding_weak[] = {
 static void bind_test_class_ends(const Link* link, uint8_t class, uint32_t* first_unit, uint32_t* last_unit)
 {
     bool seen = false;
+    // Scalar: MSan's model of the native build's vectorized loop took the columns' initialized lanes for uninitialized.
+#pragma clang loop vectorize(disable)
     for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
     {
         if (link->atoms.class[atom] == class)
