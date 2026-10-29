@@ -25,26 +25,25 @@ jobs:
         with:
           path: recipe
           persist-credentials: false
-      - name: Check out exact implementation base
+      - name: Check out exact PR head
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
+          ref: c2aa76aae918172f23e8ed932c25da3c21f4c593
           path: source
           persist-credentials: true
-      - name: Apply implementation and tests without workbench files
+      - name: Apply final capability audit without workbench files
         working-directory: source
         run: |
           set -euo pipefail
-          python3 ../recipe/.github/issue-806-edit.py
-          python3 ../recipe/.github/issue-806-tests.py
-          git add src/buster/compiler docs/c-preprocessor.md docs/c-builtins-integration.md THIRD_PARTY_NOTICES.md
+          python3 ../recipe/.github/issue-806-final-audit.py
+          git add src/buster/compiler/c_preprocessor.c src/buster/compiler/c_preprocessor_feature_test.c docs/c-preprocessor.md
           git diff --cached --check
           git diff --cached --stat
           git config user.name 'ChatGPT'
           git config user.email 'chatgpt@users.noreply.github.com'
-          git switch -c chatgpt/issue-806-feature-queries
-          git commit -m 'Report implemented source features and share native builtin query inventory (#806)'
-          git push origin HEAD:refs/heads/chatgpt/issue-806-feature-queries
+          git switch -c chatgpt/issue-806-qualified-2
+          git commit -m 'Keep unsupported native overloadable attribute unadvertised (#806)'
+          git push origin HEAD:refs/heads/chatgpt/issue-806-qualified-2
           git rev-parse HEAD | tee "$RUNNER_TEMP/issue-806-head.txt"
       - name: Install pinned official Clang 23.1.4
         working-directory: source
