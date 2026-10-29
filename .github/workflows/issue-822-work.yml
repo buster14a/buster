@@ -1,21 +1,54 @@
-name: Issue 822 isolated workspace
+name: Issue 822 isolated validation
 on:
   push:
     branches: [codex/issue-822-work]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: off
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          persist-credentials: false
-      - name: Export source for issue 822 development
-        run: git archive HEAD --output=source.tar
+          fetch-depth: 0
+      - name: Apply and retain the candidate on the isolated branch
+        run: |
+          set -euo pipefail
+          git apply .github/issue-822.patch
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/compiler/c_check_constant.c src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_test.c
+          git -c core.hooksPath=/dev/null commit -m 'Apply issue 822 candidate for isolated validation'
+          git push origin HEAD:codex/issue-822-work
+          git rev-parse HEAD HEAD^{tree}
+      - name: Install official test toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build compiler
+        run: ./build.sh
+      - name: Nested sizeof, warning and VLA regression tests
+        run: build/compiler test-checker --sizeof
+      - name: Source driver tests
+        run: build/compiler test-checker-driver
+      - name: Deferred checker tests
+        run: build/compiler test-checker-deferred
+      - name: Export candidate source and compiler
+        if: always()
+        run: |
+          mkdir -p export
+          git archive HEAD --output=export/source.tar
+          if test -x build/compiler; then cp build/compiler export/compiler; fi
+          git rev-parse HEAD HEAD^{tree} > export/revision.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: issue-822-source
-          path: source.tar
-          retention-days: 1
+          name: issue-822-candidate
+          path: export/
+          retention-days: 3
