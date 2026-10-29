@@ -529,7 +529,7 @@ static bool tier1_select_call_supported(const IrFunction* function, uint32_t nod
     {
         const IrCall call = function->calls[function->b[node]];
         const uint32_t type = function->type[node];
-        supported = !call.variadic && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && call.parameter_count == call.argument_count && (type == IR_VOID || type == IR_I32 || type == IR_I64 || type == IR_PTR);
+        supported = !call.variadic && call.abi == 0 && call.argument_count <= BUSTER_TIER1_SELECT_CALL_ARGUMENTS && call.parameter_count == call.argument_count && (type == IR_VOID || type == IR_I32 || type == IR_I64 || type == IR_PTR);
         for (uint32_t argument = 0; supported && argument < call.argument_count; argument += 1)
         {
             const uint32_t argument_type = function->call_types[call.type_first + argument];
@@ -1041,6 +1041,12 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
     bool parameter_prefix = true;
+    // Labels (whose symbols the frame and the emitter would have to define), by-value aggregates' ABI records and a
+    // variadic definition's incoming frame (#131) aren't selected yet.
+    if (error == TIER1_SELECT_OK && (function->label_count != 0 || function->parameter_passed != 0 || function->variadic))
+    {
+        error = TIER1_SELECT_ERROR_UNSUPPORTED;
+    }
     for (uint32_t block = 0; error == TIER1_SELECT_OK && block < function->block_count; block += 1)
     {
         for (uint32_t node = function->block_offsets[block]; node < function->block_offsets[block + 1]; node += 1)
@@ -1051,7 +1057,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || (op == IR_CALL && !tier1_select_call_supported(function, node)))
+        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
