@@ -6743,6 +6743,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+    // Each lowered function's validation (tier0_validate) reads the effects tables (its X86 entries' forms, #760), which
+    // a lowering of bodies without the emission's setup (check_program_emit's), a test's, builds here: a unit of data
+    // alone leaves the backend cold, as the emission does.
+    if (valid && program->body_count != 0 && !(x86_semantics_initialized || x86_semantics_initialize()))
+    {
+        lowered->status = CHECK_PROGRAM_BACKEND;
+        valid = false;
+    }
     if (valid && !check_program_helpers(&lowered->helpers, program, output, scratch))
     {
         lowered->status = lowered->helpers.status;

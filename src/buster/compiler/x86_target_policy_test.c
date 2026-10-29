@@ -34,8 +34,20 @@ static bool x86_target_test_matrix(void)
     {
         const uint64_t row = x86_target_requirement(form);
         const uint32_t compact = x86_target_compact_requirements[form];
-        const uint64_t restored = (compact & BUSTER_X86_TARGET_COMPACT_LOW) | (uint64_t)((compact >> (X86_FEATURE_AES + 1)) & 1) << X86_FEATURE_PCLMUL | (compact & BUSTER_X86_TARGET_COMPACT_KNOWN ? BUSTER_X86_TARGET_KNOWN : 0);
-        passed &= row == restored;
+        // The compact word's bits after AES's: PCLMUL, AVX512VBMI, AVX512VP2INTERSECT, GFNI, VAES and PREFETCHI.
+        static const uint8_t high[] = { X86_FEATURE_PCLMUL, X86_FEATURE_AVX512VBMI, X86_FEATURE_AVX512VP2INTERSECT, X86_FEATURE_GFNI, X86_FEATURE_VAES, X86_FEATURE_PREFETCHI };
+        uint64_t restored = (compact & BUSTER_X86_TARGET_COMPACT_LOW) | (compact & BUSTER_X86_TARGET_COMPACT_KNOWN ? BUSTER_X86_TARGET_KNOWN : 0);
+        for (uint32_t h = 0; h < BUSTER_ARRAY_LENGTH(high); h += 1)
+        {
+            restored |= (uint64_t)((compact >> (X86_FEATURE_AES + 1 + h)) & 1) << high[h];
+        }
+        // An extended row's compact word holds its compactable features and the mark, and its slot is past the compact
+        // rows', where the exact pass reads it.
+        const bool extended = (row & ~BUSTER_X86_TARGET_COMPACT_FEATURES) != 0;
+        passed &= (row & BUSTER_X86_TARGET_COMPACT_FEATURES) == restored;
+        passed &= ((compact & BUSTER_X86_TARGET_COMPACT_EXTENDED) != 0) == extended;
+        passed &= !extended || x86_target_requirement_slots[form] > BUSTER_X86_TARGET_COMPACT_COUNT;
+        passed &= extended || row == 0 || x86_target_requirement_slots[form] <= BUSTER_X86_TARGET_COMPACT_COUNT;
         passed &= indexed[form] == (row != 0);
         passed &= (x86_target_requirement_slots[form] != 0) == (row != 0);
         passed &= x86_target_requirement_slots[form] <= BUSTER_X86_TARGET_CLASSIFIED_COUNT;
@@ -280,10 +292,62 @@ static bool x86_target_test_compiler_macros(void)
 // an instruction is an architecture-dependent refusal after the control. Every other diagnostic still fails.
 static bool x86_target_test_gas(const char* directory)
 {
-    // GAS 2.47's dual FMA/AVX512F templates admit these explicit EVEX forms without AVX512VL. Keep the
-    // architectural policy strict: the independent minimal-feature tests above require F and VL for every row.
-    // Count this external-oracle gap only where GAS accepts it; a corrected assembler follows the normal check.
+    // GAS 2.47's dual FMA/AVX512F templates admit these explicit EVEX forms without AVX512VL, and so do its dual
+    // AVX/AVX2 and AVX512F ones (#760: the X86 rows' variable shifts, vpermd, vpermq, vpermps, vpermpd, vpermilps, the
+    // broadcasts, vaesenc, vaesdec and vgf2p8mulb, their broadcast forms too). Keep the architectural policy strict: the
+    // independent minimal-feature tests above require F and VL for every row. Count this external-oracle gap only where
+    // GAS accepts it; a corrected assembler follows the normal check.
     static const uint8_t gas_vl_fma[X86_FORM_COUNT] = {
+        [X86_FORM_VAESDECLAST_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VAESDECLAST_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VAESDEC_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VAESDEC_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VAESENCLAST_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VAESENCLAST_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VAESENC_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VAESENC_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VBROADCASTSS_X_XM32_EVEX] = 1,
+        [X86_FORM_VBROADCASTSS_Y_XM32_EVEX] = 1,
+        [X86_FORM_VGF2P8MULB_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VGF2P8MULB_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPBROADCASTD_X_XM32_EVEX] = 1,
+        [X86_FORM_VPBROADCASTD_Y_XM32_EVEX] = 1,
+        [X86_FORM_VPERMD_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPERMD_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPERMILPS_X_M32BCST_IMM8] = 1,
+        [X86_FORM_VPERMILPS_X_XM128_IMM8_EVEX] = 1,
+        [X86_FORM_VPERMILPS_X_X_M32BCST] = 1,
+        [X86_FORM_VPERMILPS_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPERMILPS_Y_M32BCST_IMM8] = 1,
+        [X86_FORM_VPERMILPS_Y_YM256_IMM8_EVEX] = 1,
+        [X86_FORM_VPERMILPS_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPERMILPS_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPERMPD_Y_M64BCST_IMM8] = 1,
+        [X86_FORM_VPERMPD_Y_YM256_IMM8_EVEX] = 1,
+        [X86_FORM_VPERMPS_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPERMPS_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPERMQ_Y_M64BCST_IMM8] = 1,
+        [X86_FORM_VPERMQ_Y_YM256_IMM8_EVEX] = 1,
+        [X86_FORM_VPSLLVD_X_X_M32BCST] = 1,
+        [X86_FORM_VPSLLVD_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPSLLVD_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPSLLVD_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPSLLVQ_X_X_M64BCST] = 1,
+        [X86_FORM_VPSLLVQ_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPSLLVQ_Y_Y_M64BCST] = 1,
+        [X86_FORM_VPSLLVQ_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPSRAVD_X_X_M32BCST] = 1,
+        [X86_FORM_VPSRAVD_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPSRAVD_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPSRAVD_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPSRLVD_X_X_M32BCST] = 1,
+        [X86_FORM_VPSRLVD_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPSRLVD_Y_Y_M32BCST] = 1,
+        [X86_FORM_VPSRLVD_Y_Y_YM256_EVEX] = 1,
+        [X86_FORM_VPSRLVQ_X_X_M64BCST] = 1,
+        [X86_FORM_VPSRLVQ_X_X_XM128_EVEX] = 1,
+        [X86_FORM_VPSRLVQ_Y_Y_M64BCST] = 1,
+        [X86_FORM_VPSRLVQ_Y_Y_YM256_EVEX] = 1,
 #define BUSTER_X86_TARGET_GAS_VL(name, ...) [X86_FORM_##name] = 1,
         BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMADD, "vfmadd", 0x98)
         BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMSUB, "vfmsub", 0x9a)
@@ -305,12 +369,25 @@ static bool x86_target_test_gas(const char* directory)
         { "x86-64-v2", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf", 0 },
         { "x86-64-v3", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave", 0 },
         { "x86-64-v4", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+avx2+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave+avx512f+avx512bw+avx512cd+avx512dq+avx512vl", 0 },
+        // v3 without AVX2: VEX's 256-bit integer forms and those AVX2 has at every length (#760).
+        { "x86-64-v3", "nocona+nomonitor+sse3+ssse3+sse4.1+sse4.2+popcnt+cx16+lahf_sahf+avx+bmi+bmi2+f16c+fma+lzcnt+movbe+xsave", BUSTER_X86_FEATURE(AVX2) },
         { "znver5", "znver5+nofma", BUSTER_X86_FEATURE(FMA) },
         { "znver5", "znver5+noavx512vl", BUSTER_X86_FEATURE(AVX512VL) },
         { "znver5", "znver5+noavx512bw", BUSTER_X86_FEATURE(AVX512BW) },
         { "znver5", "znver5+noavx512dq", BUSTER_X86_FEATURE(AVX512DQ) },
         { "znver5", "znver5+nobmi2", BUSTER_X86_FEATURE(BMI2) },
         { "znver5", "znver5+nopopcnt", BUSTER_X86_FEATURE(POPCNT) },
+        // The X86 rows' AVX-512 extensions, GFNI, VAES and AVX-VNNI (#760), each removed alone.
+        { "znver5", "znver5+noavx512vbmi", BUSTER_X86_FEATURE(AVX512VBMI) },
+        { "znver5", "znver5+noavx512_vbmi2", BUSTER_X86_FEATURE(AVX512VBMI2) },
+        { "znver5", "znver5+noavx512_bitalg", BUSTER_X86_FEATURE(AVX512BITALG) },
+        { "znver5", "znver5+noavx512ifma", BUSTER_X86_FEATURE(AVX512IFMA) },
+        { "znver5", "znver5+noavx512_vnni", BUSTER_X86_FEATURE(AVX512VNNI) },
+        { "znver5", "znver5+noavx512_bf16", BUSTER_X86_FEATURE(AVX512BF16) },
+        { "znver5", "znver5+noavx512_vp2intersect", BUSTER_X86_FEATURE(AVX512VP2INTERSECT) },
+        { "znver5", "znver5+nogfni", BUSTER_X86_FEATURE(GFNI) },
+        { "znver5", "znver5+novaes", BUSTER_X86_FEATURE(VAES) },
+        { "znver5", "znver5+noavx_vnni", BUSTER_X86_FEATURE(AVXVNNI) },
     };
     char source[4096];
     snprintf(source, sizeof(source), "%s/forms.s", directory);
@@ -335,6 +412,12 @@ static bool x86_target_test_gas(const char* directory)
                 if ((form == X86_FORM_LEA_R16_M || form == X86_FORM_LEA_R32_M || form == X86_FORM_LEA_R64_M) && instruction.mode == BUSTER_X86_MEMORY_ABSOLUTE)
                 {
                     instruction.mode = BUSTER_X86_MEMORY_RIP;
+                }
+                // VEX's vbroadcastss and vbroadcastsd are AVX2's from an XMM register and AVX's from memory: one form, whose
+                // requirement its register operand sets, which the gate takes (#760).
+                if (form == X86_FORM_VBROADCASTSS_X_XM32 || form == X86_FORM_VBROADCASTSS_Y_XM32 || form == X86_FORM_VBROADCASTSD_Y_XM64)
+                {
+                    instruction = (X86Instruction){ .form = (uint16_t)form, .reg = instruction.reg, .rm = 1 };
                 }
                 passed &= x86_validate(&instruction, 1) == 1;
                 x86_print_instruction(file, &instruction, 0);
