@@ -1,0 +1,21 @@
+name: Issue 821 workbench
+on:
+  push:
+    branches: [codex/821-workbench]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive the pinned implementation snapshot
+        run: git archive --format=tar.gz --output=issue-821-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-821-source
+          path: issue-821-source.tar.gz
+          retention-days: 1
