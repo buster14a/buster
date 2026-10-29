@@ -4030,7 +4030,8 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool valid = type_is_valid(table, builtin);
         const bool complex_floating = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
                                       code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE;
-        const bool complex_integer = code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULLONG;
+        // GNU's complex integer types, those of __int128 too (in clang's worlds: clang spells them through the conversions).
+        const bool complex_integer = code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
                                                              builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
                                                              complex_floating || complex_integer));
@@ -4072,6 +4073,20 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
     {
         abi_test_world_add(world, type_bit_int(table, widths[i], false));
         abi_test_world_add(world, type_bit_int(table, widths[i], true));
+    }
+    // A compiled clang world's complex _BitInts, which the usual arithmetic conversions make (#137): clang spells each as
+    // the type of a _Complex char and its element (type_test_write_types), which a width past char's keeps.
+    const uint32_t complex_widths[] = {
+        13,
+        40,
+        65,
+        100,
+        128,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(complex_widths) && world->compiled && !world->gcc; i += 1)
+    {
+        abi_test_world_add(world, type_complex(table, type_bit_int(table, complex_widths[i], false)));
+        abi_test_world_add(world, type_complex(table, type_bit_int(table, complex_widths[i], true)));
     }
     const TypeId elements[] = {
         BUSTER_TYPE_CHAR,
@@ -4583,21 +4598,26 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 }
 
 // Whether a value of `type` has one of Tier 0's memory classes in this compiler's C: a long double's (F80, complex long
-// double's parts too), a 128-bit integer's or a _BitInt's of 65 to 128 bits (I128 and U128) or a vector's (VECTOR).
+// double's parts too), a 128-bit integer's or a _BitInt's of 65 to 128 bits (I128 and U128, a complex one's parts too) or
+// a vector's (VECTOR).
 static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
     const uint8_t code = table->types.code[resolved];
+    const uint32_t element = kind == BUSTER_TYPE_KIND_COMPLEX ? abi_resolved_index(table, table->types.base[resolved]) : 0;
+    const uint8_t element_kind = table->types.kind[element];
+    const bool wide_complex = element != 0 && (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[element] == 16;
     return (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
            ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[resolved] == 16) ||
-           (kind == BUSTER_TYPE_KIND_COMPLEX && code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE) || kind == BUSTER_TYPE_KIND_VECTOR ||
+           (kind == BUSTER_TYPE_KIND_COMPLEX && code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE) || wide_complex || kind == BUSTER_TYPE_KIND_VECTOR ||
            kind == BUSTER_TYPE_KIND_EXT_VECTOR;
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
 // to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
-// float, double or long double, a complex integer of up to 64 bits (GNU's), a struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
+// float, double or long double, a complex integer (GNU's, of __int128 too) and a complex _BitInt of up to 128 bits, a
+// struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
 // up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
 // aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
@@ -4613,9 +4633,12 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
     const uint8_t element_kind = table->types.kind[element];
     const bool vector = element != 0 && (size == 16 || size == 32 || size == 64) && table->types.size[element] <= 8 && table->types.code[element] != BUSTER_TYPE_CODE_BOOL &&
                         (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING);
+    const uint32_t complex_element = kind == BUSTER_TYPE_KIND_COMPLEX ? abi_resolved_index(table, table->types.base[resolved]) : 0;
+    const bool complex_bit_int = complex_element != 0 && table->types.kind[complex_element] == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[complex_element] <= 128;
     const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
                                                               code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE ||
-                                                              (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_ULLONG));
+                                                              (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128) ||
+                                                              complex_bit_int);
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
                       ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
                       kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
