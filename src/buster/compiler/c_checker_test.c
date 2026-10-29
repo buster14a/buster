@@ -5247,6 +5247,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_program_x86(&test, clang);
             check_test_program_vector_builtins(&test, clang);
             check_test_program_fp16(&test, clang);
+            check_test_program_halves(&test, clang);
         }
         else if (initialized)
         {

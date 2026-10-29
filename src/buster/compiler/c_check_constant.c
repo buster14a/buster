@@ -1046,6 +1046,7 @@ static bool check_constant_type_builtin_prepare(CheckConstantInput* input, uint3
         input->syntax[opening - 1 - input->first] = true;
         input->type_begin[closing - input->first] = first;
         check_constant_mark_type(input, first, end);
+        check_input_rare_claim(reader, &reader->builtins[closing]);
         reader->builtins[closing] = builtin;
     }
     return valid;
@@ -1252,6 +1253,7 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
             }
             if (builtin > CBUILTIN_NONE && (builtin < CBUILTIN_COUNT || check_input_complex_builtin((CBuiltinId)builtin) || check_graph_builtin_op((CBuiltinId)builtin) != CHECK_OP_COUNT))
             {
+                check_input_rare_claim(reader, &reader->builtins[close]);
                 reader->builtins[close] = builtin;
             }
         }

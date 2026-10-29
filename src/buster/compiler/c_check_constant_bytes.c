@@ -14,16 +14,23 @@ static void check_data_integer_bytes(uint8_t* bytes, unsigned __int128 value, ui
     }
 }
 
-// The checker uses Linux/x86-64 binary32, binary64 and x87 extended values. The two IEEE encodings are copied into
-// integer values, then serialized explicitly little-endian. x87 is built from numeric fields, never host padding.
-// CheckValue does not retain NaN payload provenance; all NaNs get a deterministic quiet payload and their sign.
+// The checker uses Linux/x86-64 binary16, bfloat16, binary32, binary64 and x87 extended values. The half-precision ones
+// are check_action_half_bits', and the other two IEEE encodings are copied into integer values, then serialized
+// explicitly little-endian. x87 is built from numeric fields, never host padding. CheckValue does not retain NaN payload
+// provenance; all NaNs get a deterministic quiet payload and their sign.
 static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double value)
 {
     _Static_assert(CHAR_BIT == 8 && sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, "checker target requires binary32");
     _Static_assert(sizeof(double) == 8 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024, "checker target requires binary64");
     _Static_assert(LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384 && LDBL_MIN_EXP == -16381, "checker target requires x87 extended");
     const bool negative = signbit(value) != 0;
-    if (type == BUSTER_TYPE_FLOAT)
+    const CheckHalf half = check_action_half_format(type);
+    if (half != CHECK_HALF_NONE)
+    {
+        // A half-precision value's 16 bits (check_action_half_bits: a NaN's the format's quiet one with its sign).
+        check_data_integer_bytes(bytes, check_action_half_bits(half, value), 2);
+    }
+    else if (type == BUSTER_TYPE_FLOAT)
     {
         const float rounded = (float)value;
         uint32_t bits = 0;

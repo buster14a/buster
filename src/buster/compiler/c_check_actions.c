@@ -479,6 +479,116 @@ static bool check_action_float_supported(const TypeTable* table, TypeId type)
     return base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
 }
 
+// The half-precision formats: _Float16's and __fp16's IEEE binary16 and __bf16's bfloat16. A constant of one is folded
+// where its value is exact or rounded once, as clang folds it: a conversion to one, a negation, a unary + and a compare.
+// Its arithmetic isn't: clang computes it in float at run time (excess precision, c_check_program_half.c), which a
+// constant rounded per operation wouldn't be.
+typedef enum CheckHalf
+{
+    CHECK_HALF_NONE,
+    CHECK_HALF_IEEE,
+    CHECK_HALF_BRAIN,
+} CheckHalf;
+
+// An unqualified, unaligned type's half-precision format.
+static CheckHalf check_action_half_format(TypeId base)
+{
+    return base == BUSTER_TYPE_FLOAT16 || base == BUSTER_TYPE_HALF ? CHECK_HALF_IEEE : base == BUSTER_TYPE_BF16 ? CHECK_HALF_BRAIN : CHECK_HALF_NONE;
+}
+
+// The bits of a format's value nearest `significand` * 2^`exponent` (ties to even), of sign `negative`: a subnormal's
+// below its least normal, an infinity's past its largest, as clang's APFloat rounds a constant once, from its exact value
+// (an integer's too: a 128-bit one's through a long double could round twice).
+static uint16_t check_action_half_round(CheckHalf format, bool negative, unsigned __int128 significand, int32_t exponent)
+{
+    const uint32_t precision = format == CHECK_HALF_IEEE ? 11 : 8;
+    const int32_t least = format == CHECK_HALF_IEEE ? -14 : -126;
+    const int32_t greatest = format == CHECK_HALF_IEEE ? 15 : 127;
+    uint32_t bits = negative ? 0x8000u : 0;
+    if (significand != 0)
+    {
+        const uint64_t high = (uint64_t)(significand >> 64);
+        const int32_t top = high != 0 ? 127 - __builtin_clzll(high) : 63 - __builtin_clzll((uint64_t)significand);
+        int32_t binary = top + exponent;
+        // The result's last place: a normal value's, or the subnormals' below the least normal.
+        const int32_t place = (binary < least ? least : binary) - (int32_t)(precision - 1);
+        const int32_t shift = place - exponent;
+        unsigned __int128 rounded = 0;
+        if (shift <= 0)
+        {
+            rounded = significand << -shift;
+        }
+        else if (shift < 128)
+        {
+            const unsigned __int128 rest = significand & ((((unsigned __int128)1) << shift) - 1);
+            const unsigned __int128 half = ((unsigned __int128)1) << (shift - 1);
+            rounded = significand >> shift;
+            rounded += rest > half || (rest == half && (rounded & 1) != 0) ? 1 : 0;
+        }
+        else
+        {
+            // Below half the least subnormal, but at shift 128 past it.
+            rounded = shift == 128 && significand > ((unsigned __int128)1 << 127) ? 1 : 0;
+        }
+        if (binary >= least && rounded == ((unsigned __int128)1 << precision))
+        {
+            rounded >>= 1;
+            binary += 1;
+        }
+        if (binary >= least && binary > greatest)
+        {
+            bits |= (uint32_t)(2 * greatest + 1) << (precision - 1);
+        }
+        else if (binary >= least)
+        {
+            bits |= ((uint32_t)(binary + greatest) << (precision - 1)) | ((uint32_t)rounded - (1u << (precision - 1)));
+        }
+        else
+        {
+            // A subnormal's count of the least place, or the least normal's bits where it rounds up to it.
+            bits |= (uint32_t)rounded;
+        }
+    }
+    return (uint16_t)bits;
+}
+
+// A floating value's bits in a format: its sign with the format's quiet NaN for a NaN (as check_data_float_bytes gives a
+// float's: CheckValue keeps no payload), its infinity, or its value rounded.
+static uint16_t check_action_half_bits(CheckHalf format, long double value)
+{
+    const bool negative = signbit(value) != 0;
+    const uint32_t sign = negative ? 0x8000u : 0;
+    uint16_t bits = (uint16_t)sign;
+    if (isnan(value))
+    {
+        bits = (uint16_t)(sign | (format == CHECK_HALF_IEEE ? 0x7e00u : 0x7fc0u));
+    }
+    else if (isinf(value))
+    {
+        bits = (uint16_t)(sign | (format == CHECK_HALF_IEEE ? 0x7c00u : 0x7f80u));
+    }
+    else if (value != 0)
+    {
+        int binary = 0;
+        const long double fraction = frexpl(fabsl(value), &binary);
+        bits = check_action_half_round(format, negative, (uint64_t)ldexpl(fraction, 64), binary - 64);
+    }
+    return bits;
+}
+
+// A format's bits' value, exactly (a float's too).
+static long double check_action_half_value(CheckHalf format, uint16_t bits)
+{
+    const uint32_t precision = format == CHECK_HALF_IEEE ? 11 : 8;
+    const uint32_t greatest = format == CHECK_HALF_IEEE ? 15 : 127;
+    const uint32_t mantissa = bits & ((1u << (precision - 1)) - 1);
+    const uint32_t field = (bits & 0x7fffu) >> (precision - 1);
+    const long double magnitude = field == 2 * greatest + 1 ? (mantissa != 0 ? __builtin_nanl("") : __builtin_infl()) :
+                                  field == 0                ? ldexpl((long double)mantissa, 1 - (int)greatest - (int)(precision - 1)) :
+                                                              ldexpl((long double)(mantissa | (1u << (precision - 1))), (int)field - (int)greatest - (int)(precision - 1));
+    return (bits & 0x8000u) != 0 ? -magnitude : magnitude;
+}
+
 static long double check_action_round_float(TypeId type, long double value)
 {
     long double result = value;
@@ -490,7 +600,38 @@ static long double check_action_round_float(TypeId type, long double value)
     {
         result = (double)value;
     }
+    else if (check_action_half_format(type) != CHECK_HALF_NONE && !isnan(value))
+    {
+        result = check_action_half_value(check_action_half_format(type), check_action_half_bits(check_action_half_format(type), value));
+    }
     return result;
+}
+
+// A constant's conversion to a half-precision type, which float, double and long double's folding doesn't take:
+// an integer's exact magnitude rounded once, or a floating value rounded; false, and the value as it was, for any other
+// destination. Out of line, so that check_action_convert_plain's other conversions keep their registers.
+static __attribute__((noinline)) bool check_action_convert_half(const TypeTable* table, CheckValue* value, TypeId destination)
+{
+    uint32_t source_width = 0;
+    bool source_signed = false;
+    const bool source_integer = check_action_integer_type(table, value->type, &source_width, &source_signed);
+    const TypeId base = type_unqualified(type_strip_aligned(table, destination));
+    const CheckHalf half = check_action_half_format(base);
+    const bool integer = half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_INTEGER && source_integer;
+    const bool floating = half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_FLOATING;
+    if (integer)
+    {
+        const unsigned __int128 mask = check_action_mask(source_width);
+        const unsigned __int128 bits = value->integer & mask;
+        const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
+        value->floating = check_action_half_value(half, check_action_half_round(half, negative, negative ? (0 - bits) & mask : bits, 0));
+        value->constant_kind = CHECK_CONSTANT_FLOATING;
+    }
+    else if (floating)
+    {
+        value->floating = check_action_round_float(base, value->floating);
+    }
+    return integer || floating;
 }
 
 // Convert a constant's representation after type checking has authorized the conversion. Every integer operation
@@ -573,7 +714,10 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     {
         if (!check_action_float_supported(table, destination) || (value->constant_kind == CHECK_CONSTANT_INTEGER && !source_integer))
         {
-            check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
+            if (!check_action_convert_half(table, value, destination))
+            {
+                check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
+            }
         }
         else
         {
@@ -1115,6 +1259,11 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
     }
     else if (a->type == BUSTER_TYPE_LONG_DOUBLE)
     {
+        BUSTER_CHECK_REAL_OPERATION(long double);
+    }
+    else if (check_action_half_format(a->type) != CHECK_HALF_NONE && (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || integer))
+    {
+        // A half-precision constant's exact operations (CheckHalf): its arithmetic is clang's at run time.
         BUSTER_CHECK_REAL_OPERATION(long double);
     }
     else

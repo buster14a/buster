@@ -141,7 +141,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         base = type_conversion_operand(types, stripped);
         const uint8_t kind = type_kind(types, base);
         integer = check_action_integer_type(types, base, &width, &is_signed);
-        floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
+        floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
         // A __float128 object's bytes are zeros without an initializer (#137); the checker folds none of its constants, so
