@@ -34,6 +34,11 @@
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
 //   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
 //   driver read before setting it would release an arena of that address and unmap the child's code.
+// - The merge on lanes (#778) against its twin, which one lane and the scalar path run: four units that define three
+//   names twice, by --lanes 1, 2 and 8 and by the scalar path, refused with the same standard error, which names the
+//   first duplicate in the units' order (beta, which d3.c defines again, though alpha's first definition comes first)
+//   and the first definition's unit; and units of a pointer whose addend doesn't fit 32 bits (a wide addend) and of no
+//   symbols, by the same commands into the same bytes, a program in which the pointer holds its addend.
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -886,6 +891,110 @@ static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* ex
     printf("  refusals: %u commands refused, and one over a poisoned stack\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
 }
 
+// The merge on lanes against its twin (see the file's comment), in a directory of its own under `directory`.
+static void check_units_test_merge(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    static const char d1[] = "int alpha = 1;\nint beta = 1;\nint gamma_function(void);\nint main(void)\n{\n    return alpha + beta + gamma_function();\n}\n";
+    static const char d2[] = "int delta = 2;\nint gamma_function(void)\n{\n    return 3;\n}\n";
+    static const char d3[] = "int beta = 3;\nint delta = 3;\n";
+    static const char d4[] = "int alpha = 4;\nint gamma_function(void)\n{\n    return 4;\n}\n";
+    static const char w1[] = "extern char far_array[];\n"
+                             "extern char* const far_pointer;\n"
+                             "int main(void)\n"
+                             "{\n"
+                             "    return (unsigned long long)far_pointer - (unsigned long long)far_array == 0x123456789ull ? 0 : 1;\n"
+                             "}\n";
+    static const char w2[] = "char far_array[16];\n";
+    static const char w3[] = "extern char far_array[];\nchar* const far_pointer = far_array + 0x123456789ll;\n";
+    static const char w4[] = "typedef int unused_type;\n";
+    static const char* const names[] = { "d1.c", "d2.c", "d3.c", "d4.c", "w1.c", "w2.c", "w3.c", "w4.c" };
+    const char* const texts[] = { d1, d2, d3, d4, w1, w2, w3, w4 };
+    char merge_directory[PATH_MAX];
+    char path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(merge_directory, sizeof(merge_directory), "%s/merge", directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", merge_directory);
+    bool written = mkdir(merge_directory, 0755) == 0;
+    for (uint32_t f = 0; written && f < BUSTER_ARRAY_LENGTH(names); f += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", merge_directory, names[f]);
+        written = parse_test_write(path, texts[f], strlen(texts[f]));
+    }
+    check_units_test_expect(tally, written, "write the merge's units", merge_directory);
+    // Each command's options before its units: one lane and the scalar path run the twin, the others the merge on lanes.
+    static const char* const options[][5] = {
+        { "--lanes", "1", NULL },
+        { "--lanes", "2", NULL },
+        { "--lanes", "8", NULL },
+        { "--scalar", "--lanes", "8", NULL },
+    };
+    static const char duplicate[] = "error: multiple definition of 'beta': d3.c defines it, and d1.c first\n";
+    char* first_errors = NULL;
+    uint64_t first_length = 0;
+    for (uint32_t o = 0; written && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        char* arguments[16];
+        uint32_t used = 0;
+        arguments[used++] = (char*)executable;
+        for (uint32_t i = 0; options[o][i] != NULL; i += 1)
+        {
+            arguments[used++] = (char*)options[o][i];
+        }
+        char detail[160];
+        snprintf(detail, sizeof(detail), "%s %s%s", options[o][0], options[o][1], options[o][2] != NULL ? " 8" : "");
+        // The duplicates: refused with the same standard error, the first duplicate in the units' order.
+        const uint32_t base = used;
+        arguments[used++] = "-o";
+        arguments[used++] = "duplicates";
+        for (uint32_t f = 0; f < 4; f += 1)
+        {
+            arguments[used++] = (char*)names[f];
+        }
+        arguments[used] = NULL;
+        snprintf(path, sizeof(path), "%s/duplicates", merge_directory);
+        const int status = check_units_test_run(merge_directory, arguments, "/dev/null", errors_path, false);
+        uint64_t length = 0;
+        char* text = check_units_test_read(errors_path, &length);
+        check_units_test_expect(tally, status == 1 && text != NULL && strstr(text, duplicate) != NULL && !check_units_test_exists(path),
+                                "names several units define: refused, naming the first duplicate in the units' order, without an output", detail);
+        check_units_test_expect(tally, o == 0 || (text != NULL && first_errors != NULL && length == first_length && memcmp(text, first_errors, length) == 0),
+                                "names several units define: the same standard error by every lane count and path", detail);
+        if (o == 0)
+        {
+            first_errors = text;
+            first_length = length;
+        }
+        else
+        {
+            free(text);
+        }
+        // The wide addend and the unit without symbols: the same bytes, which run.
+        used = base;
+        char output[32];
+        snprintf(output, sizeof(output), "wide_%u", o);
+        arguments[used++] = "-o";
+        arguments[used++] = output;
+        for (uint32_t f = 4; f < BUSTER_ARRAY_LENGTH(names); f += 1)
+        {
+            arguments[used++] = (char*)names[f];
+        }
+        arguments[used] = NULL;
+        const int linked = check_units_test_run(merge_directory, arguments, "/dev/null", errors_path, false);
+        char run[48];
+        snprintf(run, sizeof(run), "./%s", output);
+        char* run_arguments[] = { run, NULL };
+        const int ran = linked == 0 ? check_units_test_run(merge_directory, run_arguments, "/dev/null", "/dev/null", false) : -1;
+        check_units_test_expect(tally, linked == 0 && ran == 0, "a wide addend and a unit without symbols: linked, and the pointer holds its addend", detail);
+        char first[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", merge_directory, output);
+        snprintf(first, sizeof(first), "%s/wide_0", merge_directory);
+        check_units_test_expect(tally, o == 0 || check_test_driver_same_files(path, first),
+                                "a wide addend and a unit without symbols: the same bytes by every lane count and path", detail);
+    }
+    free(first_errors);
+    printf("  merge: duplicates and a wide addend by %u commands, the twin's\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
+}
+
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
 #define BUSTER_CHECK_UNITS_TEST_LIMIT_RUNS 10000
 
@@ -1461,6 +1570,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
+        check_units_test_merge(&tally, executable, directory);
         check_units_test_limits(&tally, directory);
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);

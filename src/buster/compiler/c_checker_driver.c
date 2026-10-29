@@ -1167,6 +1167,35 @@ struct CheckDriverWrite
     bool succeeded;
 };
 
+// link_check_lanes's run on a group of lanes (several units' link, #778), whose lane 0 says what it found.
+typedef struct CheckDriverCheck CheckDriverCheck;
+struct CheckDriverCheck
+{
+    Link* link;
+    LinkError result;
+};
+
+static void check_driver_check_main(void* argument)
+{
+    CheckDriverCheck* check = argument;
+    const LinkError result = link_check_lanes(check->link);
+    if (lane_index() == 0)
+    {
+        check->result = result;
+    }
+}
+
+// The bound link's link_check: on `lanes` lanes (link_check_lanes, the same answer), or on the calling thread when there
+// is one, or the lanes can't start.
+static LinkError check_driver_link_check(Link* link, uint32_t lanes)
+{
+    CheckDriverCheck check = { .link = link, .result = LINK_ERROR_NONE };
+    const bool ran = lanes > 1 && lane_run(lanes, check_driver_check_main, &check, 0);
+    return ran ? check.result : link_check(link);
+}
+
+_Static_assert(EXECUTABLE_PHASES == BUSTER_CHECK_CLOCK_WRITE_PHASES, "--time-stages names every phase of executable_write");
+
 static void check_driver_write_main(void* argument)
 {
     CheckDriverWrite* write = argument;
@@ -1389,6 +1418,8 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 typedef struct CheckUnitsUnit CheckUnitsUnit;
 static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
                               Arena* bytes, Arena* scratch);
+static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
+                                    Arena* bytes, Arena* scratch, uint32_t lanes);
 static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t count, const Link* link, NameId name);
 
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
@@ -1453,9 +1484,13 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
-        // The units' links merged report their own failures (check_units_merge), but binding's.
-        const bool emitted = !valid || (units != NULL ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
+        check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
+        // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
+        // vector path (#778), and by its twin on one lane or the scalar path.
+        const bool merged_on_lanes = units != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar);
+        const bool emitted = !valid || (merged_on_lanes ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
+                                                                                  scratch, lanes->lanes) :
+                                        units != NULL   ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                         check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
                                                                                  &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
         if (units != NULL)
@@ -1563,7 +1598,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         ExecutableDynamic dynamic = { 0 };
         if (valid)
         {
-            const LinkError checked = link_check(&code.link);
+            // Several units' bound link is checked on their lanes (#778).
+            const LinkError checked = check_driver_link_check(&code.link, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
             valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
             // An import the code reaches other than through the GOT, by a call or from data, which a shared library's
             // data needs without copy relocations, which the direct path makes none of (#84). Tier 0 reaches every symbol
@@ -1607,6 +1643,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 selected[symbols.count++] = s;
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
         if (valid)
         {
             CheckDriverWrite write = {
@@ -1623,11 +1660,24 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             // Several units' executable is written on their lanes (`lanes`' count), one unit's by its calling thread.
             const uint32_t write_lanes = units != NULL && lanes->lanes > 1 ? lanes->lanes : 1;
             valid = lane_run(write_lanes, check_driver_write_main, &write, 0) && write.succeeded;
+            // The write's phases, for --time-stages (#778): each from its start or the phase before it.
+            uint64_t phase_begin = write.result.start_time;
+            for (uint32_t phase = 0; stage_clock != NULL && valid && phase < EXECUTABLE_PHASES; phase += 1)
+            {
+                const uint64_t end = write.result.phase_times[phase] >= phase_begin ? write.result.phase_times[phase] : phase_begin;
+                stage_clock->write_nanoseconds[phase] = end - phase_begin;
+                phase_begin = end;
+            }
+            if (stage_clock != NULL)
+            {
+                stage_clock->wrote = valid;
+            }
             if (!valid)
             {
                 check_driver_executable_failure(&code.link, &runtime, units != NULL ? unit_count : 1, output_path, &write.result, stderr);
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_WRITE);
         if (again && cached)
         {
             snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
@@ -1642,6 +1692,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             runtime_libraries_release(&named);
         }
         runtime_release(&runtime);
+        check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     }
     return valid;
 }
@@ -2101,7 +2152,6 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             result = check_driver_executable(&selected.program, &selected.data, checking, pp, &types, output != 0 ? output : "a.out", scalar, verify,
                                                              source_rows, unwind_tables, command->libraries, lanes, scratch, stage_clock, NULL, 0) ? 0 : 1;
-                            check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
                         }
                         else
                         {
