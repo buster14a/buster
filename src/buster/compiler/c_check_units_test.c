@@ -114,8 +114,13 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
         };
         const int out = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 &&
-            (!unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0))
+#if BUSTER_SANITIZER_RESOURCES
+        // The detectors start threads of their own: their builds inject the lanes' start failure instead.
+        const bool limited = !unstarted || setenv("BUSTER_TEST_NO_LANE_THREADS", "1", 1) == 0;
+#else
+        const bool limited = !unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
+        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 && limited)
         {
             alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
             execvp(arguments[0], arguments);
