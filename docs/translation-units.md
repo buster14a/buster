@@ -252,6 +252,13 @@ its own at that code, after the program's other symbols, as a linker relocates
 an object's DWARF against its section rather than its name (the checker
 refuses the weak attribute until #758).
 
+On the 9700X, `-g` costs Lua's 33 units linked by 8 lanes 1.3 ms (35.5 ms
+against 34.2) and by one lane 5.1 ms (83.5 against 78.4): whole processes on
+CPUs 0 to 7, the medians of 15 runs, at #779's commit (`520ba859`), whose
+commands without `-g` run as #763's head's; [the
+record](https://github.com/buster14a/buster-performance/tree/d3ed81314e41efdf56e776e8c0ba1bee2efb0fec/docs/measurements/units-tail-778-779-2026-10-29)
+has the commands and the logs.
+
 ## Measurements
 
 On the 9700X, at `ae5fb51e`, built as the 9700X job builds
