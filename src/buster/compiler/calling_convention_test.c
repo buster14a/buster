@@ -4034,7 +4034,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool complex_integer = code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
                                                              builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
-                                                             complex_floating || complex_integer));
+                                                             builtin == BUSTER_TYPE_FLOAT128 || complex_floating || complex_integer));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -4616,8 +4616,9 @@ static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
 // to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
-// float, double or long double, a complex integer (GNU's, of __int128 too) and a complex _BitInt of up to 128 bits, a
-// struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
+// float, double or long double, a complex integer (GNU's, of __int128 too) and a complex _BitInt of up to 128 bits,
+// __float128 (an aggregate's value in its C, whose operations are libgcc's), a struct or a union, and a vector of 16, 32
+// or 64 bytes of integers or floating values of
 // up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
 // aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
@@ -4639,7 +4640,7 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                                                               code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE ||
                                                               (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128) ||
                                                               complex_bit_int);
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_LONG_DOUBLE || code == BUSTER_TYPE_CODE_FLOAT128)) ||
                       ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
                       kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     // An _Atomic the world made (abi_test_compiled_atomic), behind an aligned typedef or in a record.
