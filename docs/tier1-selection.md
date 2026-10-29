@@ -36,9 +36,12 @@ patterns are:
   consumer (#141). It moves past the nodes between them that neither write
   memory, call nor access a volatile object (arithmetic, constants, addresses,
   other nonvolatile loads) and past none that do: a store to any address, a
-  call, a volatile load or store. The plan's pass over the nodes keeps each
-  one's last such barrier (`Tier1SelectForest.barriers`), so the check is a
-  comparison. The IR has no atomic access of its own: C's atomic operations
+  call, a volatile load or store. A pass of its own after the plan's pass over
+  the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
+  a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
+  twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
+  plan's pass, its store made the operands' walk reload the function's columns
+  (the build's `-fno-strict-aliasing`): 40 instructions more per node. The IR has no atomic access of its own: C's atomic operations
   reach it as calls of the unit's leaves. A volatile load remains a separate
   access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
@@ -163,9 +166,10 @@ The immediates' forms are the shared form choice's (#221). Expansion leaves
 each record with an immediate empty, with its request (the operation's row,
 the value, the live flags and the destination); both emitters collect a
 function's requests and choose their forms 32 at a time, one pass of
-`x86_choose_forms`'s lanes, or by its scalar twin on the scalar path (the
-plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
-`tier1_emit_function`), before checking the records (#141). This emitter
+`x86_choose_forms`'s lanes, before checking the records; on the scalar path
+(the plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
+`tier1_emit_function`) each request's form is its scalar twin's, chosen as
+the request comes, and none is held (#141). This emitter
 checks them in order after the batch, so a node's invalid record or a form
 the target refuses is reported before a later node's allocation failure, as
 when each node's records were checked as it was selected. Every record either

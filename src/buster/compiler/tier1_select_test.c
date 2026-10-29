@@ -858,6 +858,67 @@ static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
 };
 #undef N
 
+// tier1_select_barriers against its scalar twin and an oracle (each node's last barrier before it, by a scan back), on
+// random kinds and flags (stores, calls, indirect calls, loads volatile or not, other nodes, and flag bits besides
+// volatile's) at every count to 100 and some past it, the kinds, the flags and the entries each ending at a PROT_NONE
+// page, the entries' page poisoned before them.
+static void tier1_select_test_barrier_scan(Tier1SelectTest* test)
+{
+    const uint64_t page = 4096;
+    const uint32_t most = 4096;
+    // The kinds' page and its guard, the flags' and theirs, then the entries' four pages and their guard.
+    uint8_t* mapping = mmap(0, page * 9, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool ready = mapping != MAP_FAILED;
+    ready = ready && mprotect(mapping + page, page, PROT_NONE) == 0 && mprotect(mapping + page * 3, page, PROT_NONE) == 0 && mprotect(mapping + page * 8, page, PROT_NONE) == 0;
+    uint32_t* scalar = calloc(most, sizeof(uint32_t));
+    uint32_t* oracle = calloc(most, sizeof(uint32_t));
+    tier1_select_test_expect(test, ready && scalar != 0 && oracle != 0, "barrier scan's guarded columns");
+    static const uint8_t kinds[] = { IR_STORE, IR_CALL, IR_CALL_INDIRECT, IR_LOAD, IR_LOAD, IR_LOAD, IR_ADD, IR_CONST, IR_ADDRESS, IR_PARAM, IR_BR, IR_RET };
+    static const uint32_t counts[] = { 255, 256, 257, 1000, 4095, 4096 };
+    uint64_t random = UINT64_C(0x2c1b3c6dd9b0f6a1);
+    bool same = ready && scalar != 0 && oracle != 0;
+    for (uint32_t c = 0; same && c < 101 + BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint32_t count = c < 101 ? c : counts[c - 101];
+        uint8_t* op = mapping + page - count;
+        uint8_t* flags = mapping + page * 3 - count;
+        uint32_t* entries = (uint32_t*)(void*)(mapping + page * 8) - count;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const uint64_t bits = tier1_select_test_random(&random);
+            // One in eight nodes a barrier's kind, or a load's half the time.
+            op[node] = (bits & 7) == 0 ? kinds[(bits >> 3) % 3] : kinds[3 + (bits >> 3) % (BUSTER_ARRAY_LENGTH(kinds) - 3)];
+            flags[node] = (uint8_t)(bits >> 16);
+        }
+        memset(mapping + page * 4, 0xa5, page * 4);
+        const IrFunction function = { .op = op, .flags = flags };
+        tier1_select_barriers(&function, count, entries);
+        tier1_select_barriers_scalar(&function, count, scalar);
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            uint32_t before = node;
+            while (before != 0 && !(op[before - 1] == IR_STORE || op[before - 1] == IR_CALL || op[before - 1] == IR_CALL_INDIRECT || (op[before - 1] == IR_LOAD && (flags[before - 1] & BUSTER_IR_VOLATILE) != 0)))
+            {
+                before -= 1;
+            }
+            oracle[node] = before;
+        }
+        bool untouched = true;
+        for (uint8_t* byte = mapping + page * 4; byte < (uint8_t*)entries; byte += 1)
+        {
+            untouched &= *byte == 0xa5;
+        }
+        same = untouched && (count == 0 || (memcmp(entries, scalar, count * sizeof(uint32_t)) == 0 && memcmp(scalar, oracle, count * sizeof(uint32_t)) == 0));
+    }
+    tier1_select_test_expect(test, same, "barrier scan: vector path, scalar twin and oracle agree within guarded columns");
+    free(oracle);
+    free(scalar);
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 9);
+    }
+}
+
 static void tier1_select_test_load_barriers(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -1912,6 +1973,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_memory_plans(&test);
+            tier1_select_test_barrier_scan(&test);
             tier1_select_test_load_barriers(&test);
             tier1_select_test_errors(&test);
             tier1_select_test_guarded(&test);

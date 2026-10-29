@@ -127,8 +127,8 @@ static void tier1_select_request(Tier1SelectRecords* result, X86Operation operat
 }
 
 // A function's requests, in its records' order, held until x86_choose_forms' 32 lanes are full or the function's records
-// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context, and the
-// path that chooses their forms.
+// end (tier1_select_requests_flush): each one's record (`at`), destination register, row, value and context. On the
+// scalar path (`vector` false) each is chosen as it comes, by the twin, and none is held.
 #define BUSTER_TIER1_SELECT_BATCH 32
 typedef struct Tier1SelectRequests Tier1SelectRequests;
 struct Tier1SelectRequests
@@ -143,18 +143,11 @@ struct Tier1SelectRequests
     bool vector;
 };
 
-// The requests' forms, chosen in one batch by x86_choose_forms (or its scalar twin): each record the chosen form's, or
-// left empty where no form takes the value, which validation then refuses, as a choice of one record at a time did.
+// The held requests' forms, chosen in one batch by x86_choose_forms: each record the chosen form's, or left empty where
+// no form takes the value, which validation then refuses, as a choice of one record at a time did.
 static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instruction* records)
 {
-    if (requests->vector)
-    {
-        x86_choose_forms(requests->rows, requests->values, requests->contexts, requests->count, requests->forms);
-    }
-    else
-    {
-        x86_choose_forms_scalar(requests->rows, requests->values, requests->contexts, requests->count, requests->forms);
-    }
+    x86_choose_forms(requests->rows, requests->values, requests->contexts, requests->count, requests->forms);
     for (uint32_t q = 0; q < requests->count; q += 1)
     {
         const uint16_t form = requests->forms[q];
@@ -166,11 +159,20 @@ static void tier1_select_requests_flush(Tier1SelectRequests* requests, X86Instru
     requests->count = 0;
 }
 
-// The node's request, if it has one, its record at `first` among the function's `records`, which a full batch's forms
-// are chosen into first.
+// The node's request, if it has one, its record at `first` among the function's `records`: held, a full batch's forms
+// chosen into the records first, or on the scalar path chosen at once.
 static void tier1_select_requests_add(Tier1SelectRequests* requests, const Tier1SelectRecords* selected, uint32_t first, X86Instruction* records)
 {
-    if (selected->requested)
+    if (selected->requested && !requests->vector)
+    {
+        uint16_t form = X86_FORM_NONE;
+        x86_choose_forms_scalar(&selected->row, &selected->value, &selected->context, 1, &form);
+        if (form != X86_FORM_NONE)
+        {
+            records[first + selected->request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected->destination }, selected->value);
+        }
+    }
+    else if (selected->requested)
     {
         if (requests->count == BUSTER_TIER1_SELECT_BATCH)
         {
@@ -576,8 +578,8 @@ struct Tier1SelectForest
     const uint32_t* uses;
     const uint32_t* costs;
     // Each node's last memory barrier before it, plus one (0 for none): a store, a call or a volatile access, which a
-    // load isn't folded past (tier1_select_load_folds). The IR has no atomic access of its own: C's atomic operations
-    // reach it as calls of the unit's leaves.
+    // load isn't folded past (tier1_select_load_folds; tier1_select_barriers). The IR has no atomic access of its own:
+    // C's atomic operations reach it as calls of the unit's leaves.
     const uint32_t* barriers;
 };
 
@@ -585,6 +587,47 @@ static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
 {
     const uint32_t op = function->op[node];
     return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+}
+
+// Each node's barriers entry (Tier1SelectForest.barriers), a running maximum of the barriers' positions plus one: the
+// scalar twin of tier1_select_barriers. A pass of its own, apart from the plan's pass over the nodes, where the store
+// would make the operands' walk reload the function's columns.
+static void tier1_select_barriers_scalar(const IrFunction* function, uint32_t count, uint32_t* barriers)
+{
+    uint32_t barrier = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        barriers[node] = barrier;
+        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
+    }
+}
+
+// The same, 16 nodes at a time: their kinds and flags compared at once, each barrier's lane its position plus one, the
+// running maximum by four shifts of the lanes and the vectors' before, and each node's entry its lane before's. The
+// columns are read, and the entries written, with masked loads and stores.
+static void tier1_select_barriers(const IrFunction* function, uint32_t count, uint32_t* barriers)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i lanes = _mm512_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+    __m512i carry = zero;
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        const uint32_t left = count - first;
+        const __mmask16 active = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i op = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->op + first));
+        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, function->flags + first));
+        const __mmask16 volatile_load = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_VOLATILE));
+        const __mmask16 barrier = (_mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL)) |
+                                   _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CALL_INDIRECT)) | volatile_load) & active;
+        __m512i at = _mm512_maskz_add_epi32(barrier, lanes, _mm512_set1_epi32((int)first));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 15));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 14));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 12));
+        at = _mm512_max_epu32(at, _mm512_alignr_epi32(at, zero, 8));
+        at = _mm512_max_epu32(at, carry);
+        _mm512_mask_storeu_epi32(barriers + first, active, _mm512_alignr_epi32(at, carry, 15));
+        carry = _mm512_permutexvar_epi32(_mm512_set1_epi32(15), at);
+    }
 }
 
 static uint32_t tier1_select_width(uint32_t type)
@@ -1131,7 +1174,6 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
     bool parameter_prefix = true;
-    uint32_t barrier = 0;
     // Labels (whose symbols the frame and the emitter would have to define), by-value aggregates' ABI records and a
     // variadic definition's incoming frame (#131) aren't selected yet.
     if (error == TIER1_SELECT_OK && (function->label_count != 0 || function->parameter_passed != 0 || function->variadic))
@@ -1157,8 +1199,6 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
         parameter_prefix &= op == IR_PARAM;
-        barriers[node] = barrier;
-        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
         effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         for (uint32_t p = 0; error == TIER1_SELECT_OK && p < operand_count; p += 1)
@@ -1181,6 +1221,14 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         {
             failed_node = node;
         }
+    }
+    if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
+    {
+        tier1_select_barriers(function, count, barriers);
+    }
+    else if (error == TIER1_SELECT_OK)
+    {
+        tier1_select_barriers_scalar(function, count, barriers);
     }
     if (error == TIER1_SELECT_OK)
     {
