@@ -3154,9 +3154,10 @@ static __attribute__((noinline)) void check_lower_quad_conversion(CheckLowerWrit
 
 // `destination op= value` (check_lower_complex_update) where the calculation's type is __float128, the value's address and
 // the destination's in temporaries `locals` (the value's in the low 32 bits): the destination read in the calculation's
-// type (a real one's value converted), the result computed (check_lower_quad_compute) and stored back: copied into a
-// __float128 destination, whose address is the expression's value, or converted to a real one's type and stored, which
-// STORE leaves.
+// type (a real one's value converted, a _BitInt's past 128 bits from its address), the result computed
+// (check_lower_quad_compute) and stored back: copied into a __float128 destination, whose address is the expression's
+// value, and so into a _BitInt one past 128 bits once converted into a frame object of its own; or converted to a real
+// one's type and stored, which STORE leaves.
 static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node, uint64_t locals)
 {
     const CheckProgram* program = writer->program;
@@ -3168,12 +3169,17 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     const TypeId stored = stream->values[graph->operand0[node]].type;
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const bool stored_quad = check_lower_quad(writer, stored);
+    const CheckLowerLimbs stored_limbs = check_lower_limbs(writer, stored);
     const uint32_t value = (uint32_t)locals;
     const uint32_t destination = (uint32_t)(locals >> 32);
     const uint32_t current = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-    if (!stored_quad)
+    if (stored_limbs.count != 0)
+    {
+        check_lower_limb_conversion(writer, stored, calculated);
+    }
+    else if (!stored_quad)
     {
         check_lower_emit(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, stored), 0);
         check_lower_bit_int_extend(writer, stored, false, false);
@@ -3187,6 +3193,12 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     if (stored_quad)
     {
         check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    }
+    else if (stored_limbs.count != 0)
+    {
+        check_lower_limb_conversion(writer, calculated, stored);
+        check_lower_copy(writer, 8 * (uint64_t)stored_limbs.count, false, false);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     }
     else
@@ -3883,6 +3895,34 @@ static void check_lower_limb_update_emit(CheckLowerWriter* writer, uint32_t node
         check_lower_limb_conversion(writer, calculated, stored);
         check_lower_emit(writer, BUSTER_TYPED_STORE, check_lower_class(writer, stored), 0);
     }
+}
+
+// `destination op= value` where the destination is a _BitInt past 128 bits and the calculation's type a real floating one
+// (check_lower_complex_update), the value, of its class, and the destination's address in temporaries `locals` (the
+// value's in the low 32 bits): the destination converted to the calculation's type (check_lower_limb_conversion), the
+// result computed in its class, then converted back into a frame object of its own and copied into the destination,
+// whose address is the expression's value. Only a sum, a difference, a product and a quotient take a floating value.
+static void check_lower_limb_scalar_update_emit(CheckLowerWriter* writer, uint32_t node, uint64_t locals)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeId stored = stream->values[graph->operand0[node]].type;
+    const TypeId calculated = stream->conversions[node].operands[0].type;
+    const uint8_t class = check_lower_value_class(writer, calculated);
+    const uint32_t value = (uint32_t)locals;
+    const uint32_t destination = (uint32_t)(locals >> 32);
+    const uint32_t result = check_lower_temporary(writer, class);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    check_lower_limb_conversion(writer, stored, calculated);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, value);
+    check_lower_emit(writer, check_lower_binary(graph->ops[node]), class, 0);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, result);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, result);
+    check_lower_limb_conversion(writer, calculated, stored);
+    check_lower_copy(writer, 8 * (uint64_t)check_lower_limbs(writer, stored).count, false, false);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5142,16 +5182,19 @@ static TypeId check_lower_complex_target(const CheckLowerWriter* writer, TypeId 
     return check_lower_complex(writer, own) || !check_lower_complex(writer, converted) ? converted : check_lower_complex_element(writer->program->types, converted);
 }
 
-// `destination op= value` where either is complex (check_lower_complex_update_emit, once the destination's address and
-// the value are evaluated): of a sum, a difference, a product or a quotient.
+// `destination op= value` where either is an aggregate (check_lower_complex_update_emit, check_lower_quad_update_emit,
+// check_lower_limb_update_emit, check_lower_complex_parts_update_emit, once the destination's address and the value are
+// evaluated): of a sum, a difference, a product or a quotient; or where the destination is a _BitInt past 128 bits and
+// the calculation's type a real floating one (check_lower_limb_scalar_update_emit).
 static void check_lower_complex_update(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckOp op = graph->ops[node];
     const TypeId calculated = program->stream->conversions[node].operands[0].type;
-    // A _BitInt's past 128 bits takes each one, and an increment's has no value (check_lower_limb_update_emit).
-    const bool limbs = check_lower_limb_value(writer, calculated);
+    // A _BitInt's past 128 bits takes each one, and an increment's has no value (check_lower_limb_update_emit); so does a
+    // real floating calculation's type, whose value is of its class, into such a destination.
+    const bool limbs = check_lower_limb_value(writer, calculated) || !check_lower_aggregate(writer, calculated);
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
     if (!limbs && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN && op != CHECK_OP_DIVIDE_ASSIGN)
     {
@@ -5306,6 +5349,10 @@ static __attribute__((noinline)) void check_lower_complex_task(CheckLowerWriter*
     else if (task.address && check_lower_complex_parts(writer, type))
     {
         check_lower_complex_parts_update_emit(writer, task.node, task.value);
+    }
+    else if (task.address && !check_lower_aggregate(writer, type))
+    {
+        check_lower_limb_scalar_update_emit(writer, task.node, task.value);
     }
     else if (task.address)
     {
