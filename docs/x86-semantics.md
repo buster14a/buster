@@ -755,6 +755,34 @@ clang's code. Main is `9bb5060e` and the head `cff7bc98`, each built by
 round ([the record](https://github.com/buster14a/buster-performance/tree/a74e2a6ee49e31ea9f948f597ecefc9c02f3e835/docs/measurements/x86-semantics-221-2026-10-28)). The final head (`ecb3fcfd`) takes the scalar
 twin's x87 and vzeroupper resources from a table, measured below as a variant.
 
+**The VEX and EVEX coverage (#760)**, on the 9700X: main `5c7a0bd7` against
+`62c638ac`, five rounds in an order alternating by round
+([the record](https://github.com/buster14a/buster-performance/blob/ae896f8bedeca1419e8d384e26a221326d255396/docs/measurements/x86-semantics-760-2026-10-29/README.md)):
+
+- the records take 50,384 bytes (3,149 of 16: the 3,148 covered forms' and the
+  conservative one), and `x86_semantics_initialize` 97,285 cycles (17.5 µs)
+  against 45,750 (8.3 µs), the operands' part of a record made once per
+  distinct shape (328);
+- the choice is unchanged: 3.33 cycles per request;
+- the AVX-512 effects loop takes 6.19 cycles per record on -O0's shape and
+  6.23 on -O2's, against 5.45 and 5.50, at 25.50 instructions against 23.63,
+  back to back and after 200 ms of its twin alike: it takes a `vvvv` operand as
+  a lane's third role, which every record pays for, rather than sending its
+  record to the twin. The twin takes 72.43 cycles against 46.86, walking three
+  roles and checking the opmask roles, `/is4` operands, VEX gathers and merges
+  for every record, and the opmask column (`x86_instructions_effects_opmasks`)
+  8.89. The default compile runs neither: their consumers, the Tier 1
+  scheduler and the unwind analyzer, are opt-in. The benchmark's records are
+  legacy forms almost all, so this is their cost, not vector code's;
+- #180's table takes 795 cycles to build, against 707, classifying 3,463
+  forms from 1,675;
+- `-c` of the frozen `sqlite3.c` writes the same object, with 281,969
+  instructions more (+0.021%; `tiny.c`'s two functions take 314,928 more: the
+  initialization's fixed cost) and 0.58% more cycles (rounds +0.23% to
+  +0.70%), which no placement comparison attributes.
+
+The rest of this section is #761's: main `9bb5060e` against `cff7bc98`.
+
 **Tables:**
 
 - the records take 11,408 bytes (713 of 16: the 712 covered forms' and the
