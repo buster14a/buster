@@ -92,6 +92,7 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
                     }
                     if (suppressed != 0)
                     {
+                        check_input_rare_claim(reader, suppressed + token);
                         suppressed[token] |= suppress;
                     }
                 }
@@ -138,6 +139,11 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
         {
             __m512i bytes = _mm512_maskz_loadu_epi8(present, suppressed + begin);
             bytes = _mm512_mask_mov_epi8(bytes, selected, _mm512_or_si512(bytes, _mm512_set1_epi8((char)suppress)));
+            // The claim's store is of a byte this reader writes: lanes share a block at their bodies' boundary.
+            if (selected != 0)
+            {
+                check_input_rare_claim(reader, suppressed + begin + (uint32_t)__builtin_ctzll(selected));
+            }
             _mm512_mask_storeu_epi8(suppressed + begin, selected, bytes);
             uint32_t high = (uint32_t)_mm512_reduce_or_epi32(_mm512_maskz_mov_epi8(active, _mm512_xor_si512(bytes, _mm512_set1_epi8(-1))));
             high |= high >> 16;
@@ -184,6 +190,7 @@ static void check_input_warning_range(CheckInputReader* reader, uint32_t first, 
                     }
                     if (reader->warning_suppressed != 0)
                     {
+                        check_input_rare_claim(reader, &reader->warning_suppressed[token]);
                         reader->warning_suppressed[token] |= (uint8_t)suppress;
                     }
                 }
