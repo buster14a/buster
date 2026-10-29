@@ -2943,13 +2943,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",
         "floating-builtin-runtime-classification", clang);
+    // Which of fpclassify's selectors run for each category, and how often, and its argument's effect: mark counts each
+    // selector's evaluations in a 3-bit field of its own (the argument's seen++ in the lowest), not their order, since
+    // clang evaluates the normal and subnormal ones in an order its own build decides (check_lower_floating_prepare).
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}",
         "fpclassify-conditional-selector-effects", clang);
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
         "fpclassify-known-category-effects", clang);
     // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the
