@@ -665,8 +665,9 @@ static ForeignLinkResult foreign_link_names(ForeignLink* output, const Foreign* 
 {
     ForeignLinkResult result = { 0 };
     const ForeignNames* names = &foreign->names;
-    for (uint32_t name = 0; result.error == FOREIGN_LINK_ERROR_NONE && name < names->count; name += 1)
+    for (uint32_t at = 0; result.error == FOREIGN_LINK_ERROR_NONE && at < names->count; at += 1)
     {
+        const uint32_t name = (uint32_t)names->order[at];
         const ForeignLinkName decision = foreign_link_decide_name(output, foreign, required, bounds, kind, defer_undefined, name);
         result.error = decision.error;
         if (result.error == FOREIGN_LINK_ERROR_NONE && decision.kept)
@@ -1023,17 +1024,22 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
     output->copies = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, marked) : 0;
     result.error = marked != 0 && (copies == 0 || output->copies == 0) ? FOREIGN_LINK_ERROR_MEMORY : result.error;
     uint32_t copy_count = 0;
-    // The copied imports' names, 16 names' symbols at a time against the bitset: each one's copy, by library and address.
+    // The copied imports in canonical input order, 16 names' symbols at a time against the bitset: each one's copy,
+    // by library and address. Their first occurrence sets both the copy atom order and its representative symbol.
     const ForeignNames* names = &foreign->names;
     for (uint32_t first = 0; result.error == FOREIGN_LINK_ERROR_NONE && marked != 0 && first < names->count; first += 16)
     {
-        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, names->count - first < 16 ? names->count - first : 16);
-        const __m512i symbols = _mm512_maskz_loadu_epi32(lanes, output->names + first);
+        const uint32_t count = names->count - first < 16 ? names->count - first : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count);
+        const __m512i ordered = foreign_order_digits(names->order + first, count, 0);
+        const __m512i symbols = foreign_order_values(names->order + first, count, output->names);
         const __m512i bits = _mm512_srlv_epi32(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, _mm512_srli_epi32(symbols, 5), copied, 4),
                                                _mm512_and_si512(symbols, _mm512_set1_epi32(31)));
+        uint32_t name_ids[16];
+        _mm512_storeu_si512(name_ids, ordered);
         for (uint32_t hits = _mm512_mask_test_epi32_mask(lanes, bits, _mm512_set1_epi32(1)); result.error == FOREIGN_LINK_ERROR_NONE && hits != 0; hits &= hits - 1)
         {
-            const uint32_t name = first + (uint32_t)__builtin_ctz(hits);
+            const uint32_t name = name_ids[(uint32_t)__builtin_ctz(hits)];
             const SymbolId symbol = output->names[name];
             const uint32_t library = names->library[name];
             const ImportExports* exports = &foreign->libraries[library].library.exports;
@@ -1211,8 +1217,8 @@ static String8 foreign_link_bound_suffix(const uint8_t* bytes, uint32_t length, 
     return foreign_link_c_identifier((const uint8_t*)result.pointer, result.length) ? result : (String8){ 0 };
 }
 
-// The undefined names (64 resolutions at a time) with one of the prefixes and a C identifier after it: how many, and
-// with the plan's columns pushed, each one, its group and its prefix, the groups gathered.
+// Count undefined candidates 64 resolutions at a time without allocating. Only when candidates exist, gather their
+// groups in canonical input order: those groups later allocate atoms, so hash IDs must not choose their positions.
 static uint32_t foreign_link_bounds_names(const Foreign* foreign, ForeignLinkBounds* plan)
 {
     const ForeignNames* names = &foreign->names;
@@ -1229,21 +1235,29 @@ static uint32_t foreign_link_bounds_names(const Foreign* foreign, ForeignLinkBou
             const uint32_t name = first + (uint32_t)__builtin_ctzll(undefined);
             bool stop = false;
             const String8 suffix = foreign_link_bound_suffix(names->bytes[name], names->length[name], &stop);
-            if (suffix.length != 0 && plan->names != 0)
-            {
-                uint32_t group = 0;
-                while (group < plan->group_count && !(plan->groups[group].length == suffix.length && memcmp(plan->groups[group].pointer, suffix.pointer, suffix.length) == 0))
-                {
-                    group += 1;
-                }
-                plan->groups[group] = suffix;
-                plan->group_count += group == plan->group_count ? 1 : 0;
-                plan->names[plan->name_count] = name;
-                plan->name_groups[plan->name_count] = group;
-                plan->stops[plan->name_count] = stop ? 1 : 0;
-                plan->name_count += 1;
-            }
             result += suffix.length != 0 ? 1 : 0;
+        }
+    }
+    for (uint32_t at = 0; plan->names != 0 && at < names->count; at += 1)
+    {
+        const uint32_t name = (uint32_t)names->order[at];
+        const uint8_t resolution = names->resolution[name];
+        const bool undefined = resolution == FOREIGN_RESOLUTION_UNDEFINED || resolution == FOREIGN_RESOLUTION_WEAK_UNDEFINED;
+        bool stop = false;
+        const String8 suffix = undefined ? foreign_link_bound_suffix(names->bytes[name], names->length[name], &stop) : (String8){ 0 };
+        if (suffix.length != 0)
+        {
+            uint32_t group = 0;
+            while (group < plan->group_count && !(plan->groups[group].length == suffix.length && memcmp(plan->groups[group].pointer, suffix.pointer, suffix.length) == 0))
+            {
+                group += 1;
+            }
+            plan->groups[group] = suffix;
+            plan->group_count += group == plan->group_count ? 1 : 0;
+            plan->names[plan->name_count] = name;
+            plan->name_groups[plan->name_count] = group;
+            plan->stops[plan->name_count] = stop ? 1 : 0;
+            plan->name_count += 1;
         }
     }
     return result;
@@ -1667,8 +1681,9 @@ static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const F
             }
         }
         uint32_t count = 0;
-        for (uint32_t n = 0; n < foreign->names.count; n += 1)
+        for (uint32_t at = 0; at < foreign->names.count; at += 1)
         {
+            const uint32_t n = (uint32_t)foreign->names.order[at];
             const SymbolId symbol = output->names[n];
             const bool defined = symbol != 0 && (symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE);
             const uint8_t visibility = symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY;
@@ -2018,8 +2033,9 @@ static ForeignLinkError foreign_link_shared_finish(ForeignLink* output, const Fo
     const LinkSymbols* symbols = &output->link.symbols;
     SymbolId* exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, (uint64_t)foreign->names.count + 1);
     uint32_t count = 0;
-    for (uint32_t n = 0; exports != 0 && n < foreign->names.count; n += 1)
+    for (uint32_t at = 0; exports != 0 && at < foreign->names.count; at += 1)
     {
+        const uint32_t n = (uint32_t)foreign->names.order[at];
         const SymbolId symbol = output->names[n];
         const uint8_t flags = symbols->flags[symbol];
         const uint8_t visibility = flags & BUSTER_LINK_SYMBOL_VISIBILITY;

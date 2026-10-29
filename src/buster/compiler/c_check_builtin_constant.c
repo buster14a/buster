@@ -52,6 +52,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(reader->types, &action, &checked, 1);
@@ -75,6 +76,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
         };
         CheckBuiltinMathResult checked;
         check_builtin_math(reader->types, &action, &checked, 1);
@@ -87,6 +89,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .id = builtin, .arguments = arguments, .argument_count = count, .node = closing,
             .tag_completions = reader->tag_completions, .tag_completion_count = reader->types->tags.capacity,
             .source_position = closing + 1, .extensions = extensions,
+            .const_values = &reader->output->const_values, .constant_evaluated = true,
             .nan_payload = evidence.nan_payload, .nan_payload_length = evidence.nan_payload_length, .nan_payload_known = evidence.nan_payload_known,
         };
         CheckBuiltinFloatResult checked;

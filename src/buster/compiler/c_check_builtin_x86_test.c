@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 209 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 217 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -228,11 +228,17 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_inserti32x4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 627 },
     { "__builtin_ia32_kshiftlidi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 823 },
     { "__builtin_ia32_kshiftlihi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 821 },
+    { "__builtin_ia32_palignr128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 840 },
     { "__builtin_ia32_prold512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 787 },
+    { "__builtin_ia32_pshufd", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 751 },
+    { "__builtin_ia32_pshufhw", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 754 },
+    { "__builtin_ia32_pshuflw", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 757 },
+    { "__builtin_ia32_psrldqi128_byteshift", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 817 },
     { "__builtin_ia32_scatterdiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 416 },
     { "__builtin_ia32_scatterdiv8di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 415 },
     { "__builtin_ia32_scattersiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 414 },
     { "__builtin_ia32_shuf_i32x4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 853 },
+    { "__builtin_ia32_shufps", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 856 },
     { "__builtin_ia32_ucmpb128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 652 },
     { "__builtin_ia32_ucmpb256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 656 },
     { "__builtin_ia32_ucmpd128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 654 },
@@ -241,7 +247,9 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_ucmpw512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 661 },
     { "__builtin_ia32_vec_ext_v16qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 692 },
     { "__builtin_ia32_vec_ext_v4si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 596 },
+    { "__builtin_ia32_vec_ext_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 608 },
     { "__builtin_ia32_vec_set_v4si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 618 },
+    { "__builtin_ia32_vec_set_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 672 },
 };
 
 static bool check_builtin_x86_test_expect(CheckBuiltinX86Test* test, bool condition, const char* description, uint32_t item)
@@ -306,7 +314,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 209, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 217, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];
@@ -602,77 +610,38 @@ static void check_builtin_x86_test_pages(CheckBuiltinX86Test* test, const TypeTa
 // independent invocation without that blanket suppression, otherwise the reachability diagnostic would vanish.
 static bool check_builtin_x86_test_clang_one(const char* clang, const char* path, uint32_t policy, bool* rejected, char diagnostics[4096])
 {
-    int descriptors[2];
-    bool result = pipe(descriptors) == 0;
-    if (result)
+    char* arguments[12];
+    uint32_t count = 0;
+    arguments[count++] = (char*)clang;
+    arguments[count++] = "-fsyntax-only";
+    arguments[count++] = "-std=gnu17";
+    arguments[count++] = "-fno-caret-diagnostics";
+    arguments[count++] = "-fno-color-diagnostics";
+    arguments[count++] = "-ferror-limit=0";
+    if (policy != 0)
     {
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            alarm(10);
-            close(descriptors[0]);
-            const int discarded = open("/dev/null", O_WRONLY);
-            if (discarded < 0 || dup2(discarded, 1) < 0 || dup2(descriptors[1], 2) < 0)
-            {
-                _exit(125);
-            }
-            close(discarded);
-            close(descriptors[1]);
-            char* arguments[12];
-            uint32_t count = 0;
-            arguments[count++] = (char*)clang;
-            arguments[count++] = "-fsyntax-only";
-            arguments[count++] = "-std=gnu17";
-            arguments[count++] = "-fno-caret-diagnostics";
-            arguments[count++] = "-fno-color-diagnostics";
-            arguments[count++] = "-ferror-limit=0";
-            if (policy != 0)
-            {
-                arguments[count++] = policy == 1 ? "-Wno-error=argument-outside-range" : "-Wno-argument-outside-range";
-            }
-            arguments[count++] = (char*)path;
-            arguments[count] = NULL;
-            execvp(clang, arguments);
-            _exit(127);
-        }
-        close(descriptors[1]);
-        size_t kept = 0;
-        char buffer[1024];
-        ssize_t bytes;
-        while (true)
-        {
-            bytes = read(descriptors[0], buffer, sizeof(buffer));
-            if (bytes > 0)
-            {
-                const size_t copied = (size_t)bytes < 4095 - kept ? (size_t)bytes : 4095 - kept;
-                memcpy(diagnostics + kept, buffer, copied);
-                kept += copied;
-            }
-            else if (bytes >= 0 || errno != EINTR)
-            {
-                break;
-            }
-        }
-        diagnostics[kept] = 0;
-        close(descriptors[0]);
-        int status = 0;
-        pid_t waited = -1;
-        if (child > 0)
-        {
-            do
-            {
-                waited = waitpid(child, &status, 0);
-            }
-            while (waited < 0 && errno == EINTR);
-        }
-        result = child > 0 && bytes == 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) <= 1;
-        *rejected = result && WEXITSTATUS(status) != 0;
+        arguments[count++] = policy == 1 ? "-Wno-error=argument-outside-range" : "-Wno-argument-outside-range";
     }
-    return result;
+    arguments[count++] = (char*)path;
+    arguments[count] = NULL;
+    OracleRun run = {
+        .purpose = "checker x86 range diagnostic oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, diagnostics, 4096);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
+    return ready;
 }
 
 #define BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef char C16 __attribute__((vector_size(16))); typedef double D2 __attribute__((vector_size(16))); typedef double D8 __attribute__((vector_size(64))); typedef float F16 __attribute__((vector_size(64))); typedef int I8 __attribute__((vector_size(32))); typedef int I16 __attribute__((vector_size(64)));\n"
 #define BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "__attribute__((target(\"avx512f,avx512bw,avx512vl\"))) "
+// The 128-bit vectors of #148's SSE builtins, then the target.
+#define BUSTER_CHECK_BUILTIN_X86_TEST_SSE BUSTER_CHECK_BUILTIN_X86_TEST_TYPES \
+    "typedef int I4 __attribute__((vector_size(16))); typedef short S8 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16)));\n" \
+    BUSTER_CHECK_BUILTIN_X86_TEST_TARGET
 
 static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* clang)
 {
@@ -716,6 +685,24 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
         // #619's: _mm_cmp_epu32_mask's builtin, which c_check_program_batch.c reaches through _mm_cmplt_epu32_mask.
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef int I4 __attribute__((vector_size(16)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned char f(I4 a){return __builtin_ia32_ucmpd128_mask(a,a,1,255);}\n", 0, false, NULL, NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef int I4 __attribute__((vector_size(16)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned char f(I4 a){return __builtin_ia32_ucmpd128_mask(a,a,8,255);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
+        // #148's SSE shuffles, byte shift, align, extract and insert, which stb_image, dr_libs and minimp3 call: each at
+        // its range's top and one past it.
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "I4 f(I4 a){return __builtin_ia32_pshufd(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "I4 f(I4 a){return __builtin_ia32_pshufd(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a){return __builtin_ia32_pshufhw(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a){return __builtin_ia32_pshufhw(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a){return __builtin_ia32_pshuflw(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a){return __builtin_ia32_pshuflw(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "F4 f(F4 a,F4 b){return __builtin_ia32_shufps(a,b,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "F4 f(F4 a,F4 b){return __builtin_ia32_shufps(a,b,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C16 f(C16 a){return __builtin_ia32_psrldqi128_byteshift(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C16 f(C16 a){return __builtin_ia32_psrldqi128_byteshift(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C16 f(C16 a,C16 b){return __builtin_ia32_palignr128(a,b,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C16 f(C16 a,C16 b){return __builtin_ia32_palignr128(a,b,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "short f(S8 a){return __builtin_ia32_vec_ext_v8hi(a,7);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "short f(S8 a){return __builtin_ia32_vec_ext_v8hi(a,8);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,short v){return __builtin_ia32_vec_set_v8hi(a,v,7);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,short v){return __builtin_ia32_vec_set_v8hi(a,v,8);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
     };
     char directory[] = "/tmp/buster-check-x86-XXXXXX";
     const bool ready = mkdtemp(directory) != NULL;
@@ -743,11 +730,13 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
     }
 }
 
+#undef BUSTER_CHECK_BUILTIN_X86_TEST_SSE
 #undef BUSTER_CHECK_BUILTIN_X86_TEST_TYPES
 #undef BUSTER_CHECK_BUILTIN_X86_TEST_TARGET
 
 static int run_check_builtin_x86_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinX86Test test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -781,5 +770,7 @@ static int run_check_builtin_x86_tests(int argc, char** argv)
         check_builtin_x86_test_clang(&test, clang);
     }
     printf("test-check-builtins-x86: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-x86");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }
