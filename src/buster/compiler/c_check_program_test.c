@@ -848,6 +848,10 @@ static PredefinesOptions check_test_program_predefines(void)
     return (PredefinesOptions){ .march = check_test_program_march + strlen("-march=") };
 }
 
+// Whether a program's preprocessing searches the system's headers, as the oracle's compile does: off, or while a
+// section's programs include them (the intrinsics' headers, check_test_program_x86's).
+static bool check_test_program_includes = false;
+
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
 // oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
 // clang's default (-ffp-contract=on) does even at -O0 where the target has FMA (x86-64-v4's vector programs).
@@ -1465,7 +1469,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
     static Parser parser;
     const PPOptions pp_options = {
         .language = { .standard = 2017, .gnu = true },
-        .no_standard_includes = true,
+        .no_standard_includes = !check_test_program_includes,
         .predefines.char_unsigned = char_unsigned,
         .target = target != NULL ? *target : (X86Target){ 0 },
     };
@@ -1522,6 +1526,17 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
             check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
+        }
+        // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
+        // (MMX's, whose builtins no row takes) are no part of it.
+        if (ready && check_test_program_includes)
+        {
+            CheckProgramSelection selected;
+            ready = check_program_select(&selected, &program, &data, path == 0, &output, &scratch);
+            snprintf(description, sizeof(description), "%s: %s definitions the roots reach are selected", name, path == 0 ? "scalar" : "vector");
+            check_test_expect(test, ready, description);
+            program = selected.program;
+            data = selected.data;
         }
         if (!ready)
         {
