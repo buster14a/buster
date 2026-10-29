@@ -209,12 +209,13 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             // __builtin_convertvector with floating elements, each pair at each width it has: from 32- and 64-bit integers
             // of random bits, signed and unsigned, and from a shuffle's first elements as _mm_cvtepi32_pd writes it; to
             // them, truncated, from modest values in their range; between floats and doubles, from half-precision and bf16
-            // elements to floats and from floats to half-precision ones, of random bits; and within a format.
+            // elements to floats and from floats to half-precision ones, of random bits; and within a format, bf16's at each
+            // width too, of operands with effects.
             "vector-floating-conversions",
             BUSTER_CHECK_TEST_FLOATING_TYPES
             "typedef __fp16 v8hp __attribute__((vector_size(16)));typedef __fp16 v16hp __attribute__((vector_size(32)));"
             "typedef _Float16 v8hf __attribute__((vector_size(16)));typedef __bf16 v8bf __attribute__((vector_size(16)));"
-            "typedef __bf16 v16bf __attribute__((vector_size(32)));\n"
+            "typedef __bf16 v16bf __attribute__((vector_size(32)));typedef __bf16 v32bf __attribute__((vector_size(64)));\n"
             "int tested(int n){unsigned h=2166136261u;v4ss i4;v8ss i8;v16ss i16;v4su u4;v8su u8;v16su u16;v2ds q2;v4ds q4;v8ds q8;v2du w2;v4du w4;v8du w8;"
             "fill(&i4,16,n);fill(&i8,32,n+1);fill(&i16,64,n+2);fill(&u4,16,n+3);fill(&u8,32,n+4);fill(&u16,64,n+5);"
             "fill(&q2,16,n+6);fill(&q4,32,n+7);fill(&q8,64,n+8);fill(&w2,16,n+9);fill(&w4,32,n+10);fill(&w8,64,n+11);"
@@ -250,6 +251,8 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "v8hp j5=__builtin_convertvector(r8,v8hp);v16hp j6=__builtin_convertvector(r16,v16hp);v8sf j7=__builtin_convertvector(g8,v8sf);"
             "v16sf j8=__builtin_convertvector(g16,v16sf);v4sf j9=__builtin_convertvector(__builtin_shufflevector(g8,g8,0,1,2,3),v4sf);"
             "v8hp j10=__builtin_convertvector(k8,v8hp);FOLD(j1);FOLD(j2);FOLD(j3);FOLD(j4);FOLD(j5);FOLD(j6);FOLD(j7);FOLD(j8);FOLD(j9);FOLD(j10);"
+            "v32bf g32;fill(&g32,64,n+22);int calls=0;v8bf l1=__builtin_convertvector((calls++,g8),v8bf);"
+            "v16bf l2=__builtin_convertvector((calls+=2,g16),v16bf);v32bf l3=__builtin_convertvector((calls+=4,g32),v32bf);FOLD(l1);FOLD(l2);FOLD(l3);FOLD(calls);"
             "return (int)h;}",
         },
         {
