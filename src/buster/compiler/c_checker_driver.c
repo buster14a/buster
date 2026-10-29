@@ -2311,6 +2311,13 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes.budget = &worker_budget;
     bool invalid_lanes = false;
+    // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
+    // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
+    const char* short_enums = NULL;
+    const char* packed_bare = NULL;
+    const char* packed_value = NULL;
+    const char* invalid_pack = NULL;
+    bool has_pack_value = false;
     for (int i = 0; filtered != 0 && inputs != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -2321,6 +2328,41 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         if (!valued)
         {
             const char* argument = arguments[i];
+            if (strcmp(argument, "-fshort-enums") == 0 || strcmp(argument, "-fno-short-enums") == 0)
+            {
+                short_enums = strcmp(argument, "-fshort-enums") == 0 ? argument : NULL;
+            }
+            else if (strcmp(argument, "-fpack-struct") == 0 || strcmp(argument, "-fno-pack-struct") == 0)
+            {
+                packed_bare = strcmp(argument, "-fpack-struct") == 0 ? argument : NULL;
+            }
+            else if (strncmp(argument, "-fpack-struct=", sizeof("-fpack-struct=") - 1) == 0)
+            {
+                const char* digits = argument + sizeof("-fpack-struct=") - 1;
+                uint32_t base = 10;
+                if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X' || digits[1] == 'b' || digits[1] == 'B'))
+                {
+                    base = digits[1] == 'x' || digits[1] == 'X' ? 16 : 2;
+                    digits += 2;
+                }
+                else if (digits[0] == '0')
+                {
+                    base = 8;
+                }
+                bool valid = *digits != 0;
+                uint64_t value = 0;
+                for (const char* digit = digits; *digit != 0; digit += 1)
+                {
+                    const uint32_t number = *digit >= '0' && *digit <= '9' ? (uint32_t)(*digit - '0') :
+                                            *digit >= 'a' && *digit <= 'f' ? (uint32_t)(*digit - 'a' + 10) :
+                                            *digit >= 'A' && *digit <= 'F' ? (uint32_t)(*digit - 'A' + 10) : UINT32_MAX;
+                    valid &= number < base && value <= (UINT32_MAX - (uint64_t)number) / base;
+                    value = valid ? value * base + number : 0;
+                }
+                has_pack_value = true;
+                invalid_pack = valid ? NULL : argument;
+                packed_value = value == 0 && valid ? NULL : argument;
+            }
             if (strcmp(argument, "-Wreturn-type") == 0 || strcmp(argument, "-Werror=return-type") == 0)
             {
                 return_warning = true;
@@ -2521,6 +2563,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+    }
+    else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
+    {
+        const char* unsupported = invalid_pack != NULL ? invalid_pack : short_enums != NULL ? short_enums : has_pack_value ? packed_value : packed_bare;
+        fprintf(stderr, "error: unsupported option '%s' (the checker does not implement its ABI layout)\n", unsupported);
     }
     else if (!check_input_target_supported(&options))
     {
