@@ -193,8 +193,12 @@ The walk alone, from nothing (`benchmark-files` by 8 lanes), takes 1.98 ms for
 Lua's roots (242 files, of which 47 no unit entered, 8.5% of their tokens),
 3.27 ms for musl's (1,221 files, all entered) and 20.19 ms for synth's. A
 cache that the lanes fill as they run, with a lock for its writers (#776's
-other way), could save at most what Lua's lanes did, 1.8 ms of 29.7, less its
-waits and its shared memory's traffic.
+other way), wasn't built, and these runs don't measure it: it would have
+neither the walk before the units, nor the lanes' copies, nor the walk's
+tokens read long out of the caches, and would pay for its lock's waits and
+its shared memory's traffic instead. The 1.8 ms Lua's lanes saved is what the
+walk's prepared files saved them net of those copies and cold reads, not a
+bound on what such a cache could save.
 
 ### Diagnostics
 
