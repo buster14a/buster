@@ -2136,10 +2136,11 @@ static bool check_program_text_equal(String8 a, String8 b)
 // them: the first that applies, on the definition or a declaration before it, of a string predefines_target_attribute
 // finds a version or the default (clang drops one after the definition where none came before, with a warning); and a
 // function of several versions where another one's string differs, or it has target_clones. Each string resolves once
-// (predefines_function_target), against the unit's -march=native host features, read once. The keys sort by object with
-// the radix kernel's twins (c_bindings_sort), and a body finds its object's by a binary search: the rest is scalar, as a
-// unit holds few of them (main.c's 5,344 among its 23.5 MB of preprocessed text, the clang headers' intrinsics), and none
-// in the usual unit, which this leaves at once. Returns false if a column had no room.
+// (predefines_function_target), against the unit's -march=native host features, read once, and an attribute of the same
+// string as the one before is taken as it was. The keys sort by object with the radix kernel's twins (c_bindings_sort),
+// and a body in their objects' range finds its object's by a binary search: the rest is scalar, as a unit holds few of
+// them (main.c's 5,344 among its 23.5 MB of preprocessed text, the clang headers' intrinsics), and none in the usual
+// unit, which this leaves at once. Returns false if a column had no room.
 static bool check_program_targets(CheckProgram* program, const CheckProgramOptions* options, CheckProgramTargetEvents* events, Arena* output, Arena* scratch)
 {
     bool valid = events->room;
@@ -2163,11 +2164,20 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
     PredefinesHost host = { 0 };
     bool host_read = false;
     uint32_t last_target = UINT32_MAX;
+    // The last string read and how predefines_target_attribute takes it: a header's functions share theirs, so most
+    // attributes are the one before.
+    String8 last_text = { 0 };
+    PredefinesTargetAttribute last_kind = PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+    int32_t last_cpu = -1;
+    bool last_read = false;
+    // The keys' objects' range: a body outside it has none, as most of a unit's bodies (main.c's own, after its headers').
+    const uint32_t first_object = count != 0 ? (uint32_t)(keys[0] >> 32) : 0;
+    const uint32_t last_object = count != 0 ? (uint32_t)(keys[count - 1] >> 32) : 0;
     for (uint32_t b = 0; valid && count != 0 && b < program->body_count; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
         // The object's first key: the first whose object isn't below the body's.
-        uint32_t low = 0;
+        uint32_t low = body.object < first_object || body.object > last_object ? count : 0;
         uint32_t high = count;
         while (low < high)
         {
@@ -2186,11 +2196,15 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
                 const CheckInputAttribute* attribute = &attributes->records[i];
-                int32_t attribute_cpu = -1;
-                const PredefinesTargetAttribute attribute_kind =
-                    attribute->ignored || attribute->kind != CHECK_ATTRIBUTE_TARGET ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED :
-                    attribute->text.length >= UINT32_MAX ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED :
-                    predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &attribute_cpu);
+                const bool readable = !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX;
+                if (readable && !(last_read && check_program_text_equal(attribute->text, last_text)))
+                {
+                    last_kind = predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &last_cpu);
+                    last_text = attribute->text;
+                    last_read = true;
+                }
+                const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+                const int32_t attribute_cpu = readable ? last_cpu : -1;
                 versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && !attribute->ignored;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {

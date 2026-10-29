@@ -1571,11 +1571,13 @@ What the lowering covers past scalars (#145's programs):
   `check_program_targets`): the static functions' declarations with a target
   or `target_clones` attribute, found by the static objects' pass (scalar per
   declaration, as the pass is), sorted by object with the radix kernel's twins,
-  and each body's found by a binary search, the attribute that applies being
-  the first on the definition or a declaration before it, as clang merges it.
-  Each string resolves once against the unit's options (`c_predefines.c`'s
-  `predefines_function_target`, [the target guide](x86-target.md)). A unit
-  without one, the usual one, makes no column. A function of several versions
+  and each body's found by a binary search where its object is in their range,
+  the attribute that applies being the first on the definition or a declaration
+  before it, as clang merges it. Each string resolves once against the unit's
+  options (`c_predefines.c`'s `predefines_function_target`, [the target
+  guide](x86-target.md)), and an attribute of the string before it, as a
+  header's functions have, is read as that one was. A unit without one, the
+  usual one, makes no column. A function of several versions
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
