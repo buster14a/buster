@@ -2862,10 +2862,40 @@ static void tier0_define_templates(void)
     }
 }
 
+// Whether the form choice may take inc and dec for add and sub of 1 and -1 (BUSTER_X86_CONTEXT_INC_DEC, which the
+// choice leaves to its caller, #181): where the Zen 5 model's observations of inc and dec (x86_zen5.c's cases), at 32 and
+// 64 bits, Tier 0's widths, cost no more than add's and sub's with an imm8 in latency, throughput and retired macro-ops,
+// each known. tier0_initialize sets it.
+static uint16_t tier0_inc_dec;
+
+static bool tier0_inc_dec_costs_no_more(void)
+{
+    static const uint8_t steps[] = { X86_COST_INC_RM32_REGISTER, X86_COST_DEC_RM32_REGISTER, X86_COST_INC_RM64_REGISTER, X86_COST_DEC_RM64_REGISTER };
+    static const uint8_t originals[] = { X86_COST_ADD_RM32_IMM8_REGISTER, X86_COST_SUB_RM32_IMM8_REGISTER, X86_COST_ADD_RM64_IMM8_REGISTER,
+                                         X86_COST_SUB_RM64_IMM8_REGISTER };
+    bool cheaper = true;
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(steps); s += 1)
+    {
+        // Each step against both originals of its width: inc and dec stand for add and sub alike (of 1 and -1).
+        for (uint32_t o = s & 2; o < (s & 2) + 2; o += 1)
+        {
+            const X86CostCase* step = &x86_zen5_cases[steps[s]];
+            const X86CostCase* original = &x86_zen5_cases[originals[o]];
+            const bool known = step->latency != BUSTER_X86_COST_UNKNOWN && step->throughput != BUSTER_X86_COST_UNKNOWN &&
+                               step->retired_ops != BUSTER_X86_COST_UNKNOWN && original->latency != BUSTER_X86_COST_UNKNOWN &&
+                               original->throughput != BUSTER_X86_COST_UNKNOWN && original->retired_ops != BUSTER_X86_COST_UNKNOWN;
+            cheaper &= known && step->latency <= original->latency && step->throughput <= original->throughput && step->retired_ops <= original->retired_ops;
+        }
+    }
+    return cheaper;
+}
+
 static bool tier0_initialize(void)
 {
-    if (!tier0_initialized)
+    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
+    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
     {
+        tier0_inc_dec = tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0;
         memset(tier0_slot_bases, 0, sizeof(tier0_slot_bases));
         tier0_template_count = 0;
         tier0_builder.valid = true;
@@ -8109,7 +8139,7 @@ static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, 
 static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
 {
     const bool reg = record->mode == BUSTER_X86_REGISTER_DIRECT;
-    uint32_t context = BUSTER_X86_CONTEXT_INC_DEC | live;
+    uint32_t context = tier0_inc_dec | live;
     context |= reg ? BUSTER_X86_CONTEXT_REGISTER : 0;
     context |= reg && record->rm == X86_REGISTER_RAX ? BUSTER_X86_CONTEXT_ACCUMULATOR : 0;
     return (uint16_t)context;
@@ -8642,23 +8672,18 @@ static const uint16_t tier0_operation_legacy_forms[] = {
 };
 
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
-// branch, whose syntax names no implicit register, that has a vector or an opmask operand when it is EVEX (APX's forms
-// of general registers alone are a target's that Tier 0 doesn't take), and none of those whose implicit operands their
-// syntax doesn't name: vzeroupper and vzeroall (every vector register), mulx (rdx), vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0); or one of tier0_operation_legacy_forms.
+// branch, whose syntax names its operands, that has a vector or an opmask operand when it is EVEX (APX's forms of general
+// registers alone are a target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its
+// syntax doesn't name: a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A
+// form the tables don't cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's
+// memory) and the string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
+// x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
-    static const uint16_t implicit[] = {
-        X86_FORM_VZEROUPPER, X86_FORM_VZEROALL, X86_FORM_VMASKMOVDQU_X_X, X86_FORM_VPCMPESTRM_X_XM128_IMM8, X86_FORM_VPCMPESTRI_X_XM128_IMM8,
-        X86_FORM_VPCMPISTRM_X_XM128_IMM8, X86_FORM_VPCMPISTRI_X_XM128_IMM8, X86_FORM_VPCMPESTRMQ_X_XM128_IMM8, X86_FORM_VPCMPESTRIQ_X_XM128_IMM8,
-    };
     bool valid = form < X86_FORM_COUNT;
-    for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(implicit); k += 1)
-    {
-        valid = form != implicit[k];
-    }
     if (valid)
     {
+        const X86Effects* effects = x86_effects(form);
         const X86FormDescription* description = x86_form_description(form);
         const uint8_t syntax = description->syntax;
         const bool explicit = syntax == X86_SYNTAX_RM || syntax == X86_SYNTAX_RM_REG || syntax == X86_SYNTAX_REG_RM || syntax == X86_SYNTAX_RM_IMM ||
@@ -8669,13 +8694,14 @@ static bool tier0_operation_form_valid(uint32_t form)
         const bool vex = description->family == BUSTER_X86_FAMILY_VEX;
         const bool evex = description->family == BUSTER_X86_FAMILY_EVEX && x86_form_has_vector_operand(description) &&
                           (description->evex & (BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF)) == 0;
-        const bool mulx = vex && description->opcode == 0x0f38f6 && description->prefixes == 0xf2;
+        const bool named = effects->operation != X86_OPERATION_NONE && effects->implicit_reads == 0 && effects->implicit_writes == 0 &&
+                           (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) == 0;
         bool legacy = false;
         for (uint32_t k = 0; !legacy && description->family == BUSTER_X86_FAMILY_LEGACY && k < BUSTER_ARRAY_LENGTH(tier0_operation_legacy_forms); k += 1)
         {
             legacy = form == tier0_operation_legacy_forms[k];
         }
-        valid = legacy || (explicit && (vex || evex) && !mulx && description->relative_bytes == 0);
+        valid = legacy || (explicit && (vex || evex) && named && description->relative_bytes == 0);
     }
     return valid;
 }
@@ -10634,7 +10660,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
             const __m512i mode = _mm512_srli_epi64(chosen, 24);
             const __mmask8 direct = _mm512_cmpeq_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_REGISTER_DIRECT));
             const __mmask8 accumulator = direct & _mm512_cmpeq_epi64_mask(rm, _mm512_set1_epi64(X86_REGISTER_RAX));
-            __m512i context = _mm512_or_si512(_mm512_set1_epi64(BUSTER_X86_CONTEXT_INC_DEC), _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_LIVE_SHIFT), _mm512_set1_epi64(0x3f)));
+            __m512i context = _mm512_or_si512(_mm512_set1_epi64(tier0_inc_dec), _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_LIVE_SHIFT), _mm512_set1_epi64(0x3f)));
             context = _mm512_mask_or_epi64(context, direct, context, _mm512_set1_epi64(BUSTER_X86_CONTEXT_REGISTER));
             context = _mm512_mask_or_epi64(context, accumulator, context, _mm512_set1_epi64(BUSTER_X86_CONTEXT_ACCUMULATOR));
             const __mmask8 dynamic = choice & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE_STATIC));

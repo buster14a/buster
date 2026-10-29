@@ -542,7 +542,16 @@ reach what it is for (indirect calls; calls with records, aggregate parameters a
 both kinds of result). Each program
 is also compiled by Tier 0 and run natively in a child process
 (`test-tier0`'s harness), and its result and global bytes must equal the IR
-executor's, besides the typed interpreter's. The executor bounds every access
+executor's, besides the typed interpreter's. The records' set runs again without
+floating values (whose out-of-range conversions the shared interpreter refuses, as
+C leaves them undefined) through the shared IR's interpreter (#788), its calls with
+records as [the tools guide](ir-tools.md)'s "Aggregates by value and variadic
+definitions" has them, with undefined-byte checks off: its `COPY` entries carry
+structs' padding, which nothing reads. And `test-tier0-variadic-frame`'s callees
+(`ir_lower_test_variadic_frames`: `va_start`, `va_copy` and `va_arg` over general,
+vector and overflow arguments) are lowered, run natively from clang's caller and by
+the shared interpreter from an IR caller of the same arguments, and every output that
+isn't an address must be the native run's. The executor bounds every access
 by its slot, so a piece past an object's end faults. Two fixtures target the
 new inputs: two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16),
 the first written in pieces of every width and copied into the second, whose
@@ -658,15 +667,24 @@ vector path is 6% slower than its scalar twin on these functions, and runs under
 Zen 5's power cap (#199), 31.2 dispatch slots per instruction throttled against
 the twin's 13.9.
 
-Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the
-same instructions but 0.0004% and writes the same object. The checker's unit
-compiles 1.14 s longer (25.6 s against 24.4 s), since `test-ir-source` and
-`benchmark-ir-source` run there with the IR's modules: a command that runs the
+Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
+instructions but 0.0004% and writes the same object. The checker's unit compiled
+1.14 s longer (25.6 s against 24.4 s), since `test-ir-source` and
+`benchmark-ir-source` ran there with the IR's modules: a command that runs the
 checker's emission and the adapter, whose validation reads the x86 encoder's
-templates as the emission's encoding does, must run both in one unit's copy
-(`./build.sh check-call-graph`'s split state). The IR's synthetic benchmarks
-read the verifier 1% to 7% slower on the 9700X and 2% to 7% faster on a Zen 4
-laptop: its vector path runs 1.1% fewer instructions than main's, with 13.6%
+templates as the emission's encoding does, had to run both in one unit's copy
+(`./build.sh check-call-graph`'s split state). Since #784 they run in the
+backend's unit, which compiles the IR's modules anyway: the checker's unit homes
+their check and emission (`ir_source_prepare`, `BUSTER_IR_SOURCE_ENTRY`), and
+`main.c`'s units share the encoder's templates (`BUSTER_X86_SHARED`, the driver's
+unit's), which the emission's encoding fills and the adapter's validation reads.
+On the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/9dccbab8b026945783ce996eb7c66f2c32a3ef0b/docs/measurements/ir-backend-unit-784-2026-10-29))
+the checker's unit then compiles in 25.57 s against main's 26.71 s, and `-c` of
+`sqlite3.c` runs about 6,500 more instructions (0.0005%) and writes the same
+object, its time within the floors over six placements. The IR's synthetic
+benchmarks read the verifier 1% to 7% slower on the 9700X and 2% to 7% faster on a
+Zen 4 laptop: its vector path runs 1.1% fewer instructions than main's, with 13.6%
 more of its dispatch slots left empty by the front end. The lowering of the
 generated programs does 1.8% more work, the new kinds' and records' tests, and
 takes 3% to 8% longer there (within 1% on the laptop's larger programs).

@@ -921,31 +921,15 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
 }
 
 // #221: every record of a function's code must have a covered form (x86_effects), which the effects' consumers (the
-// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, but an X86 entry's: the front end's row, any
-// VEX or EVEX form. A function with X86 entries needs its code's entries' first records (Tier0Function.entry_records)
-// to tell those apart; without them, its records go unchecked.
-static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, const Tier0Code* code)
+// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, an X86 entry's too: a row's form must be
+// covered (tier0_operation_form_valid, #760).
+static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Code* code)
 {
-    bool rows = false;
-    for (uint32_t e = 0; e < function->count; e += 1)
-    {
-        rows |= function->kinds[e] == BUSTER_TYPED_X86;
-    }
-    const bool entries = code->entry_records != 0 && code->entry_count == function->count;
     bool result = true;
-    // The first entry whose first record is past record r: r is that entry's predecessor's (the prologue's before entry
-    // 0's first record, the epilogue's from the last entry's end).
-    uint32_t next = 0;
-    for (uint32_t r = 0; result && (!rows || entries) && r < code->count; r += 1)
+    for (uint32_t r = 0; result && r < code->count; r += 1)
     {
-        while (entries && next <= function->count && code->entry_records[next] <= r)
-        {
-            next += 1;
-        }
-        const bool row = entries && next >= 1 && next <= function->count && function->kinds[next - 1] == BUSTER_TYPED_X86;
-        result = row || tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
-                                          "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r,
-                                          x86_semantics_test_name(code->records[r].form));
+        result = tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
+                                   "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r, x86_semantics_test_name(code->records[r].form));
     }
     return result;
 }
@@ -1003,7 +987,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
                                        scalar.count);
             char name[64];
             snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
-            result = result && tier0_test_covered(tally, "effects", name, function, &scalar);
+            result = result && tier0_test_covered(tally, "effects", name, &scalar);
         }
         if (result)
         {
@@ -5772,6 +5756,26 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 
+// The form choice's inc and dec (#181): Tier 0 asks for them where the Zen 5 model's observations of inc and dec at 32 and
+// 64 bits cost no more than add's and sub's with an imm8, as today's do: then a request for add of 1 with CF dead takes
+// inc, and with CF live, add's imm8.
+static void tier0_test_inc_dec(Tier0TestTally* tally)
+{
+    tier0_test_expect(tally, tier0_inc_dec == (tier0_inc_dec_costs_no_more() ? BUSTER_X86_CONTEXT_INC_DEC : 0) && tier0_inc_dec == BUSTER_X86_CONTEXT_INC_DEC,
+                      "inc and dec", "Tier 0's context %#x, from the model's observations", tier0_inc_dec);
+    const uint16_t row = (uint16_t)x86_choice_row(X86_OPERATION_ADD, 4);
+    const int64_t value = 1;
+    const X86Instruction record = { .form = X86_FORM_ADD_RM32_IMM32, .rm = X86_REGISTER_RBX };
+    for (uint32_t live = 0; live < 2; live += 1)
+    {
+        const uint16_t context = tier0_choice_context(&record, live != 0 ? BUSTER_X86_FLAG_CF : 0);
+        uint16_t form = X86_FORM_NONE;
+        x86_choose_forms_scalar(&row, &value, &context, 1, &form);
+        tier0_test_expect(tally, form == (live != 0 ? X86_FORM_ADD_RM32_IMM8 : X86_FORM_INC_RM32), "inc and dec", "add ebx, 1 with CF %s took form %u",
+                          live != 0 ? "live" : "dead", form);
+    }
+}
+
 static void tier0_test_entry_repetitions(Tier0TestTally* tally)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 27);
@@ -5866,6 +5870,7 @@ static int run_tier0_tests(int argc, char** argv)
         if (tier0_tables_open(&tables))
         {
             tier0_test_entry_repetitions(&total);
+            tier0_test_inc_dec(&total);
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
