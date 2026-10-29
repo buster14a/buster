@@ -1465,7 +1465,13 @@ of 8 that fills them, of narrow `_BitInt`s or of long doubles): clang's LLVM
 type for a union is its most aligned member's, the first of them, and its
 copies through such a vector lose the other members' bits past it, as `union {
 bool b __attribute__((ext_vector_type(9))); __bf16 h; }`'s `i9` loses `h`'s
-top 7 bits. They make the vectors LLVM breaks up or packs, whose refused ones
+top 7 bits. Nor do they pass a complex `_BitInt` past 128 bits of an odd number
+of 64-bit limbs (129 to 192 bits, 257 to 320, ...): clang 23 types a complex
+`_BitInt(N)` as LLVM's `{ iN, iN }`, whose parts LLVM aligns to 16 bytes, so
+that its imaginary part isn't where the type's size puts it. For 129 bits,
+`sizeof` gives 48 bytes, two parts of 24, but clang's code stores the
+imaginary part at 32, 8 bytes past the object's end, and passes the value in
+64 bytes. They make the vectors LLVM breaks up or packs, whose refused ones
 no signature passes. For a `SMALLER` type the C side copies and checks LLVM's
 bytes, as clang's own objects of it are no larger, and our callee stores those
 through a hidden pointer. The unnamed arguments leave out the types the
@@ -1497,7 +1503,8 @@ and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `_Complex __float128` (#137), GNU's complex integer
 types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
 `__int128` spelled as the usual arithmetic conversions make them, #137) and,
-in clang's runs, complex `_BitInt`s of 13 to 200 bits, spelled so too,
+in clang's runs, complex `_BitInt`s of 13 to 256 bits (past 128 bits, those
+of an even number of 64-bit limbs), spelled so too,
 `__float128` (an aggregate's value in this compiler's C, whose arithmetic and
 conversions are libgcc's, #137), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of

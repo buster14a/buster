@@ -4077,15 +4077,19 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         abi_test_world_add(world, type_bit_int(table, widths[i], true));
     }
     // A compiled clang world's complex _BitInts, which the usual arithmetic conversions make (#137): clang spells each as
-    // the type of a _Complex char and its element (type_test_write_types), which a width past char's keeps.
+    // the type of a _Complex char and its element (type_test_write_types), which a width past char's keeps. Past 128 bits
+    // only widths of an even number of 64-bit limbs: clang 23 types a complex _BitInt(N) as LLVM's { iN, iN }, whose parts
+    // LLVM aligns to 16 bytes, so that for an odd number (129 to 192 bits, 257 to 320, ...) its imaginary part isn't where
+    // the type's size puts it (at 32 rather than 24 for 129 bits, in an object of 48 bytes), its stores of that part end
+    // past the object and its calls pass 64 bytes (docs/calling-convention.md).
     const uint32_t complex_widths[] = {
         13,
         40,
         65,
         100,
         128,
-        129,
         200,
+        256,
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(complex_widths) && world->compiled && !world->gcc; i += 1)
     {
