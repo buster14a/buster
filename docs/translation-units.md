@@ -106,19 +106,30 @@ last units' emissions share their parts.
 On the 9700X's CPUs 0 to 7, SQLite 3.53.4's `sqlite3.c` (9.5 MB) and `shell.c`
 (1.2 MB) as one command, against the same executable's two processes at once,
 whole processes' medians (`time-runs`, 21 runs, each row twice); [the
-record](https://github.com/buster14a/buster-performance/tree/e5cc5bb8b3a2265772611d45a502dcdac8d34e94/docs/measurements/units-functions-777-cache-776-2026-10-29) has the commands and logs:
+record](https://github.com/buster14a/buster-performance/tree/afdfdd4051b834e5a880766a87bf7f464be3b437/docs/measurements/units-functions-777-cache-776-2026-10-29) has the commands and logs:
 
-| ms | #778 | #777 | two processes at once |
+The two-process column is an **unverified historical control**. Its shell
+commands use operand-free `wait`; the recorded zero failures count wrappers,
+not each compiler child, and no retained per-child status or fresh-output receipt
+proves every timed compile succeeded. The linked control can reuse old objects.
+This establishes no actual compiler failure, but the derived 0.9% compile gap
+and 8.6% linked speedup against that column cannot qualify performance
+acceptance. The synchronous one-command parent/head rows and tests have their
+own recorded scope. The record preserves the original scripts, numbers and logs;
+this correction adds no measurement, and #777 remains open.
+
+| ms | #778 | #777 | two processes at once (unverified) |
 | --- | ---: | ---: | ---: |
 | `-c` | 133.86 | 122.04, 122.18 | 121.08, 120.85 |
 | linked | 138.25 | 125.97 | 137.77, with `cc`'s link of their objects |
 
 - The large unit's emission shared its parts with the seven other lanes, which
-  took 1,020 of them. `sqlite3.c` alone with `-c` takes 114.10 ms: what both
-  ways pay beyond it is `shell.c` compiling beside it, and the one command is
-  0.9% slower than the two processes, within one process's address space.
-- The command's peak resident set is 537 MB, against #778's 436 and the larger
-  process's 424: the other lanes' writers and arenas for the parts they take.
+  took 1,020 of them. `sqlite3.c` alone with `-c` takes 114.10 ms. The recorded
+  0.9% gap against the two-process wrappers is unverified; it does not establish
+  a slowdown or its cause in one process's address space.
+- The command's peak resident set is 537 MB, against #778's 436: the other
+  lanes' writers and arenas for the parts they take. The historical larger
+  process's 424 MB is from the unverified two-process control.
 - Its lanes without units sleep on the board's futex at once: waiting with
   `lane_wait`'s spin and its millisecond in `mwaitx` took 192 ms of user time
   against 164 to 171, with no difference in wall time.
