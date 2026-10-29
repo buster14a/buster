@@ -49,6 +49,28 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
+    { "kr-parenthesized-atomic-parameters", "int f(a,b)_Atomic(short) a;_Atomic(float) b;{return a+(int)b;}\n"
+      "int g(void){return f(65539,3.5);}\n", true },
+    { "kr-header-tag-scope", "struct S{int z;};int f(x)struct S{int a;}x;{struct S t={3};return x.a+t.z;}\n"
+      "int g(void){struct S t={4};return t.z;}\n", true },
+    { "kr-header-enumerator-scope", "enum{A=9};int f(x,a)enum E{A=3}x;int a[A];{return x+a[0]+A;}\n"
+      "int g(void){return A;}\n", true },
+    { "kr-call-arity", "int f(a)int a;{return a;}\nint g(void){return f(1,2); }\n", true },
+    { "kr-source-only-call", "int f(a)int a;{return a;}\nint g(void){return sizeof((&f)(1,2));}\n", true },
+    { "kr-source-only-promoted-warning", "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+      "#pragma clang diagnostic error \"-Weverything\"\nint g(void){return sizeof(f(1,2));}\n", true },
+    { "const-initializer-receipt-type-replay",
+      "const int top=3;\n"
+      "int f(void){struct S{int x;char a[3];};const struct S s={top,{1,2,3}};const struct S t=s;"
+      "const int a[3]={2,5};enum{E=t.x+t.a[1]+a[1]+a[2]};_Static_assert(E==10,\"first\");return E;}\n"
+      "int g(void){struct S{long x;int a[2];};const struct S s={7,{11}};const struct S t=s;"
+      "enum{E=t.x+t.a[0]+t.a[1]};_Static_assert(E==18,\"second\");return E;}\n", true },
+    { "const-initializer-receipt-byte-lifetime",
+      "int f(void){const char a[]=\"abc\";const char* const p=\"xyz\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"first bytes\");return E;}\n"
+      "int g(void){const char a[]=\"def\";const char* const p=\"uvw\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"second bytes\");return E;}\n", true },
+    { "const-initializer-receipt-future-definition-cutoff",
+      "extern const int later;int f(void){enum{E=later};return E;}const int later=3;int g(void){enum{E=later};return E;}\n", false },
     { "nested-selection-warnings",
       "#define C(X) __builtin_choose_expr(1,0,(X))\n"
       "#define N C(C(C(C(C(C(C(C(C(C(C(C((2147483647+1)))))))))))))\n"

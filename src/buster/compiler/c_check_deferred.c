@@ -98,6 +98,7 @@ typedef struct CheckDeferredResult CheckDeferredResult;
 struct CheckDeferredResult
 {
     CheckWarningEvents warning_events;
+    CheckConstValues const_values;
     TypeChanges changes;
     uint32_t types;
     uint32_t tags;
@@ -593,6 +594,8 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->arena = &arenas->output;
     reader->scratch = &arenas->scratch;
     reader->warning_events = (CheckWarningBuffer){ .arena = &arenas->output };
+    reader->const_values = (CheckConstBuffer){ .arena = &arenas->output, .prefix = &top->output->const_values };
+    input->const_values = check_const_view(&reader->const_values);
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->deferred = 0;
     reader->lane = true;
@@ -952,6 +955,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->lane_unsupported = false;
     reader->lane_reason = 0;
     reader->warning_events = (CheckWarningBuffer){ .arena = reader->arena };
+    reader->const_values = (CheckConstBuffer){ .arena = reader->arena, .prefix = &top_input->const_values };
+    input->const_values = check_const_view(&reader->const_values);
     input->warning_events = (CheckWarningEvents){ 0 };
     reader->cached_constant_count = top->cached_constant_count;
     reader->vararg_count = top->vararg_count;
@@ -1038,6 +1043,26 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
             .count = warnings.count,
             .notes = check_deferred_keep(arena, warnings.notes, warnings.note_count, sizeof(CheckWarningNote), &kept),
             .note_count = warnings.note_count,
+        };
+        const CheckConstValues values = check_const_view(&reader->const_values);
+        CheckConstPart* const_parts = check_deferred_keep(arena, values.parts, values.part_count, sizeof(CheckConstPart), &kept);
+        for (uint32_t p = 0; kept && p < values.part_count; p += 1)
+        {
+            if (const_parts[p].kind == CHECK_CONST_BYTES)
+            {
+                const_parts[p].bytes = check_deferred_keep(arena, const_parts[p].bytes, const_parts[p].byte_count, 1, &kept);
+            }
+        }
+        result->const_values = (CheckConstValues){
+            .objects = check_deferred_keep(arena, values.objects, values.count, sizeof(CheckConstObject), &kept),
+            .count = values.count,
+            .parts = const_parts,
+            .part_count = values.part_count,
+            .unions = check_deferred_keep(arena, values.unions, values.union_count, sizeof(CheckConstUnion), &kept),
+            .union_count = values.union_count,
+            .hash = check_deferred_keep(arena, values.hash, values.hash_count, sizeof(CheckConstHash), &kept),
+            .hash_count = values.hash_count,
+            .hash_root = values.hash_root,
         };
         // The body's changes, packed: the record's arrays are the lane's, which its next body takes back.
         result->changes = *changes;
@@ -1279,6 +1304,39 @@ static uint32_t check_deferred_layout(const CheckDeferred* deferred, uint64_t cu
 static TypeId check_deferred_type(const TypeReplayPart* part, TypeId type)
 {
     return type != 0 ? type_replay_type(part, type) : 0;
+}
+
+static bool check_deferred_const_values(CheckConstBuffer* output, const CheckConstValues* input, const TypeReplayPart* remap, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < input->count; i += 1)
+    {
+        CheckConstObject object = input->objects[i];
+        valid = object.part_first <= input->part_count && object.part_count <= input->part_count - object.part_first &&
+                object.union_first <= input->union_count && object.union_count <= input->union_count - object.union_first;
+        CheckConstPart* parts = valid && object.part_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckConstPart, object.part_count) : NULL;
+        CheckConstUnion* unions = valid && object.union_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckConstUnion, object.union_count) : NULL;
+        valid = valid && (object.part_count == 0 || parts != NULL) && (object.union_count == 0 || unions != NULL);
+        if (valid)
+        {
+            object.type = check_deferred_type(remap, object.type);
+            for (uint32_t p = 0; p < object.part_count; p += 1)
+            {
+                parts[p] = input->parts[object.part_first + p];
+                parts[p].type = check_deferred_type(remap, parts[p].type);
+                parts[p].value.type = check_deferred_type(remap, parts[p].value.type);
+            }
+            for (uint32_t u = 0; u < object.union_count; u += 1)
+            {
+                unions[u] = input->unions[object.union_first + u];
+                unions[u].type = check_deferred_type(remap, unions[u].type);
+            }
+            valid = check_const_append(output, object, parts, object.part_count, unions, object.union_count);
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
 }
 
 // The only TypeIds in sparse diagnostic payloads are explicit fields. Located tokens, completion boundaries and
@@ -2095,6 +2153,12 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         reader->file_function_name_ids[i] = reader->file_function_name_ids[i] != BUSTER_CHECK_NONE ? string_map[reader->file_function_name_ids[i]] : BUSTER_CHECK_NONE;
     }
+    CheckConstBuffer const_values = { .arena = reader->arena };
+    valid = valid && check_deferred_const_values(&const_values, &top_input.const_values, &parts[0], reader->scratch);
+    for (uint32_t b = 0; valid && b < bodies; b += 1)
+    {
+        valid = check_deferred_const_values(&const_values, &deferred->results[b].const_values, &parts[1 + b], reader->scratch);
+    }
     CheckWarningBuffer warnings = { .arena = reader->arena };
     valid = valid && check_deferred_warnings(&warnings, &top_input.warning_events, &parts[0], reader->scratch);
     for (uint32_t b = 0; valid && b < bodies; b += 1)
@@ -2111,6 +2175,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             input->intrinsic_call_count = call_total;
         }
         reader->warning_events = warnings;
+        reader->const_values = const_values;
+        input->const_values = check_const_view(&const_values);
         input->warning_events = check_warning_view(&warnings);
         input->constant_warnings_prepared = true;
         // Literal tables belong to the top-level reader; their retained array type must follow the same replay as
