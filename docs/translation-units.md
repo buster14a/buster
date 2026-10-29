@@ -103,6 +103,29 @@ every lane still takes units runs alone, its bodies one part, as before: a
 command of many units pays for the board only once its units run out, when its
 last units' emissions share their parts.
 
+On the 9700X's CPUs 0 to 7, SQLite 3.53.4's `sqlite3.c` (9.5 MB) and `shell.c`
+(1.2 MB) as one command, against the same executable's two processes at once,
+whole processes' medians (`time-runs`, 21 runs, each row twice); [the
+record](https://github.com/buster14a/buster-performance/tree/e5cc5bb8b3a2265772611d45a502dcdac8d34e94/docs/measurements/units-functions-777-cache-776-2026-10-29) has the commands and logs:
+
+| ms | #778 | #777 | two processes at once |
+| --- | ---: | ---: | ---: |
+| `-c` | 133.86 | 122.04, 122.18 | 121.08, 120.85 |
+| linked | 138.25 | 125.97 | 137.77, with `cc`'s link of their objects |
+
+- The large unit's emission shared its parts with the seven other lanes, which
+  took 1,020 of them. `sqlite3.c` alone with `-c` takes 114.10 ms: what both
+  ways pay beyond it is `shell.c` compiling beside it, and the one command is
+  0.9% slower than the two processes, within one process's address space.
+- The command's peak resident set is 537 MB, against #778's 436 and the larger
+  process's 424: the other lanes' writers and arenas for the parts they take.
+- Its lanes without units sleep on the board's futex at once: waiting with
+  `lane_wait`'s spin and its millisecond in `mwaitx` took 192 ms of user time
+  against 164 to 171, with no difference in wall time.
+- Lua's, synth's and musl's commands by 8 lanes, which have no lanes without
+  units until their last units, run as #778's (34.47 ms against 34.65, 530.34
+  against 528.40, 238.36 against 240.57), with the same peaks.
+
 ## What the units share
 
 Each lane keeps an intern table and a file cache (#150's `FileCache`) that the
