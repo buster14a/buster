@@ -229,6 +229,7 @@ static void check_builtin_rounds_test_clang(CheckBuiltinRoundsTest* test, const 
 
 static int run_check_builtin_rounds_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinRoundsTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -254,5 +255,7 @@ static int run_check_builtin_rounds_tests(int argc, char** argv)
     }
     printf("test-check-builtins-rounds: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int result = test.failures != 0;
+    oracle_cache_report(oracle_cache(), "test-check-builtins-rounds");
+    oracle_epoch_end(epoch);
     return result;
 }

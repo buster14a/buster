@@ -790,10 +790,27 @@ static bool check_builtin_vector_test_spawn(const char* program, char* const* ar
     return ready;
 }
 
+static bool check_builtin_vector_test_clang_process(char* const* arguments, const char* artifact, bool* rejected)
+{
+    const char* files[] = { artifact };
+    OracleRun run = {
+        .purpose = "checker vector Clang oracle",
+        .arguments = arguments,
+        .files = files,
+        .file_count = artifact != 0,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, 0, 0);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
+    return ready;
+}
+
 static bool check_builtin_vector_test_clang_run(const char* clang, const char* path, const char* option, bool* rejected)
 {
     char* arguments[] = { (char*)clang, "-std=gnu17", "-march=x86-64", "-fsyntax-only", "-fno-color-diagnostics", (char*)path, (char*)option, NULL };
-    const bool ready = check_builtin_vector_test_spawn(clang, arguments, rejected);
+    const bool ready = check_builtin_vector_test_clang_process(arguments, 0, rejected);
     return ready;
 }
 
@@ -813,6 +830,7 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
     const char* version = "_Static_assert(__clang_major__>23 || (__clang_major__==23 && (__clang_minor__>1 || (__clang_minor__==1 && __clang_patchlevel__>=1))),\"Clang 23.1.1 or newer required\");\n";
     bool rejected = false;
     ready = ready && parse_test_write(path, version, strlen(version)) && check_builtin_vector_test_clang_run(clang, path, NULL, &rejected);
+    unlink(path);
     check_builtin_vector_test_expect(test, ready && !rejected, "external vector oracle must be Clang 23.1.1 or newer in GNU17");
     ready = ready && !rejected;
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_builtin_vector_test_cases); i += 1)
@@ -846,11 +864,15 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         char source[1536];
         char description[192];
         snprintf(source, sizeof(source), "%s_Static_assert(__builtin_types_compatible_p(__typeof__(%s),%s),\"exact builtin result type\");\n", preamble, expression, expected);
+        snprintf(path, sizeof(path), "%s/type-%u.c", directory, i);
         ready = parse_test_write(path, source, strlen(source)) && check_builtin_vector_test_clang_run(clang, path, NULL, &rejected);
+        unlink(path);
         snprintf(description, sizeof(description), "Clang accepts %s with its exact source result type", fixture.name);
         check_builtin_vector_test_expect(test, ready && !rejected, description);
         snprintf(source, sizeof(source), "%svoid f(void){ (void)%s(); }\n", preamble, fixture.name);
+        snprintf(path, sizeof(path), "%s/arity-%u.c", directory, i);
         ready = ready && parse_test_write(path, source, strlen(source)) && check_builtin_vector_test_clang_run(clang, path, NULL, &rejected);
+        unlink(path);
         snprintf(description, sizeof(description), "Clang rejects zero operands for %s", fixture.name);
         check_builtin_vector_test_expect(test, ready && rejected, description);
     }
@@ -922,7 +944,9 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         char source[2048];
         char description[160];
         snprintf(source, sizeof(source), "%s%s\n", preamble, cases[i].source);
+        snprintf(path, sizeof(path), "%s/constraint-%u.c", directory, i);
         ready = parse_test_write(path, source, strlen(source)) && check_builtin_vector_test_clang_run(clang, path, cases[i].option, &rejected);
+        unlink(path);
         snprintf(description, sizeof(description), "GNU17 Clang vector source fixture %u disagrees (expected %s)", i, cases[i].rejected ? "rejection" : "acceptance");
         check_builtin_vector_test_expect(test, ready && rejected == cases[i].rejected, description);
     }
@@ -943,13 +967,20 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
             bounded = bytes > 0 && (size_t)bytes < sizeof(source) - (size_t)used;
             used += bounded ? bytes : 0;
         }
+        snprintf(path, sizeof(path), "%s/shuffle-%u.c", directory, invalid);
         ready = bounded && parse_test_write(path, source, (size_t)used) && check_builtin_vector_test_clang_run(clang, path, NULL, &rejected);
+        unlink(path);
         check_builtin_vector_test_expect(test, ready && rejected == (invalid != 0), "Clang checks the full64-index shuffle list including its last index");
     }
     const char* effect_source = "int main(void){ volatile int x=7; (void)__builtin_nondeterministic_value(x++); return x!=7; }\n";
+    snprintf(path, sizeof(path), "%s/operand-effects.c", directory);
     ready = ready && parse_test_write(path, effect_source, strlen(effect_source));
-    char* compile[] = { (char*)clang, "-std=gnu17", "-O0", "-march=x86-64", path, "-o", executable, NULL };
-    ready = ready && check_builtin_vector_test_spawn(clang, compile, &rejected);
+    char object[160];
+    snprintf(object, sizeof(object), "%s/operand-effects.o", directory);
+    char* compile[] = { (char*)clang, "-std=gnu17", "-O0", "-march=x86-64", "-c", path, "-o", object, NULL };
+    char* link[] = { (char*)clang, "-march=x86-64", object, "-o", executable, NULL };
+    ready = ready && check_builtin_vector_test_clang_process(compile, object, &rejected);
+    ready = ready && !rejected && check_builtin_vector_test_spawn(clang, link, &rejected);
     check_builtin_vector_test_expect(test, ready && !rejected, "Clang builds the original nondeterministic operand-effect oracle");
     if (ready && !rejected)
     {
@@ -960,6 +991,7 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
     check_builtin_vector_test_expect(test, ready, "independent Clang vector oracle could not run");
     if (created)
     {
+        unlink(object);
         unlink(executable);
         unlink(path);
         rmdir(directory);
@@ -968,6 +1000,7 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
 
 static __attribute__((unused)) int run_check_builtin_vector_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinVectorTest test = {0};
     const char* clang = "clang";
     bool options = true;
@@ -1004,5 +1037,7 @@ static __attribute__((unused)) int run_check_builtin_vector_tests(int argc, char
     }
     printf("test-check-builtins-vector: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int result = test.failures != 0;
+    oracle_cache_report(oracle_cache(), "test-check-builtins-vector");
+    oracle_epoch_end(epoch);
     return result;
 }
