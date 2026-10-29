@@ -1,0 +1,26 @@
+name: Issue 806 isolated workbench
+
+on:
+  push:
+    branches: [chatgpt/issue-806-workbench]
+    paths: [.github/workflows/issue-806-workbench.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
+          persist-credentials: false
+      - name: Export pinned source for implementation and review
+        run: git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/issue-806-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-806-source
+          path: ${{ runner.temp }}/issue-806-source.tar.gz
+          retention-days: 1
