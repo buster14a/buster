@@ -71,6 +71,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Winitializer-overrides", NULL, "initializer overrides prior initialization of this subobject" },
     { "-Wundefined-internal", NULL, "function has internal linkage but is not defined" },
     { "-Wc23-extensions", "-Wc2x-extensions", "omitting the parameter name in a function definition is a C23 extension" },
+    { "-Wunknown-pragmas", "-Wpragmas", "unknown pragma ignored" },
+    { "-Wignored-pragmas", "-Wpragmas", "pragma ignored" },
+    { "-Wsource-uses-openmp", "-Wopenmp", "unexpected OpenMP directive; OpenMP is not enabled" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -459,6 +462,10 @@ static bool check_diagnostic_original_pragmas(CheckInput* result, const Parser* 
                 };
             }
         }
+    }
+    if (valid)
+    {
+        valid = check_input_ignored_pragmas(&reader, handled);
     }
     if (valid)
     {
