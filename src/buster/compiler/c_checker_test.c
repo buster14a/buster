@@ -1216,6 +1216,79 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     CheckLiteral hexadecimal = { 0 };
     check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch, &hexadecimal);
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
+    // Bit-precise constants (#768): C23's wb and WB, alone or with u or U before or after them, in each radix and with
+    // digit separators, as the widths and values clang 23 gives them (each checked there by _Generic), a width past 128
+    // bits and a value past them (UINT32_MAX), which the reader refuses by name; and the spellings C23 doesn't have,
+    // with the imaginary one, which clang takes as a _Complex _BitInt it doesn't let a program spell and GCC refuses.
+    const struct
+    {
+        const char* spelling;
+        uint32_t width;
+        bool is_unsigned;
+        uint64_t high;
+        uint64_t low;
+    } bit_precise[] =
+    {
+        { "0wb", 2, false, 0, 0 },
+        { "1wb", 2, false, 0, 1 },
+        { "2WB", 3, false, 0, 2 },
+        { "0uwb", 1, true, 0, 0 },
+        { "1Uwb", 1, true, 0, 1 },
+        { "5uWB", 3, true, 0, 5 },
+        { "5wbu", 3, true, 0, 5 },
+        { "5WBU", 3, true, 0, 5 },
+        { "0777wb", 10, false, 0, 511 },
+        { "0b1010'1010wb", 9, false, 0, 170 },
+        { "0x7fff'ffff'ffff'ffffwb", 64, false, 0, INT64_MAX },
+        { "0x8000000000000000wb", 65, false, 0, UINT64_C(0x8000000000000000) },
+        { "0xffffffffffffffffuwb", 64, true, 0, UINT64_MAX },
+        { "18446744073709551616wb", 66, false, 1, 0 },
+        { "0x1'0000'0000'0000'0000uwb", 65, true, 1, 0 },
+        { "0x7fffffffffffffffffffffffffffffffwb", 128, false, INT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffuwb", 128, true, UINT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffwb", 129, false, UINT64_MAX, UINT64_MAX },
+        { "340282366920938463463374607431768211456uwb", UINT32_MAX, true, 0, 0 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)bit_precise[i].spelling, (uint32_t)strlen(bit_precise[i].spelling), scratch, &literal);
+        const unsigned __int128 value = (unsigned __int128)bit_precise[i].high << 64 | bit_precise[i].low;
+        char description[160];
+        snprintf(description, sizeof(description), "%s is a bit-precise constant of %u bits with clang's value", bit_precise[i].spelling, bit_precise[i].width);
+        check_test_expect(test, literal.valid && literal.type == 0 && literal.bit_width == bit_precise[i].width && literal.bit_unsigned == bit_precise[i].is_unsigned &&
+                                (bit_precise[i].width == UINT32_MAX || ((unsigned __int128)literal.high << 64 | literal.integer) == value) && !literal.imaginary &&
+                                scratch->length == mark,
+                          description);
+    }
+    const char* invalid_bit_precise[] =
+    {
+        "5wB",
+        "5Wb",
+        "5uwbu",
+        "5UwbU",
+        "5wbl",
+        "5lwb",
+        "5llwb",
+        "5wbll",
+        "5wbwb",
+        "5wbi",
+        "5iwb",
+        "5w",
+        "5b",
+        "5uw",
+        "0b2wb",
+        "09wb",
+        "5'wb",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)invalid_bit_precise[i], (uint32_t)strlen(invalid_bit_precise[i]), scratch, &literal);
+        char description[128];
+        snprintf(description, sizeof(description), "%s is no constant C23 has, as clang has it", invalid_bit_precise[i]);
+        check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark, description);
+    }
 }
 
 static __attribute__((noinline)) void check_test_action_oracles(CheckTest* test, const char* clang)
@@ -2161,7 +2234,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 const CheckInputReport* report = &input[p].reports[i];
                 const uint32_t source = check_diagnostic_input_report_source(&input[p], &parsers[p], report);
                 first = source < first ? source : first;
-                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED;
+                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED || report->message == CHECK_INPUT_WIDE_LITERAL;
             }
             if (adapted)
             {
@@ -3389,6 +3462,41 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "typedef unsigned _BitInt(8) U8;\nU8 x = 255;\n_Static_assert((U8)-1 > 0, \"unsigned\");\ntypedef _BitInt(8) S8;\n_Static_assert((S8)-1 < 0, \"signed\");\nint f(void) { U8 y = 200; return y > 100; }\n",
             false,
             false
+        },
+        {
+            // C23's bit-precise constants (#768): their types and values, in each radix, with digit separators and in each
+            // order and case of their suffixes, past 64 bits too.
+            "bit-precise constants",
+            "_Static_assert(_Generic(0wb, _BitInt(2): 1, default: 0) && _Generic(1wb, _BitInt(2): 1, default: 0) && _Generic(2WB, _BitInt(3): 1, default: 0), \"s\");\n"
+            "_Static_assert(_Generic(0uwb, unsigned _BitInt(1): 1, default: 0) && _Generic(5Uwb, unsigned _BitInt(3): 1, default: 0), \"u\");\n"
+            "_Static_assert(_Generic(5wbU, unsigned _BitInt(3): 1, default: 0) && _Generic(5WBu, unsigned _BitInt(3): 1, default: 0) && 5uWB == 5, \"o\");\n"
+            "_Static_assert(_Generic(0777wb, _BitInt(10): 1, default: 0) && _Generic(0b1010'1010wb, _BitInt(9): 1, default: 0) && 0777wb == 511, \"r\");\n"
+            "_Static_assert(_Generic(0x8000'0000'0000'0000wb, _BitInt(65): 1, default: 0) && _Generic(0xffffffffffffffffuwb, unsigned _BitInt(64): 1, default: 0), \"x\");\n"
+            "_Static_assert(_Generic(18446744073709551616wb, _BitInt(66): 1, default: 0) && 18446744073709551616wb == (_BitInt(66))1 << 64, \"w\");\n"
+            "_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffuwb, unsigned _BitInt(128): 1, default: 0) &&\n"
+            "               0xffffffffffffffffffffffffffffffffuwb == (unsigned _BitInt(128))-1, \"m\");\n"
+            "_Static_assert(_Generic(0x7fffffffffffffffffffffffffffffffwb, _BitInt(128): 1, default: 0) && -1wb < 0 && _Generic(-1wb, _BitInt(2): 1, default: 0), \"n\");\n"
+            "unsigned _BitInt(100) a = 0xf'ffff'ffff'ffff'ffff'ffff'ffffuwb;\nint f(void) { return (int)(a >> 90) + (int)0x1ffffffffffffffffuwb; }\n",
+            false,
+            false,
+            false,
+            2023
+        },
+        {
+            "a bit-precise constant past 128 bits refused",
+            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n",
+            true,
+            true,
+            false,
+            2023
+        },
+        {
+            "a bit-precise suffix of mixed case",
+            "int a;\n_BitInt(8) b = 5wB;\n",
+            true,
+            false,
+            false,
+            2023
         },
         {
             "no_builtin on definitions",

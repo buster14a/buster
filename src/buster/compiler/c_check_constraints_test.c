@@ -82,6 +82,27 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "unsigned long long b = 18446744073709551615u;\n",
     },
     {
+        "6.4.4.1p1", "a bit-precise suffix is wb or WB, not of mixed case (C23)", CHECK_CONSTRAINT_ERROR, 0,
+        "int a;\n"
+        "_BitInt(8) b = 5wB;\n",
+        "int a;\n"
+        "_BitInt(8) b = 5wb + 5WB;\n",
+    },
+    {
+        "6.4.4.1p1", "one unsigned suffix beside a bit-precise one (C23)", CHECK_CONSTRAINT_ERROR, 0,
+        "int a;\n"
+        "unsigned _BitInt(8) b = 5uwbu;\n",
+        "int a;\n"
+        "unsigned _BitInt(8) b = 5uwb + 5wbU;\n",
+    },
+    {
+        "6.4.4.1p1", "no long suffix beside a bit-precise one (C23)", CHECK_CONSTRAINT_ERROR, 0,
+        "int a;\n"
+        "_BitInt(8) b = 5wbl;\n",
+        "int a;\n"
+        "unsigned _BitInt(8) b = 5UWB;\n",
+    },
+    {
         "6.4.4p2", "a floating constant too large for its type", CHECK_CONSTRAINT_WARNING, 0,
         "int a;\n"
         "double b = 1e400;\n",
