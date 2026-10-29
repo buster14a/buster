@@ -295,7 +295,8 @@ static bool x86_match_supported(const X86FormDescription* form)
             "loopne",
             "jrcxz",
             // What C's inline assembly reaches the processor's state with (#147): the CPU's identity and XCR0, the x87's
-            // control and status words, MXCSR, and the exchange that cpuid.h's rbx saving takes; the byte swap of
+            // control and status words, MXCSR, the x87's, MMX's and SSE's state of 512 bytes (main.c's test of DAZ
+            // reads MXCSR's mask from fxsave's), and the exchange that cpuid.h's rbx saving takes; the byte swap of
             // <linux/swab.h>'s helpers; and SSE2's compare, in its legacy forms alone.
             "xchg",
             "bswap",
@@ -307,6 +308,10 @@ static bool x86_match_supported(const X86FormDescription* form)
             "fnclex",
             "stmxcsr",
             "ldmxcsr",
+            "fxsave",
+            "fxrstor",
+            "fxsave64",
+            "fxrstor64",
             "pcmpeqd",
             // And naked functions' (#147): the flags pushed and popped, SSE2's movq to and from an XMM register (which
             // the AT&T parser chooses over mov's suffix by its operands), and the x87's loads and stores.
