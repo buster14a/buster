@@ -21,7 +21,8 @@
 == Test the functions' lanes [8 CPUs]
 # #151: generated programs and failing ones emitted on 1, 2, 3 and 8 lanes and with a slow lane, each one
 # lane's object or failure, with -g's rows and unwind tables and without; and the driver's objects and
-# executables by --lanes and by default, by both paths, each one lane's.
+# executables by --lanes and by default, by both paths, each one lane's. #153: each compiled again with its
+# identifiers' ids in another order (--id-order, 153 by default), in-process and by the driver, the same.
 ./build/compiler test-check-lanes
 == Test the dynamic PIEs [8 CPUs]
 # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
@@ -66,9 +67,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Test c-testsuite's programs end to end [4 CPUs]
 # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
-# the scalar twins into the same bytes, then run; --cross-check also writes each as an object that cc links,
-# whose functions and objects must be clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of
-# the heading's.
+# the scalar twins, these with the identifiers' ids in another order (#153's --id-order), into the same bytes,
+# then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
+# clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
 == Test the parser's snippets against clang
 # The snippets, each also checked against clang, the generated inputs and the driver's checks.
@@ -160,6 +161,7 @@ rm "$flags_file" "$sources_file"
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler test-ir-parse
+./build/compiler test-ir-metamorphic --seed 731 --count 6
 ./build/compiler test-interpreter
 ./build/compiler test-interpreter-native
 ./build/compiler test-interpreter-link
@@ -208,7 +210,8 @@ rm "$flags_file" "$sources_file"
 == Test the C lexer without digraphs, as -fno-digraphs
 ./build/compiler test-lexer --no-digraphs
 == Test deferred function bodies against source order
-# #113's fixtures, each through the deferred reader on 1, 2, 3 and 8 lanes with every binding resolution.
+# #113's fixtures, each through the deferred reader on 1, 2, 3 and 8 lanes with every binding resolution, and
+# on 8 with the identifiers' ids in another order (#153's --id-order, 153 by default).
 ./build/compiler test-checker-deferred
 == Test the scalar and AVX-512 assembly frontends
 ./build/compiler test-assembler --cross-check
@@ -216,9 +219,10 @@ rm "$flags_file" "$sources_file"
 ./build/compiler test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 == Check c-testsuite's programs with their bodies read apart on 8 lanes
 # #113: each program checked by the scalar path, the vector path and the deferred reader, whose result must be
-# the vector path's column for column, against clang -fsyntax-only.
+# the vector path's column for column, against clang -fsyntax-only; with the identifiers' ids in another order
+# (#153's --id-order).
 unset CPATH C_INCLUDE_PATH
-./build/compiler test-checker-corpus --clang clang --deferred 8 build/c-testsuite/tests/single-exec
+./build/compiler test-checker-corpus --clang clang --deferred 8 --id-order 153 build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
 == Test the semantic driver's diagnostics and emission against clang
@@ -260,6 +264,19 @@ clang -std=c17 -O2 -Wall -Wextra -Werror tests/differential/lifecycle.c -o build
 ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
 == Test shared IR local promotion and typed-stream semantics
 ./build/compiler test-ssa-ir
+== Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
+# #131: each function -c compiles lowered by both paths, which must agree and verify, then promoted by both of
+# ssa_ir.c's paths, whose results verify with dominance. sqlite3.c with benchmark-backend-source's options, and
+# musl's 1,355 units with its build's (of which -c compiles 1,049; it refuses the others' features by name).
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Check the frozen SQLite source against Clang
 # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
 # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129), which it

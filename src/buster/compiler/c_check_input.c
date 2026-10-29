@@ -5918,6 +5918,8 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
     memset(input->parameters, 0xff, bytes);
 }
 
+#include "c_check_comma_input.c"
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options);
@@ -6392,16 +6394,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
-        // expression commas from call/declaration separators; reverse postorder passes that fact down once.
-        for (uint32_t k = count; k-- > 0;)
-        {
-            const uint32_t token = reader.postorder[k];
-            const uint32_t parent = parser->tree.parents[token];
-            const uint8_t role = parser->tree.roles[token];
-            reader.expression_commas[token] = role == PARSE_ROLE_SEPARATOR && parent < count ? reader.expression_commas[parent] :
-                                              role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_CLOSE_TERNARY ||
-                                              role == PARSE_ROLE_CLOSE_FOR || (role == PARSE_ROLE_TERMINATOR && parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR);
-        }
+        // expression commas from call/declaration separators; only separators inherit that fact from a parent.
+        check_input_expression_commas(&reader);
         if (parser->tokens.pragma_count != 0)
         {
             uint8_t* handled = arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1);

@@ -880,9 +880,10 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         frame->entry += !end;
         // Validate the dispatch domain before classifying effects; long double, the 128-bit integers and vectors (the
         // classes from F80 on) have no InterpreterValue, an indirect jump (#133) goes to a label's address, which an
-        // interpreted function has no code at, and a machine operation (#136) has no model here.
+        // interpreted function has no code at, and a machine operation (#136) and a frame's address (#148), whose
+        // return address and caller's frame an interpreted function hasn't, have no model here.
         if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86 ||
-            class >= BUSTER_TYPED_CLASS_F80)
+            kind == BUSTER_TYPED_FRAME_ADDRESS || class >= BUSTER_TYPED_CLASS_F80)
         {
             result->status = INTERPRETER_INVALID;
             break;
