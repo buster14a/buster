@@ -695,6 +695,25 @@ static bool check_test_program_daz(void)
     return (mask & 64u) != 0;
 }
 
+// The transparent unions (#147) that the harness's functions take and c_check_program_transparent_test.c's programs
+// declare too, each passed as its first member: a struct of two floats (in xmm0, where the union's own classes take a
+// general register), a short and an unsigned short (extended as they are), _Bool, a pointer beside a long and beside a
+// double, a struct of a double (xmm0, beside a long), a 128-bit integer (beside a struct and a long double), an array and
+// a struct of 24 bytes (on the stack).
+#define BUSTER_CHECK_TEST_TRANSPARENT_UNIONS                                                                                                                          \
+    "struct external_fp{float x,y;};struct external_ip{int a,b;};struct external_dv{double v;};struct external_w{_Alignas(16) long a;long b;};"                    \
+    "struct external_big{long a,b,c;};struct external_big_bytes{long c[3];};"                                                                                       \
+    "typedef union __attribute__((transparent_union)){struct external_fp p;struct external_ip q;}ExternalTF;"                                                       \
+    "typedef union __attribute__((transparent_union)){short s;unsigned short u;}ExternalTS;"                                                                        \
+    "typedef union __attribute__((transparent_union)){unsigned short u;short s;}ExternalTZ;"                                                                        \
+    "typedef union __attribute__((transparent_union)){_Bool b;char c;}ExternalTO;"                                                                                  \
+    "typedef union __attribute__((transparent_union)){long*p;long l;}ExternalTP;"                                                                                   \
+    "typedef union __attribute__((transparent_union)){long*p;double d;}ExternalTQ;"                                                                                 \
+    "typedef union __attribute__((transparent_union)){struct external_dv s;long l;}ExternalTD;"                                                                    \
+    "typedef union __attribute__((transparent_union)){__int128 w;struct external_w s;long double x;}ExternalTW;"                                                   \
+    "typedef union __attribute__((transparent_union)){int a[2];struct external_ip q;}ExternalTA;"                                                                  \
+    "typedef union __attribute__((transparent_union)){struct external_big s;struct external_big_bytes t;}ExternalTB;"
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -761,6 +780,41 @@ static const char check_test_program_harness[] =
     "const float f[10]={f0,f1,f2,f3,f4,f5,f6,f7,f8,f9};va_list a;va_start(a,m);unsigned long h=(unsigned long)n*31+(unsigned long)m;"
     "for(int i=0;i<10;i++){unsigned b;__builtin_memcpy(&b,&f[i],4);h=external_fold(h,b);}for(int i=0;i<10;i++){long l=va_arg(a,long);"
     "double d=va_arg(a,double);unsigned long b;__builtin_memcpy(&b,&d,8);h=external_fold(external_fold(h,(unsigned long)l),b);}va_end(a);return h;}\n"
+    // Transparent unions' arguments (#147), each folded from the bytes of the member its caller set: p's pointer (k's bit
+    // 0 clear) or long, q's pointer (k's bit 1 clear) or double, and the others' alike whatever was set. The _bits
+    // functions read the register a short, an unsigned short and a _Bool arrive in as 32 bits, as clang's caller
+    // extends them. The _apply functions call a program's through a pointer, and _variadic reads the unions with va_arg.
+    BUSTER_CHECK_TEST_TRANSPARENT_UNIONS
+    "static unsigned long external_tw(ExternalTW w){return (unsigned long)w.s.a+(unsigned long)(w.s.b&0xffff)*7;}"
+    "unsigned long external_transparent(int k,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTQ q,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"
+    "unsigned long bits;__builtin_memcpy(&bits,&q,8);unsigned long h=external_fold((unsigned long)k,(unsigned long)(f.q.a+f.q.b*3+s.s*5));"
+    "h=external_fold(h,(unsigned long)((k&1)?p.l:*p.p));h=external_fold(h,(k&2)?bits:(unsigned long)*q.p);h=external_fold(h,(unsigned long)d.l);"
+    "h=external_fold(h,external_tw(w));h=external_fold(h,(unsigned long)(a.a[0]+a.a[1]*3));return external_fold(h,(unsigned long)(b.s.a+b.s.b*3+b.s.c*5));}\n"
+    "int external_short_bits(int bits){return bits;}int external_ushort_bits(int bits){return bits;}int external_bool_bits(int bits){return bits;}\n"
+    // An _Atomic one, which isn't transparent: it passes as the atomic type (on the stack, as clang passes this one).
+    "unsigned long external_atomic_transparent(_Atomic ExternalTF f){ExternalTF v=f;return (unsigned long)(v.q.a+v.q.b*3);}\n"
+    "unsigned long external_transparent_apply(unsigned long(*f)(int,ExternalTF,ExternalTS,ExternalTP,ExternalTQ,ExternalTD,ExternalTW,ExternalTA,ExternalTB),int n){"
+    "struct external_ip ip={n,n*2};struct external_big big={n,n+1,n+2};long x=n*5,y=n+6;struct external_w ws={n,n+9};"
+    "return f(0,ip,(short)-n,&x,&y,(struct external_dv){n*0.25},(__int128)n*8,ip,big)"
+    "^f(3,(struct external_fp){n*0.5f,1.5f},(unsigned short)(n*3),(long)n*7,n*0.75,(long)n*11,ws,ip,(struct external_big_bytes){{1,2,n}})"
+    "^f(1,ip,(short)n,(long)n,&y,(long)n,(long double)n,ip,big);}\n"
+    "unsigned long external_transparent_variadic(int count,...){va_list a;va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalTF f=va_arg(a,ExternalTF);ExternalTS s=va_arg(a,ExternalTS);ExternalTD d=va_arg(a,ExternalTD);"
+    "ExternalTW w=va_arg(a,ExternalTW);ExternalTA r=va_arg(a,ExternalTA);ExternalTB b=va_arg(a,ExternalTB);"
+    "h=external_fold(h,(unsigned long)(f.q.a+f.q.b*3+s.s*5));h=external_fold(h,(unsigned long)d.l);h=external_fold(h,external_tw(w));"
+    "h=external_fold(h,(unsigned long)(r.a[0]+r.a[1]*3));h=external_fold(h,(unsigned long)(b.s.a+b.s.b*3+b.s.c*5));}va_end(a);return h;}\n"
+    "unsigned long external_transparent_variadic_apply(unsigned long(*f)(int,...),int n){ExternalTF tf={.q={n,-n}};ExternalTS ts={.s=(short)(n-7)};"
+    "ExternalTD td={.l=(long)n*1000003};ExternalTW tw={.w=(__int128)n*3};ExternalTA ta={.q={n,5}};ExternalTB tb={.s={n,2,3}};"
+    "return f(2,tf,ts,td,tw,ta,tb,tf,ts,td,tw,ta,tb);}\n"
+    // After 6 longs and 8 doubles, every union on the stack.
+    "unsigned long external_transparent_late(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,"
+    "double d6,double d7,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"
+    "unsigned long h=external_fold((unsigned long)(l0+l1+l2+l3+l4+l5*3),(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3));"
+    "h=external_fold(h,(unsigned long)(f.q.a+f.q.b*3+s.s*5));h=external_fold(h,(unsigned long)p.l);h=external_fold(h,(unsigned long)d.l);"
+    "h=external_fold(h,external_tw(w));return external_fold(external_fold(h,(unsigned long)(a.a[0]+a.a[1]*3)),(unsigned long)(b.s.a+b.s.b*3+b.s.c*5));}\n"
+    "unsigned long external_transparent_late_apply(unsigned long(*f)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,"
+    "ExternalTF,ExternalTS,ExternalTP,ExternalTD,ExternalTW,ExternalTA,ExternalTB),int n){struct external_ip ip={n,7};"
+    "return f(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,ip,(short)-n,(long)n*9,(long)n*3,(__int128)n*5,ip,(struct external_big){n,n,n});}\n"
     "int main(void) { for (int repeat=0;repeat<3;repeat++) for (int n=-3;n<=19;n++) {\n"
     "int a=tested(n), b=oracle_tested(n); if(a!=b) { fprintf(stderr,\"n=%d repeat=%d ours=%d oracle=%d\\n\",n,repeat,a,b); return 1; } }\n"
     "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
@@ -1957,6 +2011,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_copy_test.c"
 #include "c_check_program_vector_test.c"
 #include "c_check_program_x86_test.c"
+#include "c_check_program_transparent_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2469,6 +2524,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_diagnostics(test, clang);
     check_test_program_vectors(test, clang);
     check_test_program_x86(test, clang);
+    check_test_program_transparent(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
@@ -3575,7 +3631,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "indirect-function-pointer-call", true, true, 1, 0);
     check_test_program_boundary(test,
         "typedef union __attribute__((transparent_union)){int value;unsigned bits;} U;int consume(U);int tested(int n){return consume(n);}",
-        "transparent-union-call-machine-boundary", true, false, 1, 0);
+        "transparent-union-call-machine-boundary", true, true, 1, 0);
     check_test_program_boundary(test,
         "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(global);}",
         "vector-builtin-live-reference-machine-boundary", true, false, 1, 0);

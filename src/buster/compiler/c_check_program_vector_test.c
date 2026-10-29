@@ -150,6 +150,14 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
             "v16si array[2]={a,b};array[1]+=array[0];FOLD(array);int t=(a*b)[n&15]+(d+d)[n&3];FOLD(t);return (int)h;}",
         },
+        {
+            // A transparent union (#147) whose first member, a struct of four floats, passes in xmm0 and xmm1: a vector
+            // its conversion selects goes through a temporary of the vector's bytes, and the union's own value.
+            "vector-transparent-union-member",
+            "typedef union __attribute__((transparent_union)){struct{_Alignas(16) float a[4];}s;v4sf v;}TV;"
+            "static unsigned sum(int k,TV x){unsigned h=2166136261u+(unsigned)k;FOLD(x.s);return h;}"
+            "int tested(int n){v4sf v;fillf((float*)&v,4,n);TV t={.v=v+1};unsigned h=sum(1,v)^sum(2,t)^sum(3,v*v);return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

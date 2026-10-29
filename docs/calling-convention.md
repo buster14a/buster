@@ -73,6 +73,13 @@ generator's: it classifies after the front end has made the types, and a tag
 once it is complete (the type table's columns never change once written, but
 a tag's at its completion). Lanes may read the table while none writes it.
 
+A transparent union passes as its first member: clang classifies an argument,
+a parameter and `va_arg`'s type that is one as the member
+(`useFirstFieldIfTransparentUnion`), but a result as the union, as it does a
+struct that holds one. The table keeps the union's own row, which those take,
+and the code generator gives `abi_assign` and `abi_va_arg` the member's type
+(`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
+
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's
 `AVXLevel` (`getNativeVectorSizeForAVXABI`). It decides how vectors of 32 and
