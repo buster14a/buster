@@ -198,8 +198,10 @@ designs and the compilers already built this way.
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
   paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
   `interpreter.c` and `ir_interpreter.c` execute typed streams and shared IR
-  with explicit arena frames; `interpreter_native.c` supplies the SysV host
-  boundary and `interpreter_link.c` materializes data atoms. Their commands are
+  with explicit arena frames, the IR's calls with by-value aggregates' records
+  and variadic definitions' anchors among them (#788); `interpreter_native.c`
+  supplies the SysV host boundary and `interpreter_link.c` materializes data
+  atoms. Their commands are
   `test-interpreter`, `test-interpreter-native`, `test-interpreter-link`,
   `test-ir-interpreter`, and `interpret-ir`. [The tools guide](docs/ir-tools.md)
   records the API, text grammar and frontend-dependent acceptance. Run builds
