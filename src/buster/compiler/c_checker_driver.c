@@ -2281,11 +2281,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
-    Arena arena = arena_reserve(1ull << 36);
-    Arena scratch = arena_reserve(1ull << 36);
-    Arena output_arena = arena_reserve(1ull << 36);
+    const uint64_t reservation_bytes = UINT64_C(1) << 36;
+    Arena arena = arena_reserve(reservation_bytes);
+    Arena scratch = arena_reserve(reservation_bytes);
+    Arena output_arena = arena_reserve(reservation_bytes);
     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
-    const bool reserved = arena.base != 0 && scratch.base != 0 && output_arena.base != 0;
+    const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
     uint32_t filtered_count = 0;
     // The source files: every argument that is neither an option nor an option's value (#152). pp_parse_options reads the
@@ -2531,7 +2532,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL;
+    const bool parsed = reserved && arguments_ready && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order &&
+                        pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
     // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
     const char* unsupported_pic = parsed && (emit_object || link) ?
@@ -2579,7 +2582,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!reserved)
     {
-        fprintf(stderr, "fatal error: can't reserve the driver's memory\n");
+        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
+    }
+    else if (!arguments_ready)
+    {
+        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
     }
     else if (unsupported_codegen != NULL)
     {
