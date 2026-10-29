@@ -5217,13 +5217,15 @@ diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the merge on lanes against its twin, by
 `--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
 first in the units' order is the one reported, and a wide addend beside a unit
-without symbols, into the same bytes); the jobserver's tokens held while the
-link writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
-and 8, poisoned and by each path the same bytes, and each unit's `-c -g`
-object its own alone. With `--corpus DIR` it compiles DIR's `.c` files at once
-with `-c`, plainly and poisoned, against each alone, and with `--generate DIR`
-it writes a program of synth's shape (512 units of 200 functions by default)
-for measurements, and tests nothing.
+without symbols, into the same bytes); every reservation of two units' `-c`
+failed in turn, each run reported and its memory released (a lane's partial
+setup among them); the jobserver's tokens held while the link writes; and
+lanes that don't start; with `-g`, the executables by `--lanes` 1 and 8,
+poisoned and by each path the same bytes, and each unit's `-c -g` object its
+own alone. With `--corpus DIR` it compiles DIR's `.c` files at once with `-c`,
+plainly and poisoned, against each alone, and with `--generate DIR` it writes
+a program of synth's shape (512 units of 200 functions by default) for
+measurements, and tests nothing.
 [docs/translation-units.md](docs/translation-units.md) has the design and the
 measurements.
 

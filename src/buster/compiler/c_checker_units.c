@@ -1417,7 +1417,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
 
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
 // memory of the links it keeps (once: the links it kept stay there), the first time the lane takes a unit. False, with
-// the lane failed, if it can't be reserved.
+// the lane failed, if it can't be reserved: what was stays the lane's, for its release.
 static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverCommand* command)
 {
     if (!lane->ready && !lane->failed)
@@ -1438,14 +1438,13 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
 // compiled its units (#778): into its pool (arena_pool), when its caller set one, whose MADV_DONTNEED frees an arena's
 // pages under the address space's lock for reading, so that the lanes free theirs at once, at the end of their run,
 // where the calling thread would free every lane's after it, one after another. The links it kept stay in their arenas.
+// A lane whose setup failed releases what it reserved before the failure, which its table and cache keep as their
+// initializers left them (a lane that took no unit, or released them already, has them zero, which their releases take).
 static void check_units_lane_release(CheckUnitsLane* lane)
 {
-    if (lane->ready)
-    {
-        file_cache_release(&lane->cache);
-        intern_release(&lane->identifiers);
-        lane->ready = false;
-    }
+    file_cache_release(&lane->cache);
+    intern_release(&lane->identifiers);
+    lane->ready = false;
     arena_release(&lane->output);
     arena_release(&lane->scratch);
     arena_release(&lane->arena);
@@ -1466,7 +1465,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->compiled = true;
     if (errors != NULL && !check_units_lane_ready(lane, command))
     {
-        fprintf(errors, "fatal error: can't reserve checker memory\n");
+        fprintf(errors, "fatal error: can't reserve the lane's memory\n");
     }
     else if (errors != NULL)
     {
