@@ -652,18 +652,23 @@ vector path is 6% slower than its scalar twin on these functions, and runs under
 Zen 5's power cap (#199), 31.2 dispatch slots per instruction throttled against
 the twin's 13.9.
 
-Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the
-same instructions but 0.0004% and writes the same object. The checker's unit
-compiles 1.14 s longer (25.6 s against 24.4 s), since `test-ir-source` and
-`benchmark-ir-source` run there with the IR's modules: a command that runs the
+Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
+instructions but 0.0004% and writes the same object. The checker's unit compiled
+1.14 s longer (25.6 s against 24.4 s), since `test-ir-source` and
+`benchmark-ir-source` ran there with the IR's modules: a command that runs the
 checker's emission and the adapter, whose validation reads the x86 encoder's
-templates as the emission's encoding does, must run both in one unit's copy
-(`./build.sh check-call-graph`'s split state). The IR's synthetic benchmarks
-read the verifier 1% to 7% slower on the 9700X and 2% to 7% faster on a Zen 4
-laptop: its vector path runs 1.1% fewer instructions than main's, with 13.6%
-more of its dispatch slots left empty by the front end. The lowering of the
-generated programs does 1.8% more work, the new kinds' and records' tests, and
-takes 3% to 8% longer there (within 1% on the laptop's larger programs).
+templates as the emission's encoding does, had to run both in one unit's copy
+(`./build.sh check-call-graph`'s split state). Since #784 they run in the
+backend's unit, which compiles the IR's modules anyway: the checker's unit homes
+their check and emission (`ir_source_prepare`, `BUSTER_IR_SOURCE_ENTRY`), and
+`main.c`'s units share the encoder's templates (`BUSTER_X86_SHARED`, the driver's
+unit's), which the emission's encoding fills and the adapter's validation reads.
+The IR's synthetic benchmarks read the verifier 1% to 7% slower on the 9700X and
+2% to 7% faster on a Zen 4 laptop: its vector path runs 1.1% fewer instructions
+than main's, with 13.6% more of its dispatch slots left empty by the front end.
+The lowering of the generated programs does 1.8% more work, the new kinds' and
+records' tests, and takes 3% to 8% longer there (within 1% on the laptop's larger
+programs).
 
 ### Initial 9700X qualification
 

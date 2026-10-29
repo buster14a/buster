@@ -18,6 +18,13 @@
 // function of that name, as lowered and as promoted. It is a test outside the compile path, with no vector path of its
 // own.
 
+// ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
+// whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
+// has it static.
+#ifndef BUSTER_IR_SOURCE_ENTRY
+#define BUSTER_IR_SOURCE_ENTRY static
+#endif
+
 // The functions -c compiles of one file, as ir_source_prepare leaves them: each one's typed stream (in the caller's
 // `lowered` arena), its semantic result type, its symbol bound (Tier0Function.symbol_count, the emission's link's
 // symbols) and its name, and the file's tokens (the parser's: those that reach it after preprocessing).
@@ -74,15 +81,17 @@ static IrType ir_source_result(const Tier0Function* function, const CheckProgram
 // Checks, selects and emits `file` read with `options` as benchmark-backend-source does (backend_source_file), into
 // `*result`: its functions' streams in `lowered`, their table and names in `arena`. Both arenas keep what they hold
 // for the caller; everything else the file needed is released.
-static void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena)
+BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena)
 {
-    static InternTable identifiers;
-    static Preprocessor pp;
-    static Parser parser;
     memset(result, 0, sizeof(*result));
+    // The file's own state, on an arena of its own that the file's end releases: an entry point, which main.c's other
+    // units see as an inline definition, holds no static object.
     Arena option_arena = arena_reserve(UINT64_C(1) << 24);
+    InternTable* identifiers = BUSTER_ARENA_PUSH_ARRAY(&option_arena, InternTable, 1);
+    Preprocessor* pp = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Preprocessor, 1);
+    Parser* parser = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Parser, 1);
     char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    bool valid = own != 0;
+    bool valid = identifiers != 0 && pp != 0 && parser != 0 && own != 0;
     for (uint32_t i = 0; valid && i < option_count; i += 1)
     {
         own[i] = options[i];
@@ -98,27 +107,27 @@ static void ir_source_prepare(IrSourceFile* result, const char* file, char** opt
     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
     pp_options.semantic_pragmas = true;
     CheckCorpusPath path = { 0 };
-    const bool preprocessed = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
-    const bool accepted = preprocessed && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
+    const bool preprocessed = valid && intern_initialize(identifiers) && pp_initialize(pp, &pp_options, identifiers) && pp_run(pp, input);
+    const bool accepted = preprocessed && check_corpus_check_policy(&path, parser, pp, false, pp_options.quiet);
     const bool exhausted = preprocessed && !accepted && path.resource;
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
-    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
+    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser->options.scalar, &path.output_arena, &path.scratch);
     const CheckProgramOptions program_options = {
         .initializers = &path.initializers,
         .asms = &path.asms,
-        .identifiers = pp.table,
+        .identifiers = pp->table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };
-    prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
+    prepared = prepared && check_program(&program, parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
     const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
     CheckProgramSelection selected = { 0 };
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const bool chosen = prepared && bytes.base != 0 &&
                         check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    const bool emitted = chosen && check_program_emit(&code, &selected.program, &parser, pp.table, selected.data.capacity, false, lowered, &bytes,
+    const bool emitted = chosen && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, lowered, &bytes,
                                                       &path.scratch, NULL, NULL, false, false);
     const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     uint8_t* defined = 0;
@@ -149,7 +158,7 @@ static void ir_source_prepare(IrSourceFile* result, const char* file, char** opt
         }
     }
     result->count = named ? count : 0;
-    result->tokens = accepted ? parser.tokens.count : 0;
+    result->tokens = accepted ? parser->tokens.count : 0;
     const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
                         (chosen && !emitted && !refused) || (emitted && !named);
     result->status = failed ? IR_SOURCE_FAILED : named ? IR_SOURCE_PREPARED : IR_SOURCE_LEFT_OUT;
@@ -188,9 +197,12 @@ static void ir_source_prepare(IrSourceFile* result, const char* file, char** opt
     }
     arena_release(&bytes);
     check_corpus_close(&path);
-    parse_release(&parser);
-    pp_release(&pp);
-    intern_release(&identifiers);
+    if (valid)
+    {
+        parse_release(parser);
+        pp_release(pp);
+        intern_release(identifiers);
+    }
     arena_release(&option_arena);
 }
 
