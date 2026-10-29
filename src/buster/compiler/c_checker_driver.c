@@ -1204,6 +1204,87 @@ static const char* check_driver_fixup_origin(const Link* link, const Runtime* ru
     return buffer;
 }
 
+// Names an atom from a symbol attached to it, if it has one. This scan happens only after a failed link.
+static const char* check_driver_atom_name(const Link* link, AtomId atom, char* buffer, uint64_t capacity)
+{
+    NameId name = 0;
+    for (SymbolId symbol = 1; name == 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        name = link->symbols.atom[symbol] == atom ? link->symbols.name[symbol] : 0;
+    }
+    return check_driver_link_name(link, name, buffer, capacity);
+}
+
+// Describe only the information the writer returned. A layout refusal without an atom can have several causes.
+static void check_driver_executable_failure(const Link* link, const Runtime* runtime, const char* path, const ExecutableResult* result, FILE* out)
+{
+    char name[256];
+    const bool atom = result->atom != 0 && result->atom < link->atoms.count;
+    const bool symbol = result->symbol != 0 && result->symbol < link->symbols.count;
+    if (result->error == EXECUTABLE_ERROR_UNDEFINED && symbol)
+    {
+        fprintf(out, "error: undefined reference to '%s'\n", check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
+    }
+    else if (result->error == EXECUTABLE_ERROR_FILE)
+    {
+        fprintf(out, "error: can't write %s: %s: %s\n", path, result->call != NULL ? result->call : "write", strerror(result->system_error));
+    }
+    else if ((result->error == EXECUTABLE_ERROR_RELOCATION || result->error == EXECUTABLE_ERROR_FIXUP) && result->fixup != 0 && result->fixup < link->fixups.count)
+    {
+        char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
+        fprintf(out, "error: can't link %s: %s: %s\n", path, check_driver_fixup_origin(link, runtime, 1, result->fixup, origin, sizeof(origin)),
+                result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "unsupported relocation");
+    }
+    else if (result->error == EXECUTABLE_ERROR_LAYOUT && atom)
+    {
+        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
+        const uint64_t size = link->atoms.size[result->atom];
+        if (size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
+        {
+            fprintf(out, "error: can't link %s: atom %u%s%s%s has %" PRIu64 " bytes; the maximum atom size is %" PRIu64 " bytes\n", path,
+                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size,
+                    (uint64_t)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
+        }
+        else
+        {
+            fprintf(out, "error: can't link %s: atom %u%s%s%s has unsupported size, alignment or section layout (size %" PRIu64 " bytes)\n", path,
+                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size);
+        }
+    }
+    else if (result->error == EXECUTABLE_ERROR_LAYOUT)
+    {
+        fprintf(out, "error: can't link %s: image, TLS or section-name layout exceeds executable limits (image end: %" PRIu64
+                     " bytes; TLS block: %" PRIu64 " bytes)\n", path, (uint64_t)BUSTER_EXECUTABLE_MAX_ADDRESS, (uint64_t)BUSTER_EXECUTABLE_MAX_TLS_BYTES);
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNWIND && atom)
+    {
+        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
+        fprintf(out, "error: can't link %s: unwind atom %u%s%s%s cannot be indexed in the unwind table\n", path, result->atom,
+                atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "");
+    }
+    else if (result->error == EXECUTABLE_ERROR_ENTRY)
+    {
+        const char* entry = symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "";
+        fprintf(out, "error: can't link %s: entry point%s%s%s is not defined in code\n", path,
+                entry[0] ? " '" : "", entry[0] ? entry : "", entry[0] ? "'" : "");
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNSUPPORTED && symbol)
+    {
+        fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path,
+                check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
+    }
+    else
+    {
+        const char* reason = result->error == EXECUTABLE_ERROR_MEMORY ? "linker scratch memory exhausted" :
+                             result->error == EXECUTABLE_ERROR_UNWIND ? "unwind table cannot be indexed" :
+                             result->error == EXECUTABLE_ERROR_UNSUPPORTED ? "unsupported executable configuration" :
+                             result->error == EXECUTABLE_ERROR_UNDEFINED ? "undefined symbol" :
+                             result->error == EXECUTABLE_ERROR_RELOCATION ? "unsupported relocation" :
+                             result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "executable write failed";
+        fprintf(out, "error: can't link %s: %s (executable error %u)\n", path, reason, (uint32_t)result->error);
+    }
+}
+
 // The libraries the command line names, -lNAME (or -l NAME), and the directories it adds to their search, -LDIR (or
 // -L DIR), each in its order, for the direct path to link (runtime_libraries_import).
 typedef struct CheckDriverLibraries CheckDriverLibraries;
@@ -1438,27 +1519,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 },
             };
             valid = lane_run(1, check_driver_write_main, &write, 0) && write.succeeded;
-            const ExecutableError error = write.result.error;
-            if (!valid && error == EXECUTABLE_ERROR_UNDEFINED && write.result.symbol < code.link.symbols.count)
+            if (!valid)
             {
-                fprintf(stderr, "error: undefined reference to '%s'\n",
-                        check_driver_link_name(&code.link, code.link.symbols.name[write.result.symbol], name, sizeof(name)));
-            }
-            else if (!valid && error == EXECUTABLE_ERROR_FILE)
-            {
-                fprintf(stderr, "error: can't write %s: %s: %s\n", output_path, write.result.call != NULL ? write.result.call : "write",
-                        strerror(write.result.system_error));
-            }
-            else if (!valid && (error == EXECUTABLE_ERROR_RELOCATION || error == EXECUTABLE_ERROR_FIXUP) && write.result.fixup != 0)
-            {
-                // The fixup's origin and target, a runtime member's as libgcc.a(generic-morestack.o) names one.
-                char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
-                fprintf(stderr, "error: can't link %s: %s (executable error %u)\n", output_path,
-                        check_driver_fixup_origin(&code.link, &runtime, 1, write.result.fixup, origin, sizeof(origin)), (uint32_t)error);
-            }
-            else if (!valid)
-            {
-                fprintf(stderr, "error: can't link %s (executable error %u)\n", output_path, (uint32_t)error);
+                check_driver_executable_failure(&code.link, &runtime, output_path, &write.result, stderr);
             }
         }
         if (again && cached)
