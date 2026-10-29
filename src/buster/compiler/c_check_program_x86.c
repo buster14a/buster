@@ -95,7 +95,7 @@ typedef enum CheckX86LowerFamily
     // (vector a): the form's dest, a, a: a scalar operation of a's first element, the others a's (VRCPSS, VRSQRTSS).
     CHECK_X86_LOWER_UNARY_SCALAR,
     // (vector a, vector b): the form's flags of a and b (`swap`: of b and a: VCOMISD, VPTEST), then an int: 1 where the
-    // condition `fixed` holds (CMOVcc's, CheckX86LowerCondition), and where `other` names a second one, its value where
+    // condition `fixed` holds (SETcc's, CheckX86LowerCondition), and where `other` names a second one, its value where
     // that one holds: 0 (CHECK_X86_THEN_ZERO: comieq's unordered operands, by the parity) or 1 (CHECK_X86_THEN_ONE:
     // comineq's).
     CHECK_X86_LOWER_FLAGS,
@@ -136,7 +136,7 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_XOP_COMPARE,
 } CheckX86LowerFamily;
 
-// FLAGS' conditions, CMOVcc's (and the x86 conditions' order), and its second condition's value.
+// FLAGS' conditions, SETcc's (and the x86 conditions' order), and its second condition's value.
 typedef enum CheckX86LowerCondition
 {
     CHECK_X86_CC_O,
@@ -200,8 +200,10 @@ typedef enum CheckX86LowerInto
 // MASK_MERGE's results, by its rule's `fixed`: the form's into w under the mask (its destination is w's register); the
 // same with w zeroed where the mask's bits are clear; that, then a's elements where the mask's bits are clear (the
 // 512-bit complex FMAs, which clang selects into a); that, then a's first lane where the mask's first bit is clear and
-// a's others (the scalar complex FMAs' round_mask, clang's select by the mask's bit 0); or the form into a copy of w (c)
-// in VECTOR(3), whose first lane then goes over c's (their round_mask3, clang's shuffle of the result and c).
+// a's others (the scalar complex FMAs' round_mask, clang's select by the mask's bit 0); the form into a copy of w (c) in
+// VECTOR(3), whose first lane then goes over c's (their round_mask3, clang's shuffle of the result and c); or the form's
+// into w under the mask with w and the result of half a's bytes (AVX10.2's conversions of 32 and 64 bytes of halves to
+// 8-bit floats with a bias).
 typedef enum CheckX86LowerMerge
 {
     CHECK_X86_MERGE_W,
@@ -209,6 +211,7 @@ typedef enum CheckX86LowerMerge
     CHECK_X86_MERGE_A,
     CHECK_X86_MERGE_A_SCALAR,
     CHECK_X86_MERGE_C_SCALAR,
+    CHECK_X86_MERGE_W_HALF,
 } CheckX86LowerMerge;
 
 // REDUCE's operations.
@@ -439,6 +442,51 @@ _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word
 #define BUSTER_CHECK_X86_EXTENDED(name, family, element, bytes, form, other, extensions) \
     { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form, other, false, 0, 0, CHECK_X86_ROUND_NONE, 0, extensions },
+// AVX10.2's rules: one of `family`'s row of the form with another vector's bytes (`other`), one with a rounding control
+// (its last argument) and the form it picks, one with a MASK_MERGE's merge (CHECK_X86_MERGE_*), and the compares into an
+// int of bf16's first elements (FLAGS', as BUSTER_CHECK_X86_COMPARISONS's).
+#define BUSTER_CHECK_X86_AVX10 BUSTER_X86_EXTENSION(AVX10_2)
+#define BUSTER_CHECK_X86_AVX10_ONE(name, family, element, bytes, form, other) \
+    BUSTER_CHECK_X86_EXTENDED(name, family, element, bytes, form, other, BUSTER_CHECK_X86_AVX10)
+#define BUSTER_CHECK_X86_AVX10_ROUNDED(name, family, element, bytes, form, other, round_form, rounding) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, other, false, 0, X86_FORM_##round_form, CHECK_X86_ROUND_##rounding, 0, BUSTER_CHECK_X86_AVX10 },
+#define BUSTER_CHECK_X86_AVX10_MERGED(name, element, bytes, form, merge) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_MASK_MERGE, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, 0, false, 0, 0, CHECK_X86_ROUND_NONE, CHECK_X86_MERGE_##merge, BUSTER_CHECK_X86_AVX10 },
+#define BUSTER_CHECK_X86_AVX10_TEST(name, swap, condition, then) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_FLAGS, 1, 16, false, swap, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_VCOMISBF16_X_XM16, then, false, 0, 0, CHECK_X86_ROUND_NONE, CHECK_X86_CC_##condition, BUSTER_CHECK_X86_AVX10 },
+// AVX10.2's saturating conversions with truncation at each width (`x`, `y` and `z` the forms' operand suffixes, the 512-bit
+// one with its exceptions' suppression `zs`), each of a's bytes per lane and bytes and w's bytes where they aren't a's.
+#define BUSTER_CHECK_X86_SATURATING(name, form, e1, b1, o1, x, e2, b2, o2, y, e3, b3, o3, z, zs) \
+    BUSTER_CHECK_X86_AVX10_ONE(name "128_mask", MASK_UNARY, e1, b1, form##_##x, o1) \
+    BUSTER_CHECK_X86_AVX10_ONE(name "256_mask", MASK_UNARY, e2, b2, form##_##y, o2) \
+    BUSTER_CHECK_X86_AVX10_ROUNDED(name "512_round_mask", MASK_UNARY, e3, b3, form##_##z, o3, form##_##zs, SAE)
+// AVX10.2's conversions of halves to 8-bit floats (bf8 or hf8, saturating with s) at each width: of one vector into w under
+// the mask (vcvtph2bf8's, MASK_UNARY's), with a vector of biases (vcvtbiasph2bf8's, MASK_MERGE's, whose 32- and 64-byte
+// results are half a's bytes), and of two vectors (vcvt2ph2bf8's, BINARY's).
+#define BUSTER_CHECK_X86_EIGHT_BITS(kind, form) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvtph2" kind "_128_mask", MASK_UNARY, 2, 16, VCVTPH2##form##_X_XM128, 0) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvtph2" kind "_256_mask", MASK_UNARY, 2, 32, VCVTPH2##form##_X_YM256, 16) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvtph2" kind "_512_mask", MASK_UNARY, 2, 64, VCVTPH2##form##_Y_ZM512, 32) \
+    BUSTER_CHECK_X86_AVX10_MERGED("vcvtbiasph2" kind "_128_mask", 2, 16, VCVTBIASPH2##form##_X_X_XM128, W) \
+    BUSTER_CHECK_X86_AVX10_MERGED("vcvtbiasph2" kind "_256_mask", 2, 32, VCVTBIASPH2##form##_X_Y_YM256, W_HALF) \
+    BUSTER_CHECK_X86_AVX10_MERGED("vcvtbiasph2" kind "_512_mask", 2, 64, VCVTBIASPH2##form##_Y_Z_ZM512, W_HALF) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvt2ph2" kind "_128", BINARY, 1, 16, VCVT2PH2##form##_X_X_XM128, 0) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvt2ph2" kind "_256", BINARY, 1, 32, VCVT2PH2##form##_Y_Y_YM256, 0) \
+    BUSTER_CHECK_X86_AVX10_ONE("vcvt2ph2" kind "_512", BINARY, 1, 64, VCVT2PH2##form##_Z_Z_ZM512, 0)
+// AVX10.2's bf16 operations at each width: masked ones of one vector (MASK_UNARY's) and of two (MASK_MERGE's), and
+// unmasked ones of two (BINARY's).
+#define BUSTER_CHECK_X86_BF16_WIDTHS(name, suffix, family, form, x, y, z) \
+    BUSTER_CHECK_X86_AVX10_ONE(name "128" suffix, family, 2, 16, form##_##x, 0) \
+    BUSTER_CHECK_X86_AVX10_ONE(name "256" suffix, family, 2, 32, form##_##y, 0) \
+    BUSTER_CHECK_X86_AVX10_ONE(name "512" suffix, family, 2, 64, form##_##z, 0)
+// MOVRS's vector loads (AVX10.2's) of each element's size, VECTOR_MEMORY's LOAD from p.
+#define BUSTER_CHECK_X86_READ_SHARED(name, element, form) \
+    BUSTER_CHECK_X86_EXTENDED(name "128", VECTOR_MEMORY, element, 16, form##_X_M128, CHECK_X86_LAYOUT_LOAD, BUSTER_X86_EXTENSION(MOVRS) | BUSTER_CHECK_X86_AVX10) \
+    BUSTER_CHECK_X86_EXTENDED(name "256", VECTOR_MEMORY, element, 32, form##_Y_M256, CHECK_X86_LAYOUT_LOAD, BUSTER_X86_EXTENSION(MOVRS) | BUSTER_CHECK_X86_AVX10) \
+    BUSTER_CHECK_X86_EXTENDED(name "512", VECTOR_MEMORY, element, 64, form##_Z_M512, CHECK_X86_LAYOUT_LOAD, BUSTER_X86_EXTENSION(MOVRS) | BUSTER_CHECK_X86_AVX10)
 
 static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_cmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, true, 2)
@@ -1412,12 +1460,70 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_EXTENDED("vsm3msg2", TERNARY, 4, 16, VSM3MSG2_X_X_XM128, 0, BUSTER_X86_EXTENSION(SM3))
     BUSTER_CHECK_X86_EXTENDED("vsm4key4512", BINARY, 4, 64, VSM4KEY4_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(SM4) | BUSTER_X86_EXTENSION(AVX10_2))
     BUSTER_CHECK_X86_EXTENDED("vsm4rnds4512", BINARY, 4, 64, VSM4RNDS4_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(SM4) | BUSTER_X86_EXTENSION(AVX10_2))
+    // AVX10.2's saturating conversions with truncation: of floats and doubles to doublewords and quadwords, signed and not.
+    BUSTER_CHECK_X86_SATURATING("vcvttps2dqs", VCVTTPS2DQS, 4, 16, 0, X_XM128, 4, 32, 0, Y_YM256, 4, 64, 0, Z_ZM512, Z_Z_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttps2udqs", VCVTTPS2UDQS, 4, 16, 0, X_XM128, 4, 32, 0, Y_YM256, 4, 64, 0, Z_ZM512, Z_Z_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttps2qqs", VCVTTPS2QQS, 8, 16, 0, X_XM64, 4, 16, 32, Y_XM128, 4, 32, 64, Z_YM256, Z_Y_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttps2uqqs", VCVTTPS2UQQS, 8, 16, 0, X_XM64, 4, 16, 32, Y_XM128, 4, 32, 64, Z_YM256, Z_Y_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttpd2dqs", VCVTTPD2DQS, 8, 16, 0, X_XM128, 8, 32, 16, X_YM256, 8, 64, 32, Y_ZM512, Y_Z_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttpd2udqs", VCVTTPD2UDQS, 8, 16, 0, X_XM128, 8, 32, 16, X_YM256, 8, 64, 32, Y_ZM512, Y_Z_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttpd2qqs", VCVTTPD2QQS, 8, 16, 0, X_XM128, 8, 32, 0, Y_YM256, 8, 64, 0, Z_ZM512, Z_Z_SAE)
+    BUSTER_CHECK_X86_SATURATING("vcvttpd2uqqs", VCVTTPD2UQQS, 8, 16, 0, X_XM128, 8, 32, 0, Y_YM256, 8, 64, 0, Z_ZM512, Z_Z_SAE)
+    // AVX10.2's bf16 operations: the scale (MASK_MERGE's), the exponent and the approximations (MASK_UNARY's), the maximum
+    // and the minimum (BINARY's), and the compares of the first elements into an int (FLAGS', as COMISS's).
+    BUSTER_CHECK_X86_BF16_WIDTHS("vscalefbf16", "_mask", MASK_MERGE, VSCALEFBF16, X_X_XM128, Y_Y_YM256, Z_Z_ZM512)
+    BUSTER_CHECK_X86_BF16_WIDTHS("vgetexpbf16", "_mask", MASK_UNARY, VGETEXPBF16, X_XM128, Y_YM256, Z_ZM512)
+    BUSTER_CHECK_X86_BF16_WIDTHS("vrcpbf16", "_mask", MASK_UNARY, VRCPBF16, X_XM128, Y_YM256, Z_ZM512)
+    BUSTER_CHECK_X86_BF16_WIDTHS("vrsqrtbf16", "_mask", MASK_UNARY, VRSQRTBF16, X_XM128, Y_YM256, Z_ZM512)
+    BUSTER_CHECK_X86_BF16_WIDTHS("vmaxbf16", "", BINARY, VMAXBF16, X_X_XM128, Y_Y_YM256, Z_Z_ZM512)
+    BUSTER_CHECK_X86_BF16_WIDTHS("vminbf16", "", BINARY, VMINBF16, X_X_XM128, Y_Y_YM256, Z_Z_ZM512)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16eq", false, E, CHECK_X86_THEN_ZERO | CHECK_X86_CC_P)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16lt", true, A, 0)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16le", true, AE, 0)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16gt", false, A, 0)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16ge", false, AE, 0)
+    BUSTER_CHECK_X86_AVX10_TEST("vcomisbf16neq", false, NE, CHECK_X86_THEN_ONE | CHECK_X86_CC_P)
+    // AVX10.2's conversions to and from 8-bit floats: of halves to bf8 and hf8, saturating or not, and of hf8 to halves
+    // (MASK_UNARY's of elements twice as wide); of two vectors of floats to halves (MASK_MERGE's); and its dot products of
+    // pairs of halves into floats (TERNARY's).
+    BUSTER_CHECK_X86_EIGHT_BITS("bf8", BF8)
+    BUSTER_CHECK_X86_EIGHT_BITS("bf8s", BF8S)
+    BUSTER_CHECK_X86_EIGHT_BITS("hf8", HF8)
+    BUSTER_CHECK_X86_EIGHT_BITS("hf8s", HF8S)
+    BUSTER_CHECK_X86_AVX10_ONE("vcvthf8_2ph128_mask", MASK_UNARY, 2, 16, VCVTHF82PH_X_XM64, 0)
+    BUSTER_CHECK_X86_AVX10_ONE("vcvthf8_2ph256_mask", MASK_UNARY, 1, 16, VCVTHF82PH_Y_XM128, 32)
+    BUSTER_CHECK_X86_AVX10_ONE("vcvthf8_2ph512_mask", MASK_UNARY, 1, 32, VCVTHF82PH_Z_YM256, 64)
+    BUSTER_CHECK_X86_AVX10_ONE("vcvt2ps2phx128_mask", MASK_MERGE, 2, 16, VCVT2PS2PHX_X_X_XM128, 0)
+    BUSTER_CHECK_X86_AVX10_ONE("vcvt2ps2phx256_mask", MASK_MERGE, 2, 32, VCVT2PS2PHX_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_AVX10_ROUNDED("vcvt2ps2phx512_mask", MASK_MERGE, 2, 64, VCVT2PS2PHX_Z_Z_ZM512, 0, VCVT2PS2PHX_Z_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_AVX10_ONE("vdpphps128", TERNARY, 4, 16, VDPPHPS_X_X_XM128, 0)
+    BUSTER_CHECK_X86_AVX10_ONE("vdpphps256", TERNARY, 4, 32, VDPPHPS_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_AVX10_ONE("vdpphps512", TERNARY, 4, 64, VDPPHPS_Z_Z_ZM512, 0)
+    // MOVRS's vector loads (AVX10.2's) of each element's size, and AVX512-BMM's products of 16-by-16 bit matrices into
+    // their accumulator (TERNARY's), by OR and by XOR.
+    BUSTER_CHECK_X86_READ_SHARED("vmovrsb", 1, VMOVRSB)
+    BUSTER_CHECK_X86_READ_SHARED("vmovrsw", 2, VMOVRSW)
+    BUSTER_CHECK_X86_READ_SHARED("vmovrsd", 4, VMOVRSD)
+    BUSTER_CHECK_X86_READ_SHARED("vmovrsq", 8, VMOVRSQ)
+    BUSTER_CHECK_X86_EXTENDED("bmacor16x16x16_v16hi", TERNARY, 2, 32, VBMACOR16X16X16_Y_Y_YM256, 0, BUSTER_X86_EXTENSION(AVX512BMM))
+    BUSTER_CHECK_X86_EXTENDED("bmacor16x16x16_v32hi", TERNARY, 2, 64, VBMACOR16X16X16_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(AVX512BMM))
+    BUSTER_CHECK_X86_EXTENDED("bmacxor16x16x16_v16hi", TERNARY, 2, 32, VBMACXOR16X16X16_Y_Y_YM256, 0, BUSTER_X86_EXTENSION(AVX512BMM))
+    BUSTER_CHECK_X86_EXTENDED("bmacxor16x16x16_v32hi", TERNARY, 2, 64, VBMACXOR16X16X16_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(AVX512BMM))
 };
 
 #undef BUSTER_CHECK_X86_BF16_MEMORY
 #undef BUSTER_CHECK_X86_NE_CONVERT
 #undef BUSTER_CHECK_X86_VNNI_INT
 #undef BUSTER_CHECK_X86_EXTENDED
+#undef BUSTER_CHECK_X86_AVX10
+#undef BUSTER_CHECK_X86_AVX10_ONE
+#undef BUSTER_CHECK_X86_AVX10_ROUNDED
+#undef BUSTER_CHECK_X86_AVX10_MERGED
+#undef BUSTER_CHECK_X86_AVX10_TEST
+#undef BUSTER_CHECK_X86_SATURATING
+#undef BUSTER_CHECK_X86_EIGHT_BITS
+#undef BUSTER_CHECK_X86_BF16_WIDTHS
+#undef BUSTER_CHECK_X86_READ_SHARED
 #undef BUSTER_CHECK_X86_XOP_COMPARE
 #undef BUSTER_CHECK_X86_XOP
 #undef BUSTER_CHECK_X86_HALF_REDUCE
@@ -1585,34 +1691,30 @@ static void check_x86_lower_round(const CheckX86LowerRule* rule, uint64_t round,
     }
 }
 
-// FLAGS', KTEST's, RANDOM's and CARRY's tail from record `r`, after the records whose flags it reads: the integer result
-// 0, then 1 where `condition` holds (CheckX86LowerCondition) and, where `then` names a second condition, that one's value
-// (CHECK_X86_THEN_ZERO's 0 or CHECK_X86_THEN_ONE's 1) where it holds, by CMOVcc's from scratch registers, which MOV
-// writes without the flags. The result's register is the first integer operand's, which the records before have read.
-// The count of records after it.
+// FLAGS', KTEST's, RANDOM's and CARRY's tail from record `r`, after the records whose flags it reads, as clang's code has
+// it: SETcc of `condition` (CheckX86LowerCondition) into a scratch register's byte, then its zero extension into the
+// integer result. Where `then` names a second condition, SETcc of it (CHECK_X86_THEN_ONE's) or of its negation
+// (CHECK_X86_THEN_ZERO's) into another scratch byte comes first, and the first condition's byte is ORed (or ANDed) with
+// it: comineq's setp, setne and or, comieq's setnp, sete and and. The count of records after it.
 static uint32_t check_x86_lower_condition(Tier0Operation* row, uint32_t r, uint32_t condition, uint32_t then)
 {
-    static const uint16_t moves[16] = {
-        X86_FORM_CMOVO_R32_RM32, X86_FORM_CMOVNO_R32_RM32, X86_FORM_CMOVB_R32_RM32, X86_FORM_CMOVAE_R32_RM32,
-        X86_FORM_CMOVE_R32_RM32, X86_FORM_CMOVNE_R32_RM32, X86_FORM_CMOVBE_R32_RM32, X86_FORM_CMOVA_R32_RM32,
-        X86_FORM_CMOVS_R32_RM32, X86_FORM_CMOVNS_R32_RM32, X86_FORM_CMOVP_R32_RM32, X86_FORM_CMOVNP_R32_RM32,
-        X86_FORM_CMOVL_R32_RM32, X86_FORM_CMOVGE_R32_RM32, X86_FORM_CMOVLE_R32_RM32, X86_FORM_CMOVG_R32_RM32,
+    static const uint16_t sets[16] = {
+        X86_FORM_SETO_RM8, X86_FORM_SETNO_RM8, X86_FORM_SETB_RM8, X86_FORM_SETAE_RM8, X86_FORM_SETE_RM8, X86_FORM_SETNE_RM8,
+        X86_FORM_SETBE_RM8, X86_FORM_SETA_RM8, X86_FORM_SETS_RM8, X86_FORM_SETNS_RM8, X86_FORM_SETP_RM8, X86_FORM_SETNP_RM8,
+        X86_FORM_SETL_RM8, X86_FORM_SETGE_RM8, X86_FORM_SETLE_RM8, X86_FORM_SETG_RM8,
     };
     const bool zero = (then & CHECK_X86_THEN_ZERO) != 0;
-    row->records[r] = check_x86_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
-    row->records[r++].immediate = 0;
-    row->records[r] = check_x86_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, BUSTER_TIER0_ROLE_SCRATCH(0));
-    row->records[r++].immediate = 1;
-    row->records[r++] = check_x86_lower_record(moves[condition & 15], BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, BUSTER_TIER0_ROLE_SCRATCH(0));
-    if (zero)
-    {
-        row->records[r] = check_x86_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, BUSTER_TIER0_ROLE_SCRATCH(1));
-        row->records[r++].immediate = 0;
-    }
+    const uint8_t value = BUSTER_TIER0_ROLE_SCRATCH(then != 0 ? 1 : 0);
     if (then != 0)
     {
-        row->records[r++] = check_x86_lower_record(moves[then & 15], BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, BUSTER_TIER0_ROLE_SCRATCH(zero ? 1 : 0));
+        row->records[r++] = check_x86_lower_record(sets[(then & 15) ^ (zero ? 1 : 0)], 0, 0, BUSTER_TIER0_ROLE_SCRATCH(0));
     }
+    row->records[r++] = check_x86_lower_record(sets[condition & 15], 0, 0, value);
+    if (then != 0)
+    {
+        row->records[r++] = check_x86_lower_record(zero ? X86_FORM_AND_RM8_R8 : X86_FORM_OR_RM8_R8, BUSTER_TIER0_ROLE_SCRATCH(0), 0, value);
+    }
+    row->records[r++] = check_x86_lower_record(X86_FORM_MOVZX_R32_RM8, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, value);
     return r;
 }
 
@@ -1704,12 +1806,16 @@ static void check_x86_lower_reduce_row(const CheckX86LowerRule* rule, Tier0Opera
 
 // The row of an x86 builtin's call on a target: its records, operands and result, or the reason it has none.
 // `immediate` is its immediate argument's constant value (the rule's `immediate`'s), which a record takes and no operand
-// is, and `round` its rounding control's (its last argument's, where the rule has one). Operands are the other arguments
+// is, and `round` its rounding control's (its last argument's, where the rule has one). `mask` is a MASK_UNARY's or
+// MASK_MERGE's mask argument's value where it is a constant, 0 elsewhere: one with every lane's bit is the form unmasked,
+// as clang's code has it (the headers' intrinsics without a mask pass -1), where the row merges into w. Operands are the
+// other arguments
 // in order, and a role's j is its operand's place among them all, so that a compare's mask is INTEGER(2) and a select's
 // vectors VECTOR(1) and VECTOR(2). An integer operand's class here is its width's; the caller gives each its argument's
 // own (check_lower_x86_builtin). A result is in the class the instruction extends it to, which the caller converts to
 // the builtin's type. The target's features and extensions must hold the rule's.
-static const char* check_x86_lower_row_of(const X86Target* target, const CheckX86LowerRule* rule, uint64_t immediate, uint64_t round, Tier0Operation* row)
+static const char* check_x86_lower_row_of(const X86Target* target, const CheckX86LowerRule* rule, uint64_t immediate, uint64_t round, uint64_t mask,
+                                          Tier0Operation* row)
 {
     const char* reason = NULL;
     uint64_t needed = 0;
@@ -2077,15 +2183,22 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             const uint8_t merged = merge ? rule->fixed : CHECK_X86_MERGE_W;
             const uint8_t w = merge ? v2 : v1;
             const uint8_t into = merged == CHECK_X86_MERGE_C_SCALAR ? v3 : w;
-            const uint32_t w_bytes = !merge && rule->other != 0 ? rule->other : rule->bytes;
+            const uint32_t w_bytes = !merge && rule->other != 0 ? rule->other : merged == CHECK_X86_MERGE_W_HALF ? rule->bytes / 2 : rule->bytes;
+            // A mask of every lane's bit leaves nothing of w: the form unmasked, with no opmask to load.
+            const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+            const bool unmasked = (mask & every) == every &&
+                                  (merged == CHECK_X86_MERGE_W || merged == CHECK_X86_MERGE_W_ZEROED || merged == CHECK_X86_MERGE_W_HALF);
             uint32_t r = 0;
-            row->records[r++] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(merge ? 3 : 2));
+            if (!unmasked)
+            {
+                row->records[r++] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(merge ? 3 : 2));
+            }
             if (merged == CHECK_X86_MERGE_C_SCALAR)
             {
                 row->records[r++] = check_x86_lower_record(check_x86_lower_move(8, width, false), v3, 0, w);
             }
             row->records[r] = check_x86_lower_record(rule->form, into, merge ? v0 : 0, merge ? v1 : v0);
-            row->records[r].decorations = (uint8_t)(1 | (merged == CHECK_X86_MERGE_W_ZEROED ? BUSTER_X86_DECORATION_ZEROING : 0));
+            row->records[r].decorations = unmasked ? 0 : (uint8_t)(1 | (merged == CHECK_X86_MERGE_W_ZEROED ? BUSTER_X86_DECORATION_ZEROING : 0));
             row->records[r].immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE ? (int32_t)(immediate & 0xff) : 0;
             check_x86_lower_round(rule, round, &row->records[r]);
             r += 1;
@@ -2114,12 +2227,12 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
             row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
-            row->operand_bytes[1] = merge && rule->other != 0 ? rule->other : w_bytes;
+            row->operand_bytes[1] = merge && rule->other != 0 ? rule->other : merge ? rule->bytes : w_bytes;
             row->operand_classes[merge ? 3 : 2] = mask_class;
             if (merge)
             {
                 row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
-                row->operand_bytes[2] = rule->bytes;
+                row->operand_bytes[2] = w_bytes;
             }
             row->result_bytes = w_bytes;
         }

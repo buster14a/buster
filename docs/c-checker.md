@@ -1573,7 +1573,10 @@ What the lowering covers past scalars (#145's programs):
   not their arithmetic, which rounds at run time. An integer constant converted
   to one rounds once, as clang folds it, where a conversion at run time rounds
   through float (a `__bf16`'s twice; a conditional's value converts so, as
-  clang's does); but in a function with `FENV_ACCESS` none folds, as none of
+  clang's does), and so does a float or double constant that the checker leaves
+  to the lowering (a vector initializer's element: `_mm_setzero_ph`'s zeros,
+  which libgcc's `__truncdfhf2` converted at run time before); but in a function
+  with `FENV_ACCESS` none folds, as none of
   clang's constrained conversions does, and a float rounds to a `__bf16` by
   libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
   unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
@@ -1736,11 +1739,15 @@ What the lowering covers past scalars (#145's programs):
   - operations into w under a mask, of one vector (MASK_UNARY: every
     conversion's pair of widths, VGETEXP, VRCP14 and VRSQRT14) and of two
     (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's);
+    a constant mask of every lane's bit is the form unmasked, with no opmask to
+    load, as clang's code has the headers' intrinsics without a mask, which
+    pass -1;
   - compares and tests into an int, from the flags (FLAGS and KTEST): the SSE
     compares (`comieq` and the others, of each kind, the parity giving
     unordered operands' equal and not equal), PTEST, VTEST, KORTEST and KTEST,
-    then CMOVcc's of the condition into the result, which MOV's 0 and 1 leave
-    the flags for;
+    then SETcc of the condition into a scratch register's byte and its zero
+    extension into the result, as clang's code has it (`comieq`'s SETNP, SETE
+    and AND, `comineq`'s SETP, SETNE and OR);
   - KNOT and the other widths' opmask operations;
   - the general registers' and memory's instructions (SYSTEM): CRC32, BEXTR,
     the FS and GS bases, RDPID, the shadow stack's, the cache lines', FXSAVE,
@@ -1793,6 +1800,29 @@ What the lowering covers past scalars (#145's programs):
     SM4 key expansion and rounds of 64 bytes (BINARY's), each extension's
     (`X86Extension`'s SHA512, SM3 and SM4), compared with clang's code by
     `test-x86-intrinsics` as well;
+  - AVX10.2's saturating conversions with truncation of floats and doubles to
+    doublewords and quadwords, signed and not (`vcvttps2dqs` to
+    `vcvttpd2uqqs`, MASK_UNARY's, those of 64 bytes with the exceptions'
+    suppression where their last argument asks for it);
+  - AVX10.2's bf16 operations: the scale (MASK_MERGE's), the exponent and the
+    approximations (MASK_UNARY's), the maximum and the minimum (BINARY's), and
+    the compares of the first elements into an int (`vcomisbf16eq` to
+    `vcomisbf16neq`, FLAGS', as COMISS's);
+  - AVX10.2's conversions to and from 8-bit floats: of halves to bf8 and hf8,
+    saturating or not, from one vector (`vcvtph2bf8` to `vcvtph2hf8s`,
+    MASK_UNARY's), with a vector of biases (`vcvtbiasph2bf8` to
+    `vcvtbiasph2hf8s`, MASK_MERGE's, whose results of 32 and 64 bytes' halves
+    are half their bytes, `CHECK_X86_MERGE_W_HALF`) and from two vectors
+    (`vcvt2ph2bf8` to `vcvt2ph2hf8s`, BINARY's), and of hf8 to halves
+    (`vcvthf8_2ph`); its conversion of two vectors of floats to halves
+    (`vcvt2ps2phx`, MASK_MERGE's, with a rounding control at 64 bytes); and its
+    dot products of pairs of halves into floats (`vdpphps`, TERNARY's);
+  - MOVRS's vector loads (`vmovrsb` to `vmovrsq`, AVX10.2's, VECTOR_MEMORY's
+    LOAD) and AVX512-BMM's products of 16-by-16 bit matrices into their
+    accumulator, by OR and by XOR (`bmacor16x16x16`, `bmacxor16x16x16`,
+    TERNARY's), each extension's (`X86Extension`'s MOVRS and AVX512BMM). No host
+    of the tests runs any of these AVX10.2, MOVRS or AVX512-BMM instructions,
+    and `test-x86-intrinsics` compares them all with clang's code;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -2667,8 +2697,8 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 ```
 
 The executable programs check a builtin's lowering by running it, which XOP's,
-AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's instructions can't be:
-no host of the tests has them (Zen 5 has none of them).
+AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and AVX512-BMM's
+instructions can't be: no host of the tests has them (Zen 5 has none of them).
 `test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
 code of their intrinsics with clang -O0's instead, as the values each
 instruction computes:
@@ -2686,7 +2716,9 @@ instruction computes:
   on) at the entry, constants (the object's data, which relocations name), and
   a node for each instruction that isn't a move, of its form (VEX's and EVEX's
   encodings of one instruction are one), its immediate and its operands'
-  values, a masked one's a select of its mask, its value and what it keeps.
+  values, a masked one's a select of its mask, its value and what it keeps,
+  over lanes of the destination's elements (a conversion's no more than its
+  source's: `vcvtph2bf8`'s eight bytes of an XMM register's halves).
   What an instruction reads and writes is its form's effects in
   `x86_semantics.c`; a form without them fails the case and is listed. Moves,
   pushes, pops and stack slots carry values, and the trace follows jumps in a
@@ -2700,11 +2732,15 @@ instruction computes:
   must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
   a result stored through a pointer; and one intrinsic called with its two
   operands in each order must give different expressions in each object.
-- The cases, 145 of them: the intrinsics of XOP's own instructions (VFRCZ's
+- The cases, 386 of them: the intrinsics of XOP's own instructions (VFRCZ's
   fractions, the horizontal sums and differences, the multiply-accumulates,
   VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
   AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
-  masked, merged and zeroed, at each width, and SHA512's, SM3's and SM4's.
+  masked, merged and zeroed, at each width, SHA512's, SM3's and SM4's; and
+  AVX10.2's saturating conversions, bf16 operations and compares, conversions
+  to and from 8-bit floats and of two vectors of floats to halves, and dot
+  products of halves, MOVRS's vector loads and AVX512-BMM's products of bit
+  matrices, each unmasked, merged and zeroed where the headers have them.
 
 The comparison is of the instructions' data flow, not of their meaning: code
 that computes the same values with other instructions differs, and a case would

@@ -26,16 +26,16 @@ file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
 from the profile where `-march` names one of the six above, and that profile's
 architecture (`X86_ARCH_OTHER` for clang's other CPUs). Its `extensions` are
 the features past those (`X86Extension`: AVX512-FP16, AVX-NE-CONVERT,
-AVX10.2, XOP, SHA512, SM3 and SM4), which form eligibility doesn't classify and
-only the lowering reads (the x86 builtins' rows and half-precision vectors' and
-scalars': [the checker's guide](c-checker.md)). An unknown name or
-switch is an error, as in clang (the preprocessor takes only the `-m` options
-clang 23 uses for x86-64 Linux), so no option silently leaves baseline macros
-active. `-mtune=` accepts clang's names and `generic`, independently of the
-ISA. It is recorded for the future scheduler, and currently changes no costs,
-scheduling or allowed instructions. As with Clang 23, CPU identity macros,
-including `__tune_*__`, follow `-march`. `--predefines` remains an explicit
-replacement of the entire macro preamble.
+AVX10.2, XOP, SHA512, SM3, SM4, MOVRS and AVX512-BMM), which form eligibility
+doesn't classify and only the lowering reads (the x86 builtins' rows and
+half-precision vectors' and scalars': [the checker's guide](c-checker.md)). An
+unknown name or switch is an error, as in clang (the preprocessor takes only
+the `-m` options clang 23 uses for x86-64 Linux), so no option silently leaves
+baseline macros active. `-mtune=` accepts clang's names and `generic`,
+independently of the ISA. It is recorded for the future scheduler, and
+currently changes no costs, scheduling or allowed instructions. As with Clang
+23, CPU identity macros, including `__tune_*__`, follow `-march`.
+`--predefines` remains an explicit replacement of the entire macro preamble.
 
 `x86_target.c` supplies the bitset and target parser. A zero-initialized
 `X86Target` means baseline. The v2/v3/v4 profiles are cumulative; the named Zen 5
