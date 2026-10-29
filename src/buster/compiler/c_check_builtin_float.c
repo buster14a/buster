@@ -54,6 +54,8 @@ struct CheckBuiltinFloatAction
     uint32_t tag_completion_count;
     uint32_t source_position;
     uint32_t extensions;
+    const CheckConstValues* const_values;
+    bool constant_evaluated;
     const uint8_t* nan_payload;
     uint32_t nan_payload_length;
     bool nan_payload_known;
@@ -119,6 +121,8 @@ static CheckValue check_builtin_float_argument(TypeTable* table, const CheckBuil
                 .tag_completion_count = input->tag_completion_count,
                 .source_position = input->source_position,
                 .extensions = input->extensions,
+                .const_values = input->const_values,
+                .constant_evaluated = input->constant_evaluated,
             };
             value = check_action_operand(table, &action, &converted, 0);
             if (converted.diagnostic != CHECK_DIAG_NONE)
@@ -592,7 +596,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         if (output->folded)
         {
             output->runtime_builtin = CBUILTIN_NONE;
-            if (classify || compare)
+            if ((classify || compare) && (output->action.value.flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
             {
                 output->action.value.flags |= BUSTER_CHECK_ICE;
             }
