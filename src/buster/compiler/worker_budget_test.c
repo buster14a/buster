@@ -643,7 +643,7 @@ static void worker_budget_test_dry_run(WorkerBudgetTest* test)
     for (uint32_t form = 0; ready && form < 5; form += 1)
     {
         char flags[128];
-        const char* prefix = form == 0 ? "n" : form == 1 ? "-kn" : form == 2 ? "w VAR=n" : "w n";
+        const char* prefix = form == 0 ? "n" : form == 1 ? "kn" : form == 2 ? "w VAR=n" : "w n";
         snprintf(flags, sizeof(flags), "%s --jobserver-auth=%d,%d", prefix, fds[0], fds[1]);
         if (form == 4)
         {
