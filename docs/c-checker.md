@@ -1378,7 +1378,10 @@ What the lowering covers past scalars (#145's programs):
   vector of one double MEMORY); a call passes and returns one as the 128-bit
   integers are passed, through a frame object of its bytes. A vector of 4 or 8
   bytes is in an XMM register's first bytes, the rest zero, so that its rows
-  are XMM forms, as clang's code of `__m64` is. An operator is an X86 entry of its row
+  are XMM forms, as clang's code of `__m64` is; its floating division divides
+  its own elements alone, under a mask of them, so that the zeros past them
+  raise no `FE_INVALID` (clang's code divides them one at a time under
+  `FENV_ACCESS`). An operator is an X86 entry of its row
   (`c_check_program_vectors.c`): an instruction per operator and element type
   where AVX-512 has one (`+ - * / & | ^ << >>`, the compares through an opmask
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or

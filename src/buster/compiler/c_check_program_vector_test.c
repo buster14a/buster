@@ -2,13 +2,13 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
-// every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
-// elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of vector type.
-// Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign its frame
-// (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their operators, calls,
-// members, arrays, globals, casts to and from integers of their bytes and nontemporal stores. Then what the lowering
-// refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other sizes. Include after
-// c_check_program_test.c's runners.
+// every operator at each element type and width, compound assignments, calls passing and returning vectors in
+// registers, elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of
+// vector type. Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign
+// its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their operators,
+// calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
+// divisions' floating-point flags under FENV_ACCESS. Then what the lowering refuses by name: vectors on x86-64,
+// operators AVX-512 has no instruction for and other sizes. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
     "typedef signed char v64qi __attribute__((vector_size(64),aligned(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -178,6 +178,22 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "v2si pick=(n&1)?a:b;v2si called=mix(a,s,f);v4qi q2=quad(s,n);f2 ext=(f2)3.0f;FOLD(pick);FOLD(called);FOLD(q2);FOLD(ext);"
             "__builtin_nontemporal_store(a,&array[0]);v2si nt=__builtin_nontemporal_load(&array[1]);v4qi nt4;__builtin_nontemporal_store(s,&nt4);"
             "FOLD(array);FOLD(nt);FOLD(nt4);"
+            "return (int)h;}",
+        },
+        {
+            // Divisions of vectors of 8 and 4 bytes under FENV_ACCESS: each divides its own elements alone, so that the
+            // zeros past them in their registers raise no FE_INVALID (clang's code divides them one at a time), and
+            // their own elements' 0/0 and division by zero raise theirs. The flags of each are folded with its value.
+            "vector-narrow-division-flags",
+            "\n#pragma STDC FENV_ACCESS ON\n"
+            "typedef float v2sf __attribute__((vector_size(8)));typedef float v1sf __attribute__((vector_size(4)));"
+            "typedef double v1df __attribute__((vector_size(8)));int clear_fp(void);int fp_state(void);"
+            "int tested(int n){unsigned h=2166136261u;volatile float one=1.0f;v2sf a={one,2.0f*(float)n},b={2.0f,4.0f};"
+            "clear_fp();v2sf c=a/b;int f1=fp_state();FOLD(c);FOLD(f1);"
+            "v1sf d={3.0f*(float)n},e={one+1.0f};clear_fp();v1sf g=d/e;int f2=fp_state();FOLD(g);FOLD(f2);"
+            "v1df p={3.0*n},q={4.0};clear_fp();v1df r=p/q;int f3=fp_state();FOLD(r);FOLD(f3);"
+            "v2sf z={0.0f*(float)n,one};clear_fp();v2sf s=z/(v2sf){0.0f,0.0f};int f4=fp_state();FOLD(s);FOLD(f4);"
+            "v2sf w=a;clear_fp();w/=2.0f*(float)(n|1);int f5=fp_state();FOLD(w);FOLD(f5);"
             "return (int)h;}",
         },
         {
