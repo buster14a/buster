@@ -1904,6 +1904,80 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Diagnostic examples include missing indices: the writer does not attach an atom to every failure.
+static void check_test_driver_link_failure_messages(CheckTest* test)
+{
+    const uint8_t* names[] = { NULL, (const uint8_t*)"large" };
+    uint32_t lengths[] = { 0, 5 };
+    NameId symbol_names[] = { 0, 1 };
+    AtomId symbol_atoms[] = { 0, 1 };
+    uint64_t sizes[] = { 0, (3ull << 30), (3ull << 30) };
+    Link link = {
+        .names = { .bytes = names, .length = lengths, .count = 2 },
+        .atoms = { .size = sizes, .count = 3 },
+        .symbols = { .name = symbol_names, .atom = symbol_atoms, .count = 2 },
+    };
+    Runtime runtime = { 0 };
+    static const struct
+    {
+        ExecutableResult result;
+        const char* expected;
+    } cases[] = {
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1 }, "atom 1 ('large') has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 2 }, "atom 2 has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT }, "image, TLS or section-name layout exceeds executable limits" },
+        { { .error = EXECUTABLE_ERROR_MEMORY }, "linker scratch memory exhausted" },
+        { { .error = EXECUTABLE_ERROR_ENTRY, .symbol = 1 }, "entry point 'large' is not defined in code" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1 }, "unwind atom 1 ('large') cannot be indexed" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 99 }, "unwind table cannot be indexed" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1 }, "unsupported symbol 'large'" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 99 }, "unsupported executable configuration" },
+        { { .error = EXECUTABLE_ERROR_UNDEFINED, .symbol = 1 }, "undefined reference to 'large'" },
+        { { .error = EXECUTABLE_ERROR_FILE, .call = "open", .system_error = EACCES }, "can't write out: open:" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        FILE* output = tmpfile();
+        char* text = NULL;
+        size_t length = 0;
+        if (output != NULL)
+        {
+            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+        }
+        const bool read = output != NULL && pp_test_read_output(output, &text, &length);
+        check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");
+        free(text);
+        if (output != NULL)
+        {
+            fclose(output);
+        }
+    }
+}
+
+// A large BSS atom is refused without writing gigabytes; the driver must explain the writer's atom limit.
+static void check_test_driver_link_layout_error(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char source_text[] = "char gbig[3L << 30]; int main(void) { return 0; }\n";
+    char source[256];
+    char output[256];
+    snprintf(source, sizeof(source), "%s/large-bss.c", directory);
+    snprintf(output, sizeof(output), "%s/large-bss", directory);
+    const bool made = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        char* const vector[] = { (char*)executable, "-o", output, source, NULL };
+        char* const scalar_args[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn(scalar ? scalar_args : vector, &text) : -1;
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "gbig") != NULL &&
+                                  strstr(text, "3221225472 bytes") != NULL && strstr(text, "maximum atom size is 2147483648 bytes") != NULL,
+                          "a too-large atom's link diagnostic names its symbol, size and limit");
+        free(text);
+    }
+    unlink(output);
+    unlink(source);
+}
+
 // -E is an action at any argument position, but an option's value can spell -E without selecting that action.
 static void check_test_driver_preprocess_action(CheckTest* test, const char* executable, const char* directory)
 {
@@ -4043,6 +4117,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_link_failure_messages(&test);
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
@@ -4076,6 +4151,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
+            check_test_driver_link_layout_error(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }
         rmdir(directory);
