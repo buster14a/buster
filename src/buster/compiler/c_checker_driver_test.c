@@ -1942,7 +1942,7 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
         size_t length = 0;
         if (output != NULL)
         {
-            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+            check_driver_executable_failure(&link, &runtime, 1, "out", &cases[i].result, output);
         }
         const bool read = output != NULL && pp_test_read_output(output, &text, &length);
         check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");

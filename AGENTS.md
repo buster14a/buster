@@ -374,7 +374,16 @@ designs and the compilers already built this way.
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per CPU the process may run on, and with
-  `--lanes N` N of them; the output is one lane's, byte for byte.
+  `--lanes N` N of them; the output is one lane's, byte for byte. An
+  executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  `-g`, its DWARF unit's functions'). With several source files (#152,
+  `c_checker_units.c`, the [translation units guide](docs/translation-units.md))
+  the units compile on lanes instead, one unit a lane at a time (`--lanes N`
+  then counts those lanes), each from preprocessing to code as alone
+  (`check_driver_unit`), and their diagnostics are printed in the command
+  line's order: `-fsyntax-only` checks each, `-c` writes each one's object in
+  the current directory as clang names it (`-o` refused), and the link merges
+  the units' links (`check_units_merge`) into one executable.
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -1295,6 +1304,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
 ./build/compiler test-check-lanes
+./build/compiler test-check-units
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -5186,6 +5196,51 @@ every run one lane's code. Run it under the 9700X's lock without `taskset`,
 with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
 and the benchmark on the frozen SQLite source where the emission changes.
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
+measurements.
+
+## Translation units
+
+`check_driver_units` (`c_checker_units.c`) is #152's driver of several source
+files: `./build/compiler [options] a.c b.c ...`. The units are a lane group's
+items, taken costliest first by their sources' sizes; each runs on one lane
+from preprocessing to its code through `check_driver_unit`, the pipeline a
+command of one file runs, its functions on that lane alone. Each lane keeps an
+intern table and a file cache that its units share; no lane shares anything a
+unit writes. Each unit's diagnostics go to a stream of its own, printed in the
+command line's order after every unit has run. A lane keeps its three big
+arenas from one unit to the next, emptied; it pools the other arenas its units
+release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
+mappings kept for the next reservations of their shapes); and the arenas of a
+unit of less than 1 MB of source start with 16 MB of base pages
+(`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
+which every reservation took for writing, were what limited the lanes.
+`--poison-arenas`, a test option, overwrites what a unit left in its lane's
+three arenas (`arena_poison`), so that a compile that read a byte it didn't
+write would show. A link keeps each unit's link
+(`check_units_keep`) and merges them in the command line's order
+(`check_units_merge`: a global name once, each unit's locals its own, a name
+two units define an error) before `check_driver_executable` binds and writes
+it as it does one unit's. `-c -o`, the dumps, `--id-order`, `-g` for an
+executable and two units of one object's name are refused.
+
+`./build/compiler test-check-units [--executable PATH] [--clang PATH]
+[--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
+[--generate DIR [--units N] [--functions N]]` runs the driver as a process:
+generated programs of 2 to 7 units and one of synth's shape (12 units of 30
+functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
+and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
+`clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
+objects defines, and each of whose units' `-c` objects is the unit's alone;
+diagnostics, each unit's alone in the command line's order; refusals, one
+of them over a poisoned stack; every reservation of two units' `-c` failed in
+turn, each run reported and its memory released (a lane's partial setup
+among them); the jobserver's tokens held while the link writes; and lanes
+that don't start. With `--corpus DIR` it compiles DIR's
+`.c` files at
+once with `-c`, plainly and poisoned, against each alone, and with
+`--generate DIR` it writes a program of synth's shape (512 units of 200
+functions by default) for measurements, and tests nothing.
+[docs/translation-units.md](docs/translation-units.md) has the design and the
 measurements.
 
 ## Selective lowering

@@ -6696,7 +6696,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     }
     else
     {
+        // The columns this setup took are as the arena left them, unwritten: the warnings that a failed unit's reports
+        // still scan find none (check_driver_reports reads every token's attributes and constant warnings when they're
+        // there).
         input->resource = true;
+        input->attributes = NULL;
+        input->constant_warnings = NULL;
+        input->constant_warning_ignored = NULL;
     }
     arena_pop_to(scratch, mark);
     arena_release(&sparse);
