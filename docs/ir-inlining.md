@@ -39,13 +39,13 @@ The metadata producer is responsible for marking a definition
 External-linkage definitions, unknown symbols, indirect calls, noinline
 definitions and variadic definitions remain calls, and so do calls with ABI
 records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
-value). Unknown flag bits are errors. Every other known direct call's result
-type, fixed parameter types/count and variadic status must agree with its table
-entry, even when expansion is disabled. A call with ABI records has the
-convention's shape instead, which only its records give: its callee takes a
-hidden pointer as parameter 0, or returns its result's bytes' address to a void
-call, so its IR types aren't its callee's. The existing verifier checks actual
-argument types and counts.
+value). Unknown flag bits are errors. Every known direct call's variadic
+status, and every other one's result type and fixed parameter types/count, must
+agree with its table entry, even when expansion is disabled. A call with ABI
+records has the convention's shape instead, which only its records give: its
+callee takes a hidden pointer as parameter 0, or returns its result's bytes'
+address to a void call, so its result and parameters' IR types aren't its
+callee's. The existing verifier checks actual argument types and counts.
 
 The table is a shared symbol namespace, so cloned `IR_SYMBOL_ADDR` operations
 retain their symbol IDs. No symbol renumbering, ABI change or linker binding
@@ -168,7 +168,7 @@ claiming the complete data-parallel or throughput acceptance of #139.
 name and currently accepts none. `./build/compiler test-ir-inline` runs it,
 and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized runs pass **92,931 checks**, including **6,160 independent
+Local optimized runs pass **92,932 checks**, including **6,160 independent
 interpreter executions** before and after rewriting (59,741 checks, with
 ASan/UBSan too, before the side-table growth case below).
 The interpreter executes calls using an explicit frame stack, and a call with
@@ -187,7 +187,8 @@ Each destination must follow the renumbering, the records must stay the
 caller's and the callees', and the unit must run as it did. Dropping the
 destination's remap, either table's copy, or the rule that keeps these calls
 apart from the signature check (which refused the whole unit as a type error)
-each fails the test. Separate transitive-closure tests check 64 call graphs,
+each fails the test. A variadic call of the registers callee, which isn't
+variadic, is refused at the call, as a call of another variadic status always is. Separate transitive-closure tests check 64 call graphs,
 while guarded pages cover
 empty and partial unsigned cost batches through 65 entries. Disabled mode,
 exact thresholds, growth budgets (32,769 calls whose constant rows would

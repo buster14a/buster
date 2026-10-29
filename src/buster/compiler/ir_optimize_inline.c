@@ -203,12 +203,12 @@ static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
 }
 
 // A call with ABI records (#131) has the convention's shape, which only its records give (a hidden pointer its callee
-// takes as parameter 0, a void call of a callee whose result is the address of its bytes): its IR types aren't its
-// callee's, and it stays a call (IR_INLINE_ABI).
+// takes as parameter 0, a void call of a callee whose result is the address of its bytes): its result and parameters'
+// IR types aren't its callee's, though whether it is variadic is, and it stays a call (IR_INLINE_ABI).
 static bool ir_inline_signature(const IrFunction* caller, uint32_t node, const IrFunction* callee, uint8_t flags)
 {
     const IrCall call = caller->calls[caller->b[node]];
-    bool match = call.abi != 0 || (call.result_type == callee->result_type && call.parameter_count == callee->parameter_count && call.variadic == ((flags & BUSTER_IR_INLINE_VARIADIC) != 0));
+    bool match = call.variadic == ((flags & BUSTER_IR_INLINE_VARIADIC) != 0) && (call.abi != 0 || (call.result_type == callee->result_type && call.parameter_count == callee->parameter_count));
     for (uint32_t p = 0; match && call.abi == 0 && p < call.parameter_count; p += 1)
     {
         match = caller->call_types[call.type_first + p] == callee->parameter_types[p];

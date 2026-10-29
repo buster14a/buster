@@ -1297,6 +1297,18 @@ static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* o
             ir_inline_test_expect(test, ir_inline_test_same_function(&result.functions[2], registers) && ir_inline_test_same_function(&result.functions[3], hidden), "the callees keep their own records");
             ir_inline_test_compare(test, &unit, &result, 0, scratch, 128);
         }
+        // A call with records still says whether its callee is variadic: a variadic call of the registers callee, which
+        // isn't, keeping its two arguments and its records, is the unit's type error at the call, as any other's is.
+        caller->calls[1].variadic = true;
+        const uint64_t output_mark = output->length;
+        const uint64_t scratch_mark = scratch->length;
+        IrInlineResult refused = { 0 };
+        uint32_t failed = UINT32_MAX;
+        const IrCheck mismatch = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &refused, &failed);
+        ir_inline_test_expect(test, ir_verify(caller, scratch, 0).error == IR_OK && mismatch.error == IR_ERROR_TYPE && mismatch.instruction == 6 && mismatch.detail == 2 && failed == 0 &&
+                                        output->length == output_mark && scratch->length == scratch_mark,
+                              "a call with records of another variadic status than its callee's");
+        caller->calls[1].variadic = false;
     }
     arena_pop_to(input, 0);
     arena_pop_to(output, 0);
