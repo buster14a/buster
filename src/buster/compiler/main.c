@@ -517,6 +517,7 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
+#include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
 #include "buster/compiler/ssa_ir.c"
 #include "buster/compiler/ir_validate.c"
@@ -573,6 +574,8 @@ bool run_x86_target_selection_tests(void);
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
 #include "buster/compiler/ir_stack_test.c"
+#include "buster/compiler/ir_simd_typed_test.c"
+#include "buster/compiler/ir_simd_consumer_test.c"
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
@@ -1294,6 +1297,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir") == 0)
     {
         result = run_ir_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-simd") == 0)
+    {
+        result = run_ir_simd_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-lowering") == 0)
     {

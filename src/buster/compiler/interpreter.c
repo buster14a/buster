@@ -29,6 +29,7 @@ typedef enum InterpreterStatus
     INTERPRETER_ARITHMETIC,
     INTERPRETER_SYMBOL,
     INTERPRETER_NATIVE,
+    INTERPRETER_UNSUPPORTED,
 } InterpreterStatus;
 
 typedef struct InterpreterOptions InterpreterOptions;

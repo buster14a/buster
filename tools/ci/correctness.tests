@@ -159,6 +159,7 @@ rm "$flags_file" "$sources_file"
 ./build/compiler test-object-writer --cross-check
 == Test the IR and typed-stream lowering
 ./build/compiler test-ir
+./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
