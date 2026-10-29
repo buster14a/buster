@@ -81,6 +81,9 @@ struct CheckProgramBody
     uint32_t entry_count;
     uint32_t reference_first;
     uint32_t reference_count;
+    // Its source labels' places (CheckProgram.label_positions): label_count of them from label_first.
+    uint32_t label_first;
+    uint32_t label_count;
     bool is_main;
     bool return_flow;
     bool falls;
@@ -198,12 +201,17 @@ struct CheckProgram
     uint32_t* body_targets;
     X86Target* targets;
     uint32_t target_count;
-    // The function declarations with a target, target_clones, always_inline or flatten attribute, as keys of their
-    // object in the high half and their token in the low, sorted by object (per object, the target attributes' in token
-    // order, then the others'), for code generation's check of target features at -c (#775,
+    // The function declarations with a target, target_clones, always_inline, flatten or noreturn attribute, as keys of
+    // their object in the high half and their token in the low, sorted by object (per object, the target attributes' in
+    // token order, then the others'), for code generation's check of target features at -c (#775,
     // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
     uint64_t* attribute_keys;
     uint32_t attribute_key_count;
+    // Each body's source labels' places, its controls' indices where code after them begins, in the order the writer
+    // expands their statements (CheckProgramBody.label_first): code generation's check of target features walks from
+    // each, as clang emits a label's block whatever code precedes it. Null in a unit without a label.
+    uint32_t* label_positions;
+    uint32_t label_position_count;
     // The host's features (predefines_host_of), where check_program_targets read them: they are the CPU's, which
     // -march=native reads, and code generation's check of target features takes them from here.
     PredefinesHost host;
@@ -287,6 +295,10 @@ struct CheckControlWriter
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
+    // CheckProgram.label_positions while the bodies are written, a token's room each: each body's labels' numbers, then,
+    // once it is written, their places.
+    uint32_t* label_positions;
+    uint32_t label_position_count;
     // CheckProgram.switches, and its room: a switch recorded there has four of the program's cases or more.
     uint32_t* switches;
     uint32_t switch_count;
@@ -317,11 +329,12 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // The attributes of a declaration that the static objects' pass reads (check_program_static_object), as bits.
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED 1u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
-#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE 4u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE 4u
 
 // Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
-// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and an
-// always_inline or flatten one (#775, CheckProgram.attribute_keys).
+// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and one of a
+// callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
+// CheckProgram.attribute_keys).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -331,7 +344,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const CheckInputAttributeKind kind = attribute->kind;
         const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
                              kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
-                             kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE : 0;
+                             kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN || kind == CHECK_ATTRIBUTE_NORETURN ?
+                                 BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
+                                 0;
         bits |= attribute->ignored ? 0 : bit;
     }
     return bits;
@@ -340,8 +355,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
 // resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
-// Beside them, the declarations with an always_inline or flatten attribute, as keys of the same form, which only code
-// generation's check of target features reads, and only in a unit with a target attribute (#775,
+// Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
+// only code generation's check of target features reads, and only in a unit with a target attribute (#775,
 // CheckProgram.attribute_keys).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
@@ -350,9 +365,9 @@ struct CheckProgramTargetEvents
     uint64_t* keys;
     uint32_t count;
     uint32_t capacity;
-    uint64_t* inline_keys;
-    uint32_t inline_count;
-    uint32_t inline_capacity;
+    uint64_t* callee_keys;
+    uint32_t callee_count;
+    uint32_t callee_capacity;
     bool room;
 };
 
@@ -980,6 +995,13 @@ static bool check_control_enterable(const CheckControlWriter* writer, uint32_t a
     return enterable;
 }
 
+// Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
+// loop turns into its place once the label's body is written: a label is a token, so the column has room.
+static void check_control_source_label(CheckControlWriter* writer, uint32_t label)
+{
+    writer->label_positions[writer->label_position_count++] = label;
+}
+
 static void check_control_expand(CheckControlWriter* writer, CheckControlTask task)
 {
     const Parser* parser = writer->parser;
@@ -1302,6 +1324,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         if (role == PARSE_ROLE_LABEL && writer->addressed != 0 && writer->addressed[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+        if (role == PARSE_ROLE_LABEL)
+        {
+            check_control_source_label(writer, writer->source_labels[token]);
         }
         check_control_mark(writer, writer->source_labels[token]);
     }
@@ -2323,8 +2349,9 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
 
 // A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
 // declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
-// function's declaration with a target or target_clones attribute, or an always_inline or flatten one (`events`), all
-// found by one pass over its attributes. Returns whether the column had room, `room` again unless making it failed.
+// function's declaration with a target or target_clones attribute, or an always_inline, flatten or noreturn one
+// (`events`), all found by one pass over its attributes. Returns whether the column had room, `room` again unless
+// making it failed.
 static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
 {
     const CheckInput* input = program->input;
@@ -2340,9 +2367,9 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_target_event(events, object, token);
         }
-        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE) != 0)
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE) != 0)
         {
-            check_program_event_push(events, &events->inline_keys, &events->inline_count, &events->inline_capacity, object, token);
+            check_program_event_push(events, &events->callee_keys, &events->callee_count, &events->callee_capacity, object, token);
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
@@ -2548,12 +2575,12 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 
 // The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
 // unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
-// so each object's are still in token order) and then the always_inline and flatten ones, sorted stably by object with
-// the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it can lack a
-// feature by clang's rule. Returns false if there was no room.
+// so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
+// object with the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it
+// can lack a feature by clang's rule. Returns false if there was no room.
 __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
-    const uint64_t total = (uint64_t)events->count + events->inline_count;
+    const uint64_t total = (uint64_t)events->count + events->callee_count;
     bool valid = events->room && total <= UINT32_MAX;
     if (valid && events->count != 0)
     {
@@ -2563,9 +2590,9 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
         if (valid)
         {
             memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
-            if (events->inline_count != 0)
+            if (events->callee_count != 0)
             {
-                memcpy(keys + events->count, events->inline_keys, (uint64_t)events->inline_count * sizeof(uint64_t));
+                memcpy(keys + events->count, events->callee_keys, (uint64_t)events->callee_count * sizeof(uint64_t));
             }
             uint32_t varying = 0;
             for (uint64_t e = 1; e < total; e += 1)
@@ -2684,6 +2711,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // Each body's opening brace, in token order: at most one per token, and only the bodies' entries are touched.
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
+    uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -2698,7 +2726,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
-            case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
+            case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && openings != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
             allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0 && (input->cleanup_count == 0 || cleanup_parents != 0);
     if (!valid && program->status == CHECK_PROGRAM_OK)
@@ -2898,6 +2926,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .entries = entries,
         .tasks = tasks,
         .labels = labels,
+        .label_positions = label_positions,
         .switches = program->switches,
         .switch_capacity = switch_capacity,
         .capacity = capacity,
@@ -2908,7 +2937,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const uint32_t token = openings[b];
         const uint32_t declaration = input->body_declarations[token];
         const uint32_t start = writer.count;
+        const uint32_t label_first = writer.label_position_count;
         check_control_build(&writer, token);
+        // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
+        for (uint32_t l = label_first; l < writer.label_position_count; l += 1)
+        {
+            const uint32_t label = writer.label_positions[l];
+            writer.label_positions[l] = label < writer.label_count ? writer.labels[label] : BUSTER_CHECK_NONE;
+        }
         CheckProgramBody* body = &program->bodies[program->body_count++];
         *body = (CheckProgramBody)
         {
@@ -2919,6 +2955,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             .count = writer.count - start,
             .entry_count = writer.entry_count,
             .reference_first = reference_count,
+            .label_first = label_first,
+            .label_count = writer.label_position_count - label_first,
         };
         if (options.identifiers != 0)
         {
@@ -2969,10 +3007,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         check_program_builtins(&input->graph, nodes, program->builtin_nodes, BUSTER_SCALAR_PATH(options.scalar));
     }
     program->controls = valid && writer.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckControl, writer.count) : 0;
-    valid = valid && (writer.count == 0 || program->controls != 0);
+    program->label_positions = valid && writer.label_position_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, writer.label_position_count) : 0;
+    valid = valid && (writer.count == 0 || program->controls != 0) && (writer.label_position_count == 0 || program->label_positions != 0);
     if (valid)
     {
         program->control_count = writer.count;
+        program->label_position_count = writer.label_position_count;
+        if (writer.label_position_count != 0)
+        {
+            memcpy(program->label_positions, writer.label_positions, (uint64_t)writer.label_position_count * sizeof(uint32_t));
+        }
         program->switch_count = writer.switch_count;
         program->reference_count = reference_count;
         if (writer.count != 0)

@@ -359,15 +359,44 @@ block's own, which run once its value is computed), and the check places the
 call at the CLEANUP control of its scope's closing token, in that control's
 statement, or in a statement expression's, the statement that reached it.
 
-That walk is Sema's reachability, its CFG's (#487's range warnings follow it,
-as clang's do), which code generation's emission differs from in a few shapes,
-so the two may report different errors there. Clang emits a `while` or `for`
-loop's body whatever its condition (`while (0)`'s), what follows
-`do ... while (1)`, and dead code that holds a label (a dead `if` arm's whole,
-or, after a `return`, the code from the label on), which the walk doesn't reach;
-and it emits nothing after a statement that ends in a noreturn call (`exit(0);`,
-`__builtin_unreachable();`), which the walk goes on past (`EmitStmt` drops the
-empty block such a call leaves).
+That walk is Sema's reachability, its CFG's, which #487's range warnings
+follow, as clang's do. Code generation emits other code in a few shapes, and the
+check walks as it does there (`CheckTargetFeatureEmission`), #487's walk
+unchanged:
+
+- An expression statement whose code ends in a block that nothing branches to
+  ends what is emitted, up to a label: a call of a function that doesn't
+  return, by its declarations before the call (`noreturn`, `_Noreturn`,
+  `[[noreturn]]`), leaves such a block (`EmitCall`'s dummy block), and so does
+  `__builtin_unreachable()`, and `EmitStmt` erases it where only straight-line
+  code followed the call in the statement. So `exit(1);`, `(void)fatal();`,
+  `x = stopi();`, `g(stopi());` and `(stop(), x++);` stop it, and so do
+  `0 ? (void)0 : stop();` and `1 && stopi();`, whose constant conditions code
+  generation folds. A join after the call (`&&`, `||` or `?:` whose condition
+  isn't a constant, but a `?:` of two constants, which is a select; `va_arg`; a
+  statement expression with statements before its value) has a predecessor, so
+  `c ? (void)0 : stop();` and `c && stopi();` don't, where `(stop(), c ? 1 : 2);`
+  does; nor does a declaration's initializer (`int y = stopi();`), which
+  `EmitStmt` doesn't erase, nor `__builtin_trap()`. Calls in the statement
+  after the call are emitted (`stopi() + h(x)`).
+- A `while` or `for` statement's body is emitted whatever its condition
+  (`while (0)`'s too). A `for` statement's condition, a constant one too,
+  branches to its end, but `while (1)` doesn't. A `do` statement's condition
+  and end, and a `for` statement's increment, are emitted once their
+  statement's code begins, whatever its body's code leaves (a `return`, or a
+  call that doesn't return, at its end).
+- Code after a label is emitted whatever precedes it: the walk starts from
+  each source label of the body outside statement expressions too
+  (`CheckProgram.label_positions`, which the control writer records).
+
+It still differs where clang emits a statement that holds a label from its
+start: an `if`, loop or `switch` statement after a point where emission stops,
+and an `if`'s or a `switch`'s arm that a constant condition would leave out,
+which the walk takes from the label on; and a statement expression holding a
+label in an operand a constant condition leaves out. A call through a pointer
+to a function that doesn't return, and a call of a C library function that
+clang knows doesn't return (`exit`, `abort`) where its declaration lacks the
+attribute (glibc's headers have it), go on (#891 has the rest).
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
@@ -411,8 +440,11 @@ errors clang reports and in which order, `<immintrin.h>`'s `_bzhi_u32` at
 targets with BMI2 and without, and a cleanup's call, with its controls: the
 unit's features or the caller's attribute holding the cleanup function's, its
 attributes declared after the cleanup, and cleanups that no exit reaches, in
-dead code and after an endless loop. Thirty-seven fixtures' every error, line
-for line, must be clang's: the first external function's alone, calls in their
+dead code and after an endless loop; and calls after calls that don't return
+(the shapes above that stop the code, `<stdlib.h>`'s `exit` and `abort`), with
+a `noreturn` attribute declared after the call as their control.
+Forty-two fixtures' every error, line for line, must be clang's: the first
+external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
 deferred one's unreported, two deferred functions', where no external function
 has any, loops' and a statement expression's, a for loop's increment after its
@@ -433,7 +465,15 @@ goto leave the scope (also where no path reaches its end), a statement
 expression's after its value and a return out of one, a for statement's own
 variable's after its increment, the innermost first, a `flatten` caller's (both
 messages), a standard attribute's at its scope, one among other attributes and
-two from a macro, and those no exit reaches in deferred functions.
+two from a macro, and those no exit reaches in deferred functions. And code
+generation's emission: the calls it emits around calls that don't return (in
+a declaration's initializer, after a join, in the same statement, after a
+label and after `__builtin_trap()`), a join after the call in its statement
+and a `?:` of constants, a select, which isn't one, such calls in operands that
+constant conditions leave out, loops' blocks it emits whatever their conditions
+and bodies' code leave, code after labels (one that nothing names, one that
+only a goto after the call names, and after a `return`), and cleanups after
+calls that don't return.
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

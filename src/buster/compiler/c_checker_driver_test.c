@@ -3568,6 +3568,28 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "int dead(void) { return 0; { int x __attribute__((cleanup(h))) = 0; } }\n"
           "void endless(void) { int x __attribute__((cleanup(h))) = 0; for (;;) { x += 1; } }\n",
           false, true },
+        // Code generation emits nothing after an expression statement that ends in a call that doesn't return, and goes on
+        // from a label (#863's fourth review).
+        { "a call after a call of a function that doesn't return", "-march=x86-64",
+          "__attribute__((noreturn)) void stop(void);\nstatic inline __attribute__((always_inline, target(\"avx2\"))) void h(void) {}\n"
+          "void f(void) { stop(); h(); }\n",
+          false, true },
+        { "calls after code that ends where nothing branches to", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n_Noreturn void stop2(void);\nint g(int);\nint f1(int x) { stop2(); return h(x); }\n"
+          "int f2(int x) { __builtin_unreachable(); return h(x); }\nint f3(int x) { (void)stop(); return h(x); }\nint f4(int x) { (x++, stop()); return h(x); }\n"
+          "int f5(int x) { (stop(), x++); return h(x); }\nint f6(int x) { x = stopi(); return h(x); }\nint f7(int x) { g(stopi()); return h(x); }\n"
+          "int f8(int x) { 0 ? (void)0 : stop(); return h(x); }\nint f9(int x) { 1 && stopi(); return h(x); }\nint f10(int x) { ({ stop(); }); return h(x); }\n"
+          "int f11(int x) { switch (x) { case 1: stop(); h(x); default: break; } return x; }\nint f12(int x) { while (x) { stop(); h(x); } return x; }\n",
+          false, true },
+        { "calls after <stdlib.h>'s exit and abort", "-march=x86-64",
+          "#include <stdlib.h>\nstatic inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int f(int x) { if (x) exit(1); else abort(); return h(x); }\n",
+          false, true },
+        { "a noreturn attribute declared after the call", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nvoid late(void);\n"
+          "int f(int x) { late(); return h(x); }\n__attribute__((noreturn)) void late(void);\n",
+          true, true },
     };
     const uint32_t routes = executable != NULL ? 4 : 2;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -3794,6 +3816,40 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
           "static int s(void) { int x __attribute__((cleanup(h))) = 0; return x; }\nint b(void) { return s(); }\n"
           "int e(void) { int z __attribute__((cleanup(h))) = 0; return z; }\n" },
+        // Code generation's emission, where it differs from Sema's reachability (#863's fourth review): nothing after an
+        // expression statement that ends in a call that doesn't return, loops' blocks emitted whatever their conditions and
+        // bodies' code, and code after a label whatever precedes it.
+        { "calls code generation emits around calls that don't return",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nint f(int n)\n{\n    if (n == 1)\n        stop();\n    n += h(1);\n    n ? (void)0 : stop();\n"
+          "    n += h(2);\n    int y = stopi();\n    n += h(3) + y;\n    n && stopi();\n    n += h(4);\n    n = stopi() + h(5);\n    n += h(6);\nlbl:\n"
+          "    n += h(7);\n    __builtin_trap();\n    n += h(8);\n    if (n)\n        goto lbl;\n    return n;\n}\n" },
+        { "loops' blocks code generation emits whatever their conditions and bodies leave",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nstatic int a(int n) { while (0) { n = h(n); } return n; }\n"
+          "static int b(int n) { for (; 0; n = h(n + 1)) { n = h(n + 2); } return n; }\n"
+          "static int c(int n) { do { stop(); } while (h(n + 3)); return h(n + 4); }\nstatic int d(int n) { do { n++; } while (1); return h(n + 5); }\n"
+          "static int e(int n) { for (; 1;) { n++; } return h(n + 6); }\nstatic int f(int n) { for (int i = 0; i < n; i = h(i)) { stop(); } return n; }\n"
+          "static int g(int n) { while (1) { n++; } return h(n + 7); }\nint entry(int n) { return a(n) + b(n) + c(n) + d(n) + e(n) + f(n) + g(n); }\n" },
+        { "code after labels, whatever precedes them",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nstatic void hp(int *p) { *p = h(*p); }\nstatic int a(int n) { stop(); lbl: return h(n); }\n"
+          "static int b(int n) { stop(); goto end; end: return h(n + 1); }\nstatic int c(int n) { if (n) goto out; stop(); out: return h(n + 2); }\n"
+          "static int d(int n) { return n; skip: n = h(n + 3); goto skip; }\nstatic void e(int n) { int x __attribute__((cleanup(hp))) = n; stop(); }\n"
+          "static void g(int n) { int x __attribute__((cleanup(hp))) = n; if (n) return; stop(); }\n"
+          "int entry(int n) { e(n); g(n); return a(n) + b(n) + c(n) + d(n); }\n" },
+        { "a join after a call that doesn't return, in its statement, a select, which isn't one, and constant conditions' "
+          "operands that aren't emitted",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\nstatic int f(int n)\n{\n    int y = 0;\n    *(n ? &n : &y) = stopi();\n    n += h(9);\n"
+          "    (stop(), n ? 1 : 2);\n    n += h(10);\n    (n ? 1 : 2, stop());\n    n += h(11);\n    return n;\n}\n"
+          "static int g(int n)\n{\n    1 ? (void)0 : stop();\n    n += h(12);\n    0 && stopi();\n    n += h(13);\n    1 || stopi();\n    n += h(14);\n"
+          "    n = 0 ? stopi() : n;\n    return h(n);\n}\nint entry(int n) { return f(n) + g(n); }\n" },
+        { "cleanups after calls that don't return",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "static void e(int n) { int x __attribute__((cleanup(hp))) = n; stop(); }\n"
+          "static void g(int n) { int x __attribute__((cleanup(hp))) = n; if (n) return; stop(); }\n"
+          "static void k(int n) { int x __attribute__((cleanup(hp))) = n; stop(); lbl: x++; }\nint entry(int n) { e(n); g(n); k(n); return n; }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
