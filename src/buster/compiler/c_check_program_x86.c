@@ -6,8 +6,8 @@
 // constants, as clang -O0's code computes it. A builtin's row is its family's with the rule's form, from a table by
 // name; the families are those this compiler's own main.c reaches first. Each form is a VEX or EVEX one that names its
 // operands in its fields alone, of AVX-512F and AVX-512VL, which the lowering requires of a function with vectors, and
-// of the features and extensions (AVX512-FP16's: X86Extension) the rule names past them. A builtin the table doesn't
-// name is refused by name. One whose instruction names fixed registers (rdtsc, xgetbv, monitorx and mwaitx) or has a
+// of the features and extensions (AVX512-FP16's and XOP's: X86Extension) the rule names past them. A builtin the table
+// doesn't name is refused by name. One whose instruction names fixed registers (rdtsc, xgetbv, monitorx and mwaitx) or has a
 // legacy encoding (pause, tzcnt), which no row takes, is a call of a per-unit leaf instead (c_builtin_x86_helpers.c).
 // Included by c_check_program_lower.c after c_check_program_vectors.c.
 
@@ -119,7 +119,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_MASK_TERNARY,
     // ([floating start,] vector a): a's elements reduced (`fixed`: add, mul, max or min, CheckX86LowerReduction) by
     // halvings in clang's order, with start the first operand of the last one where the reduction has one: two rows,
-    // check_x86_lower_row_of's of a's 64 bytes to 16 and check_x86_lower_reduce_row's of those to the element.
+    // check_x86_lower_row_of's of a's 16, 32 or 64 bytes to 16 (to 8, of half-precision elements) and
+    // check_x86_lower_reduce_row's of those to the element. A half-precision start and result are their bits in a
+    // general register (U32), which the caller moves to and from the value's U16.
     CHECK_X86_LOWER_REDUCE,
     // (vector a, vector b, mask* p, mask* q): VP2INTERSECT's pair of masks, of a's elements found in b (k2, the pair's even
     // register) and of b's found in a (k3), stored at p and at q.
@@ -128,6 +130,10 @@ typedef enum CheckX86LowerFamily
     // predicate (its imm8's low 5 bits) into k1, whose bit 0 is the int (VCMPSH's: clang's vcomi intrinsics are an
     // FSETCCM, not COMISH's flags).
     CHECK_X86_LOWER_SCALAR_COMPARE,
+    // (vector a, vector b, int predicate): XOP's VPCOM of a and b by the predicate, the immediate's low 3 bits (less,
+    // less or equal, greater, greater or equal, equal, not equal, false, true), as clang's code for AVX-512 has it: VPCMP's
+    // or VPCMPU's opmask of a and b by the same predicate in its own numbering, then VPMOVM2's vector of -1 and 0 by it.
+    CHECK_X86_LOWER_XOP_COMPARE,
 } CheckX86LowerFamily;
 
 // FLAGS' conditions, CMOVcc's (and the x86 conditions' order), and its second condition's value.
@@ -385,6 +391,10 @@ _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word
 #define BUSTER_CHECK_X86_HALF_FMA(name, element, bytes, form, round_form, into) \
     { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_MASK_TERNARY, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form, 0, false, 0, X86_FORM_##round_form, CHECK_X86_ROUND_ER, CHECK_X86_INTO_##into, BUSTER_CHECK_X86_FP16 },
+// A REDUCE rule of half-precision elements, of 16, 32 or 64 bytes.
+#define BUSTER_CHECK_X86_HALF_REDUCE(name, bytes, reduction) \
+    { "__builtin_ia32_reduce_" name, sizeof("__builtin_ia32_reduce_" name) - 1, CHECK_X86_LOWER_REDUCE, 2, bytes, false, false, \
+      BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_NONE, 0, false, 0, 0, CHECK_X86_ROUND_NONE, CHECK_X86_REDUCE_##reduction, BUSTER_CHECK_X86_FP16 },
 #define BUSTER_CHECK_X86_HALF_COMPLEX(name, bytes, form, round_form, rounding, merge) \
     { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_MASK_MERGE, 4, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form, 0, false, 0, X86_FORM_##round_form, CHECK_X86_ROUND_##rounding, CHECK_X86_MERGE_##merge, BUSTER_CHECK_X86_FP16 },
@@ -394,6 +404,16 @@ _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word
     BUSTER_CHECK_X86_HALF(name "128_mask", MASK_UNARY, e1, b1, form##_##x, o1) \
     BUSTER_CHECK_X86_HALF(name "256_mask", MASK_UNARY, e2, b2, form##_##y, o2) \
     BUSTER_CHECK_X86_HALF_ROUNDED(name "512_mask", MASK_UNARY, e3, b3, form##_##z, o3, form##_##zr, rounding)
+// XOP's compares (XOP_COMPARE's, its extension's) of 16 bytes' elements, signed or not, with their features past AVX-512F
+// and VL: AVX-512BW's VPCMPB, VPCMPW, VPMOVM2B and VPMOVM2W, AVX-512DQ's VPMOVM2D and VPMOVM2Q.
+#define BUSTER_CHECK_X86_XOP_COMPARE(name, element, is_signed, features) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_XOP_COMPARE, element, 16, is_signed, false, 2, X86_FORM_NONE, 0, false, \
+      features, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(XOP) },
+// AVX10.2's masked load and store of bf16's first element, the whole vector's under the mask, as AVX512-FP16's of a
+// half's are.
+#define BUSTER_CHECK_X86_BF16_MEMORY(name, family) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, 2, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_NONE, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2) },
 
 static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_cmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, true, 2)
@@ -1261,8 +1281,35 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_HALF_ROUNDED("vcvttsh2usi64", CONVERT, 2, 16, VCVTTSH2USI_R64_XM16, 8, VCVTTSH2USI_R64_X_SAE, SAE)
     { "__builtin_ia32_vcomish", sizeof("__builtin_ia32_vcomish") - 1, CHECK_X86_LOWER_SCALAR_COMPARE, 2, 16, false, false, 2, X86_FORM_VCMPSH_K_X_XM16_IMM8, 0,
       false, 0, X86_FORM_VCMPSH_K_X_X_SAE_IMM8, CHECK_X86_ROUND_SAE, 0, BUSTER_CHECK_X86_FP16 },
+    // The reductions of half-precision elements at each width, as the floats' of 64 bytes.
+    BUSTER_CHECK_X86_HALF_REDUCE("fadd_ph128", 16, ADD)
+    BUSTER_CHECK_X86_HALF_REDUCE("fadd_ph256", 32, ADD)
+    BUSTER_CHECK_X86_HALF_REDUCE("fadd_ph512", 64, ADD)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmul_ph128", 16, MUL)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmul_ph256", 32, MUL)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmul_ph512", 64, MUL)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmax_ph128", 16, MAX)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmax_ph256", 32, MAX)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmax_ph512", 64, MAX)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmin_ph128", 16, MIN)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmin_ph256", 32, MIN)
+    BUSTER_CHECK_X86_HALF_REDUCE("fmin_ph512", 64, MIN)
+    BUSTER_CHECK_X86_BF16_MEMORY("loadsbf16128_mask", LOAD)
+    BUSTER_CHECK_X86_BF16_MEMORY("storesbf16128_mask", STORE)
+    // XOP's compares.
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomb", 1, true, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomw", 2, true, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomd", 4, true, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomq", 8, true, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomub", 1, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomuw", 2, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomud", 4, false, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_XOP_COMPARE("vpcomuq", 8, false, BUSTER_X86_FEATURE(AVX512DQ))
 };
 
+#undef BUSTER_CHECK_X86_BF16_MEMORY
+#undef BUSTER_CHECK_X86_XOP_COMPARE
+#undef BUSTER_CHECK_X86_HALF_REDUCE
 #undef BUSTER_CHECK_X86_HALF_CONVERSIONS
 #undef BUSTER_CHECK_X86_HALF_COMPLEX
 #undef BUSTER_CHECK_X86_HALF_FMA
@@ -1343,6 +1390,24 @@ static uint16_t check_x86_lower_move(uint32_t element, uint32_t width, bool stor
     };
     const uint32_t size = element == 1 ? 0 : element == 2 ? 1 : element == 4 ? 2 : 3;
     return store ? stores[size][width] : loads[size][width];
+}
+
+// VPCMP's and VPCMPU's forms of an element's size (0 to 3: bytes to quadwords) at each width (16, 32 and 64 bytes).
+static uint16_t check_x86_lower_compare_form(bool is_signed, uint32_t size, uint32_t width)
+{
+    static const uint16_t signed_forms[4][3] = {
+        { X86_FORM_VPCMPB_K_X_XM128_IMM8, X86_FORM_VPCMPB_K_Y_YM256_IMM8, X86_FORM_VPCMPB_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPW_K_X_XM128_IMM8, X86_FORM_VPCMPW_K_Y_YM256_IMM8, X86_FORM_VPCMPW_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPD_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPQ_K_X_XM128_IMM8, X86_FORM_VPCMPQ_K_Y_YM256_IMM8, X86_FORM_VPCMPQ_K_Z_ZM512_IMM8 },
+    };
+    static const uint16_t unsigned_forms[4][3] = {
+        { X86_FORM_VPCMPUB_K_X_XM128_IMM8, X86_FORM_VPCMPUB_K_Y_YM256_IMM8, X86_FORM_VPCMPUB_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPUW_K_X_XM128_IMM8, X86_FORM_VPCMPUW_K_Y_YM256_IMM8, X86_FORM_VPCMPUW_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
+        { X86_FORM_VPCMPUQ_K_X_XM128_IMM8, X86_FORM_VPCMPUQ_K_Y_YM256_IMM8, X86_FORM_VPCMPUQ_K_Z_ZM512_IMM8 },
+    };
+    return is_signed ? signed_forms[size][width] : unsigned_forms[size][width];
 }
 
 static X86Instruction check_x86_lower_record(uint32_t form, uint8_t reg, uint8_t vvvv, uint8_t rm)
@@ -1450,55 +1515,80 @@ static X86Instruction check_x86_lower_memory(uint32_t form, uint8_t reg, uint8_t
 // REDUCE's forms by its operation: the packed ones of 32 and 16 bytes and the scalar one, of floats' and doubles'.
 static uint16_t check_x86_lower_reduction_form(uint32_t reduction, uint32_t element, uint32_t bytes)
 {
-    static const uint16_t forms[4][2][3] = {
+    static const uint16_t forms[4][3][3] = {
         { { X86_FORM_VADDPS_Y_Y_YM256_EVEX, X86_FORM_VADDPS_X_X_XM128_EVEX, X86_FORM_VADDSS_X_X_XM32_EVEX },
-          { X86_FORM_VADDPD_Y_Y_YM256_EVEX, X86_FORM_VADDPD_X_X_XM128_EVEX, X86_FORM_VADDSD_X_X_XM64_EVEX } },
+          { X86_FORM_VADDPD_Y_Y_YM256_EVEX, X86_FORM_VADDPD_X_X_XM128_EVEX, X86_FORM_VADDSD_X_X_XM64_EVEX },
+          { X86_FORM_VADDPH_Y_Y_YM256, X86_FORM_VADDPH_X_X_XM128, X86_FORM_VADDSH_X_X_XM16 } },
         { { X86_FORM_VMULPS_Y_Y_YM256_EVEX, X86_FORM_VMULPS_X_X_XM128_EVEX, X86_FORM_VMULSS_X_X_XM32_EVEX },
-          { X86_FORM_VMULPD_Y_Y_YM256_EVEX, X86_FORM_VMULPD_X_X_XM128_EVEX, X86_FORM_VMULSD_X_X_XM64_EVEX } },
+          { X86_FORM_VMULPD_Y_Y_YM256_EVEX, X86_FORM_VMULPD_X_X_XM128_EVEX, X86_FORM_VMULSD_X_X_XM64_EVEX },
+          { X86_FORM_VMULPH_Y_Y_YM256, X86_FORM_VMULPH_X_X_XM128, X86_FORM_VMULSH_X_X_XM16 } },
         { { X86_FORM_VMAXPS_Y_Y_YM256_EVEX, X86_FORM_VMAXPS_X_X_XM128_EVEX, X86_FORM_VMAXSS_X_X_XM32_EVEX },
-          { X86_FORM_VMAXPD_Y_Y_YM256_EVEX, X86_FORM_VMAXPD_X_X_XM128_EVEX, X86_FORM_VMAXSD_X_X_XM64_EVEX } },
+          { X86_FORM_VMAXPD_Y_Y_YM256_EVEX, X86_FORM_VMAXPD_X_X_XM128_EVEX, X86_FORM_VMAXSD_X_X_XM64_EVEX },
+          { X86_FORM_VMAXPH_Y_Y_YM256, X86_FORM_VMAXPH_X_X_XM128, X86_FORM_VMAXSH_X_X_XM16 } },
         { { X86_FORM_VMINPS_Y_Y_YM256_EVEX, X86_FORM_VMINPS_X_X_XM128_EVEX, X86_FORM_VMINSS_X_X_XM32_EVEX },
-          { X86_FORM_VMINPD_Y_Y_YM256_EVEX, X86_FORM_VMINPD_X_X_XM128_EVEX, X86_FORM_VMINSD_X_X_XM64_EVEX } },
+          { X86_FORM_VMINPD_Y_Y_YM256_EVEX, X86_FORM_VMINPD_X_X_XM128_EVEX, X86_FORM_VMINSD_X_X_XM64_EVEX },
+          { X86_FORM_VMINPH_Y_Y_YM256, X86_FORM_VMINPH_X_X_XM128, X86_FORM_VMINSH_X_X_XM16 } },
     };
-    return forms[reduction & 3][element == 8 ? 1 : 0][bytes == 32 ? 0 : bytes == 16 ? 1 : 2];
+    return forms[reduction & 3][element == 8 ? 1 : element == 2 ? 2 : 0][bytes == 32 ? 0 : bytes == 16 ? 1 : 2];
 }
 
 // REDUCE's second row, of the first's 16 bytes ([floating start,] vector x) to the element, as clang orders it: x and its
 // halves swapped (VPERMILPD), of floats those and their odd elements (VMOVSHDUP), each operation's first operand the one
 // before's result, and start the last's where the reduction has one (an add's or a mul's). The result is the floating
-// result's register.
+// result's register. Of half-precision elements, whose first row has swapped the halves, the odd 32-bit lanes
+// (VMOVSHDUP), then the odd halves (VPSRLD by 16), the start's and the result's bits moved to and from a general
+// register (VMOVD) for the caller's U16: max and min by VMAXSH and VMINSH, which give what clang's compare and VMOVSH
+// give, as the packed ones do the second operand where either is a NaN or both are zeros.
 static void check_x86_lower_reduce_row(const CheckX86LowerRule* rule, Tier0Operation* row)
 {
     memset(row, 0, sizeof(*row));
     const bool start = rule->fixed == CHECK_X86_REDUCE_ADD || rule->fixed == CHECK_X86_REDUCE_MUL;
+    const bool half = rule->element == 2;
     const uint8_t x = BUSTER_TIER0_ROLE_VECTOR(start ? 1 : 0);
     const uint8_t t = BUSTER_TIER0_ROLE_VECTOR(start ? 2 : 1);
     const uint16_t scalar = check_x86_lower_reduction_form(rule->fixed, rule->element, 4);
     uint32_t r = 0;
-    row->records[r] = check_x86_lower_record(X86_FORM_VPERMILPD_X_XM128_IMM8_EVEX, t, 0, x);
-    row->records[r++].immediate = 1;
-    if (rule->element == 4)
+    if (half)
     {
-        row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, 4, 16), x, x, t);
         row->records[r++] = check_x86_lower_record(X86_FORM_VMOVSHDUP_X_XM128_EVEX, t, 0, x);
-    }
-    if (start)
-    {
+        row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, 2, 16), x, x, t);
+        row->records[r] = check_x86_lower_record(X86_FORM_VPSRLD_X_XM128_IMM8, 0, t, x);
+        row->records[r++].immediate = 16;
         row->records[r++] = check_x86_lower_record(scalar, x, x, t);
-        row->records[r++] = check_x86_lower_record(scalar, BUSTER_TIER0_ROLE_FLOATING_RESULT, BUSTER_TIER0_ROLE_FLOATING(0), x);
+        if (start)
+        {
+            row->records[r++] = check_x86_lower_record(X86_FORM_VMOVD_X_RM32_EVEX, t, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+            row->records[r++] = check_x86_lower_record(scalar, x, t, x);
+        }
+        row->records[r++] = check_x86_lower_record(X86_FORM_VMOVD_RM32_X_EVEX, x, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
     }
     else
     {
-        row->records[r++] = check_x86_lower_record(scalar, BUSTER_TIER0_ROLE_FLOATING_RESULT, x, t);
+        row->records[r] = check_x86_lower_record(X86_FORM_VPERMILPD_X_XM128_IMM8_EVEX, t, 0, x);
+        row->records[r++].immediate = 1;
+        if (rule->element == 4)
+        {
+            row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, 4, 16), x, x, t);
+            row->records[r++] = check_x86_lower_record(X86_FORM_VMOVSHDUP_X_XM128_EVEX, t, 0, x);
+        }
+        if (start)
+        {
+            row->records[r++] = check_x86_lower_record(scalar, x, x, t);
+            row->records[r++] = check_x86_lower_record(scalar, BUSTER_TIER0_ROLE_FLOATING_RESULT, BUSTER_TIER0_ROLE_FLOATING(0), x);
+        }
+        else
+        {
+            row->records[r++] = check_x86_lower_record(scalar, BUSTER_TIER0_ROLE_FLOATING_RESULT, x, t);
+        }
     }
     row->record_count = (uint8_t)r;
-    const uint8_t floating = rule->element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+    const uint8_t scalar_class = half ? BUSTER_TYPED_CLASS_U32 : rule->element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
     row->operand_count = start ? 2 : 1;
-    row->operand_classes[0] = start ? floating : BUSTER_TYPED_CLASS_VECTOR;
+    row->operand_classes[0] = start ? scalar_class : BUSTER_TYPED_CLASS_VECTOR;
     row->operand_bytes[0] = start ? 0 : 16;
     row->operand_classes[1] = start ? BUSTER_TYPED_CLASS_VECTOR : 0;
     row->operand_bytes[1] = start ? 16 : 0;
-    row->result_class = floating;
+    row->result_class = scalar_class;
 }
 
 // The row of an x86 builtin's call on a target: its records, operands and result, or the reason it has none.
@@ -1539,22 +1629,10 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         row->result_bytes = rule->bytes;
         if (rule->family == CHECK_X86_LOWER_COMPARE)
         {
-            static const uint16_t signed_forms[4][3] = {
-                { X86_FORM_VPCMPB_K_X_XM128_IMM8, X86_FORM_VPCMPB_K_Y_YM256_IMM8, X86_FORM_VPCMPB_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPW_K_X_XM128_IMM8, X86_FORM_VPCMPW_K_Y_YM256_IMM8, X86_FORM_VPCMPW_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPD_K_X_XM128_IMM8, X86_FORM_VPCMPD_K_Y_YM256_IMM8, X86_FORM_VPCMPD_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPQ_K_X_XM128_IMM8, X86_FORM_VPCMPQ_K_Y_YM256_IMM8, X86_FORM_VPCMPQ_K_Z_ZM512_IMM8 },
-            };
-            static const uint16_t unsigned_forms[4][3] = {
-                { X86_FORM_VPCMPUB_K_X_XM128_IMM8, X86_FORM_VPCMPUB_K_Y_YM256_IMM8, X86_FORM_VPCMPUB_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPUW_K_X_XM128_IMM8, X86_FORM_VPCMPUW_K_Y_YM256_IMM8, X86_FORM_VPCMPUW_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPUD_K_X_XM128_IMM8, X86_FORM_VPCMPUD_K_Y_YM256_IMM8, X86_FORM_VPCMPUD_K_Z_ZM512_IMM8 },
-                { X86_FORM_VPCMPUQ_K_X_XM128_IMM8, X86_FORM_VPCMPUQ_K_Y_YM256_IMM8, X86_FORM_VPCMPUQ_K_Z_ZM512_IMM8 },
-            };
             const uint32_t size = rule->element == 1 ? 0 : rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
             // The predicate is the immediate's low 3 bits, as the instruction reads them.
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 2, 0, BUSTER_TIER0_ROLE_INTEGER(2));
-            row->records[1] = check_x86_lower_record(rule->is_signed ? signed_forms[size][width] : unsigned_forms[size][width], 1, v0, v1);
+            row->records[1] = check_x86_lower_record(check_x86_lower_compare_form(rule->is_signed, size, width), 1, v0, v1);
             row->records[1].immediate = (int64_t)(immediate & 7);
             row->records[1].decorations = 2;
             row->records[2] = check_x86_lower_record(check_x86_lower_mask_out(lanes), BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, 1);
@@ -2221,19 +2299,51 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_REDUCE)
         {
-            // The first row (check_x86_lower_reduce_row has the second): a's halves, then the sum's (or product's, or
-            // greater's, or lesser's) halves, each operation's first operand the lower half.
-            row->records[0] = check_x86_lower_record(X86_FORM_VEXTRACTF64X4_YM256_Z_IMM8, v0, 0, v1);
-            row->records[0].immediate = 1;
-            row->records[1] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, rule->element, 32), v0, v0, v1);
-            row->records[2] = check_x86_lower_record(X86_FORM_VEXTRACTF32X4_XM128_Y_IMM8, v0, 0, v1);
-            row->records[2].immediate = 1;
-            row->records[3] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, rule->element, 16), v0, v0, v1);
-            row->record_count = 4;
+            // The first row (check_x86_lower_reduce_row has the second): a's halves from 64 or 32 bytes to 16, then the
+            // sum's (or product's, or greater's, or lesser's) halves, each operation's first operand the lower half; of
+            // half-precision elements, which take a step more than the second row has room for, then the 16 bytes' halves
+            // swapped (VPERMILPD) and the same of them.
+            uint32_t r = 0;
+            if (rule->bytes == 64)
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_VEXTRACTF64X4_YM256_Z_IMM8, v0, 0, v1);
+                row->records[r++].immediate = 1;
+                row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, rule->element, 32), v0, v0, v1);
+            }
+            if (rule->bytes >= 32)
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_VEXTRACTF32X4_XM128_Y_IMM8, v0, 0, v1);
+                row->records[r++].immediate = 1;
+                row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, rule->element, 16), v0, v0, v1);
+            }
+            if (rule->element == 2)
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_VPERMILPD_X_XM128_IMM8_EVEX, v1, 0, v0);
+                row->records[r++].immediate = 1;
+                row->records[r++] = check_x86_lower_record(check_x86_lower_reduction_form(rule->fixed, 2, 16), v0, v0, v1);
+            }
+            row->record_count = (uint8_t)r;
             row->operand_count = 1;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
             row->result_bytes = 16;
+        }
+        else if (rule->family == CHECK_X86_LOWER_XOP_COMPARE)
+        {
+            // XOP's predicates (less, less or equal, greater, greater or equal, equal, not equal, false and true) in VPCMP's
+            // numbering (equal 0, less 1, less or equal 2, false 3, not equal 4, not less 5 and not less or equal 6, true 7).
+            static const uint8_t predicates[8] = { 1, 2, 6, 5, 0, 4, 3, 7 };
+            static const uint16_t vectors[4] = { X86_FORM_VPMOVM2B_X_K, X86_FORM_VPMOVM2W_X_K, X86_FORM_VPMOVM2D_X_K, X86_FORM_VPMOVM2Q_X_K };
+            const uint32_t size = rule->element == 1 ? 0 : rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
+            row->records[0] = check_x86_lower_record(check_x86_lower_compare_form(rule->is_signed, size, width), 1, v0, v1);
+            row->records[0].immediate = predicates[immediate & 7];
+            row->records[1] = check_x86_lower_record(vectors[size], v0, 0, 1);
+            row->record_count = 2;
+            row->operand_count = 2;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = rule->bytes;
         }
         else if (rule->family == CHECK_X86_LOWER_SCALAR_COMPARE)
         {

@@ -93,13 +93,15 @@ _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
 
 // The features past those that the generated code may use, which form eligibility doesn't classify and only the
 // lowering reads: AVX512-FP16 for its x86 rows (c_check_program_x86.c) and its vector and scalar half precision, AVX-NE-
-// CONVERT for its VCVTNEPS2BF16 and AVX10.2 for its native __bf16 arithmetic (c_check_program_half.c).
-// X86Target.extensions, from the target options as clang resolves them and from a function's target attribute
-// (c_predefines.c's predefines_target and predefines_function_target), by clang's names (predefines_x86_extensions).
+// CONVERT for its VCVTNEPS2BF16 and AVX10.2 for its native __bf16 arithmetic (c_check_program_half.c), and XOP for its
+// builtins' rows. X86Target.extensions, from the target options as clang resolves them and from a function's target
+// attribute (c_predefines.c's predefines_target and predefines_function_target), by clang's names
+// (predefines_x86_extensions).
 #define BUSTER_X86_TARGET_EXTENSIONS(X) \
     X(AVX512FP16) \
     X(AVXNECONVERT) \
-    X(AVX10_2)
+    X(AVX10_2) \
+    X(XOP)
 
 #define BUSTER_X86_TARGET_EXTENSION_ENUM(name) X86_EXTENSION_##name,
 typedef enum X86Extension

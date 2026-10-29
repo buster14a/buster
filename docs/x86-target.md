@@ -25,8 +25,8 @@ fills the `X86Target` from the result (`predefines_target`): the features this
 file knows by name, with RDTSCP and CLFLUSH, which clang has no feature for,
 from the profile where `-march` names one of the six above, and that profile's
 architecture (`X86_ARCH_OTHER` for clang's other CPUs). Its `extensions` are
-the features past those (`X86Extension`: AVX512-FP16, AVX-NE-CONVERT and
-AVX10.2), which form eligibility doesn't classify and only the lowering reads
+the features past those (`X86Extension`: AVX512-FP16, AVX-NE-CONVERT,
+AVX10.2 and XOP), which form eligibility doesn't classify and only the lowering reads
 (the x86 builtins' rows and half-precision vectors' and scalars': [the
 checker's guide](c-checker.md)). An unknown name or
 switch is an error, as in clang (the preprocessor takes only the `-m` options

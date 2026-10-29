@@ -1663,7 +1663,17 @@ What the lowering covers past scalars (#145's programs):
     KANDN of the mask and 1, as no scalar move of 16 bits is AVX-512F's);
   - the floating reductions of 64 bytes, two rows in clang's order: the
     halvings to 16 bytes, then to the element, the start the last operation's
-    first operand where the reduction has one;
+    first operand where the reduction has one; and AVX512-FP16's of 16, 32 and
+    64 bytes, the halvings to 8 bytes in the first row, whose start and result
+    are their bits in a general register, moved as an unsigned short's to and
+    from the half's U16 (max and min by VMAXSH and VMINSH, which give what
+    clang's compare and VMOVSH give);
+  - XOP's compares (`vpcomb` to `vpcomuq`), XOP's extension's, by the
+    immediate's predicate as clang's code for AVX-512 has them: VPCMP's or
+    VPCMPU's opmask by the same predicate in its own numbering, then VPMOVM2's
+    vector of it;
+  - AVX10.2's masked load and store of bf16's first element
+    (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
   - AVX512-FP16's, whose rules name its extension (`CheckX86LowerRule.extensions`),
     which the function's target must have too: the half-precision elements'
