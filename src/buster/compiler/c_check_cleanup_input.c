@@ -126,6 +126,7 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
             };
             valid = check_input_cleanup_record(reader, cleanup);
             // A goto or a case mustn't enter the scope, as a variable-length array's (check_input_vla_finish).
+            check_input_rare_claim(reader, &reader->vla_scope_ends[name]);
             reader->vla_scope_ends[name] = valid ? cleanup.end : reader->vla_scope_ends[name];
             check_input_lane_refuse(reader, reader->lane, "a body declares a variable with a cleanup");
         }
