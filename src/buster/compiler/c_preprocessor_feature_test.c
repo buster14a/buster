@@ -99,7 +99,8 @@ static bool pp_test_source_feature_matrix(void)
     static const struct { const char* name; bool source; } intrinsics[] = {
         { "__rdtsc", true }, { "__builtin_ia32_pause", true }, { "__builtin_rotateleft32", true },
         { "__builtin_assume", true }, { "__builtin_unpredictable", true }, { "__builtin_ia32_selectd_512", true },
-        { "__builtin_ia32_emms", false }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
+        // EMMS has both a shared SYSTEM lowering row and a declaration in the frozen source scope.
+        { "__builtin_ia32_emms", true }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(intrinsics); i += 1)
     {
