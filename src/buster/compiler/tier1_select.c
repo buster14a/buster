@@ -575,7 +575,17 @@ struct Tier1SelectForest
     const uint32_t* blocks;
     const uint32_t* uses;
     const uint32_t* costs;
+    // Each node's last memory barrier before it, plus one (0 for none): a store, a call or a volatile access, which a
+    // load isn't folded past (tier1_select_load_folds). The IR has no atomic access of its own: C's atomic operations
+    // reach it as calls of the unit's leaves.
+    const uint32_t* barriers;
 };
+
+static bool tier1_select_barrier(const IrFunction* function, uint32_t node)
+{
+    const uint32_t op = function->op[node];
+    return op == IR_STORE || op == IR_CALL || op == IR_CALL_INDIRECT || (op == IR_LOAD && (function->flags[node] & BUSTER_IR_VOLATILE) != 0);
+}
 
 static uint32_t tier1_select_width(uint32_t type)
 {
@@ -652,6 +662,14 @@ static X86Operation tier1_select_operation(uint32_t op)
 static bool tier1_select_tree_child(const Tier1SelectForest* forest, uint32_t parent, uint32_t value)
 {
     return value != BUSTER_IR_NONE && value < parent && forest->uses[value] == 1 && forest->blocks[value] == forest->blocks[parent];
+}
+
+// A load moves into its consumer's memory operand: its only use, in its block, past nodes that neither write memory,
+// call nor access a volatile object (no barrier between them), and itself not volatile.
+static bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t consumer, uint32_t load)
+{
+    const IrFunction* function = forest->function;
+    return load != BUSTER_IR_NONE && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, consumer, load) && forest->barriers[consumer] <= load;
 }
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
@@ -860,8 +878,10 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
                 tier1_select_add_candidate(forest, node, &candidates, folded);
             }
         }
-        const uint32_t load = function->op[b] == IR_LOAD ? b : tier1_select_commutative((X86Operation)base.operation) ? a : BUSTER_IR_NONE;
-        if (load != BUSTER_IR_NONE && load + 1 == node && function->op[load] == IR_LOAD && function->flags[load] == 0 && tier1_select_tree_child(forest, node, load))
+        // The load the memory operand takes: the right operand's, or for a commutative operation either's.
+        const bool commutative = tier1_select_commutative((X86Operation)base.operation);
+        const uint32_t load = tier1_select_load_folds(forest, node, b) ? b : commutative && tier1_select_load_folds(forest, node, a) ? a : BUSTER_IR_NONE;
+        if (load != BUSTER_IR_NONE)
         {
             Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_LOAD_OPERAND;
@@ -1084,6 +1104,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     uint32_t* blocks = 0;
     uint32_t* uses = 0;
+    uint32_t* barriers = 0;
     uint32_t* depths = 0;
     uint32_t* level_offsets = 0;
     uint32_t* level_nodes = 0;
@@ -1093,6 +1114,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         bool ok = true;
         blocks = ir_allocate(scratch, count, 4, &ok);
         uses = ir_allocate(scratch, count, 4, &ok);
+        barriers = ir_allocate(scratch, count, 4, &ok);
         depths = ir_allocate(scratch, count, 4, &ok);
         level_offsets = ir_allocate(scratch, (uint64_t)count + 2, 4, &ok);
         level_nodes = ir_allocate(scratch, count, 4, &ok);
@@ -1109,6 +1131,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     uint32_t maximum_depth = 0;
     uint64_t effective_capacity = 0;
     bool parameter_prefix = true;
+    uint32_t barrier = 0;
     // Labels (whose symbols the frame and the emitter would have to define), by-value aggregates' ABI records and a
     // variadic definition's incoming frame (#131) aren't selected yet.
     if (error == TIER1_SELECT_OK && (function->label_count != 0 || function->parameter_passed != 0 || function->variadic))
@@ -1134,6 +1157,8 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
         parameter_prefix &= op == IR_PARAM;
+        barriers[node] = barrier;
+        barrier = tier1_select_barrier(function, node) ? node + 1 : barrier;
         effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
         for (uint32_t p = 0; error == TIER1_SELECT_OK && p < operand_count; p += 1)
@@ -1188,6 +1213,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         .blocks = blocks,
         .uses = uses,
         .costs = plan.costs,
+        .barriers = barriers,
     };
     for (uint32_t level = 0; error == TIER1_SELECT_OK && level <= maximum_depth; level += 1)
     {

@@ -780,7 +780,7 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
                 tier1_select_test_expect(test, error == TIER1_SELECT_OK, "memory fixture selects");
                 if (error == TIER1_SELECT_OK)
                 {
-                    tier1_select_test_expect(test, (plan.covered[4] != 0) == (variant == 0), "load fusion requires adjacent single use and nonvolatile access");
+                    tier1_select_test_expect(test, (plan.covered[4] != 0) == (variant == 0), "load folding requires a single use, no store between and a nonvolatile access");
                     if (variant == 0)
                     {
                         bool uses[5] = {0};
@@ -809,6 +809,150 @@ static void tier1_select_test_memory_plans(Tier1SelectTest* test)
         else
         {
             tier1_select_test_expect(test, false, "create memory fixture");
+        }
+        arena_pop_to(&input, 0);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
+// #141: a load folds into its single consumer past nodes that neither write memory, call nor access a volatile
+// object, and past none that do. Each function is one block: a pointer p, an index i and a value v, then the shape's
+// nodes. Its load reads p + i (address 0); address 1 is p + 8 and address 2 p + 16; constant 0 is 7. The consumers
+// have no lea for the costed cover to prefer over the fold (an add's: the cover keeps its load apart). A call's shape
+// is planned alone, since this emitter refuses calls (tier1_select_test_call_barriers runs them through the native
+// one); the IR has no atomic access of its own: C's atomic operations reach it as calls.
+typedef struct Tier1SelectTestBarrier Tier1SelectTestBarrier;
+struct Tier1SelectTestBarrier
+{
+    const char* name;
+    uint8_t op[8];
+    uint8_t type[8];
+    uint8_t flags[8];
+    uint32_t a[8];
+    uint32_t b[8];
+    uint32_t c[8];
+    uint32_t count;
+    uint32_t load;
+    uint32_t consumer;
+    bool folds;
+};
+
+#define N BUSTER_IR_NONE
+static const Tier1SelectTestBarrier tier1_select_test_barriers[] =
+{
+    { "adjacent", { IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5 }, { 1, N, 4, N }, { 0, N, N, N }, 4, 4, 5, true },
+    { "past arithmetic", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, true },
+    { "past a load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, true },
+    { "past a constant and its immediate", { IR_ADDRESS, IR_LOAD, IR_CONST, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 2, 6, 7 }, { 1, N, N, 5, 4, N }, { 0, N, N, N, N, N }, 6, 4, 7, true },
+    { "a commutative consumer's left operand", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_XOR, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 4, 6 }, { 1, N, 1, 5, N }, { 0, N, N, N, N }, 5, 4, 6, true },
+    { "after a store before the load", { IR_ADDRESS, IR_STORE, IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_VOID, IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 2, 7, 8 }, { N, 2, 1, N, 1, 6, N }, { 2, N, 0, N, N, N, N }, 7, 6, 8, true },
+    { "not past a store to its address", { IR_ADDRESS, IR_LOAD, IR_STORE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 2, 6 }, { 1, N, 2, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past a store elsewhere", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_STORE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 0, 5, 2, 7 }, { 1, N, N, 2, 4, N }, { 0, N, 2, N, N, N }, 6, 4, 7, false },
+    { "not past a volatile load", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_LOAD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_I64, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_VOLATILE }, { 0, 3, 0, 5, 6, 7 }, { 1, N, N, N, 4, N }, { 0, N, 1, N, N, N }, 6, 4, 7, false },
+    { "not past a volatile store", { IR_ADDRESS, IR_LOAD, IR_ADDRESS, IR_STORE, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_PTR, IR_VOID, IR_I64, IR_VOID }, { 0, 0, 0, BUSTER_IR_VOLATILE }, { 0, 3, 0, 5, 2, 7 }, { 1, N, N, 2, 4, N }, { 0, N, 2, N, N, N }, 6, 4, 7, false },
+    { "not a volatile load", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, { 0, BUSTER_IR_VOLATILE }, { 0, 3, 2, 5, 6 }, { 1, N, 1, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not a load used twice", { IR_ADDRESS, IR_LOAD, IR_ADD, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_I64, IR_I64, IR_VOID }, {0}, { 0, 3, 2, 5, 6 }, { 1, N, 4, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+    { "not past a call", { IR_ADDRESS, IR_LOAD, IR_CALL, IR_SUB, IR_RET }, { IR_PTR, IR_I64, IR_VOID, IR_I64, IR_VOID }, {0}, { 0, 3, 1, 2, 6 }, { 1, N, 0, 4, N }, { 0, N, N, N, N }, 5, 4, 6, false },
+};
+#undef N
+
+static void tier1_select_test_load_barriers(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(1u << 20);
+    Arena scratch = arena_reserve(1u << 20);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(tier1_select_test_barriers); s += 1)
+    {
+        const Tier1SelectTestBarrier* shape = &tier1_select_test_barriers[s];
+        const uint32_t count = 3 + shape->count;
+        bool calls = false;
+        for (uint32_t i = 0; i < shape->count; i += 1)
+        {
+            calls |= shape->op[i] == IR_CALL;
+        }
+        const IrSizes sizes =
+        {
+            .instruction_count = count,
+            .block_count = 1,
+            .constant_count = 1,
+            .address_count = 3,
+            .call_count = calls,
+            .parameter_count = 3,
+        };
+        IrFunction function;
+        const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+        tier1_select_test_expect(test, created, "create load barrier fixture");
+        if (created)
+        {
+            function.result_type = IR_I64;
+            function.block_offsets[1] = count;
+            function.parameter_types[0] = IR_PTR;
+            function.parameter_types[1] = IR_I64;
+            function.parameter_types[2] = IR_I64;
+            function.constants[0].low = 7;
+            if (calls)
+            {
+                // A direct call of symbol 1 without arguments or a result.
+                function.symbol_count = 2;
+                function.calls[0].result_type = IR_VOID;
+            }
+            for (uint32_t address = 0; address < 3; address += 1)
+            {
+                function.addresses[address].scale = 1;
+                function.addresses[address].offset = (int64_t)address * 8;
+            }
+            tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 2, IR_PARAM, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            // Each value its own caller-saved register, the consumer's rax.
+            static const uint8_t pool[] = { X86_REGISTER_R8, X86_REGISTER_RCX, X86_REGISTER_R9, X86_REGISTER_R10 };
+            uint8_t registers[16] = { X86_REGISTER_RDI, X86_REGISTER_RSI, X86_REGISTER_RDX };
+            uint32_t next = 0;
+            for (uint32_t i = 0; i < shape->count; i += 1)
+            {
+                const uint32_t node = 3 + i;
+                tier1_select_test_node(&function, node, shape->op[i], shape->type[i], shape->a[i], shape->b[i], shape->c[i]);
+                function.flags[node] = shape->flags[i];
+                const bool pooled = node != shape->consumer && shape->type[i] != IR_VOID;
+                assert(!pooled || next < BUSTER_ARRAY_LENGTH(pool));
+                registers[node] = pooled ? pool[next++] : X86_REGISTER_RAX;
+            }
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Tier1SelectPlan plan;
+                uint32_t failed = 0;
+                const Tier1SelectError planned = tier1_select_plan(&function, 0, &output, &scratch, path == 0, &plan, &failed);
+                char message[160];
+                snprintf(message, sizeof(message), "load barrier fixture selects: %s", shape->name);
+                tier1_select_test_expect(test, planned == TIER1_SELECT_OK, message);
+                if (planned == TIER1_SELECT_OK)
+                {
+                    const bool folded = plan.covered[shape->load] != 0 && plan.patterns[shape->consumer].rule == TIER1_RULE_LOAD_OPERAND;
+                    snprintf(message, sizeof(message), "a load folds into its consumer past no barrier: %s", shape->name);
+                    tier1_select_test_expect(test, folded == shape->folds && (plan.covered[shape->load] != 0) == shape->folds, message);
+                    Tier1SelectCode code;
+                    const Tier1SelectError emitted = calls ? TIER1_SELECT_ERROR_UNSUPPORTED : tier1_select_emit(&plan, registers, test->allowed, &output, &code, &failed);
+                    snprintf(message, sizeof(message), "load barrier fixture emits: %s", shape->name);
+                    tier1_select_test_expect(test, calls || emitted == TIER1_SELECT_OK, message);
+                    if (emitted == TIER1_SELECT_OK && tier1_select_test_load_code(test, code.records, code.count, code.count, true))
+                    {
+                        // The load's address p + i: the stored-to word itself at i = 0, the next one at 8.
+                        for (uint64_t index = 0; index <= 8; index += 8)
+                        {
+                            uint64_t actual_memory[4] = {73, 19, 51, 99};
+                            uint64_t expected_memory[4];
+                            memcpy(expected_memory, actual_memory, sizeof(actual_memory));
+                            const uint64_t expected = tier1_select_test_interpret(&function, (uintptr_t)expected_memory, index, 112);
+                            const uint64_t actual = tier1_select_test_call(test, (uintptr_t)actual_memory, index, 112);
+                            snprintf(message, sizeof(message), "the folded load reads what the original IR's does: %s", shape->name);
+                            tier1_select_test_expect(test, expected == actual && memcmp(actual_memory, expected_memory, sizeof(actual_memory)) == 0, message);
+                        }
+                    }
+                }
+                arena_pop_to(&output, 0);
+            }
         }
         arena_pop_to(&input, 0);
     }
@@ -1768,6 +1912,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_memory_plans(&test);
+            tier1_select_test_load_barriers(&test);
             tier1_select_test_errors(&test);
             tier1_select_test_guarded(&test);
             tier1_select_test_calls(&test);

@@ -30,10 +30,17 @@ patterns are:
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. Larger displacements
   return an unsupported result until materialization is implemented.
-- A nonvolatile load with exactly one use immediately followed by its arithmetic
-  consumer can become that consumer's memory operand. No store, volatile
-  operation, call or other instruction is crossed. A volatile load remains
-  a separate access; a store retains its original order and access width.
+- A nonvolatile load whose only use is an arithmetic consumer in its block
+  can become that consumer's memory operand (the right operand of a
+  subtraction, either of a commutative operation), its access moved to the
+  consumer (#141). It moves past the nodes between them that neither write
+  memory, call nor access a volatile object (arithmetic, constants, addresses,
+  other nonvolatile loads) and past none that do: a store to any address, a
+  call, a volatile load or store. The plan's pass over the nodes keeps each
+  one's last such barrier (`Tier1SelectForest.barriers`), so the check is a
+  comparison. The IR has no atomic access of its own: C's atomic operations
+  reach it as calls of the unit's leaves. A volatile load remains a separate
+  access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
@@ -151,6 +158,19 @@ error_node)` consumes the allocator's direct byte register column. A value
 without one stable supported register is rejected. The caller supplies an
 allocation verified against the selected-use liveness; this API does not
 reconstruct or independently solve allocation.
+
+The immediates' forms are the shared form choice's (#221). Expansion leaves
+each record with an immediate empty, with its request (the operation's row,
+the value, the live flags and the destination); both emitters collect a
+function's requests and choose their forms 32 at a time, one pass of
+`x86_choose_forms`'s lanes, or by its scalar twin on the scalar path (the
+plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
+`tier1_emit_function`), before checking the records (#141). This emitter
+checks them in order after the batch, so a node's invalid record or a form
+the target refuses is reported before a later node's allocation failure, as
+when each node's records were checked as it was selected. Every record either
+emitter writes has a form `x86_semantics.c` covers, which the selector, emitter
+and pipeline tests check.
 
 `Tier1SelectCode` publishes:
 
