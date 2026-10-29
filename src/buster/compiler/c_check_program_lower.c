@@ -2856,6 +2856,28 @@ static void check_lower_quad_truth(CheckLowerWriter* writer, bool negate)
     check_lower_emit(writer, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
 }
 
+// A conversion between integer types, but to _Bool, of the value on top of the stack, as check_lower_scalar_conversion
+// makes one: a CONVERT where their classes differ, and a _BitInt narrower than its class extended from its width
+// (check_lower_bit_int_extend). check_lower_quad_conversion's to and from libgcc's integers are made here, so that it
+// doesn't call back into the conversion that calls it.
+static void check_lower_integer_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    const uint8_t source = check_lower_class(writer, from);
+    const uint8_t target = check_lower_class(writer, to);
+    if (writer->bit_ints && check_lower_bit_int_shift(writer->program->types, to) != 0)
+    {
+        if (source != check_lower_computed(target))
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, check_lower_computed(target), 0);
+        }
+        check_lower_bit_int_extend(writer, to, true, false);
+    }
+    else if (source != target)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, target, 0);
+    }
+}
+
 // A conversion of the value on top of the stack between `from` and `to`, one of them __float128 and the other a scalar
 // type (check_lower_scalar_conversion's mixed one), as clang -O0 makes it: libgcc's of a float, a double or a long double
 // by its own; of an integer through int, unsigned int, long, unsigned long, __int128 or unsigned __int128, the first
@@ -2890,7 +2912,11 @@ static __attribute__((noinline)) void check_lower_quad_conversion(CheckLowerWrit
         const TypeId argument = from_quad ? BUSTER_TYPE_FLOAT128 : through;
         if (!from_quad)
         {
-            check_lower_scalar_conversion(writer, other, through);
+            // A floating value's own type is its runtime function's (`through` of its class).
+            if (integer)
+            {
+                check_lower_integer_conversion(writer, other, through);
+            }
             if (check_lower_wide(writer, through))
             {
                 // A 128-bit integer's value passes from a frame object of its own.
@@ -2900,9 +2926,9 @@ static __attribute__((noinline)) void check_lower_quad_conversion(CheckLowerWrit
             }
         }
         check_lower_quad_call(writer, runtime, from_quad ? through : BUSTER_TYPE_FLOAT128, &argument, 1);
-        if (from_quad)
+        if (from_quad && integer)
         {
-            check_lower_scalar_conversion(writer, through, other);
+            check_lower_integer_conversion(writer, through, other);
         }
     }
     else
