@@ -692,7 +692,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_FLOAT;
     }
-    else if (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE)
+    else if (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE)
     {
         op = CHECK_OP_BUILTIN_QUERY;
     }
@@ -1453,37 +1453,49 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
         check_action_call(types, &ordinary, result);
         result->conversions[0] = (CheckConversion){ 0 };
     }
-    CheckValue converted[BUSTER_CHECK_BUILTIN_X86_ARGUMENTS];
-    for (uint32_t i = 0; result->diagnostic == CHECK_DIAG_NONE && i < action->argument_count &&
-                         i < BUSTER_CHECK_BUILTIN_X86_ARGUMENTS; i += 1)
+    if (cbuiltin_fortify_id(call->info->name, call->info->name_length) != CBUILTIN_FORTIFY_COUNT)
     {
-        CheckAction operand = *action;
-        operand.operands[0] = action->arguments[i];
-        CheckActionResult temporary = { 0 };
-        converted[i] = check_action_operand(types, &operand, &temporary, 0);
-        check_action_conversion(types, converted + i, action->argument_conversions[i].type, 0,
-                                temporary.conversions, action->node);
-        if (temporary.diagnostic != CHECK_DIAG_NONE)
-        {
-            check_action_diagnose(result, temporary.diagnostic, i);
-        }
+        // These exact generic signatures have no x86 immediate constraints. Keep the ordinary call's conversions,
+        // side effects and diagnostics, without imposing the x86 adapter's 64-argument bound on printf varargs.
+        *checked = (CheckBuiltinX86Result){
+            .action = ordinary_result,
+            .status = ordinary_result.diagnostic == CHECK_DIAG_NONE ? CHECK_BUILTIN_X86_OK : CHECK_BUILTIN_X86_ERROR,
+        };
     }
-    const CheckBuiltinX86Action input = {
-        .name = call->info->name,
-        .name_bytes = call->info->name_length,
-        .arguments = converted,
-        .argument_count = action->argument_count,
-        .required_ice_arguments = call->required_ice_arguments,
-        .ice_arguments = call->ice_arguments,
-        .node = node,
-        .typed_call = *result,
-        .reachability = call->unselected_context ? CHECK_BUILTIN_X86_REACHABLE : call->reachability,
-        // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
-        .name_in_scope = builtin_intrinsic_own_main_prototype_in_scope(call->info->name, call->info->name_length),
-        .constant_evaluated_context = call->constant_evaluated_context,
-        .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
-    };
-    check_builtin_x86(types, &input, checked, 1);
+    else
+    {
+        CheckValue converted[BUSTER_CHECK_BUILTIN_X86_ARGUMENTS];
+        for (uint32_t i = 0; result->diagnostic == CHECK_DIAG_NONE && i < action->argument_count &&
+                             i < BUSTER_CHECK_BUILTIN_X86_ARGUMENTS; i += 1)
+        {
+            CheckAction operand = *action;
+            operand.operands[0] = action->arguments[i];
+            CheckActionResult temporary = { 0 };
+            converted[i] = check_action_operand(types, &operand, &temporary, 0);
+            check_action_conversion(types, converted + i, action->argument_conversions[i].type, 0,
+                                    temporary.conversions, action->node);
+            if (temporary.diagnostic != CHECK_DIAG_NONE)
+            {
+                check_action_diagnose(result, temporary.diagnostic, i);
+            }
+        }
+        const CheckBuiltinX86Action input = {
+            .name = call->info->name,
+            .name_bytes = call->info->name_length,
+            .arguments = converted,
+            .argument_count = action->argument_count,
+            .required_ice_arguments = call->required_ice_arguments,
+            .ice_arguments = call->ice_arguments,
+            .node = node,
+            .typed_call = *result,
+            .reachability = call->unselected_context ? CHECK_BUILTIN_X86_REACHABLE : call->reachability,
+            // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
+            .name_in_scope = builtin_intrinsic_own_main_prototype_in_scope(call->info->name, call->info->name_length),
+            .constant_evaluated_context = call->constant_evaluated_context,
+            .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
+        };
+        check_builtin_x86(types, &input, checked, 1);
+    }
 }
 
 static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)

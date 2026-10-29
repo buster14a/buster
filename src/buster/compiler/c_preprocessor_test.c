@@ -7215,6 +7215,7 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_TYPES_COMPATIBLE_P, "__builtin_types_compatible_p", false, true, true },
         { CBUILTIN_CHOOSE_EXPR, "__builtin_choose_expr", false, true, true },
         { CBUILTIN_OBJECT_SIZE, "__builtin_object_size", false, true, false },
+        { CBUILTIN_DYNAMIC_OBJECT_SIZE, "__builtin_dynamic_object_size", false, true, false },
         { CBUILTIN_HUGE_VAL, "__builtin_huge_val", false, true, false },
         { CBUILTIN_HUGE_VALF, "__builtin_huge_valf", false, true, false },
         { CBUILTIN_HUGE_VALL, "__builtin_huge_vall", false, true, false },

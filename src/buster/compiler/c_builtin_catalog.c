@@ -67,6 +67,7 @@
     X(TYPES_COMPATIBLE_P, 0x131u, "__builtin_types_compatible_p", BUSTER_CBUILTIN_CONSTANT) \
     X(CHOOSE_EXPR, 0x132u, "__builtin_choose_expr", BUSTER_CBUILTIN_CONSTANT) \
     X(OBJECT_SIZE, 0x133u, "__builtin_object_size", BUSTER_CBUILTIN_SOURCE) \
+    X(DYNAMIC_OBJECT_SIZE, 0x134u, "__builtin_dynamic_object_size", BUSTER_CBUILTIN_SOURCE) \
     X(HUGE_VAL, 0x140u, "__builtin_huge_val", BUSTER_CBUILTIN_SOURCE) \
     X(HUGE_VALF, 0x141u, "__builtin_huge_valf", BUSTER_CBUILTIN_SOURCE) \
     X(HUGE_VALL, 0x142u, "__builtin_huge_vall", BUSTER_CBUILTIN_SOURCE) \
