@@ -1286,10 +1286,11 @@ decisions in #154 and on #117's configuration):
 
 - **By default, what buster implements** (`pp_implemented_*`). Until the
   compiler implements everything clang supports, they say exactly what it does:
-  of builtins only the preprocessor's own `__is_target_*` (which clang's
-  `__has_builtin` answers 1 for too), and no attribute, feature, extension or
-  constexpr builtin. The parser, the checker and the code generators add theirs
-  to these tables as they implement them (#127, #133, #147, #148).
+  `__has_attribute(packed)` and `__has_c_attribute(gnu::packed)` answer 1,
+  including the `__packed__` spelling. Builtin answers use the shared catalog's
+  source and constant-expression capabilities as well as the preprocessor's own
+  `__is_target_*`. No feature or extension is advertised yet. Other attributes
+  remain unadvertised until their checker and lowering support is verified.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.
