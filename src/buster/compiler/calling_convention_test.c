@@ -3999,7 +3999,8 @@ static uint32_t abi_test_world_directed_compiled(AbiTestWorld* world, TypeId* di
 // Whether a compiled world makes an _Atomic of `base`: an integer of up to 8 bytes (not a _BitInt, which clang doesn't
 // make atomic), an enum, a pointer, a float or a double, a struct or a union, which this compiler's C loads and stores
 // atomically (#720: inline at 1, 2, 4, 8 and 16 bytes aligned to them, through libatomic otherwise). The signatures pass
-// records holding them and aligned typedefs of them, never an _Atomic itself, as the record runs do.
+// them as the record runs do: themselves, as named arguments and results, records holding them and aligned typedefs of
+// them.
 static bool abi_test_compiled_atomic(const TypeTable* table, TypeId base)
 {
     const uint32_t resolved = abi_resolved_index(table, base);
@@ -5619,10 +5620,10 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both). A
         // _BitInt of 65 to 127 bits, whose value extends from its width as it loads (the convention leaves the bits past it
         // unspecified) through shifts of 128 bits whose count takes the depth above it, takes one depth more than a 128-bit
-        // integer: it is never the last of the 12. An aligned typedef of an _Atomic loads atomically as it passes, an exchange
-        // of 16 bytes in rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which take up to four depths more
-        // (on the 7940HS a 16-byte one follows 8 integer values at most, in a frame realigned for an argument aligned to 32,
-        // under a struct result's address): it is never past the 8th.
+        // integer: it is never the last of the 12. An _Atomic, or an aligned typedef of one, loads atomically as it passes,
+        // an exchange of 16 bytes in rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which take up to four
+        // depths more (on the 7940HS a 16-byte one follows 8 integer values at most, in a frame realigned for an argument
+        // aligned to 32, under a struct result's address): it is never past the 8th.
         bool memory = cross->compiled && abi_test_tier0_memory(table, signature->result);
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -6771,7 +6772,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
                 const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
                 const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
-                const bool atomic_result = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
                 const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE);
                 // GCC passes a LOW_GENERAL type's low eightbyte in a vector register, as the psABI says.
                 const bool low_general = (abi.pass[index] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
@@ -6791,7 +6791,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const bool odd_vector_record = (resolved_kind == BUSTER_TYPE_KIND_STRUCT || resolved_kind == BUSTER_TYPE_KIND_UNION) &&
                                                (abi.pass[index] & BUSTER_ABI_PASS_VECTOR) != 0 && resolved_size != 16 && resolved_size != 32 && resolved_size != 64;
                 // clang's atomic loads of an _Atomic vector of bools crash its instruction selection (an aligned typedef
-                // of one's too, which the check above lets through).
+                // of one's too).
                 const uint32_t atomic_value = resolved_kind == BUSTER_TYPE_KIND_ATOMIC ? abi_resolved_index(table, table->types.base[abi_resolved_index(table, type)]) : 0;
                 const bool atomic_bits = atomic_value != 0 && table->types.kind[atomic_value] == BUSTER_TYPE_KIND_EXT_VECTOR &&
                                          abi_test_packed_bits(table, atomic_value) == 1;
@@ -6803,7 +6803,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
                 // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
                 const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !gcc_differs &&
                     !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
                     (!compiled || abi_test_compiled_passes(table, type)))
                 {

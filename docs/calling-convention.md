@@ -1442,9 +1442,11 @@ fifth of the results `void`:
   every signature both ways and fails if a value differs where its mask says
   it means something, or a hidden pointer comes back wrong.
 
-The signatures leave out `_Atomic` types themselves (the fixtures check them;
-records of `_Atomic` members and aligned typedefs of `_Atomic` types are in).
-The clang worlds' `_Atomic`s of structs of no size reach them that way: at
+clang's signatures pass `_Atomic` types themselves as named arguments and
+results, as well as records of `_Atomic` members and aligned typedefs of
+`_Atomic` types (at seed 1, 82 to 117 `_Atomic` arguments and 9 to 19 `_Atomic`
+results a run; GCC's worlds make no `_Atomic`, which GCC classifies as its
+value). The clang worlds' `_Atomic`s of structs of no size reach them: at
 seeds 1 to 20, 330 `LARGER` arguments, 167 of them `GROWN`, for which our side
 copies a stack argument's own bytes, fewer than its slot's. clang's worlds
 leave out a type passed in registers that holds an array of elements of no
@@ -1499,8 +1501,8 @@ clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
 in clang's runs `_Atomic`s of integers of up to 8 bytes, enums, pointers,
 `float`, `double`, structs and unions (#720's lowering of C11's atomics,
 `abi_test_compiled_atomic`), which the signatures pass as the record runs' do:
-records holding them and aligned typedefs of them, never an `_Atomic` itself,
-and the structs, unions, arrays and aligned typedefs made of
+themselves, as named arguments and results, records holding them and aligned
+typedefs of them, and the structs, unions, arrays and aligned typedefs made of
 them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member

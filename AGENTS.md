@@ -5324,8 +5324,8 @@ this compiler on our side: a world of what its C passes (integers to 64 bits,
 `_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
 `nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
 GNU's complex integer types to 64 bits, in clang's `_Atomic`s of those
-scalars and records (records holding them and aligned typedefs of them, as in
-the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
+scalars and records (themselves, records holding them and aligned typedefs of
+them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
@@ -5333,7 +5333,7 @@ enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
 signatures with long doubles, 128-bit integers or vectors within Tier 0's
 depths (12 integer arguments, a `_BitInt` of 65 to 127 bits never the 12th,
-an aligned typedef of an `_Atomic` never past the 8th, a realigned frame's rbp
+an `_Atomic` or an aligned typedef of one never past the 8th, a realigned frame's rbp
 past them, and 15 floating ones), and the others past
 them, in its deep slots (#712), the
 first against clang `(nullptr_t, long × 5, U, long)` for a union U whose high
