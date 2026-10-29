@@ -477,7 +477,10 @@ after the function lanes (#151), the change merged with it is −19.8% in all,
 record's synthetic units of 200 and 2,000 definitions, whose few tokens leave the
 whole-unit passes little to cost, −3.7 to −7.9%. The Xeon gave −25.5% in all
 against main before #418, and +4.0% under 300 tokens. The smallest units, which
-have few tokens to skip, keep a fixed cost: chiefly the ABI classification of
-the 64 builtin types on every lowering, whose rows are the same for every unit
-of a configuration but would need state that `main.c`'s units share to cache.
+have few tokens to skip, kept a fixed cost: chiefly the ABI classification of
+the 42 present builtin types in the 64-index builtin prefix on every lowering.
+The later [immutable builtin projection](calling-convention.md#immutable-builtin-facts-442)
+reuses those rows without a mutable cross-unit cache; derived classifications
+and dependency scheduling remain private to each unit. The historical numbers
+above predate that change and do not measure its effect.
 These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
