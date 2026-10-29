@@ -445,8 +445,12 @@ struct CheckLowerWriter
     uint32_t vector_constant_count;
     uint32_t vector_constant_capacity;
     // The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES, or BUSTER_TYPED_CLASS_VECTOR where the
-    // target has no AVX-512F and AVX-512VL, whose EVEX forms Tier 0's vector entries are (check_lower_vector_target).
+    // unit's target or the function's has no AVX-512F and AVX-512VL, whose EVEX forms Tier 0's vector entries are
+    // (check_lower_vector_target): the unit's decides the convention, as clang's x86-64 ABI does.
     uint32_t class_limit;
+    // The function's instruction set (#180), by its target attribute (check_program_targets): which instructions the x86
+    // builtins' rows and leaves and the vector builtins' and operators' rows use.
+    X86Target target;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -1183,7 +1187,9 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
     const uint32_t count = writer->count;
     if (class >= writer->class_limit)
     {
-        check_lower_unsupported(writer, class == BUSTER_TYPED_CLASS_VECTOR ? "vector types without AVX-512F and AVX-512VL" : "values of this type");
+        check_lower_unsupported(writer, class != BUSTER_TYPED_CLASS_VECTOR ? "values of this type" :
+                                        check_lower_vector_target(writer->program->target.features) ? "vector types in a function whose target attribute turns off AVX-512F or AVX-512VL" :
+                                        "vector types without AVX-512F and AVX-512VL");
     }
     else if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
     {
@@ -1471,7 +1477,7 @@ static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier
 static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
     Tier0Operation row;
-    const char* reason = check_vector_lower_row(writer->program->types, writer->program->target_features, op, vector, scalar_class, &row);
+    const char* reason = check_vector_lower_row(writer->program->types, writer->target.features, op, vector, scalar_class, &row);
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
@@ -4312,7 +4318,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
-                         check_x86_lower_row_of(program->target_features, rule, (uint64_t)immediates[0].integer,
+                         check_x86_lower_row_of(writer->target.features, rule, (uint64_t)immediates[0].integer,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
@@ -4397,7 +4403,7 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
         // The leaf's instructions' features (c_builtin_x86_helpers.c), which the target must have.
         const CBuiltinX86HelperKind leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;
         const uint64_t needed = cbuiltin_x86_helper_infos[leaf].features;
-        if ((program->target_features & needed) != needed)
+        if ((writer->target.features & needed) != needed)
         {
             check_lower_unsupported(writer, cbuiltin_x86_helper_infos[leaf].refusal);
         }
@@ -4545,7 +4551,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const uint64_t target = program->target_features;
+    const uint64_t target = writer->target.features;
     const uint32_t selected = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
     const CheckBuiltinVectorEffect* effect = selected != BUSTER_CHECK_NONE ? stream->vectors + selected : NULL;
     const CBuiltinId builtin = effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE;
@@ -6793,7 +6799,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
     // table, so a unit without a body needs neither its columns nor its classifications (#613).
     valid = valid && (program->body_count == 0 ||
-                      abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target_features), types->types.count));
+                      abi_initialize_types(&shared->table, scratch, types, check_lower_vector_register_bytes(program->target.features), types->types.count));
     if (valid && program->body_count != 0)
     {
         if (BUSTER_SCALAR_PATH(scalar))
@@ -6946,7 +6952,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .sources = sources,
         .x87_constant_capacity = shared->x87_constant_capacity,
         .label_symbol_capacity = shared->label_symbol_capacity,
-        .class_limit = check_lower_vector_target(program->target_features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR,
+        .class_limit = check_lower_vector_target(program->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR,
+        .target = program->target,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
@@ -7134,6 +7141,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->aggregates = false;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
+        // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
+        const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
+        writer->target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? program->target : program->targets[body_target - 1];
+        writer->class_limit = check_lower_vector_target(program->target.features & writer->target.features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR;
         writer->result = result;
         writer->token = body.declaration;
         check_lower_source(writer, body.declaration);
@@ -7165,7 +7176,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // the address each return gives (Tier0Function.result_size).
         const bool aggregate_result = check_lower_aggregate(writer, result);
         const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
-        if (bare && naked->reason != NULL)
+        if (body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS)
+        {
+            // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
+            check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
+        }
+        else if (bare && naked->reason != NULL)
         {
             check_lower_unsupported(writer, naked->reason);
         }

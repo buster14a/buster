@@ -1368,9 +1368,10 @@ What the lowering covers past scalars (#145's programs):
   (`Tier0Function.vectors`), from the classes its entries have, which one
   bitmask gathers with long double's and the 128-bit integers'. Their entries
   are AVX-512 forms: the target needs AVX-512F and AVX-512VL, which the lowering
-  takes from the preprocessor's target (`CheckProgramOptions.target_features`,
-  from `-march` and the `-m` flags), and without them a vector's first entry is
-  refused by name. The convention passes a vector in a register as wide as the
+  takes from the preprocessor's target (`CheckProgramOptions.target`, from
+  `-march` and the `-m` flags), the unit's and the function's (its target
+  attribute's, below), and without them a vector's first entry is refused by
+  name. The convention passes a vector in a register as wide as the unit's
   target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
   passes and returns one as the 128-bit integers are passed, through a frame
   object of its bytes. An operator is an X86 entry of its row
@@ -1564,6 +1565,22 @@ What the lowering covers past scalars (#145's programs):
   write them, with the masked truncating stores and the leaves (monitorx and
   mwaitx where the host has MWAITX), by both paths against clang -O0's code for
   znver5.
+- **A function's target attribute (#180).** A function's
+  `__attribute__((target("...")))` gives its rows and leaves its own
+  instruction set (`CheckProgram.body_targets`, made by
+  `check_program_targets`): the static functions' declarations with a target
+  or `target_clones` attribute, found by the static objects' pass (scalar per
+  declaration, as the pass is), sorted by object with the radix kernel's twins,
+  and each body's found by a binary search where its object is in their range,
+  the attribute that applies being the first on the definition or a declaration
+  before it, as clang merges it. Each string resolves once against the unit's
+  options (`c_predefines.c`'s `predefines_function_target`, [the target
+  guide](x86-target.md)), and an attribute of the string before it, as a
+  header's functions have, is read as that one was. A unit without one, the
+  usual one, makes no column. A function of several versions
+  (GNU's function multiversioning: `target_clones`, or two strings) is refused by
+  name, and so are vector values in a function whose attribute turns AVX-512F or
+  AVX-512VL off; the convention stays the unit's, as clang's does.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
