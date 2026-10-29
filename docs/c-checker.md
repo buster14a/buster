@@ -1488,9 +1488,10 @@ What the lowering covers past scalars (#145's programs):
   is refused by name. The overflow builtins take 128-bit operands and
   destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
   in a frame object of its own.
-- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 16, 32
-  or 64 bytes (the intrinsics' `__m128` to `__m512i`, elements other than
-  `bool`) are Tier 0's VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
+- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 4, 8,
+  16, 32 or 64 bytes (the intrinsics' `__m64` and `__m128` to `__m512i`, and the
+  narrow vectors of their conversions; elements other than `bool`) are Tier 0's
+  VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
   memory class: their locals, parameters and temporaries are frame objects of
   their bytes (`check_lower_temporary_of`), their globals are read and written
   through their addresses, and each `LOAD`, `STORE` and `SET` of one has its
@@ -1502,15 +1503,24 @@ What the lowering covers past scalars (#145's programs):
   `-march` and the `-m` flags), the unit's and the function's (its target
   attribute's, below), and without them a vector's first entry is refused by
   name. The convention passes a vector in a register as wide as the unit's
-  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
-  passes and returns one as the 128-bit integers are passed, through a frame
-  object of its bytes. An operator is an X86 entry of its row
+  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does, and one
+  of 4 or 8 bytes as clang's ABI classes it (4 bytes INTEGER, 8 bytes SSE, but a
+  vector of one double MEMORY); a call passes and returns one as the 128-bit
+  integers are passed, through a frame object of its bytes. A vector of 4 or 8
+  bytes is in an XMM register's first bytes, the rest zero, so that its rows
+  are XMM forms, as clang's code of `__m64` is; its floating division divides
+  its own elements alone, under a mask of them, so that the zeros past them
+  raise no `FE_INVALID` (clang's code divides them one at a time under
+  `FENV_ACCESS`). An operator is an X86 entry of its row
   (`c_check_program_vectors.c`): an instruction per operator and element type
   where AVX-512 has one (`+ - * / & | ^ << >>`, the compares through an opmask
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
-  type. `op=` loads, computes and stores back. Half-precision elements'
+  type, and so is a conditional's scalar arm (`check_lower_vector_operand`: the
+  operator splats it itself, so that an integer's conversion to a GNU C vector
+  of its bytes is a cast's, below, and the tasks' loop asks no cast whether it is
+  one). `op=` loads, computes and stores back. Half-precision elements'
   (`_Float16`'s) arithmetic and compares are AVX512-FP16's (VADDPH, VCMPPH and
   the others), which the function's target must have (its extension:
   `X86Target.extensions`), and their negation flips the sign bits. Where the
@@ -1527,10 +1537,13 @@ What the lowering covers past scalars (#145's programs):
   computes chains in half precision, as clang does. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
   (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
-  same bytes changes no bits. Integer division and remainder, and 8-bit
+  same bytes changes no bits, and so does one between a GNU C vector of 4 or 8
+  bytes and an integer of its bytes, a move between their registers
+  (`check_lower_vector_bits`: VMOVD or VMOVQ), where an extended vector's cast
+  of a scalar splats it. Integer division and remainder, and 8-bit
   multiplication and shifts, which clang computes an element at a time, are
-  refused by name, and so are a cast between a vector and an integer, vectors of
-  other sizes and of `bool`, logical vector operators and vector conditions.
+  refused by name, and so are vectors of other sizes and of `bool`, logical
+  vector operators and vector conditions.
   Element access through a volatile vector lvalue is also refused: Clang uses
   a whole-vector volatile load, and a read/insert/store for an element write,
   which a scalar access at the element's address cannot preserve. Whole-vector
@@ -1711,6 +1724,10 @@ What the lowering covers past scalars (#145's programs):
     truncation at the operand's, or nothing between elements of one size. One
     of a shuffle's first elements (a vector's low half, as the intrinsics widen
     one) converts that shuffle's first vector in place;
+  - a conversion between 8- or 16-bit integers and floats or doubles goes
+    through 32-bit integers, as LLVM converts them: VPMOVSX or VPMOVZX to
+    them, then VCVTDQ2PS or VCVTDQ2PD; or VCVTTPS2DQ or VCVTTPD2DQ, then
+    VPMOVDB or VPMOVDW's truncation;
   - a conversion with floating elements is the pair's instruction, as clang
     -O0's code is: from 32- and 64-bit integers by their signedness (VCVTDQ2PS,
     VCVTUDQ2PD, VCVTQQ2PS and the rest, DQ's for 64-bit ones), to them truncated
@@ -1722,9 +1739,10 @@ What the lowering covers past scalars (#145's programs):
     (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), and nothing
     within one format. A widening one is at the result's width, so that it reads
     a shuffle's first elements in place (`_mm_cvtps_pd`'s);
-  - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
-    shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
-    has no class for, with a compound literal of constants) are VPMOV's
+  - the intrinsics' narrowing conversions into a vector of 4 or 8 bytes
+    (`_mm_cvtepi32_epi8` and the rest: a shuffle of a conversion into it with a
+    compound literal of zeros) are the conversion, then the shuffle; into one of
+    2 bytes (`_mm_cvtepi64_epi8`'s, a vector Tier 0 has no class for) they are VPMOV's
     truncation, which zeroes the rest of its register, where every element past
     the conversion's is a zero of the literal's; else that, then VPERMT2 with
     the literal's bytes as its second table. This requires a nonvolatile literal
@@ -1741,7 +1759,9 @@ What the lowering covers past scalars (#145's programs):
     and of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH);
   - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
     elements and a nontemporal load VMOVNTDQA, at an address the pointer's
-    element type aligns to the vector's bytes, as clang's code needs them;
+    element type aligns to the vector's bytes, as clang's code needs them; of a
+    vector of 4 or 8 bytes, its bytes moved to a general register (VMOVD,
+    VMOVQ), then MOVNTI, and a plain load;
   - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
     and VPSRLW) and applies its operation at each step, then moves the element
     into a general register, in two rows where that is more than a row's 8
@@ -1749,12 +1769,14 @@ What the lowering covers past scalars (#145's programs):
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
-  floating constant the checker folded is its bytes; between integers or
-  pointers, or between vectors, the value's bits are the result; and between an
-  integer and a float or a double they go through a frame temporary, as clang
-  -O0's go through memory. The other floating elementwise functions and
-  conversions (of 8-bit integers, of 16-bit ones but to and from half-precision
-  elements, to bf16 elements, and between half-precision elements and other
+  floating or vector constant the checker folded is its bytes; between integers
+  or pointers, or between vectors, the value's bits are the result; between a
+  vector of 4 or 8 bytes and an integer, a float or a double of its bytes, a
+  move between their registers (VMOVD, VMOVQ); and between an integer and a
+  float or a double they go through a frame temporary, as clang -O0's go through
+  memory. The other floating elementwise functions and conversions (between
+  8-bit integers and half-precision elements, between 8- and 16-bit integers and
+  bf16 elements, to bf16 elements, and between half-precision elements and other
   types than floats without AVX512-FP16), the bf16 elements' elementwise
   functions and the half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
@@ -1764,10 +1786,12 @@ What the lowering covers past scalars (#145's programs):
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
   BITALG, VPOPCNTDQ, VBMI2, DQ) are refused by name. `test-checker`'s vector
   builtin programs (`c_check_program_vector_builtins_test.c`) call each at every
-  width, the narrowing conversions and the floating intrinsics as the headers
-  write them, with the masked truncating stores and the leaves (monitorx and
-  mwaitx where the host has MWAITX), by both paths against clang -O0's code for
-  znver5.
+  width, those of vectors of 4 and 8 bytes, the narrowing conversions and the
+  floating intrinsics as the headers write them, with the masked truncating
+  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
+  paths against clang -O0's code for znver5; and `test-checker-driver` links a
+  program of MMX's intrinsics through clang's `<immintrin.h>` by both paths,
+  whose output must be clang's build's.
 - **A function's target attribute (#180).** A function's
   `__attribute__((target("...")))` gives its rows and leaves its own
   instruction set (`CheckProgram.body_targets`, made by

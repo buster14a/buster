@@ -132,7 +132,8 @@ static X86Instruction check_vector_lower_record(uint32_t form, uint8_t reg, uint
 // VECTOR(1) and leaves its result in VECTOR(0); a compare, its -1 or 0 elements of the operands' sizes; a unary one, its
 // operand as VECTOR(0); a floating negation, also the sign bit as an integer operand (pushed after the vector: operand 1,
 // as a role's j is its operand's place among them all); a splat, the scalar as its element's class (`scalar_class`). The
-// rows don't depend on the operands' depths: Tier 0 places them. Half-precision elements' rows but a negation's, which
+// rows don't depend on the operands' depths: Tier 0 places them. A floating division of a vector of 4 or 8 bytes
+// divides its own elements alone, under a mask of them. Half-precision elements' rows but a negation's, which
 // flips their bits alone, take AVX512-FP16; a splat into them has none, as a scalar of their type has no class yet (the
 // checker and the scalar lowering refuse one first). With `excess` (clang's _Float16 excess precision, where the unit's
 // target hasn't AVX512-FP16: check_lower_vector_half_chain), a negation of them is clang's in float, which quiets their
@@ -144,7 +145,8 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
     const CheckVectorElement element = check_vector_lower_element(types, vector);
     const bool half = element.floating && element.bytes == 2;
     const uint64_t bytes = type_size(types, type_unqualified(type_strip_aligned(types, vector)));
-    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    // A vector of 4 or 8 bytes takes the 16-byte forms, in an XMM register whose bytes past it Tier 0 zeroes.
+    const uint32_t width = bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
     const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
     const bool compare = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -280,8 +282,23 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
                      op == CHECK_OP_MULTIPLY ? "vector multiplication of 8-bit elements" :
                      op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ? "vector shifts of 8-bit elements" : "this vector operator";
         }
-        row->records[0] = check_vector_lower_record(forms.forms[width], v0, v0, v1);
-        row->record_count = 1;
+        if (element.floating && op == CHECK_OP_DIVIDE && bytes < 16)
+        {
+            // A vector of 4 or 8 bytes divides its own elements alone, under k1's mask of them with zeroing: its
+            // register's bytes past it are zeros, whose 0/0 would raise FE_INVALID, and masked-out elements raise no
+            // exception (clang's code divides them one at a time under FENV_ACCESS).
+            row->records[0] = check_vector_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, BUSTER_TIER0_ROLE_SCRATCH(0));
+            row->records[0].immediate = (int64_t)((UINT64_C(1) << (bytes / element.bytes)) - 1);
+            row->records[1] = check_vector_lower_record(X86_FORM_KMOVW_K_R32, 1, 0, BUSTER_TIER0_ROLE_SCRATCH(0));
+            row->records[2] = check_vector_lower_record(forms.forms[width], v0, v0, v1);
+            row->records[2].decorations = 1 | BUSTER_X86_DECORATION_ZEROING;
+            row->record_count = 3;
+        }
+        else
+        {
+            row->records[0] = check_vector_lower_record(forms.forms[width], v0, v0, v1);
+            row->record_count = 1;
+        }
         row->operand_count = 2;
     }
     if (compare || (row->operand_count == 2 && row->operand_classes[0] == 0))

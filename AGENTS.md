@@ -5750,10 +5750,13 @@ take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes 
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads
-whole, its upper bytes zero; and `--count` random programs of vector, integer and
-float statements, masked stores and dropped vectors over the rows (operands and
-results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
-operands, a row of no records), constants, frame objects of each width, DUP,
+whole, its upper bytes zero; and `--count` random programs of vector (of 4, 8,
+16, 32 and 64 bytes, those of 4 and 8 through XMM forms that read them with
+their upper bytes zero), integer and float statements, masked stores and
+dropped vectors over the rows (operands and results on both stacks, masks,
+scratch registers, `/is4`, memory and VSIB operands, a row of no records, moves
+between general registers and vectors of 4 and 8 bytes), constants, frame
+objects of each width, DUP,
 STORE's kept value and `?:`, under live values on both stacks, every output
 byte against the check's stack machine. Its coverage must reach every VECTOR
 kind at each width it has, every row and both arms. Then the `validation`
