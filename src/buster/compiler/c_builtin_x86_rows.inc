@@ -158,6 +158,26 @@
 #define BUSTER_CHECK_X86_BF16_MEMORY(name, family) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, 2, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_NONE, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2))
+// AVX-NE-CONVERT's loads (its extension's), VECTOR_MEMORY's LOAD: a bf16 or a half broadcast into every float element,
+// or a vector of them's even or odd elements converted, from memory at p.
+#define BUSTER_CHECK_X86_NE_CONVERT(name, bytes, form) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_VECTOR_MEMORY, 4, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, CHECK_X86_LAYOUT_LOAD, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVXNECONVERT))
+// AVX-VNNI-INT8's dot products of bytes and AVX-VNNI-INT16's of words, TERNARY's into the accumulator, at 16, 32 and 64
+// bytes in AVX10.2's EVEX forms, as clang's code of AVX10.2's intrinsics has them (the masked ones of 16 and 32 bytes, and
+// those of 64 bytes); the headers' unmasked ones of 16 and 32 bytes are macros of the builtins.
+#define BUSTER_CHECK_X86_VNNI_INT(name, form) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name "128", sizeof("__builtin_ia32_" name "128") - 1, CHECK_X86_LOWER_TERNARY, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form##_X_X_XM128_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2) }, \
+    { "__builtin_ia32_" name "256", sizeof("__builtin_ia32_" name "256") - 1, CHECK_X86_LOWER_TERNARY, 4, 32, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form##_Y_Y_YM256_EVEX, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2) }, \
+    { "__builtin_ia32_" name "512", sizeof("__builtin_ia32_" name "512") - 1, CHECK_X86_LOWER_TERNARY, 4, 64, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form##_Z_Z_ZM512, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(AVX10_2))
+// A rule of an extension's (`extensions`, X86Extension's bits), of `family`'s row of the form, with its last vector of
+// `other` bytes where they aren't the others'.
+#define BUSTER_CHECK_X86_EXTENDED(name, family, element, bytes, form, other, extensions) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, other, false, 0, 0, CHECK_X86_ROUND_NONE, 0, extensions)
 
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_cmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, true, 2)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_ucmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, false, 2)
@@ -1093,8 +1113,48 @@
     BUSTER_CHECK_X86_XOP("vpmadcsswd", BLENDV, 2, 16, false, VPMADCSSWD_X_X_XM128_X)
     BUSTER_CHECK_X86_XOP("vpmadcswd", BLENDV, 2, 16, false, VPMADCSWD_X_X_XM128_X)
     BUSTER_CHECK_X86_XOP("vpperm", BLENDV, 1, 16, false, VPPERM_X_X_XM128_X)
+    // AVX-NE-CONVERT's loads, of 16 and 32 bytes of floats.
+    BUSTER_CHECK_X86_NE_CONVERT("vbcstnebf162ps128", 16, VBCSTNEBF162PS_X_M16)
+    BUSTER_CHECK_X86_NE_CONVERT("vbcstnebf162ps256", 32, VBCSTNEBF162PS_Y_M16)
+    BUSTER_CHECK_X86_NE_CONVERT("vbcstnesh2ps128", 16, VBCSTNESH2PS_X_M16)
+    BUSTER_CHECK_X86_NE_CONVERT("vbcstnesh2ps256", 32, VBCSTNESH2PS_Y_M16)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneebf162ps128", 16, VCVTNEEBF162PS_X_M128)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneebf162ps256", 32, VCVTNEEBF162PS_Y_M256)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneeph2ps128", 16, VCVTNEEPH2PS_X_M128)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneeph2ps256", 32, VCVTNEEPH2PS_Y_M256)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneobf162ps128", 16, VCVTNEOBF162PS_X_M128)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneobf162ps256", 32, VCVTNEOBF162PS_Y_M256)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneoph2ps128", 16, VCVTNEOPH2PS_X_M128)
+    BUSTER_CHECK_X86_NE_CONVERT("vcvtneoph2ps256", 32, VCVTNEOPH2PS_Y_M256)
+    // The dot products of signed and unsigned bytes (b) and words (w) into doublewords, the s ones with signed saturation:
+    // the first operand's signedness, then the second's (su, signed by unsigned).
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbssd", VPDPBSSD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbssds", VPDPBSSDS)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbsud", VPDPBSUD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbsuds", VPDPBSUDS)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbuud", VPDPBUUD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpbuuds", VPDPBUUDS)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwsud", VPDPWSUD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwsuds", VPDPWSUDS)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwusd", VPDPWUSD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwusds", VPDPWUSDS)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwuud", VPDPWUUD)
+    BUSTER_CHECK_X86_VNNI_INT("vpdpwuuds", VPDPWUUDS)
+    // SHA512's message steps (BINARY's, of forms without vvvv: a the destination too, the first one's b of 16 bytes) and
+    // its two rounds (TERNARY's: a, b and c of 16 bytes), of 32 bytes; SM3's message steps (TERNARY's); and SM4's key
+    // expansion and rounds of 64 bytes (BINARY's, AVX10.2's EVEX forms).
+    BUSTER_CHECK_X86_EXTENDED("vsha512msg1", BINARY, 8, 32, VSHA512MSG1_Y_X, 16, BUSTER_X86_EXTENSION(SHA512))
+    BUSTER_CHECK_X86_EXTENDED("vsha512msg2", BINARY, 8, 32, VSHA512MSG2_Y_Y, 0, BUSTER_X86_EXTENSION(SHA512))
+    BUSTER_CHECK_X86_EXTENDED("vsha512rnds2", TERNARY, 8, 32, VSHA512RNDS2_Y_Y_X, 16, BUSTER_X86_EXTENSION(SHA512))
+    BUSTER_CHECK_X86_EXTENDED("vsm3msg1", TERNARY, 4, 16, VSM3MSG1_X_X_XM128, 0, BUSTER_X86_EXTENSION(SM3))
+    BUSTER_CHECK_X86_EXTENDED("vsm3msg2", TERNARY, 4, 16, VSM3MSG2_X_X_XM128, 0, BUSTER_X86_EXTENSION(SM3))
+    BUSTER_CHECK_X86_EXTENDED("vsm4key4512", BINARY, 4, 64, VSM4KEY4_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(SM4) | BUSTER_X86_EXTENSION(AVX10_2))
+    BUSTER_CHECK_X86_EXTENDED("vsm4rnds4512", BINARY, 4, 64, VSM4RNDS4_Z_Z_ZM512, 0, BUSTER_X86_EXTENSION(SM4) | BUSTER_X86_EXTENSION(AVX10_2))
 
 #undef BUSTER_CHECK_X86_BF16_MEMORY
+#undef BUSTER_CHECK_X86_NE_CONVERT
+#undef BUSTER_CHECK_X86_VNNI_INT
+#undef BUSTER_CHECK_X86_EXTENDED
 #undef BUSTER_CHECK_X86_XOP_COMPARE
 #undef BUSTER_CHECK_X86_XOP
 #undef BUSTER_CHECK_X86_HALF_REDUCE

@@ -2,16 +2,16 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-x86-intrinsics (#136): the compiler's code of the headers' x86 intrinsics against clang -O0's, for the builtins
-// whose instructions neither the tests' hosts nor Zen 5 runs (XOP's), which no native run can compare, and for controls
-// that run. A source takes every case's address, as --lower-all of main.c lowers the headers' definitions: clang -O0
-// compiles its out-of-line copy of each always_inline definition, and the compiler, by both paths into the same bytes,
-// its own. Each object's functions are decoded (x86_64_disassembler.c) and followed from their entry, every register's,
-// opmask's and stack byte's value as x86_semantics.c's effects say the instructions read and write them: through moves,
-// stack slots and the calls into the object's other functions (the compiler's code calls the definitions that clang
-// inlines). A value is an expression of the arguments' bytes, with a node for each instruction that isn't a move (its
-// form, immediate and operands' values; a masked one as select(mask, node, else)), so the code of each case must give
-// the same expression for its result (its return register's bytes for the intrinsic's type) and for its stores through
-// pointers, by both compilers.
+// whose instructions neither the tests' hosts nor Zen 5 runs (XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's,
+// SM4's), which no native run can compare, and for controls that run. A source takes every case's address, as
+// --lower-all of main.c lowers the headers' definitions: clang -O0 compiles its out-of-line copy of each always_inline
+// definition, and the compiler, by both paths into the same bytes, its own. Each object's functions are decoded
+// (x86_64_disassembler.c) and followed from their entry, every register's, opmask's and stack byte's value as
+// x86_semantics.c's effects say the instructions read and write them: through moves, stack slots and the calls into the
+// object's other functions (the compiler's code calls the definitions that clang inlines). A value is an expression of
+// the arguments' bytes, with a node for each instruction that isn't a move (its form, immediate and operands' values; a
+// masked one as select(mask, node, else)), so the code of each case must give the same expression for its result (its
+// return register's bytes for the intrinsic's type) and for its stores through pointers, by both compilers.
 //
 // Layout: the cases (x86_intrinsic_cases) and the probe's source; the objects (X86IntrinsicObject: sections, symbols
 // and relocations); the trace's values (X86IntrinsicByte, X86IntrinsicNode, x86_intrinsic_node, x86_intrinsic_value);
@@ -49,9 +49,10 @@ struct X86IntrinsicCase
 
 // The controls: intrinsics whose builtins the native programs check already, unmasked, merged and zeroed, which must
 // agree with clang's code as the cases do; and the probe's own pair of functions of one intrinsic with its operands
-// swapped, whose expressions must differ (run_x86_intrinsic_tests' last check). Then the cases: XOP's own instructions
-// (the fractions, the horizontal sums and differences, the multiply-accumulates, VPPERM and the shifts by vectors of
-// counts), which no host of the tests runs.
+// swapped, whose expressions must differ (run_x86_intrinsic_tests' last check). Then the cases, which no host of the
+// tests runs: XOP's own instructions (the fractions, the horizontal sums and differences, the multiply-accumulates,
+// VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads, AVX10.2's intrinsics of AVX-VNNI-INT8's and
+// AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), and SHA512's, SM3's and SM4's.
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -106,6 +107,109 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_sha_epi16)
     BUSTER_X86_INTRINSIC_X(_mm_sha_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_sha_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_bcstnebf16_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_bcstnebf16_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_bcstnesh_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_bcstnesh_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtneebf16_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtneebf16_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtneeph_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtneeph_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtneobf16_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtneobf16_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtneoph_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtneoph_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbssd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbssds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbsud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbsuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbuud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpbuuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwsud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwsuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwusd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwusds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwuud_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_dpwuuds_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_sha512msg1_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_sha512msg2_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_sha512rnds2_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_sm3msg1_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_sm3msg2_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_sm4key4_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_sm4rnds4_epi32)
 };
 
 #undef BUSTER_X86_INTRINSIC_X

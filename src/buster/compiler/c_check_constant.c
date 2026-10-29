@@ -2523,6 +2523,12 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             if (valid)
             {
                 CheckActionResult checked;
+                if (reader->sizeof_capture && action.op == CHECK_OP_SIZEOF)
+                {
+                    // Publish once, while this enclosing operand is folded. This is only the operand's type for
+                    // VLA routing, not an explicit query type or a substitute for the graph's constraint checks.
+                    reader->sizeof_types[token] = action.type != 0 ? action.type : action.operands[0].type;
+                }
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, &checked);

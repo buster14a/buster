@@ -660,10 +660,10 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_BINARY)
         {
-            // b is of `other` bytes where they aren't a's (a shift's count, an XMM register at every width). A legacy form
-            // (SSE4A's, SHA's) has no vvvv: its reg is a and the destination.
-            const bool legacy = x86_form_description(rule->form)->family == BUSTER_X86_FAMILY_LEGACY;
-            row->records[0] = check_x86_lower_record(rule->form, v0, legacy ? 0 : rule->swap ? v1 : v0, rule->swap ? v0 : v1);
+            // b is of `other` bytes where they aren't a's (a shift's count, an XMM register at every width). A form
+            // without vvvv (SSE4A's, SHA's, SHA512's) has its reg a and the destination.
+            const bool two = x86_form_description(rule->form)->vvvv == BUSTER_X86_OPERAND_NONE;
+            row->records[0] = check_x86_lower_record(rule->form, v0, two ? 0 : rule->swap ? v1 : v0, rule->swap ? v0 : v1);
             row->records[0].immediate = rule->fixed;
             check_x86_lower_round(rule, round, &row->records[0]);
             row->record_count = 1;
@@ -958,7 +958,7 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             for (uint32_t j = 0; j < 3; j += 1)
             {
                 row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
-                row->operand_bytes[j] = rule->bytes;
+                row->operand_bytes[j] = j == 2 && rule->other != 0 ? rule->other : rule->bytes;
             }
             row->operand_classes[3] = mask_class;
         }

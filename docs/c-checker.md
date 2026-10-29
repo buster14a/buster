@@ -1775,6 +1775,24 @@ What the lowering covers past scalars (#145's programs):
     the tests runs XOP, so `test-x86-intrinsics` compares the compiler's code
     of their 42 intrinsics with clang -O0's, instruction by instruction
     (below);
+  - AVX-NE-CONVERT's loads (VECTOR_MEMORY's LOAD, its extension's): a bf16
+    or a half broadcast into every float element (`vbcstnebf162ps`,
+    `vbcstnesh2ps`), and a vector of them's even or odd elements converted to
+    floats (`vcvtneebf162ps` to `vcvtneoph2ps`), at 16 and 32 bytes;
+  - AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products of bytes and words into
+    doublewords (`vpdpbssd` to `vpdpwuuds`, TERNARY's), at 16, 32 and 64 bytes
+    in AVX10.2's EVEX forms, which clang's code of AVX10.2's intrinsics has:
+    the masked ones of 16 and 32 bytes and those of 64. The headers' unmasked
+    ones of 16 and 32 bytes are macros of the builtins, whose VEX forms a
+    function with AVX-VNNI-INT8 or INT16 alone would need; there they are
+    refused by name. No host of the tests runs either extension, and
+    `test-x86-intrinsics` compares them with clang's code too;
+  - SHA512's message steps (BINARY's: forms without vvvv, whose reg is a and
+    the destination, `vsha512msg1`'s b of 16 bytes) and its two rounds
+    (TERNARY's, c of 16 bytes), SM3's message steps (TERNARY's) and AVX10.2's
+    SM4 key expansion and rounds of 64 bytes (BINARY's), each extension's
+    (`X86Extension`'s SHA512, SM3 and SM4), compared with clang's code by
+    `test-x86-intrinsics` as well;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -2648,8 +2666,9 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 ./build/compiler test-x86-intrinsics [--clang PATH] [--march CPU] [--executable PATH] [--cases FILE] [--print NAME] [--keep]
 ```
 
-The executable programs check a builtin's lowering by running it, which XOP's
-instructions can't be: no host of the tests has XOP (Zen 5 has none).
+The executable programs check a builtin's lowering by running it, which XOP's,
+AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's instructions can't be:
+no host of the tests has them (Zen 5 has none of them).
 `test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
 code of their intrinsics with clang -O0's instead, as the values each
 instruction computes:
@@ -2681,9 +2700,11 @@ instruction computes:
   must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
   a result stored through a pointer; and one intrinsic called with its two
   operands in each order must give different expressions in each object.
-- The cases: the intrinsics of XOP's own instructions, 42 of them: VFRCZ's
+- The cases, 145 of them: the intrinsics of XOP's own instructions (VFRCZ's
   fractions, the horizontal sums and differences, the multiply-accumulates,
-  VPPERM and the shifts by vectors of counts.
+  VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
+  AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
+  masked, merged and zeroed, at each width, and SHA512's, SM3's and SM4's.
 
 The comparison is of the instructions' data flow, not of their meaning: code
 that computes the same values with other instructions differs, and a case would
