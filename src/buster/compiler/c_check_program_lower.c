@@ -7185,6 +7185,18 @@ static uint8_t check_lower_x86_operand_class(uint8_t class)
                                                                                class;
 }
 
+// A type's in an X86 row, and its class: a half-precision type's bits (its U16), an unsigned short's, as a row moves them
+// to and from its registers (a reduction's start and result), and any other type itself.
+static TypeId check_lower_x86_bits_type(const CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_class_half(check_lower_value_class(writer, type)) != CHECK_HALF_NONE ? BUSTER_TYPE_USHORT : type;
+}
+
+static uint8_t check_lower_x86_bits_class(const CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_value_class(writer, check_lower_x86_bits_type(writer, type));
+}
+
 // Whether a builtin's catalog entry is a name's.
 static bool check_lower_x86_named(const BuiltinIntrinsicInfo* info, const char* name)
 {
@@ -7196,7 +7208,9 @@ static bool check_lower_x86_named(const BuiltinIntrinsicInfo* info, const char* 
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
 // (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
 // bits (check_lower_x86_operand_class). A reduction's is two rows (check_x86_lower_reduce_row): the first of its vector,
-// the last argument, to 16 bytes, the second of those and its floating start, the first, where it has one.
+// the last argument, to 16 bytes, the second of those and its floating start, the first, where it has one. A
+// half-precision argument and result are their bits (c_check_program_half.c's U16), which a row reads and writes in a
+// general register: an unsigned short's, widened, and an unsigned int's, narrowed.
 static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -7257,7 +7271,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
-        const uint8_t class = check_lower_value_class(writer, stream->argument_conversions[first + a].type);
+        const uint8_t class = check_lower_x86_bits_class(writer, stream->argument_conversions[first + a].type);
         const bool taken = a != skipped && a != rounded;
         if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
         {
@@ -7278,7 +7292,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         const uint32_t index = check_lower_operation_index(writer, &row);
         const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
         const uint8_t result_class = reduce ? tail.result_class : row.result_class;
-        const TypeId result = stream->values[node].type;
+        const TypeId result = check_lower_x86_bits_type(writer, stream->values[node].type);
         // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
         const bool zero_test = rule->zero_test;
         if (result_class != BUSTER_TYPED_CLASS_VOID && result_class != BUSTER_TYPED_CLASS_VECTOR)
@@ -7302,11 +7316,11 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
             {
                 // The argument at its prototype's type, then widened (the tasks run in the reverse of their pushes).
                 const TypeId type = stream->argument_conversions[first + a].type;
-                const uint8_t class = check_lower_value_class(writer, type);
+                const uint8_t class = check_lower_x86_bits_class(writer, type);
                 const uint8_t widened = check_lower_x86_operand_class(class);
                 if (widened != class)
                 {
-                    check_lower_convert(writer, type, check_lower_class_type(widened));
+                    check_lower_convert(writer, check_lower_x86_bits_type(writer, type), check_lower_class_type(widened));
                 }
                 check_lower_operand(writer, node, a + 3, false, type);
             }
