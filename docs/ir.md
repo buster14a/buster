@@ -663,12 +663,16 @@ backend's unit, which compiles the IR's modules anyway: the checker's unit homes
 their check and emission (`ir_source_prepare`, `BUSTER_IR_SOURCE_ENTRY`), and
 `main.c`'s units share the encoder's templates (`BUSTER_X86_SHARED`, the driver's
 unit's), which the emission's encoding fills and the adapter's validation reads.
-The IR's synthetic benchmarks read the verifier 1% to 7% slower on the 9700X and
-2% to 7% faster on a Zen 4 laptop: its vector path runs 1.1% fewer instructions
-than main's, with 13.6% more of its dispatch slots left empty by the front end.
-The lowering of the generated programs does 1.8% more work, the new kinds' and
-records' tests, and takes 3% to 8% longer there (within 1% on the laptop's larger
-programs).
+On the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/e6eccd9d2474923915adbc41d20c835b364b7109/docs/measurements/ir-backend-unit-784-2026-10-29))
+the checker's unit then compiles in 25.57 s against main's 26.71 s, and `-c` of
+`sqlite3.c` runs the same instructions and writes the same object, its time within
+the floors over six placements. The IR's synthetic benchmarks read the verifier 1%
+to 7% slower on the 9700X and 2% to 7% faster on a Zen 4 laptop: its vector path
+runs 1.1% fewer instructions than main's, with 13.6% more of its dispatch slots
+left empty by the front end. The lowering of the generated programs does 1.8% more
+work, the new kinds' and records' tests, and takes 3% to 8% longer there (within
+1% on the laptop's larger programs).
 
 ### Initial 9700X qualification
 
