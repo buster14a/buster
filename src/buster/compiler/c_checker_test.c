@@ -3234,6 +3234,40 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             true
         },
+        {
+            // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
+            // int's alignment where the deduced type's is, at file scope, a type's, and GNU's aligned, which can't lower it.
+            "__auto_type: an _Alignas the deduced type allows",
+            "_Alignas(2) __auto_type g = (short)1;\n"
+            "void f(void) {\n"
+            "    _Alignas(1) __auto_type c = (char)0;\n"
+            "    _Alignas(double) __auto_type d = (char)1;\n"
+            "    __auto_type e __attribute__((aligned(1))) = 1.0;\n"
+            "    (void)c; (void)d; (void)e;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Below the deduced type's alignment, though not int's: at the _Alignas.
+            "__auto_type: an _Alignas below the deduced type's",
+            "void f(void) {\n"
+            "    _Alignas(4)\n"
+            "        __auto_type x = 1.0;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an _Alignas below a decayed pointer's",
+            "void f(void) {\n"
+            "    char a[3];\n"
+            "    _Alignas(1)\n"
+            "        __auto_type p = a;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {

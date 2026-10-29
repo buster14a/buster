@@ -3863,6 +3863,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "__auto_type w=({int k=n;if(k>3)goto done;k=5;done:k*2L;});"
         "return(int)(m*100+p.y+q.x*q.y+c+s[n&3]+r+t+MAX(MAX(n,1),-n)+bias+u+(long)(d*4)+(long)sizeof(u)*1000+w*(long)sizeof(w));}",
         "auto-type", clang);
+    // An _Alignas of __auto_type's variables against their deduced types (#840's review): past a double's, a char's below
+    // int's and past a short's, their addresses and GNU's alignments of them.
+    check_test_program_source(test,
+        "int tested(int n){_Alignas(32) __auto_type a=n*1.5;_Alignas(1) __auto_type c=(char)n;_Alignas(8) __auto_type s=(short)n;"
+        "return (int)a+c+s+(int)(((unsigned long)&a&31)|((unsigned long)&s&7))*1000+(int)__alignof__(a)*7+(int)__alignof__(c)*11+(int)__alignof__(s)*13;}",
+        "auto-type-alignment", clang);
     {
         char source[4096];
         uint32_t length = 0;

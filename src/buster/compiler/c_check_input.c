@@ -1834,7 +1834,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     }
     if (attributes != 0 && valid)
     {
-        base = check_input_attribute_type(reader, attributes, base, false);
+        base = check_input_attribute_type(reader, attributes, base, false, auto_type != BUSTER_CHECK_NONE);
     }
     if (auto_type != BUSTER_CHECK_NONE && valid)
     {
@@ -2768,7 +2768,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
                 if (type != 0 && frame->attributes != 0)
                 {
-                    type = check_input_attribute_type(reader, frame->attributes, type, false);
+                    type = check_input_attribute_type(reader, frame->attributes, type, false, false);
                 }
                 if (type != 0)
                 {
@@ -3772,8 +3772,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0 ||
                      (!is_typedef && type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION);
             valid &= !attributes->has_alignas || (!is_typedef && storage != C_NAME_REGISTER);
-            valid &= attributes->required_alignment_log2 == 0 || (!is_typedef && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION &&
-                     attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, type));
+            // (__auto_type's placeholder leaves _Alignas to its deduced type: check_input_auto_type_finish.)
+            valid &= attributes->required_alignment_log2 == 0 || check_input_auto_type(type) ||
+                     (!is_typedef && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION &&
+                      attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, type));
             if (valid && is_typedef)
             {
                 check_input_transparent_union(reader, type, attributes, i);

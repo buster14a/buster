@@ -549,7 +549,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         const uint8_t kind = parser->tokens.kinds[token];
         if (attributes != 0)
         {
-            base = check_input_attribute_type(reader, &attributes->parsed, base, false);
+            base = check_input_attribute_type(reader, &attributes->parsed, base, false, false);
             valid = base != 0 && check_constant_type_attribute(frame, links, link_count, capacity, attributes);
             token = attributes->end;
         }

@@ -151,7 +151,8 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
 // An __auto_type declaration's type, once the walk has read its initializer (whose uses' declarations it captured:
 // inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
 // _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
-// there, a bit-field's value one at the member's name, and an incomplete type one at the variable's name; a variably
+// there, a bit-field's value one at the member's name, an incomplete type one at the variable's name, and an _Alignas
+// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this); a variably
 // modified type, whose sizes the declaration would have evaluated, is refused by name. The declaration's columns take the
 // type, which is returned, or 0.
 static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputReader* reader, uint32_t declaration, uint32_t begin, uint32_t end,
@@ -196,6 +197,8 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     else
     {
         const TypeId deduced = check_input_type_result(reader, type_adjust_parameter(types, value.type));
+        CheckInputAttributes* attributes = reader->output->attributes[declaration];
+        const uint32_t required = attributes != 0 ? attributes->required_alignment_log2 : 0;
         if (deduced != 0 && !type_is_complete(types, deduced))
         {
             check_input_report(reader, declaration, CHECK_INPUT_INCOMPLETE_OBJECT);
@@ -203,6 +206,17 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         else if (deduced != 0 && (type_inherited_flags(types, deduced) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
         {
             check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
+        }
+        else if (deduced != 0 && required != 0 && required - 1 < type_alignment_log2(types, deduced))
+        {
+            for (uint32_t i = 0; i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = &attributes->records[i];
+                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
+                {
+                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_ALIGNMENT);
+                }
+            }
         }
         else if (deduced != 0)
         {

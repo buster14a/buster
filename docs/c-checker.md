@@ -2795,14 +2795,17 @@ constant evaluation's binding is a use of the variable in its own initializer
 Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
 specifiers (a parameter's, a member's, a type name's) at the keyword
 (`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
-keyword; a variable without an initializer at its name; an initializer list
-and an array at the initializer; a use of the variable in its initializer at
-the use, an outer variable of its name notwithstanding; a bit-field's value at
-the member's name; a void or incomplete type at the variable's name; and its
-clashes with the other specifiers where clang reports them: a second type
-specifier at itself, and a signedness or a width at its keyword, wherever it is
-in the list (`check_input_auto_type_clash`). Refused by name: what clang deduces
-as C++ deduces a declarator's type and GCC refuses (a pointer declarator, and a
+keyword; a variable without an initializer at its name; an initializer list and
+an array at the initializer; a use of the variable in its initializer at the
+use, an outer variable of its name notwithstanding; a bit-field's value at the
+member's name; a void or incomplete type at the variable's name; an `_Alignas`
+below the deduced type's alignment at the `_Alignas`, which the specifiers and
+the declarator leave to the deduction rather than check against the
+placeholder's `int` (`check_input_attribute_type`'s `deduced`); and its clashes
+with the other specifiers where clang reports them: a second type specifier at
+itself, and a signedness or a width at its keyword, wherever it is in the list
+(`check_input_auto_type_clash`). Refused by name: what clang deduces as C++
+deduces a declarator's type and GCC refuses (a pointer declarator, and a
 declaration's second declarator); `_Atomic`, `restrict` and type attributes with
 `__auto_type`; a variably modified deduced type, whose sizes the declaration
 would have evaluated; and a variable with linkage that a declaration before it

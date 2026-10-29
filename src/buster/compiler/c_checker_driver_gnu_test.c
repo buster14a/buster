@@ -87,6 +87,8 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "__auto_type with a signedness", "void f(void) {\n    long\n        unsigned __auto_type x = 1;\n}\n" },
         { "__auto_type after int", "void f(void) {\n    int\n        __auto_type x = 1;\n}\n" },
         { "_Complex __auto_type", "void f(void) {\n    __auto_type\n        _Complex x = 1;\n}\n" },
+        { "__auto_type with an _Alignas below the deduced type's", "void f(void) {\n    _Alignas(4) __auto_type x =\n        1.0;\n}\n" },
+        { "__auto_type before an _Alignas below a pointer's", "void f(void) {\n    char a[3];\n    __auto_type _Alignas(1) p = a;\n}\n" },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
