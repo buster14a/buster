@@ -5957,6 +5957,11 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
         abi_test_hex(text, cross->result_mask + results, signature->result_bytes);
         type_test_format(text, "};\n_Alignas(64) unsigned char abi_capture_%u[%u];\n_Alignas(64) unsigned char abi_result_%u[%u];\n", n, signature->data_bytes, n,
                          signature->result_bytes);
+        if (cross->compiled)
+        {
+            // Our compiled callee's named parameters after it wrote them back from the data (abi_test_write_ours).
+            type_test_format(text, "_Alignas(64) unsigned char abi_rewritten_%u[%u];\n", n, signature->data_bytes);
+        }
         type_test_format(text, "void* abi_result_pointer_%u;\nunsigned char abi_al_%u;\n", n, n);
         // The C callee, which our caller calls.
         type_test_format(text, "%sc_callee_%u", result, n);
@@ -6044,6 +6049,12 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
             type_test_format(text, "    abi_check(abi_capture_%u + %u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"B\");\n", n, offset, n, offset, n,
                              offset, a, n, a);
         }
+        for (uint32_t a = 0; cross->compiled && a < signature->named; a += 1)
+        {
+            const uint32_t offset = cross->offsets[signature->first + a];
+            type_test_format(text, "    abi_check(abi_rewritten_%u + %u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"B rewritten\");\n", n, offset, n,
+                             offset, n, offset, a, n, a);
+        }
         if (abi_test_variadic(signature) && !cross->compiled)
         {
             const uint8_t expected = cross->calls[n].vector_registers;
@@ -6092,20 +6103,26 @@ static void abi_test_write_ours(AbiTestCross* cross, TypeTestText* text)
         const char* result = abi_test_c_name(world, signature->result);
         const bool has_result = signature->result != BUSTER_TYPE_VOID;
         type_test_format(text, "\nextern unsigned char abi_args_%u[];\nextern unsigned char abi_ret_%u[];\n", n, n);
-        type_test_format(text, "extern unsigned char abi_capture_%u[];\nextern unsigned char abi_result_%u[];\n%sc_callee_%u", n, n, result, n);
+        type_test_format(text, "extern unsigned char abi_capture_%u[];\nextern unsigned char abi_rewritten_%u[];\nextern unsigned char abi_result_%u[];\n%sc_callee_%u", n, n,
+                         n, result, n);
         abi_test_parameters(cross, text, n, false);
         type_test_format(text, ";\n%sbuster_callee_%u", result, n);
         abi_test_parameters(cross, text, n, true);
         type_test_format(text, "\n{\n");
-        // Each parameter's bytes written back from the data first, the last first: one kept in a stack slot shorter than its
-        // object would overwrite the slots after it, which the captures then show.
+        // Each named parameter's bytes as it arrived (its incoming copy's, which the C caller checks against the data), then
+        // each written back from the data, the last first, and its bytes again into abi_rewritten: one kept in a home
+        // shorter than its object would overwrite the homes after it, which that second capture shows.
+        for (uint32_t a = 0; a < signature->named; a += 1)
+        {
+            type_test_format(text, "    memcpy(abi_capture_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
+        }
         for (uint32_t a = signature->named; a != 0; a -= 1)
         {
             type_test_format(text, "    memcpy(&a%u, abi_args_%u + %u, sizeof(a%u));\n", a - 1, n, cross->offsets[signature->first + a - 1], a - 1);
         }
         for (uint32_t a = 0; a < signature->named; a += 1)
         {
-            type_test_format(text, "    memcpy(abi_capture_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
+            type_test_format(text, "    memcpy(abi_rewritten_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
         }
         if (abi_test_variadic(signature))
         {

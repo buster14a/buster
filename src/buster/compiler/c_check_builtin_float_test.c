@@ -736,37 +736,17 @@ static void check_builtin_float_test_pages(CheckBuiltinFloatTest* test, TypeTabl
 
 static bool check_builtin_float_test_clang_run(const char* clang, const char* path, bool* rejected)
 {
-    // parse_test_clang deliberately supplies -w. These cases also test pragma-upgraded warnings, which -w would
-    // suppress even after an error mapping; use an explicit diagnostic-preserving boundary for the source oracle.
+    // Preserve pragma-upgraded warnings, which parse_test_clang's -w would suppress.
     char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-color-diagnostics", (char*)path, NULL };
-    posix_spawn_file_actions_t actions;
-    bool ready = posix_spawn_file_actions_init(&actions) == 0;
-    const bool initialized = ready;
-    if (ready)
-    {
-        ready = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0 &&
-                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0;
-    }
-    pid_t child = -1;
-    if (ready)
-    {
-        ready = posix_spawnp(&child, clang, &actions, NULL, arguments, environ) == 0;
-    }
-    if (initialized)
-    {
-        posix_spawn_file_actions_destroy(&actions);
-    }
-    int status = 0;
-    if (ready)
-    {
-        pid_t waited;
-        do
-        {
-            waited = waitpid(child, &status, 0);
-        } while (waited < 0 && errno == EINTR);
-        ready = waited == child && WIFEXITED(status);
-    }
-    *rejected = ready && WEXITSTATUS(status) != 0;
+    OracleRun run = {
+        .purpose = "checker floating diagnostic oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, 0, 0);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
     return ready;
 }
 
@@ -851,6 +831,7 @@ static void check_builtin_float_test_oracle(CheckBuiltinFloatTest* test, const c
 
 static int run_check_builtin_float_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinFloatTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -886,5 +867,7 @@ static int run_check_builtin_float_tests(int argc, char** argv)
         check_builtin_float_test_oracle(&test, clang);
     }
     printf("test-check-builtin-float: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtin-float");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }

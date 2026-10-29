@@ -535,6 +535,7 @@ static void check_builtin_test_clang(CheckBuiltinTest* test, const char* clang)
 
 static int run_check_builtin_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinTest test = {
         .random = 148,
     };
@@ -577,5 +578,7 @@ static int run_check_builtin_tests(int argc, char** argv)
         check_builtin_test_clang(&test, clang);
     }
     printf("test-check-builtins: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }
