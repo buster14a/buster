@@ -342,6 +342,9 @@ jobs:
             ${{ runner.temp }}/sanitizer-probes
             build/compile_commands.json
             build/*-*.tsv
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            LICENSES/
           if-no-files-found: error
           retention-days: 14
 
@@ -459,6 +462,9 @@ jobs:
             ${{ runner.temp }}/sanitizer-probes
             build/compiler
             build/compile_commands.json
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            LICENSES/
           if-no-files-found: error
           retention-days: 14
 
