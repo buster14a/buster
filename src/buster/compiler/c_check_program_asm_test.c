@@ -326,11 +326,11 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_tables(test, asm_tables, "asm-names-switch-tables", 1, 6);
     // Clang takes its flag-output path; buster selects the equivalent setcc fallback until it supports flag outputs.
     check_test_program_source(test,
-        "int tested(int n){unsigned char z;\n"
+        "int tested(int n){int z;\n"
         "#ifdef __GCC_ASM_FLAG_OUTPUTS__\n"
         "__asm__(\"testl %1,%1\" : \"=@ccz\"(z) : \"r\"(n) : \"cc\");\n"
         "#else\n"
-        "__asm__(\"testl %1,%1; setz %0\" : \"=q\"(z) : \"r\"(n) : \"cc\");\n"
+        "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
         "#endif\n"
         "return z;}", "asm-flag-output-fallback", clang);
     // What the lowering refuses, by name.
