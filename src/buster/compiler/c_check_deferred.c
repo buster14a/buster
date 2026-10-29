@@ -8,8 +8,7 @@
 //     types and tags, its binding events and active declarations, and each table the walk appends to.
 //   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
 //     BUSTER_CHECK_DEFERRED_LANE_TOKENS (and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of
-//     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies;
-//     in a unit of BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS or more, the _BASE_ constants.
+//     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies.
 //     It cuts the bodies into parts before the lanes start (parts_by_cost), promotes the part containing the largest
 //     body for the first lane, and every lane takes the others from one counter, costliest first (check_deferred_lane):
 //     the others are woken for the bodies and read them more slowly. A lane copies the top
@@ -47,13 +46,10 @@
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
 // The bodies' tokens that pay for a lane past the first, beyond their critical path (check_deferred_bodies): this many,
 // and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
-// grows with the top level. In a unit whose rare columns are base pages where more than one lane reads
-// (BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS), a lane's first touches of them cost more, and more with a larger top level:
-// the _BASE_ constants (docs/c-deferred-bodies.md, "How many lanes" and "The rare columns' huge pages").
+// grows with the top level (docs/c-deferred-bodies.md, "How many lanes" and "The rare columns' pages by the unit's
+// size").
 #define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
 #define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
-#define BUSTER_CHECK_DEFERRED_BASE_LANE_TOKENS 1280
-#define BUSTER_CHECK_DEFERRED_BASE_LANE_TOP_TOKENS 3
 // The unit's tokens from which check_input_run's arena of rare columns is base pages where more than one lane reads the
 // bodies (check_deferred_shared, #764, #847). In a smaller unit the top level's walk faults in most of the arena's huge
 // pages, the bodies' lanes write into them at no cost, and the phases after the merge read the huge zero page where
@@ -325,8 +321,7 @@ struct CheckDeferred
     // are more than one in a large unit (check_deferred_shared).
     uint32_t planned;
     // The unit has BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS tokens or more (or `base_page_tokens`, for the tests and
-    // benchmark-checker-deferred, where it isn't 0): the rule's _BASE_ constants, and where more than one lane reads, the
-    // rare columns in base pages.
+    // benchmark-checker-deferred, where it isn't 0): where more than one lane reads, the rare columns in base pages.
     bool large;
     uint32_t base_page_tokens;
     // Whether the lanes claimed the rare columns' 2 MB regions before their first writes into them, as in a unit that
@@ -2286,14 +2281,6 @@ static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t tota
     return paid < most ? (uint32_t)paid : most;
 }
 
-// The bodies' tokens that pay for a lane, in a unit whose top level has `top_tokens` tokens: the _BASE_ constants in a
-// large unit (CheckDeferred.large).
-static uint32_t check_deferred_lane_tokens(bool large, uint32_t top_tokens)
-{
-    return large ? BUSTER_CHECK_DEFERRED_BASE_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_BASE_LANE_TOP_TOKENS
-                 : BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
-}
-
 // Whether check_input_run's arena of rare columns is base pages throughout: where the rule gives a large unit's bodies
 // more than one lane, which write their entries of the token columns at once (#764, #847).
 static bool check_deferred_shared(const CheckDeferred* deferred)
@@ -2393,12 +2380,11 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     // largest body, which the first lane reads itself, and twice the second largest, which a woken lane reads at about
     // half the first lane's speed. A lane costs its copy of the reader and its wake-up, which its share of the walks must
     // pay for, and the copy grows with the top level: BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one more per
-    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, or in a large unit the _BASE_ constants
-    // (check_deferred_lane_tokens). And no more lanes than bodies, which are at least as many as the parts: a lane past
-    // them would take none.
+    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. And no more lanes than bodies, which are at least
+    // as many as the parts: a lane past them would take none.
     const uint32_t count = reader->parser->tokens.count;
     deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
-    deferred->lane_tokens = check_deferred_lane_tokens(deferred->large, deferred->top_tokens);
+    deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
     const uint32_t active = check_deferred_rule(deferred, total, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
@@ -2600,7 +2586,8 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     // cuts, before check_input_run reserves its arena of rare columns by them and the unit's size (check_deferred_shared).
     const uint32_t top_tokens = count > body_tokens ? (uint32_t)(count - body_tokens) : 0;
     deferred->large = count >= (deferred->base_page_tokens != 0 ? deferred->base_page_tokens : BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS);
-    deferred->planned = check_deferred_rule(deferred, body_tokens, bodies, largest, second, check_deferred_lane_tokens(deferred->large, top_tokens));
+    deferred->planned = check_deferred_rule(deferred, body_tokens, bodies, largest, second,
+                                            BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS);
     deferred->cuts = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredCut, (uint64_t)bodies + 1) : 0;
     deferred->body_capacity = bodies;
     valid = valid && deferred->cuts != 0;

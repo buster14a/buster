@@ -15,9 +15,9 @@
 // one of them at least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture
 // is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
-// the bodies' tokens beyond the larger of the largest body's and twice the second largest's; in a large unit, the
-// _BASE_ constants), and eight of bodies of known tokens are read by the rule alone, as they are and with every unit
-// large (CheckDeferred.base_page_tokens): on each side of a second lane and of an
+// the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
+// known tokens are read by the rule alone, as they are and with every unit large (CheckDeferred.base_page_tokens): on
+// each side of a second lane and of an
 // eighth, beside a largest body, which the first lane reads itself, and beside a second largest, which a woken lane
 // reads in about twice its tokens' time; their largest body must be the first lane's, also on every lane with the first
 // lane starting once the others have taken from the counter (CheckDeferred.late_first). A unit that
@@ -838,29 +838,26 @@ static bool check_deferred_test_merge_modes(void)
 }
 
 // The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
-// from the rule (docs/c-deferred-bodies.md, "How many lanes"): in a large unit, by the _BASE_ constants.
-static uint64_t check_deferred_test_lane_tokens(bool large, uint64_t top)
+// from the rule (docs/c-deferred-bodies.md, "How many lanes").
+static uint64_t check_deferred_test_lane_tokens(uint64_t top)
 {
-    return large ? BUSTER_CHECK_DEFERRED_BASE_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_BASE_LANE_TOP_TOKENS
-                 : BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+    return BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
 }
 
 // The lanes a unit's bodies run on, written again from the rule: one, and one more per check_deferred_test_lane_tokens
 // of their tokens beyond the larger of the largest body's and twice the second largest's, or with `every` as many as
 // there are lanes; and no more than `lanes` or the bodies, none without bodies.
-static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t top, uint64_t largest, uint64_t second, uint64_t lanes, bool every,
-                                          bool large)
+static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t top, uint64_t largest, uint64_t second, uint64_t lanes, bool every)
 {
     const uint64_t path = largest > second * 2 ? largest : second * 2;
     const uint64_t beyond = tokens > path ? tokens - path : 0;
-    const uint64_t wanted = every ? lanes : 1 + beyond / check_deferred_test_lane_tokens(large, top);
+    const uint64_t wanted = every ? lanes : 1 + beyond / check_deferred_test_lane_tokens(top);
     const uint64_t most = bodies < lanes ? bodies : lanes;
     return wanted < most ? wanted : most;
 }
 
 // The rule's sides, with N the tokens that pay for a lane in their unit, whose top level is five tokens a function
-// (check_deferred_test_lane_tokens, by the unit's constants, the _BASE_ ones where it is large): `bodies` functions of
-// empty statements, whose bodies
+// (check_deferred_test_lane_tokens): `bodies` functions of empty statements, whose bodies
 // have N tokens each from their opening brace to their closing one, but the first `first` times as many, the second
 // `second` times as many, and the last `fewer` fewer; and the lanes the rule gives them on 8. Bodies of N: a second lane
 // needs N tokens beyond twice the second largest body's, and an eighth seven times as many, each with a token fewer too.
@@ -877,34 +874,32 @@ struct CheckDeferredSize
     uint32_t second;
     uint32_t fewer;
     uint32_t lanes;
-    // The lanes in a large unit, whose rule takes the _BASE_ constants.
-    uint32_t large_lanes;
-    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases, whose `lanes` and
-    // `large_lanes` are the rule's for those tokens, and change with its constants.
+    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases, whose `lanes` are the
+    // rule's for those tokens, and change with its constants.
     uint32_t base_tokens;
 };
 
 static const CheckDeferredSize check_deferred_sizes[] =
 {
-    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1, 1, 0 },
-    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2, 2, 0 },
-    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7, 7, 0 },
-    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8, 8, 0 },
-    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1, 1, 0 },
-    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 2, 0 },
-    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 2, 0 },
-    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 3, 0 },
-    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .large_lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .large_lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .large_lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .large_lanes = 5, .base_tokens = 18 },
-    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .large_lanes = 5, .base_tokens = 18 },
-    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .large_lanes = 5, .base_tokens = 18 },
+    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1, 0 },
+    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2, 0 },
+    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7, 0 },
+    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8, 0 },
+    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1, 0 },
+    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 0 },
+    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 0 },
+    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 0 },
+    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 18 },
 };
 
-// A CheckDeferredSize's unit, made for the rule of a large unit or not: its bodies and the tokens they hold in all, the
-// largest one's (the first of them) and the largest of the others'.
-static void check_deferred_sized(char* text, uint64_t capacity, const CheckDeferredSize* size, bool large, uint64_t* tokens, uint64_t* largest, uint64_t* second)
+// A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
+// largest of the others'.
+static void check_deferred_sized(char* text, uint64_t capacity, const CheckDeferredSize* size, uint64_t* tokens, uint64_t* largest, uint64_t* second)
 {
     uint64_t length = 0;
     *tokens = 0;
@@ -913,7 +908,7 @@ static void check_deferred_sized(char* text, uint64_t capacity, const CheckDefer
     for (uint32_t b = 0; b < size->bodies && length < capacity; b += 1)
     {
         // `void fB(void)`: five tokens of the top level a function.
-        const uint64_t lane_tokens = check_deferred_test_lane_tokens(large, (uint64_t)size->bodies * 5);
+        const uint64_t lane_tokens = check_deferred_test_lane_tokens((uint64_t)size->bodies * 5);
         const uint64_t body = size->base_tokens != 0 ? size->base_tokens + (b == 0 ? 2u : 0u) :
                               lane_tokens * (b == 0 ? size->first : b == 1 ? size->second : 1) - (b + 1 == size->bodies ? size->fewer : 0);
         length += (uint64_t)snprintf(text + length, capacity - length, "void f%u(void) {", b);
@@ -1057,7 +1052,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
     const uint32_t listed = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_fixtures);
     // The rule's sides twice: as they are, units too small to be large, whose rare columns stay huge pages, which more
     // than one lane claims before writing; and every unit large (check_corpus_deferred_base_page_tokens 1), whose rare
-    // columns are base pages where more than one lane reads, and whose lanes the rule's _BASE_ constants pay for (#847).
+    // columns are base pages where more than one lane reads (#847).
     const uint32_t sizes = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
     const uint32_t fixtures = listed + 1 + 2 * sizes;
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
@@ -1079,11 +1074,11 @@ static int run_checker_deferred_tests(int count, char** arguments)
         uint64_t size_second = 0;
         if (size != 0)
         {
-            check_deferred_sized(sized, sizeof(sized), size, large, &size_tokens, &size_largest, &size_second);
+            check_deferred_sized(sized, sizeof(sized), size, &size_tokens, &size_largest, &size_second);
         }
         char name[128];
         snprintf(name, sizeof(name), "%s%s", f < listed ? check_deferred_fixtures[f].name : size == 0 ? "many-bodies" : size->name, large ? "-large" : "");
-        const uint32_t size_lanes = size == 0 ? 0 : large ? size->large_lanes : size->lanes;
+        const uint32_t size_lanes = size == 0 ? 0 : size->lanes;
         const char* source = f < listed ? check_deferred_fixtures[f].source : size == 0 ? many : sized;
         const bool expected = f < listed ? check_deferred_fixtures[f].merged : true;
         const bool every = size == 0;
@@ -1114,7 +1109,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 const uint64_t top = outcome.tokens - outcome.deferred_body_tokens;
                 const bool unit_large = large || outcome.tokens >= BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS;
                 const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, top, outcome.deferred_largest_body,
-                                                                outcome.deferred_second_body, lane_counts[l], every, unit_large);
+                                                                outcome.deferred_second_body, lane_counts[l], every);
                 // The parts a group of the bodies' lanes cuts, made before the lanes started (parts_by_cost).
                 const uint64_t group = most == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * most;
                 const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
@@ -1124,7 +1119,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                                                           (size != 0 || f < listed || !outcome.deferred_claiming || outcome.deferred_claimed != 0) &&
                                                           outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most &&
                                                           outcome.deferred_parts == parts &&
-                                                          outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(unit_large, top));
+                                                          outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(top));
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
@@ -1181,8 +1176,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_every_lane = true;
             const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
-                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, false,
-                                                            outcome.tokens >= BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS);
+                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, false);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected &&
                                 (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
                                                        outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
@@ -1303,8 +1297,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             check_corpus_deferred_poison = false;
             check_corpus_deferred_stamp = 0;
             const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
-                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, true,
-                                                            outcome.tokens >= BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS);
+                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, true);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
                                 outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most && check_corpus_deferred_kept;
             checks += 1;
