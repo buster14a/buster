@@ -95,6 +95,14 @@ int main(int argc, char** argv)
     {
         probe_leak();
     }
+    else if (strcmp(argv[1], "use-after-scope") == 0)
+    {
+        {
+            volatile uint8_t bytes[16] = { 7 };
+            probe_escaped = bytes;
+        }
+        result = *probe_escaped != 7;
+    }
     else if (strcmp(argv[1], "undefined-shift") == 0)
     {
         result = (1u << (probe_index + 31)) != 0;

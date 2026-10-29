@@ -268,6 +268,9 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
+    // In-memory consumers can refuse every external include/embed lookup,
+    // including absolute paths and __has_include/__has_embed queries.
+    bool no_external_files;
     // -nobuiltininc: no compiler headers (clang's resource directory, or buster's) among the standard directories.
     bool no_builtin_includes;
     // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
@@ -4411,7 +4414,11 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
 {
     PPCandidate result = PP_CANDIDATE_END;
     *directory = BUSTER_PP_NONE;
-    if (length != 0 && name[0] == '/')
+    if (pp->options.no_external_files)
+    {
+        result = PP_CANDIDATE_END;
+    }
+    else if (length != 0 && name[0] == '/')
     {
         // An absolute path: its record, if a file is there (a record is kept for a missing one too).
         if (index == 0)
@@ -15911,7 +15918,7 @@ static bool pp_find_embed(Preprocessor* pp, const PPContext* context, const uint
     *path_length = 0;
     *size = 0;
     *regular = false;
-    for (uint32_t c = absolute || !angled ? 0 : 2; !found && c < count; c += 1)
+    for (uint32_t c = absolute || !angled ? 0 : 2; !pp->options.no_external_files && !found && c < count; c += 1)
     {
         int written;
         if (absolute)

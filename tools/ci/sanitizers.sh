@@ -13,13 +13,13 @@ sanitizer_options()
     symbolizer=$(command -v llvm-symbolizer)
     export ASAN_SYMBOLIZER_PATH="$symbolizer"
     export MSAN_SYMBOLIZER_PATH="$symbolizer"
-    export ASAN_OPTIONS="halt_on_error=1:abort_on_error=0:exitcode=86:detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1:check_initialization_order=1:symbolize=1:log_path=$reports/asan"
+    export ASAN_OPTIONS="halt_on_error=1:abort_on_error=0:exitcode=86:detect_leaks=1:detect_stack_use_after_return=1:strict_string_checks=1:check_initialization_order=1:symbolize=1:log_path=$reports/report"
     # Integrated runtimes share common flags. Give them one exit code rather
     # than depending on the runtime's option-parser initialization order.
-    export LSAN_OPTIONS="exitcode=86:print_suppressions=1:log_path=$reports/lsan"
-    export UBSAN_OPTIONS="halt_on_error=1:exitcode=86:print_stacktrace=1:symbolize=1:external_symbolizer_path=$symbolizer:log_path=$reports/ubsan"
-    export TSAN_OPTIONS="halt_on_error=1:exitcode=86:second_deadlock_stack=1:external_symbolizer_path=$symbolizer:log_path=$reports/tsan"
-    export MSAN_OPTIONS="halt_on_error=1:exitcode=86:symbolize=1:external_symbolizer_path=$symbolizer:log_path=$reports/msan"
+    export LSAN_OPTIONS="exitcode=86:print_suppressions=1:log_path=$reports/report"
+    export UBSAN_OPTIONS="halt_on_error=1:exitcode=86:print_stacktrace=1:symbolize=1:external_symbolizer_path=$symbolizer:log_path=$reports/report"
+    export TSAN_OPTIONS="halt_on_error=1:exitcode=86:second_deadlock_stack=1:external_symbolizer_path=$symbolizer:log_path=$reports/report"
+    export MSAN_OPTIONS="halt_on_error=1:exitcode=86:symbolize=1:external_symbolizer_path=$symbolizer:log_path=$reports/report"
 }
 
 case "${1:-}" in
@@ -42,7 +42,7 @@ case "${1:-}" in
         "$directory/probe" clean
         tests=()
         case "$BUSTER_SANITIZER" in
-            address) tests=('heap-overflow|86|AddressSanitizer: heap-buffer-overflow' 'use-after-free|86|AddressSanitizer: heap-use-after-free' 'use-after-return|86|AddressSanitizer: stack-use-after-return' 'leak|86|LeakSanitizer: detected memory leaks' 'undefined-shift|86|runtime error:' 'bounds|86|runtime error:') ;;
+            address) tests=('heap-overflow|86|AddressSanitizer: heap-buffer-overflow' 'use-after-free|86|AddressSanitizer: heap-use-after-free' 'use-after-return|86|AddressSanitizer: stack-use-after-return' 'use-after-scope|86|AddressSanitizer: stack-use-after-scope' 'leak|86|LeakSanitizer: detected memory leaks' 'undefined-shift|86|runtime error:' 'bounds|86|runtime error:') ;;
             undefined) tests=('undefined-shift|86|runtime error:' 'bounds|86|runtime error:') ;;
             thread) tests=('race|86|ThreadSanitizer: data race') ;;
             memory) tests=('uninitialized|86|MemorySanitizer: use-of-uninitialized-value') ;;

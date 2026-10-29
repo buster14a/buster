@@ -24,6 +24,11 @@ the complete suite before any benchmarks. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation or randomized runner pool.
 Baseline memory boundary tests also run with undefined-behavior checks.
+The hosted matrix additionally builds the entire compiler with each of
+`BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.
+Every variant runs `tools/ci/correctness.tests`, including the same corpus,
+seeds, lane counts, generated-code execution and external cross-checks. These
+are full suites; the TSan and MSan rows are not reduced module lists.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
 executes their results on that same emulated CPU.
@@ -43,9 +48,9 @@ the old Clang binary hash remain provenance records; the active oracle is the
 installed Clang 23 toolchain. A missing or changed input fails setup.
 
 The `benchmarks` job runs native correctness followed by benchmarks. It has
-`needs: [changes, test]` and explicitly requires
-`needs.test.result == 'success'`. GitHub applies that result to the entire test
-matrix. A failure, cancellation or skipped suite prevents the physical job from
+`needs: [changes, test, fuzz]` and explicitly requires successful `test` and
+`fuzz` results. GitHub applies these results to their entire matrices.
+A failure, cancellation or skipped suite prevents the physical job from
 being queued, including scheduled and manual runs whose change selector is
 skipped. The hardware job checks out the same `github.sha`, verifies the Ryzen
 7 9700X identity and vector eligibility, and retains the existing host lock,
@@ -63,7 +68,7 @@ archive as hosted tests. No system packages are modified.
 
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires successful hosted tests and
-the hardware job, including native correctness, so a skipped hardware job after
+fuzzing and the hardware job, including native correctness, so a skipped hardware job after
 hosted failure cannot accidentally satisfy the merge gate. Documentation-only
 changes retain their explicit no-code path.
 
@@ -71,3 +76,94 @@ To check CI edits locally, run the selector's self-test and validate the shell
 and workflow syntax. To exercise fallback code on a capable machine, set
 `BUSTER_HOST_ARCH=x86-64` for `build.sh`; keep Zen 5 performance measurements on
 Benchpress.
+
+## Sanitizer builds and detection policy
+
+Diagnostic builds default to production `-O3`, with line information, frame pointers, PIE and
+`-fno-sanitize-recover=all`. Ordinary and benchmark builds retain `-O3` and their
+existing fixed-address link. `build.sh print-compile-flags` and
+`print-sanitizer-flags` expose the actual arguments as NUL-delimited arrays.
+Instrumentation is applied to every build unit and the final link; it cannot
+be combined with the private baseline runtime used for QEMU smoke tests.
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit optimization level.
+The full hosted sanitizer matrix runs at `-O3`; additional combined ASan/UBSan
+rows run the entire suite at `-O1` on both host architectures. This retains
+diagnostic-friendly coverage without substituting it for production optimization.
+
+| `BUSTER_SANITIZER` | Checks |
+| --- | --- |
+| `none` (default) | Ordinary optimized build |
+| `address` | ASan, UBSan, bounds, leaks, stack use after scope and return |
+| `undefined` | Independent UBSan and bounds run |
+| `thread` | TSan across the entire correctness inventory |
+| `memory` | MSan with level-two origin tracking across the entire inventory |
+
+ASan, UBSan and leak checking share a process. TSan and MSan have separate
+builds because their runtimes cannot be combined with ASan. The independent
+UBSan run also avoids ASan's allocation layout and its earlier failure points.
+The checks cover the host compiler implementation. Generated machine code and
+external reference tools retain their own execution and validation contracts;
+bootstrap instrumentation does not instrument Buster's generated instructions.
+
+`tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
+policy and matching symbolizer. Deliberate faults prove each enabled detector,
+its failure exit code and source symbolization before the full suite starts.
+These proofs use a separate directory. An unconditional report audit rejects
+diagnostics from the actual suite even when a negative test expected its child
+to fail. No suppression file or reduced sanitizer suite is used. Reports,
+detector proofs and compile commands are retained as workflow artifacts.
+
+For example, on a supported Linux host:
+
+```sh
+BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=address ./build.sh
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ./build/compiler test-lanes
+```
+
+Use the owner's `cores` budget where installed and the shared hardware lock on
+Benchpress, as described in `AGENTS.md`.
+
+## In-process coverage-guided fuzzing
+
+```sh
+BUSTER_FUZZ_AVAILABLE=1 ./build.sh
+./build/compiler --fuzz -seed=133 -runs=10000 -max_len=4096 \
+    -dict=tests/fuzz/c.dict -artifact_prefix=/absolute/crashes/ /absolute/corpus/
+```
+
+Fuzz builds default to the combined `address` mode at `-O3`. Every compiler unit receives
+`-fsanitize=fuzzer-no-link`; the link uses Clang's matching no-main libFuzzer
+runtime. `--fuzz` hands control to `LLVMFuzzerRunDriver` before ordinary command
+dispatch, preserving engine options, coverage, mutation, crash artifacts,
+minimization and replay. Other compiler commands continue to work in that
+executable. A missing runtime or incompatible TSan configuration is an error.
+
+The default original callback in `src/buster/compiler/fuzz.c` accepts inputs up
+to 64 KiB. It compares scalar/native lexer output and exercises preprocessing,
+parsing, checker-input construction, typed expression checking and initializer
+planning. Rejection of malformed C is normal. All per-input owning state is
+released, and source-directed include/embed lookups and existence queries
+cannot read external files. Permanent enabled/disabled controls verify that
+boundary against existing absolute paths. This callback does not execute
+input-derived machine code or claim to fuzz every backend phase.
+
+To replace the callback while retaining the same instrumented compiler and
+driver, provide a C file that defines
+`int buster_fuzz_test_input(const uint8_t* data, size_t size)`:
+
+```sh
+BUSTER_FUZZ_AVAILABLE=1 BUSTER_FUZZ_ENTRY=tests/fuzz/entry_override.c ./build.sh
+./build/compiler --fuzz -runs=10000 /absolute/elf-corpus/
+```
+
+The file is included in the driver unit after the module interfaces, so it can
+call their APIs directly. The shipped override exercises the ELF object/shared
+header reader. It is an actual replacement for the default frontend callback.
+Do not retain borrowed input pointers after the callback returns.
+
+Hosted CI runs bounded frontend and ELF campaigns with seed 133, original C
+seeds and newly compiled original ELF fixtures. PRs and main pushes run 10,000
+inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
+crashing entry proves the override, saved crash bytes and exact-input replay.
+All three jobs retain their corpora, crash inputs, logs, compile commands and
+matching executable, and must pass before hardware qualification can start.

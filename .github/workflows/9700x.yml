@@ -122,7 +122,7 @@ jobs:
           fi
 
   test:
-    name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }})
+    name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
     needs: changes
     if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
     runs-on: ubuntu-26.04
@@ -132,12 +132,21 @@ jobs:
       matrix:
         host_arch: [x86-64, native]
         sanitizer: [none, address, undefined, thread, memory]
+        optimization: [3]
+        include:
+          - host_arch: x86-64
+            sanitizer: address
+            optimization: 1
+          - host_arch: native
+            sanitizer: address
+            optimization: 1
     defaults:
       run:
         shell: bash
     env:
       BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
       BUSTER_SANITIZER: ${{ matrix.sanitizer }}
+      BUSTER_SANITIZER_OPTIMIZATION: ${{ matrix.optimization }}
       BUSTER_LINKER: ${{ matrix.sanitizer == 'none' && 'auto' || 'lld' }}
       BUSTER_ORACLE_CACHE: check
     steps:
@@ -327,7 +336,7 @@ jobs:
         if: ${{ always() && matrix.sanitizer != 'none' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sanitizers-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-${{ github.run_attempt }}
+          name: sanitizers-${{ matrix.host_arch }}-${{ matrix.sanitizer }}-O${{ matrix.optimization }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sanitizer-reports
             ${{ runner.temp }}/sanitizer-probes
@@ -336,12 +345,116 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  fuzz:
+    name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
+    needs: changes
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - entry: frontend
+            host_arch: native
+            source: src/buster/compiler/fuzz.c
+          - entry: elf-override
+            host_arch: x86-64
+            source: tests/fuzz/entry_override.c
+          - entry: crash-replay-proof
+            host_arch: x86-64
+            source: tests/fuzz/entry_probe.c
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
+      BUSTER_SANITIZER: address
+      BUSTER_FUZZ_AVAILABLE: '1'
+      BUSTER_FUZZ_ENTRY: ${{ matrix.source }}
+      BUSTER_LINKER: lld
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install official Clang, sanitizer and libFuzzer runtimes
+        run: bash tools/ci/setup-hosted.sh
+
+      - name: Set fatal sanitizer policy and verify detectors
+        run: |
+          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
+          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
+
+      - name: Build the selected coverage-instrumented entry and check ordinary dispatch
+        run: |
+          ./build.sh
+          ./build/compiler -fsyntax-only tests/fuzz/corpus/basic.c
+
+      - name: Fuzz the compiler with retained seeds and deterministic mutation seed
+        if: matrix.entry != 'crash-replay-proof'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts"
+          cp tests/fuzz/corpus/* "$RUNNER_TEMP/fuzz-corpus/"
+          clang -c -march=x86-64 tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/object.elf"
+          clang -shared -fPIC tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/shared.elf"
+          runs=10000
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then runs=100000; fi
+          ./build/compiler --fuzz -seed=133 -runs="$runs" -max_len=4096 -timeout=10 -rss_limit_mb=4096 \
+            -dict=tests/fuzz/c.dict -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+            "$RUNNER_TEMP/fuzz-corpus" 2>&1 | tee "$RUNNER_TEMP/fuzzer.log"
+          if [ '${{ matrix.entry }}' = elf-override ]; then
+            grep -Fq 'Buster fuzz entry: ELF import' "$RUNNER_TEMP/fuzzer.log"
+          fi
+
+      - name: Prove entry override, crash preservation and exact-input replay
+        if: matrix.entry == 'crash-replay-proof'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay"
+          printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
+          status=0
+          ./build/compiler --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
+            "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
+          test "$status" -eq 77
+          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
+          artifacts=("$RUNNER_TEMP/fuzz-artifacts/"crash-*)
+          test "${#artifacts[@]}" -eq 1
+          cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
+          status=0
+          ./build/compiler --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
+            "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
+          test "$status" -eq 77
+          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
+
+      - name: Reject every unexpected sanitizer diagnostic
+        if: ${{ !cancelled() }}
+        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
+
+      - name: Preserve corpus, crash inputs, reports and the matching executable
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: libfuzzer-${{ matrix.entry }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fuzz-corpus
+            ${{ runner.temp }}/fuzz-artifacts
+            ${{ runner.temp }}/fuzz-replay
+            ${{ runner.temp }}/fuzzer*.log
+            ${{ runner.temp }}/sanitizer-reports
+            ${{ runner.temp }}/sanitizer-probes
+            build/compiler
+            build/compile_commands.json
+          if-no-files-found: error
+          retention-days: 14
+
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
-    needs: [changes, test]
+    needs: [changes, test, fuzz]
     # Both hosted variants must pass before any hardware work, including native
     # correctness. This also covers scheduled/manual runs, whose selector is skipped.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' && needs.fuzz.result == 'success' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -1236,7 +1349,7 @@ jobs:
     # Preserve the existing required context: both hosted variants and the gated
     # 9700X native correctness/benchmark job must pass on the same revision.
     name: Build and execute on Ryzen 7 9700X
-    needs: [changes, test, benchmarks]
+    needs: [changes, test, fuzz, benchmarks]
     if: always()
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1246,13 +1359,15 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
           TEST_RESULT: ${{ needs.test.result }}
+          FUZZ_RESULT: ${{ needs.fuzz.result }}
           BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
         shell: bash
         run: |
           if [ "$CHANGES_RESULT" = success ] && [ "$CODE_CHANGED" = false ] &&
-              [ "$TEST_RESULT" = skipped ] && [ "$BENCHMARK_RESULT" = skipped ]; then
+              [ "$TEST_RESULT" = skipped ] && [ "$FUZZ_RESULT" = skipped ] && [ "$BENCHMARK_RESULT" = skipped ]; then
               echo 'Documentation-only change; no compilation or measurements required.'
           else
               test "$TEST_RESULT" = success
+              test "$FUZZ_RESULT" = success
               test "$BENCHMARK_RESULT" = success
           fi

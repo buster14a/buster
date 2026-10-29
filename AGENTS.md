@@ -1294,9 +1294,19 @@ preprocessor's predefines give as clang's do for the same options
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
-After both hosted variants pass on the same triggering revision, Benchpress
+Each host architecture also runs the complete inventory under
+`BUSTER_SANITIZER=address|undefined|thread|memory`. ASan combines UBSan, bounds,
+leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
+builds default to `-O3`, frames and line information, with fatal symbolized detector
+proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
+coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
+its byte-input callback. Hosted frontend, ELF and crash/replay campaigns are
+also gates. Additional full ASan/UBSan suites run at `-O1`;
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
+See `docs/ci.md` for usage and the precise coverage boundaries.
+After all hosted variants and fuzz jobs pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
-benchmarks, reusing one build and the existing shared lock. All three builds run
+benchmarks, reusing one build and the existing shared lock. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. The existing required check name is retained by a hosted

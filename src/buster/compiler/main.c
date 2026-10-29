@@ -1397,7 +1397,11 @@ static int main_command(int argc, char** argv, bool* found)
 }
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
-int main(int argc, char** argv)
+#if BUSTER_FUZZ_AVAILABLE
+#include BUSTER_FUZZ_ENTRY
+extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
+#endif
+static int main_driver(int argc, char** argv)
 {
     const int guardian = worker_budget_guardian_command(argc, argv);
     // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
@@ -1447,6 +1451,27 @@ int main(int argc, char** argv)
     if (!found)
     {
         result = main_command(argc, argv, &found);
+    }
+    return result;
+}
+
+int main(int argc, char** argv)
+{
+    int result;
+#if BUSTER_FUZZ_AVAILABLE
+    // The no-main engine takes over before normal command dispatch. Keep its
+    // signal handlers, argument parsing, crash artifacts and replay protocol.
+    if (argc >= 2 && strcmp(argv[1], "--fuzz") == 0)
+    {
+        argv[1] = argv[0];
+        argc -= 1;
+        argv += 1;
+        result = LLVMFuzzerRunDriver(&argc, &argv, buster_fuzz_test_input);
+    }
+    else
+#endif
+    {
+        result = main_driver(argc, argv);
     }
     return result;
 }
