@@ -36,6 +36,18 @@ typedef enum CheckInputMessage
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
     CHECK_INPUT_OPTIMIZE,
+    // A goto, a switch's case and a computed goto that enter a variable-length array's or a cleanup's scope, or for a
+    // computed goto leave a cleanup's, as clang's JumpScopeChecker reports them.
+    CHECK_INPUT_JUMP_GOTO,
+    CHECK_INPUT_JUMP_SWITCH,
+    CHECK_INPUT_JUMP_INDIRECT,
+    // GNU's cleanup attribute's argument and function (c_check_cleanup_input.c).
+    CHECK_INPUT_CLEANUP_FUNCTION,
+    CHECK_INPUT_CLEANUP_PARAMETERS,
+    CHECK_INPUT_CLEANUP_TYPE,
+    CHECK_INPUT_CLEANUP_ARGUMENTS,
+    // GNU's weak attribute on a declaration without external linkage.
+    CHECK_INPUT_WEAK_LINKAGE,
     // Labels' errors, at the label's name (check_input_controls_mode): a use of one no definition has, or a local
     // label's declaration without one; a second definition in the label's scope; a name a block's `__label__` lists
     // declare twice.
@@ -78,6 +90,14 @@ static const char* const check_input_messages[] =
     "initializer element is not a compile-time constant",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
+    "cannot jump from this goto statement to its label",
+    "cannot jump from switch statement to this case label",
+    "cannot jump from this indirect goto statement to one of its possible targets",
+    "'cleanup' argument is not a function",
+    "'cleanup' function must take 1 parameter",
+    "'cleanup' function's parameter has a type incompatible with the variable's address",
+    "'cleanup' attribute takes one argument",
+    "weak declaration cannot have internal linkage",
     "use of undeclared label",
     "redefinition of label",
     "ambiguous reference to a label",
@@ -207,6 +227,19 @@ struct CheckInputRegion
     uint32_t final_statement;
 };
 
+// A variable with GNU's cleanup attribute (c_check_cleanup_input.c): its declaration (its name's token), the declaration
+// of the function the attribute's argument names, the argument's token, its scope's opening (its block's brace, or its
+// for statement's parenthesis) and the token after the scope's last.
+typedef struct CheckInputCleanup CheckInputCleanup;
+struct CheckInputCleanup
+{
+    uint32_t declaration;
+    uint32_t function;
+    uint32_t argument;
+    uint32_t scope;
+    uint32_t end;
+};
+
 struct CheckInput
 {
     CheckGraph graph;
@@ -302,6 +335,10 @@ struct CheckInput
     CheckInputVla* vlas;
     uint32_t vla_count;
     uint32_t vla_capacity;
+    // The variables with GNU's cleanup attribute, in source order: none in a unit without one.
+    CheckInputCleanup* cleanups;
+    uint32_t cleanup_count;
+    uint32_t cleanup_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -710,6 +747,13 @@ struct CheckInputReader
     uint32_t section_event_count;
     uint32_t section_event_capacity;
     uint32_t section_record_from;
+    // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
+    // (check_input_cleanup_declaration), a weak one, which only then each declarator's are for its linkage, and a weak,
+    // a constructor or a destructor, which only then each redeclaration's are for those after a definition
+    // (check_input_attribute_late).
+    bool cleanup_attributes;
+    bool weak_attributes;
+    bool late_attributes;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -2088,6 +2132,7 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
+#include "c_check_cleanup_input.c"
 #include "c_check_overload_input.c"
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
@@ -3832,6 +3877,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            if (valid && reader->cleanup_attributes && attributes != 0)
+            {
+                // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
+                // ignores.
+                const bool automatic = !file && !is_typedef && !function && !is_static && !thread_local && storage != C_NAME_EXTERN;
+                valid = check_input_cleanup_declaration(reader, attributes, name, type, automatic);
+            }
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {
@@ -3873,6 +3925,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     {
                         const uint32_t declaration = reader->bindings.declaration[previous - 1];
                         reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
+                    }
+                }
+                // GNU's weak attribute needs external linkage (#147): clang's error at the attribute, but on a typedef,
+                // where it warns and ignores it (all of a typedef's declarators are typedefs).
+                for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
+                {
+                    CheckInputAttribute* attribute = attributes->records + a;
+                    attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
+                    if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
+                    {
+                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
+                        valid = false;
                     }
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
@@ -4096,6 +4160,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
+                check_input_attribute_late(reader, token, previous);
                 reader->definition_seen[token] |= reader->definition_seen[previous];
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);

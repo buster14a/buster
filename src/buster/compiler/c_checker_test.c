@@ -5086,6 +5086,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_cleanup_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5323,6 +5324,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_attributes(&test, clang);
             check_test_attribute_sources(&test, clang);
             check_test_programs(&test, clang);
+            check_test_cleanups(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);

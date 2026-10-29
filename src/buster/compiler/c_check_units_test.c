@@ -1106,7 +1106,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     // The jobserver's tokens, which MAKEFLAGS would give the run, aren't what this checks.
     const char* makeflags = getenv("MAKEFLAGS");
     char* saved_makeflags = makeflags != NULL ? strdup(makeflags) : NULL;
-    unsetenv("MAKEFLAGS");
+    // Leave the environment untouched if its value could not be saved; do not run an unisolated warmup.
+    const bool isolated_makeflags = (makeflags == NULL || saved_makeflags != NULL) && unsetenv("MAKEFLAGS") == 0;
     char* arguments[] = { "--lanes", "1", "-c", "caller.c", "callee.c", NULL };
     const int count = (int)BUSTER_ARRAY_LENGTH(arguments) - 1;
     char text[1024];
@@ -1117,7 +1118,7 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     struct rlimit saved_space = { 0 };
     struct rlimit saved_core = { 0 };
     const bool saved_limits = getrlimit(RLIMIT_AS, &saved_space) == 0 && getrlimit(RLIMIT_CORE, &saved_core) == 0;
-    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && saved_limits)
+    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && saved_limits && isolated_makeflags)
     {
         const uint64_t warm_base = parse_test_status_bytes("VmSize:");
         const CheckUnitsTestProbe warmed = warm_base != 0 ? check_units_test_probe(arguments, count, limits, capture, warm_base, 1ull << 46, true, shared) :
@@ -1202,7 +1203,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     check_units_test_expect(tally, !released || (peak == 0 && setups != 0), "every reservation failed in turn, a lane's setup's among them", limits);
     if (saved_makeflags != NULL)
     {
-        setenv("MAKEFLAGS", saved_makeflags, 1);
+        const bool restored_makeflags = setenv("MAKEFLAGS", saved_makeflags, 1) == 0;
+        check_units_test_expect(tally, restored_makeflags, "restore the reservations' caller's MAKEFLAGS", limits);
         free(saved_makeflags);
     }
     if (shared != MAP_FAILED)
