@@ -1053,7 +1053,9 @@ designs and the compilers already built this way.
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
-  records (`tier0_select_deep`). The output is
+  records (`tier0_select_deep`); long double's, the 128-bit integers' and the
+  vectors' values keep their own slots there, by their true depths (#780). The
+  output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
   tables, and, when asked for (`Tier0Function.entry_records`), each entry's
@@ -5673,8 +5675,10 @@ kind and conversion of the class and both arms of a `?:`. Any refusal except a
 random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
-its entry; a stack of a memory class's values up to the last 16-byte slot,
-which runs, and one past it, which both paths refuse (for long double too);
+its entry; stacks of a memory class's values to the last 16-byte slot of the
+integer table, one and two past it and 40, which run (past the table through
+the deep slots, #780), of 238, which compiles, and of 239, past the deep slots
+with the output's address, which both paths refuse (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
 stack, called from C, and calling C; each class's compares and shifts on every
 pair of ten boundary values, against C's own operators too; and `--count`
@@ -5682,7 +5686,7 @@ random programs over every kind of the classes, frame objects as the x87
 check's, shifts by constant and variable counts and conversions to and from the
 other integers, under live values where
 `MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
-past the slots fails it, and only the entries that ran in the programs both
+past the deep slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
 both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
@@ -5695,7 +5699,7 @@ converted and two compared among them); each row under no
 live values, under 8 floats and 3 integers, and under as many floats as leave
 its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
 one past it and a scratch register past the integer table, which both paths
-refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads
