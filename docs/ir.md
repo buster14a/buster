@@ -114,7 +114,7 @@ column comparisons deterministic.
 | `switch` | `a` integer value, `b` extra-word offset, `c` case count; words are `default_block, constant_id, target, ...` |
 | `ret` | Optional value in `a`, matching the function result; the instruction itself is `void` |
 | `unreachable` | No operands; a terminator |
-| `br_indirect` | `a:ptr`, a label's address; a terminator whose successors are the function's labels |
+| `br_indirect` | `a:ptr`, a label's address; a terminator whose successors are its listed labels (`b` an extra-word offset, `c` their count; label indices) or, with `b` and `c` none, the function's labels |
 
 Constants preserve exact low/high bits, including NaNs, negative zero and x87
 payloads. Unused bits above the type's width must be zero. The printer uses fixed
@@ -144,18 +144,20 @@ GNU C's labels as values and the producer's jump tables (#133's
 `JUMP_INDIRECT`) are the function's labels: `labels[k]` is label `k`'s block, at
 whose code the producer defines its `k`-th label symbol, as it defines it at
 `Tier0Code.label_records[k]` for Tier 0. `br_indirect` goes to the label whose
-address its operand holds; its CFG successors are every label's block, one edge
-per distinct block, in label order. A function with `br_indirect` must give every
-label a block; in one without, a label may have none (`BUSTER_IR_NONE`): no jump
-reaches it, and a backend defines its symbol anywhere in the function. A pass that
-removes a label's block (SSA promotion's unreachable blocks, the optimizer's dead
-ones) leaves the label none; one that threads a block's jump moves the label to
-its target. A jump table's dispatch can only reach its own table's labels, but the
-IR takes the conservative edges of GNU C's rule: any label of the function. A
-function may have several `br_indirect`s, each with every label for successors;
-the typed-stream adapter gives it one, which every indirect jump branches to
-(below), so that its CFG has an edge per jump and per label rather than every
-jump's to every label.
+address its operand holds, one of the labels it lists (#785: `extra[b..+c)`, label
+indices, printed `[#0, #2]`) or, without a list, any of the function's; its CFG
+successors are those labels' blocks, one edge per distinct block, in their order.
+Each label a `br_indirect` may go to must have a block; any other may have none
+(`BUSTER_IR_NONE`): no jump reaches it, and a backend defines its symbol anywhere
+in the function. A pass that removes a label's block (SSA promotion's unreachable
+blocks, the optimizer's dead ones) leaves the label none; one that threads a
+block's jump moves the label to its target; and every rewrite keeps each list's
+label indices. A jump table's dispatch reaches only its own table's labels, and a
+computed goto only labels whose addresses the program takes (GNU C's rule), so the
+typed-stream adapter gives each jump table's jump a `br_indirect` listing its
+table's labels, and all of a function's computed gotos one, which they branch to
+(below), listing the labels of no table: its CFG has an edge per jump and per
+label rather than every jump's to every label.
 
 ### By-value aggregates' ABI records
 
@@ -334,10 +336,14 @@ through branches and loops without moving their effects. This adds no planning
 arrays, instruction columns or input traversals for ordinary functions.
 
 #133's labels (`label_entries`) each start a block, and the IR's labels are
-those blocks. `JUMP_INDIRECT` pops a label's address at statement level, stores it
-in the dispatch slot (an `i64` expression slot after the depth slots) and branches
-to the dispatch block, the function's last, which loads it and is the function's
-one `br_indirect`; the plan arrives at every label once, with the stacks empty.
+those blocks. A jump table's `JUMP_INDIRECT` (`Tier0Function.table_jumps`, #785)
+pops its label's address at statement level and is a `br_indirect` of its table's
+labels (`label_tables`), which the plan arrives at with the stacks empty. Any
+other `JUMP_INDIRECT`, a computed goto, stores the address in the dispatch slot
+(an `i64` expression slot after the depth slots) and branches to the dispatch
+block, the function's last, which loads it and is the `br_indirect` of the labels
+of no table (every label, in a function without tables); the plan arrives at
+those labels once, with the stacks empty.
 This is clang's `indirectgoto` block. With a `br_indirect` per jump, each of a
 function's jumps would be a predecessor of each of its labels, and promotion would
 give a label a phi of a pair per jump for each value live there: Lua 5.4.8's
@@ -536,7 +542,16 @@ reach what it is for (indirect calls; calls with records, aggregate parameters a
 both kinds of result). Each program
 is also compiled by Tier 0 and run natively in a child process
 (`test-tier0`'s harness), and its result and global bytes must equal the IR
-executor's, besides the typed interpreter's. The executor bounds every access
+executor's, besides the typed interpreter's. The records' set runs again without
+floating values (whose out-of-range conversions the shared interpreter refuses, as
+C leaves them undefined) through the shared IR's interpreter (#788), its calls with
+records as [the tools guide](ir-tools.md)'s "Aggregates by value and variadic
+definitions" has them, with undefined-byte checks off: its `COPY` entries carry
+structs' padding, which nothing reads. And `test-tier0-variadic-frame`'s callees
+(`ir_lower_test_variadic_frames`: `va_start`, `va_copy` and `va_arg` over general,
+vector and overflow arguments) are lowered, run natively from clang's caller and by
+the shared interpreter from an IR caller of the same arguments, and every output that
+isn't an address must be the native run's. The executor bounds every access
 by its slot, so a piece past an object's end faults. Two fixtures target the
 new inputs: two objects, of 23 bytes (aligned to 8) and 24 (aligned to 16),
 the first written in pieces of every width and copied into the second, whose
