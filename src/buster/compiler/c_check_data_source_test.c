@@ -475,6 +475,34 @@ static __attribute__((noinline)) void check_test_data_sources(CheckTest* test)
             .size = 4,
         },
     };
+    const CheckDataSourceSymbol overload[] = {
+        {
+            .name = "_Z1fv",
+            .flags = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL,
+        },
+        {
+            .name = "p",
+            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
+            .class = BUSTER_LINK_CLASS_DATA,
+            .alignment = 3,
+            .size = 8,
+            .target = 1,
+        },
+    };
+    const CheckDataSourceSymbol renamed_overload[] = {
+        {
+            .name = "named_function",
+            .flags = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL,
+        },
+        {
+            .name = "p",
+            .flags = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL,
+            .class = BUSTER_LINK_CLASS_DATA,
+            .alignment = 3,
+            .size = 8,
+            .target = 1,
+        },
+    };
     const CheckDataSourceFixture fixtures[] = {
         {
             .name = "static-scalars.c",
@@ -530,10 +558,17 @@ static __attribute__((noinline)) void check_test_data_sources(CheckTest* test)
             .failed_name = "f",
         },
         {
-            .name = "static-overload-needs-symbol-mangling.c",
+            .name = "static-overload-mangled-symbol.c",
             .source = "int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
-            .status = CHECK_DATA_INPUT_UNSUPPORTED,
-            .failed_name = "f",
+            .symbols = overload,
+            .symbol_count = BUSTER_ARRAY_LENGTH(overload),
+            .capacities = true,
+        },
+        {
+            .name = "static-overload-asm-label.c",
+            .source = "int f(void) __asm__(\"named_function\") __attribute__((overloadable)); int f(void) __attribute__((overloadable)); int (*p)(void)=f;",
+            .symbols = renamed_overload,
+            .symbol_count = BUSTER_ARRAY_LENGTH(renamed_overload),
         },
         {
             .name = "static-unused-overload-needs-no-symbol.c",

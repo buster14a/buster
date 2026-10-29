@@ -9,7 +9,8 @@
 // -o DIR/stages.o, whose report (c_check_clock.c) says where its time went; and with --reference, PATH on ARGUMENT...
 // -o DIR/reference.o (`tcc` with `-c ...`, say), a name without a slash looked up in PATH as a shell does. The warm-ups run in that order, then `--runs` rounds (11) in an order
 // that rotates by round (profile_ab_tree's), so that no compile always follows the same one. Each process's wall time
-// is from fork to wait4's return, and wait4's rusage gives its user and system time, peak resident set and page faults.
+// is from fork to wait4's return. Its rusage peak includes pre-exec memory and can include waited descendants;
+// it is not an executable-only peak. Only --time-stages supplies a separate approximate post-exec RSS report.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
 // default's), the default against the reference, and each stage's median, its range and its share of the median
 // span, ranked, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and
@@ -154,6 +155,8 @@ static double measure_compile_median(double* values, uint32_t count)
 // The warm-ups and the rounds, then the report. Returns how many failures it found.
 static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
 {
+    printf("memory: wait4 peaks include pre-exec memory and waited descendants; executable-only peaks are not measured by wait4\n");
+    printf("memory: --time-stages peak growth is approximate post-exec RSS; -1 means unavailable, not zero\n");
     const uint32_t compiles = m->reference != NULL ? 3 : 2;
     ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, (uint64_t)m->runs * BUSTER_MEASURE_COMPILES);
     double* rows = BUSTER_ARENA_PUSH_ARRAY(arena, double, (uint64_t)m->runs * BUSTER_MEASURE_ROW);
@@ -188,7 +191,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             if (!warmup)
             {
                 timed[(uint64_t)(run - m->warmups) * BUSTER_MEASURE_COMPILES + c] = one;
-                printf("run %u %s: %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major\n", run - m->warmups + 1,
+                printf("run %u %s: %.3f ms wall, %.3f ms user, %.3f ms system, %llu KiB wait4 peak, %llu minor faults, %llu major\n", run - m->warmups + 1,
                        measure_compile_names[c], (double)one.wall_ns / 1e6, (double)one.user_us / 1e3, (double)one.system_us / 1e3,
                        (unsigned long long)one.peak_kb, (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults);
             }
@@ -220,7 +223,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             high = field == 0 ? values[m->runs - 1] : high;
         }
         medians[c] = fields[0];
-        printf("%s: median of %u: %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %.0f KB peak, %.0f minor faults, %.0f major\n",
+        printf("%s: median of %u: %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %.0f KiB wait4 peak, %.0f minor faults, %.0f major\n",
                measure_compile_names[c], m->runs, fields[0], low, high, fields[1], fields[2], fields[3], fields[4], fields[5]);
     }
     if (failures == 0)
@@ -239,19 +242,23 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
     double high[BUSTER_MEASURE_ROW] = { 0 };
     for (uint32_t i = 0; failures == 0 && i < BUSTER_MEASURE_ROW; i += 1)
     {
+        const bool peak_column = i >= BUSTER_MEASURE_USAGE && (i - BUSTER_MEASURE_USAGE) % 3 == 2;
+        bool unavailable = false;
         for (uint32_t r = 0; r < m->runs; r += 1)
         {
             values[r] = rows[(uint64_t)r * BUSTER_MEASURE_ROW + i];
+            unavailable = unavailable || (peak_column && values[r] < 0);
         }
-        median[i] = measure_compile_median(values, m->runs);
-        low[i] = values[0];
-        high[i] = values[m->runs - 1];
+        // Do not sort unavailable sentinels into a plausible median of the remaining RSS readings.
+        median[i] = unavailable ? -1 : measure_compile_median(values, m->runs);
+        low[i] = unavailable ? -1 : values[0];
+        high[i] = unavailable ? -1 : values[m->runs - 1];
     }
     if (failures == 0)
     {
         const double span = median[BUSTER_MEASURE_SPAN];
         double sum = 0;
-        printf("--time-stages' stages, medians of %u runs: ms (range), share of the median span; system ms, minor faults, peak KB added\n", m->runs);
+        printf("--time-stages' stages, medians of %u runs: ms (range), share of the median span; system ms, minor faults, approximate post-exec peak KiB added (-1 unavailable)\n", m->runs);
         for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
         {
             const double* used = median + BUSTER_MEASURE_USAGE + 3 * s;

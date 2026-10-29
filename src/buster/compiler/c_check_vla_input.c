@@ -530,6 +530,8 @@ static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, T
 static bool check_input_indirect_goto(const Parser* parser, uint32_t token);
 static bool check_input_label_address(const Parser* parser, uint32_t token);
 
+// The scopes a jump mustn't enter (clang's JumpScopeChecker): a variably modified declaration's, and a cleanup's
+// variable's (check_input_cleanup_declaration), from the declaration to its scope's end (vla_scope_ends).
 static void check_input_vla_finish(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -585,13 +587,17 @@ static void check_input_vla_finish(CheckInputReader* reader)
             const uint32_t declaration = reader->scope_marks[target] - 1;
             if (source < declaration || source >= reader->vla_scope_ends[declaration])
             {
-                check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                check_input_report(reader, token, target == token ? CHECK_INPUT_JUMP_SWITCH : CHECK_INPUT_JUMP_GOTO);
             }
         }
     }
     // A computed goto may go to any label whose address its function takes, so it must be inside the scope of every
-    // variable-length array such a label is in (clang's JumpScopeChecker), whichever way it leaves its own: the labels'
-    // innermost scopes intersect in one interval, [low, high), which holds each goto.
+    // variable-length array or cleanup such a label is in (clang's JumpScopeChecker), whichever way it leaves its own: the
+    // labels' innermost scopes intersect in one interval, [low, high), which holds each goto. Nor may it leave a cleanup's
+    // scope: the labels' first and last must be in its innermost, whose records come in source order, as the bodies do.
+    const CheckInputCleanup* cleanups = reader->output->cleanups;
+    const uint32_t cleanup_count = reader->output->cleanup_count;
+    uint32_t next = 0;
     for (uint32_t opening = 0; reader->indirect_gotos != 0 && opening < scanned; opening += 1)
     {
         const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[opening] != 0;
@@ -600,6 +606,8 @@ static void check_input_vla_finish(CheckInputReader* reader)
         {
             uint32_t low = 0;
             uint32_t high = UINT32_MAX;
+            uint32_t first_label = UINT32_MAX;
+            uint32_t last_label = 0;
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
                 const uint32_t label = check_input_label_address(parser, token) ? reader->output->label_targets[token] : BUSTER_CHECK_NONE;
@@ -609,14 +617,36 @@ static void check_input_vla_finish(CheckInputReader* reader)
                     low = declaration > low ? declaration : low;
                     high = reader->vla_scope_ends[declaration] < high ? reader->vla_scope_ends[declaration] : high;
                 }
+                first_label = label < first_label ? label : first_label;
+                last_label = label < parser->tokens.count && label > last_label ? label : last_label;
             }
+            // The cleanups' scopes that hold each token, innermost last, which a stack of the body's records keeps.
+            while (next < cleanup_count && cleanups[next].declaration < opening)
+            {
+                next += 1;
+            }
+            const uint64_t mark = reader->scratch->length;
+            uint32_t* active = next < cleanup_count ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)cleanup_count - next) : NULL;
+            reader->output->resource |= next < cleanup_count && active == NULL;
+            uint32_t active_count = 0;
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
-                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high))
+                while (active_count != 0 && cleanups[active[active_count - 1]].end <= token)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                    active_count -= 1;
+                }
+                if (active != NULL && next < cleanup_count && cleanups[next].declaration == token)
+                {
+                    active[active_count++] = next++;
+                }
+                const CheckInputCleanup* innermost = active_count != 0 ? cleanups + active[active_count - 1] : NULL;
+                const bool leaves = innermost != NULL && (first_label <= innermost->declaration || last_label >= innermost->end);
+                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high || leaves))
+                {
+                    check_input_report(reader, token, CHECK_INPUT_JUMP_INDIRECT);
                 }
             }
+            arena_pop_to(reader->scratch, mark);
             opening = closing;
         }
     }
