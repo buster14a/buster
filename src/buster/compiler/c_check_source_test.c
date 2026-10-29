@@ -409,6 +409,58 @@ static void check_test_source_intrinsic_range(CheckTest* test)
     intern_release(&identifiers);
 }
 
+static void check_test_source_kr_header_reuse(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    static const char* const sources[] =
+    {
+        "int f(x)struct S{void member;}x;{return 0;}",
+        "int f(A,x)int A;enum E{A=3}x;{return x+A;}",
+        "struct S{long outer;};enum{A=19};int f(x,p)struct S{int inner;}x;_Atomic(int*)p;"
+        "{struct S s={7};return x.inner+(int)s.outer+A+*p;}",
+    };
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool ready = intern_initialize(&identifiers);
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    ready = ready && output.base != NULL && scratch.base != NULL;
+    if (ready)
+    {
+        memset(arena_push(&output, 31, 1), 0xa5, 31);
+        memset(arena_push(&scratch, 29, 1), 0x5a, 29);
+    }
+    check_test_expect(test, ready, "K&R header reuse fixture initializes retained arenas");
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        CheckTestTypes types = { 0 };
+        ready = check_test_types_open(&types);
+        CheckInput input = { 0 };
+        for (uint32_t pass = 0; ready && pass < 2 * BUSTER_ARRAY_LENGTH(sources); pass += 1)
+        {
+            const uint32_t source = pass % BUSTER_ARRAY_LENGTH(sources);
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            arena_pop_to(&output, 31);
+            arena_pop_to(&scratch, 29);
+            const bool prepared = pp_initialize(&pp, &options, &identifiers) &&
+                                  pp_run_source(&pp, "kr-header-reuse.c", (const uint8_t*)sources[source], strlen(sources[source])) &&
+                                  parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+            const bool valid = prepared && check_input(&input, &parser, &pp, &types.table, &output, &scratch);
+            check_test_expect(test, prepared && valid == (source == 2) && !input.resource &&
+                              (input.report_count == 0) == valid && scratch.length == 29 &&
+                              ((const uint8_t*)output.base)[0] == 0xa5 && ((const uint8_t*)scratch.base)[0] == 0x5a,
+                              "invalid tag/member and enumerator headers leave reusable input, types and arena prefixes intact");
+            parse_release(&parser);
+            pp_release(&pp);
+        }
+        check_test_types_close(&types);
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    intern_release(&identifiers);
+}
+
 static __attribute__((noinline)) void check_test_source_extensions(CheckTest* test, const char* clang)
 {
     const CheckSourceFixture fixtures[] =
@@ -1180,6 +1232,92 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             .rejected = true,
         },
         {
+            .name = "K&R header tag is complete in later parameter declarations",
+            .source = "int f(x,y)struct S{int a;}x;struct S*y;{return x.a+y->a;}",
+        },
+        {
+            .name = "K&R header tag completes an earlier header reference",
+            .source = "int f(x,y)struct S*x;struct S{int a;}y;{return x->a+y.a;}",
+        },
+        {
+            .name = "K&R nested member tags share the declaration list scope",
+            .source = "int f(x,y)union U{struct S{int a;}s;long b;}x;struct S*y;{return x.s.a+y->a;}",
+        },
+        {
+            .name = "K&R anonymous record parameter types remain complete",
+            .source = "int f(x,y)struct{int a;}x;union{int a;long b;}y;{return x.a+(int)y.b;}",
+        },
+        {
+            .name = "K&R repeated header tag definitions retain separate parameter types",
+            .source = "int f(x,y,z)struct S{int a;}x;struct S{long b;}y;struct S*z;{return x.a+(int)y.b+z->a;}",
+        },
+        {
+            .name = "K&R enumerators are visible in later header array bounds",
+            .source = "int f(x,a)enum E{A=3}x;int a[A];{return x+a[0];}",
+        },
+        {
+            .name = "K&R header tags restore the outer tag before the body",
+            .source = "struct S{int z;};int f(x)struct S{int a;}x;{struct S t={3};return x.a+t.z;}struct S after;",
+        },
+        {
+            .name = "K&R header enumerators restore outer ordinary names before the body",
+            .source = "enum{A=9};int f(x)enum E{A=3}x;{return x+A;}int a[A];_Static_assert(sizeof a==9*sizeof(int),\"scope\");",
+        },
+        {
+            .name = "K&R header tag names are absent from the body",
+            .source = "int f(x)struct S{int a;}x;{struct S t=x;return t.a;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header tags are absent after the function",
+            .source = "int f(x)struct S{int a;}x;{return x.a;}struct S after;",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header enumerators are absent from the body",
+            .source = "int f(x)enum E{A=3}x;{return x+A;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header enumerators are absent after the function",
+            .source = "int f(x)enum E{A=3}x;{return x;}int after=A;",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header enumerator conflicts with its parameter declaration",
+            .source = "int f(A)enum E{A=3}A;{return A;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header enumerator conflicts with a later parameter",
+            .source = "int f(x,A)enum E{A=3}x;int A;{return x+A;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R header enumerator conflicts with an earlier parameter",
+            .source = "int f(A,x)int A;enum E{A=3}x;{return x+A;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R implicit C89 parameter conflicts with a header enumerator",
+            .source = "int f(A,x)enum E{A=3}x;{return A+x;}",
+            .rejected = true,
+            .standard = 1989,
+        },
+        {
+            .name = "K&R mixed tag and atomic declarations retain their header scope",
+            .source = "int f(x,p)enum E{A=3}x;_Atomic(int*)p;{return x+*p;}int g(int *p){return f(2,p);}",
+        },
+        {
+            .name = "K&R invalid header record diagnoses its member",
+            .source = "int f(x)struct S{void member;}x;{return 0;}",
+            .rejected = true,
+        },
+        {
+            .name = "K&R tag preparation after an invalid header starts with fresh scope",
+            .source = "struct S{long outer;};int f(x)struct S{int inner;}x;{struct S s={3};return x.inner+(int)s.outer;}",
+        },
+        {
             .name = "K&R all implicit parameters in C89",
             .source = "int f(a,b){return a+b;} int g(void){return f(3,4);}",
             .standard = 1989,
@@ -1804,4 +1942,5 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     check_test_source_transparent_history(test);
     check_test_source_intrinsic_range(test);
     check_test_source_region_transfers(test);
+    check_test_source_kr_header_reuse(test);
 }

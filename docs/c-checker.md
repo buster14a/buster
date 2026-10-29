@@ -514,9 +514,15 @@ adjusted as a parameter's, under C17 6.9.1p6's constraints:
 - every listed name declared in C99 and later; a name left undeclared in C89
   receives `int`.
 
-A struct, union or enum defined in the list, and a variably modified
-parameter there, are still refused by name. An identifier list outside a
-definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+The list's struct, union and enum definitions use the ordinary tag reader.
+Their tags and enumerators remain visible throughout the declaration list,
+then their header scope ends before the function body, as Clang treats an
+old-style definition. The completed parameter types remain; an outer tag or
+ordinary name becomes visible again in the body and following file scope.
+These declarations are not republished into the body as prototype-definition
+tags are. The extra visibility/redefinition warning sequence is not reproduced.
+Variably modified parameters remain refused by name. An identifier list
+outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
 Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
 as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,
 including typedefs and nested type queries; invalid atomic inner types retain
