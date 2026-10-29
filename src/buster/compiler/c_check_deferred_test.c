@@ -850,7 +850,8 @@ struct CheckDeferredSize
     uint32_t second;
     uint32_t fewer;
     uint32_t lanes;
-    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases.
+    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases, whose `lanes` are the
+    // rule's for those tokens, and change with its constants.
     uint32_t base_tokens;
 };
 
@@ -867,9 +868,9 @@ static const CheckDeferredSize check_deferred_sizes[] =
     { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 18 },
     { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 18 },
     { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 18 },
-    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 18 },
-    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 5, .base_tokens = 18 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 5, .base_tokens = 18 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 5, .base_tokens = 18 },
 };
 
 // A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
