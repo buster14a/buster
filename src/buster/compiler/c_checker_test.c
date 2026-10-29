@@ -3631,6 +3631,47 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // #830's review: a bit-precise pack value's low 64 bits alone made 0x10000000000000001uwb an alignment of 1, and
+            // one past 128 bits wrapped to its low bits. clang ignores both, with its alignment warning, and takes small ones.
+            "a pack pragma's bit-precise values: small ones apply, past 64 and past 128 bits ignored",
+            "#pragma pack(push, 8uwb)\nstruct A { char c; double d; };\n#pragma pack(pop)\n"
+            "#pragma pack(push, 2wb)\nstruct B { char c; int i; };\n#pragma pack(pop)\n"
+            "#pragma pack(4)\n#pragma pack(0x10000000000000001uwb)\nstruct C { char c; double d; };\n"
+            "#pragma pack(0x1000000000000000000000000000000001uwb)\nstruct D { char c; double d; };\n#pragma pack()\n"
+            "_Static_assert(sizeof(struct A) == 16 && sizeof(struct B) == 6, \"small values apply\");\n"
+            "_Static_assert(sizeof(struct C) == 12 && sizeof(struct D) == 12, \"wide values leave pack(4)\");\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            // #830's review: a bit-precise count is its value, accepted where it is an int's and refused past 64 bits and
+            // past 128 bits, whatever its low bits.
+            "a loop hint's bit-precise counts accepted",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(4uwb) interleave_count(2wb)\n while (n--) s += 1; return s; }\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 64 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0x10000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 128 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count(0x1000000000000000000000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
+        },
+        {
             "a loop hint's floating count refused",
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(1.5)\n while (n--) s += 1; return s; }\n",
             true,
