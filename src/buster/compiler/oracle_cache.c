@@ -721,6 +721,43 @@ static void oracle_cache_disable(void)
     oracle_cache_open(&oracle_cache_state, 0, 0);
 }
 
+// These standalone builtin commands have cheap compiler references: native measurements found USE's validation
+// slower than fresh execution. Keep their CHECK path intact, and do not extend this policy by a command prefix.
+static bool oracle_test_fresh_builtin(const char* command)
+{
+    static const char* const commands[] = {
+        "test-check-builtins", "test-check-builtins-misc", "test-check-builtins-query", "test-check-builtins-bit-cast",
+        "test-check-builtins-float", "test-check-builtins-x86", "test-check-builtins-vector", "test-check-builtins-math",
+        "test-check-builtins-atomic", "test-check-builtins-atomic-rmw", "test-check-builtins-typed-overflow", "test-check-builtins-rounds",
+    };
+    bool selected = false;
+    for (uint32_t c = 0; command != 0 && !selected && c < sizeof(commands) / sizeof(commands[0]); c += 1)
+    {
+        selected = strcmp(command, commands[c]) == 0;
+    }
+    return selected;
+}
+
+// A synchronous test command's USE-only scope. No cache is touched for an unselected command (cache == 0).
+// Apply before the command starts children, and restore after it returns, including failure and usage rejection.
+static OracleMode oracle_test_fresh_begin(OracleCache* cache)
+{
+    const OracleMode mode = cache != 0 ? cache->mode : ORACLE_MODE_OFF;
+    if (cache != 0 && mode == ORACLE_MODE_USE)
+    {
+        cache->mode = ORACLE_MODE_OFF;
+    }
+    return mode;
+}
+
+static void oracle_test_fresh_end(OracleCache* cache, OracleMode mode)
+{
+    if (cache != 0)
+    {
+        cache->mode = mode;
+    }
+}
+
 // SOURCE_DATE_EPOCH fixed (BUSTER_ORACLE_EPOCH) for a test that compares with compilers, where it isn't set: their
 // __DATE__, __TIME__ and __TIMESTAMP__ and the test's own preprocessor's follow it, so that they agree whenever the test
 // runs and the compilers' runs can be kept (oracle_run_key). Before the test starts threads or processes; true if it set
@@ -3385,6 +3422,46 @@ static void oracle_run_release(OracleRun* run)
     free(run->errors);
     run->output = 0;
     run->errors = 0;
+}
+
+// A synchronous test tool's exit status, or -1 for a launcher, timeout, capture or cache-check failure. Optional
+// capture files receive the complete bytes; diagnostics receives a bounded NUL-terminated prefix. Declared output
+// artifacts and dependency tracing are the caller's OracleRun contract. Generated programs must still run directly.
+static int oracle_test_run(OracleRun* run, const char* output_path, const char* error_path, char* diagnostics, size_t capacity)
+{
+    const bool ran = oracle_run(run);
+    bool written = true;
+    const char* paths[] = { output_path, error_path };
+    const char* bytes[] = { run->output, run->errors };
+    const uint64_t lengths[] = { run->output_length, run->errors_length };
+    for (uint32_t capture = 0; capture < 2; capture += 1)
+    {
+        if (paths[capture] != 0)
+        {
+            FILE* file = fopen(paths[capture], "wb");
+            if (file != 0)
+            {
+                written = fwrite(bytes[capture] != 0 ? bytes[capture] : "", 1, lengths[capture], file) == lengths[capture] && written;
+                written = fclose(file) == 0 && written;
+            }
+            else
+            {
+                written = false;
+            }
+        }
+    }
+    if (diagnostics != 0 && capacity != 0)
+    {
+        const uint64_t kept = run->errors_length < capacity - 1 ? run->errors_length : capacity - 1;
+        if (kept != 0)
+        {
+            memcpy(diagnostics, run->errors, kept);
+        }
+        diagnostics[kept] = 0;
+    }
+    const int result = ran && written && WIFEXITED(run->status) ? WEXITSTATUS(run->status) : -1;
+    oracle_run_release(run);
+    return result;
 }
 
 #endif

@@ -40,6 +40,8 @@ struct CheckBuiltinMiscAction
     uint32_t tag_completion_count;
     uint32_t source_position;
     uint32_t extensions;
+    const CheckConstValues* const_values;
+    bool constant_evaluated;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -106,6 +108,8 @@ static CheckValue check_builtin_misc_argument(TypeTable* table, const CheckBuilt
             .tag_completion_count = input->tag_completion_count,
             .source_position = input->source_position,
             .extensions = input->extensions,
+            .const_values = input->const_values,
+            .constant_evaluated = input->constant_evaluated,
         };
         value = check_action_operand(table, &action, &converted, 0);
         if (converted.diagnostic != CHECK_DIAG_NONE)

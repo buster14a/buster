@@ -2017,8 +2017,21 @@ The test command fails if the oracle cannot run. It covers:
   per distinct text, with `-c` and the flags of the one-step build they
   replaced, and a path whose checked object and oracle are byte for byte the
   last linked program's takes that program's run: the same files would link
-  into the same executable (#465). A program that fails is linked and run, and
-  its directory kept with `driver.c` and `oracle.c`.
+  into the same executable (#465). A control's oracle is clang's build of
+  another source of the same names (`check_test_program_against`): a model of
+  what the program computes, or a mutant of it. The program must agree with
+  it, or with `mismatch` differ from it on some input (the harness's status
+  1). A run is taken from the last program only if that run expected the same
+  outcome. fpclassify's selector programs have both kinds (#148). Their
+  models, for a double, run the normal and subnormal selectors in an order
+  that C's sequencing fixes. The programs agree with the model that runs the
+  subnormal selector first, as a GCC-built clang does. With the
+  order-recording encoding they had, ours must agree with the model that runs
+  the normal selector first and differ from the other, so a change to
+  `check_lower_floating_prepare`'s order must change these two controls. Their
+  mutants evaluate the normal selector twice, the subnormal one never or the
+  argument twice. A program that fails is linked and run, and its directory
+  kept with `driver.c` and `oracle.c`.
 - The passes after checking that visit a unit's few records rather than every
   token (#592), on every program fixture by both paths
   (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
@@ -2130,12 +2143,12 @@ fixed with its fixture there:
     evaluation").
 - **Accepted, where clang refuses them:** the `_Noreturn` keyword on an object, and an `inline main`.
 
-One difference stays, recorded with the line the checker refuses the violation at. It's GNU's folding of a
-`const` object's value in an integer constant expression: `const int k = 3; enum { E = k };`, which clang folds,
-silently but for `-Wgnu-folding-constant`. The checker reads an object's value only as an address constant's
-place, not its initializer's value. It refuses the enumerator as clang refuses a non-`const` object's. Clang
-reads the initializers of `const` objects of every type there (members of a `const` struct's too), and this
-would need their values at the declaration.
+The remaining const-object difference is covered by declaration-time initializer receipts (#704).
+`const int k = 3; enum { E = k };` reads the completed initializer as GNU constant evidence, independently
+of the standard ICE flag. Typed sparse writes retain scalar values, implicit zero coverage, aggregate
+subobjects, symbolic pointers and active union selections. Each lookup checks the use's source boundary;
+volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
+including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
 The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
 declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.

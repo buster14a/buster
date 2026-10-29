@@ -1512,7 +1512,12 @@ int main_unit_checker(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
 int main_unit_check_builtins(int argc, char** argv, bool* found)
 {
-    return main_command(argc, argv, found);
+    const char* command = argc >= 2 ? argv[1] : 0;
+    OracleCache* cache = oracle_test_fresh_builtin(command) ? oracle_cache() : 0;
+    const OracleMode mode = oracle_test_fresh_begin(cache);
+    const int result = main_command(argc, argv, found);
+    oracle_test_fresh_end(cache, mode);
+    return result;
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
 int main_unit_backend(int argc, char** argv, bool* found)
