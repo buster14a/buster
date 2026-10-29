@@ -1942,7 +1942,7 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
         size_t length = 0;
         if (output != NULL)
         {
-            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+            check_driver_executable_failure(&link, &runtime, 1, "out", &cases[i].result, output);
         }
         const bool read = output != NULL && pp_test_read_output(output, &text, &length);
         check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");
@@ -3122,6 +3122,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
 #include "c_checker_driver_const_test.c"
+#include "c_checker_driver_gnu_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -4207,6 +4208,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)

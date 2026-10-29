@@ -3023,6 +3023,369 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // GNU C's local labels (#147): a `__label__` list's names are labels of its block, which shadow the function's
+        // and an outer list's, in a statement expression a macro expands twice too, whose labeled last statement gives
+        // its value.
+        {
+            "local labels: a statement expression's, expanded twice",
+            "#define CHECKED(x) ({ __label__ out; int r = 0; if (x) goto out; r = 1; out: r; })\n"
+            "int f(int a) {\n"
+            "    return CHECKED(a) + CHECKED(a > 1);\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "local labels: nested blocks' and the function's",
+            "int f(int n) {\n"
+            "    int s = 0;\n"
+            "    {\n"
+            "        __label__ again, done;\n"
+            "    again:\n"
+            "        if (n-- > 0) { s += 1; goto again; }\n"
+            "        {\n"
+            "            __label__ again;\n"
+            "        again:\n"
+            "            if (s > 100) { s -= 1; goto again; }\n"
+            "        }\n"
+            "        goto done;\n"
+            "    done:;\n"
+            "    }\n"
+            "    if (s == 0) goto again;\n"
+            "    return s;\n"
+            "again:\n"
+            "    return -s;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "local labels: an address of one",
+            "int f(int n) {\n"
+            "    {\n"
+            "        __label__ odd;\n"
+            "        void *p = &&odd;\n"
+            "        if (n & 1) goto *p;\n"
+            "        return 0;\n"
+            "    odd:\n"
+            "        return 1;\n"
+            "    }\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // A local label its block doesn't define: clang's "use of undeclared label", at its name in the list.
+            "local labels: one its block doesn't define",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ missing;\n"
+            "        (void)0;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A goto from outside the block reaches no label of the function.
+            "local labels: a goto from outside the block",
+            "void f(void) {\n"
+            "    goto inner;\n"
+            "    {\n"
+            "        __label__ inner;\n"
+            "    inner:;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "local labels: one defined twice",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ a;\n"
+            "    a:;\n"
+            "    a:;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "local labels: the function's after the block",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ a;\n"
+            "    a:;\n"
+            "    }\n"
+            "    goto a;\n"
+            "}\n",
+            true,
+            false
+        },
+        // GNU C's __auto_type (#147): a variable's type is its initializer's, lvalue-converted and decayed, with the
+        // specifiers' qualifiers, as clang deduces it.
+        {
+            "__auto_type: a statement expression's maximum",
+            "#define MAX(a, b) ({ __auto_type a_ = (a); __auto_type b_ = (b); a_ > b_ ? a_ : b_; })\n"
+            "long f(int x, long y) {\n"
+            "    __auto_type m = MAX(x, y);\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(m), long), \"the conditional's type\");\n"
+            "    return m + MAX(MAX(x, 1), 2);\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: lvalue conversion and decay",
+            "int g(void);\n"
+            "const char *h(void) {\n"
+            "    const int c = 1;\n"
+            "    int a[3] = { 0 };\n"
+            "    volatile short v = 2;\n"
+            "    _Atomic int t = 3;\n"
+            "    __auto_type x = c;\n"
+            "    __auto_type p = a;\n"
+            "    __auto_type q = g;\n"
+            "    __auto_type s = \"abc\";\n"
+            "    __auto_type w = v;\n"
+            "    __auto_type z = t;\n"
+            "    const __auto_type k = 2.0f;\n"
+            "    __auto_type volatile u = (char)1 + (char)2;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(x), int), \"lvalue conversion\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(p), int *), \"an array's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(q), int (*)(void)), \"a function's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(s), char *), \"a string's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(w), short), \"volatile dropped\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(z), _Atomic int), \"_Atomic kept\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(k), const float), \"the specifiers' const\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(u), volatile int), \"promoted, and volatile\");\n"
+            "    x = 3;\n"
+            "    p[0] = x + q() + w + z + (int)k + u;\n"
+            "    return s;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: file scope, static, a loop's, structures and compound literals",
+            "typedef struct { int a; } S;\n"
+            "S make(void);\n"
+            "__auto_type g = 1L;\n"
+            "static __auto_type h = 'c';\n"
+            "int f(void) {\n"
+            "    static __auto_type n = sizeof g;\n"
+            "    __auto_type s = make();\n"
+            "    __auto_type t = (S){ 2 };\n"
+            "    __auto_type e = (int[]){ 1, 2, 3 };\n"
+            "    __auto_type r = ({ __auto_type r = 4; r + 1; });\n"
+            "    int sum = s.a + t.a + h + e[2] + r;\n"
+            "    for (__auto_type i = 0u; i < n; i++) sum += (int)i;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(g), long), \"file scope\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(h), int), \"a character constant's int\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(n), unsigned long), \"sizeof's size_t\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(s), S), \"a structure\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(t), S), \"a compound literal\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(e), int *), \"an array's compound literal decays\");\n"
+            "    __auto_type l = ({ int k = sum; if (k > 3) goto done; k = 5; done: k * 2L; });\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(l), long), \"a labeled last statement's\");\n"
+            "    extern long g;\n"
+            "    return sum + (int)l + (int)g;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // A use of the variable in its own initializer, though an outer one has its name: at the use.
+            "__auto_type: its own initializer names it",
+            "void f(void) {\n"
+            "    int x = 1;\n"
+            "    {\n"
+            "        __auto_type x =\n"
+            "            x + 1;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A use of it in a type query of its own initializer, which the walk doesn't resolve: the query's binding.
+            "__auto_type: its own initializer's type query names it",
+            "unsigned long f(void) {\n"
+            "    __auto_type x =\n"
+            "        sizeof(__typeof__(x));\n"
+            "    return x;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: without an initializer",
+            "void f(void) {\n"
+            "    __auto_type\n"
+            "        x;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a parameter's",
+            "void f(int a,\n"
+            "       __auto_type b);\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a function's result",
+            "__auto_type\n"
+            "f(void);\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a typedef's",
+            "typedef\n"
+            "    __auto_type T;\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a type name's",
+            "unsigned long f(void) {\n"
+            "    return sizeof(\n"
+            "        __auto_type);\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an initializer list",
+            "void f(void) {\n"
+            "    __auto_type x =\n"
+            "        { 1 };\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an array",
+            "void f(void) {\n"
+            "    __auto_type a[] =\n"
+            "        { 1, 2 };\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a bit-field's value",
+            "struct B { int b : 3; };\n"
+            "void f(struct B s) {\n"
+            "    __auto_type x =\n"
+            "        s.b;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a void value",
+            "void f(void) {\n"
+            "    __auto_type\n"
+            "        x = (void)0;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A signedness, at its keyword wherever it is among the specifiers (DeclSpec::Finish).
+            "__auto_type: a signedness",
+            "void f(void) {\n"
+            "    long\n"
+            "        unsigned __auto_type x = 1;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // What clang deduces as C++ deduces a declarator's type, and GCC refuses: refused by name.
+            "__auto_type: a pointer declarator",
+            "void f(void) {\n"
+            "    int y = 0;\n"
+            "    __auto_type *p = &y;\n"
+            "}\n",
+            true,
+            true
+        },
+        {
+            "__auto_type: a second declarator",
+            "void f(void) {\n"
+            "    __auto_type x = 1, y = 2;\n"
+            "}\n",
+            true,
+            true
+        },
+        {
+            // A name with linkage declared before: its types would bind before the deduction.
+            "__auto_type: a linked name declared before",
+            "extern int e;\n"
+            "__auto_type e = 1;\n",
+            true,
+            true
+        },
+        {
+            // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
+            // int's alignment where the deduced type's is, at file scope, a type's, and GNU's aligned, which can't lower it.
+            "__auto_type: an _Alignas the deduced type allows",
+            "_Alignas(2) __auto_type g = (short)1;\n"
+            "void f(void) {\n"
+            "    _Alignas(1) __auto_type c = (char)0;\n"
+            "    _Alignas(double) __auto_type d = (char)1;\n"
+            "    __auto_type e __attribute__((aligned(1))) = 1.0;\n"
+            "    (void)c; (void)d; (void)e;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Below the deduced type's alignment, though not int's: at the _Alignas.
+            "__auto_type: an _Alignas below the deduced type's",
+            "void f(void) {\n"
+            "    _Alignas(4)\n"
+            "        __auto_type x = 1.0;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an _Alignas below a decayed pointer's",
+            "void f(void) {\n"
+            "    char a[3];\n"
+            "    _Alignas(1)\n"
+            "        __auto_type p = a;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // The specifiers' const and volatile on the deduced type, which _Generic of its address sees.
+            "__auto_type: the specifiers' qualifiers",
+            "void f(void) {\n"
+            "    volatile __auto_type y = 1.0;\n"
+            "    _Static_assert(_Generic(&y, volatile double *: 1, default: 0), \"volatile\");\n"
+            "    const __auto_type x = 1;\n"
+            "    _Static_assert(_Generic(&x, const int *: 1, default: 0), \"const\");\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: an assignment to a const one",
+            "void f(void) {\n"
+            "    const __auto_type x = 1;\n"
+            "    x = 2;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {
