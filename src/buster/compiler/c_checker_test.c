@@ -3365,6 +3365,27 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        {
+            // The specifiers' const and volatile on the deduced type, which _Generic of its address sees.
+            "__auto_type: the specifiers' qualifiers",
+            "void f(void) {\n"
+            "    volatile __auto_type y = 1.0;\n"
+            "    _Static_assert(_Generic(&y, volatile double *: 1, default: 0), \"volatile\");\n"
+            "    const __auto_type x = 1;\n"
+            "    _Static_assert(_Generic(&x, const int *: 1, default: 0), \"const\");\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: an assignment to a const one",
+            "void f(void) {\n"
+            "    const __auto_type x = 1;\n"
+            "    x = 2;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {

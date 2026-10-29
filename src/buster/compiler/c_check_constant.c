@@ -1475,14 +1475,13 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             }
             else if (input->cached || intrinsic != 0)
             {
-                // An __auto_type variable's placeholder is a use in its own initializer, clang's error there.
-                valid = (intrinsic != 0 || reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND) && !check_input_auto_type(reader->declared_types[token]);
+                valid = intrinsic != 0 || reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND;
             }
             else if (handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
                 const bool is_typedef = reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
-                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER) && !check_input_auto_type(reader->declared_types[declaration]);
+                valid = is_typedef == (role == PARSE_ROLE_SPECIFIER);
                 if (valid)
                 {
                     reader->output->declarations[token] = declaration;
@@ -3233,8 +3232,6 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             {
                 valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
-                // An __auto_type variable's placeholder is a use in its own initializer, clang's error there.
-                valid &= !check_input_auto_type(input->cached ? reader->declared_types[token] : handle != 0 ? reader->declared_types[reader->bindings.declaration[handle - 1]] : 0);
             }
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {

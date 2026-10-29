@@ -4118,6 +4118,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){_Alignas(32) __auto_type a=n*1.5;_Alignas(1) __auto_type c=(char)n;_Alignas(8) __auto_type s=(short)n;"
         "return (int)a+c+s+(int)(((unsigned long)&a&31)|((unsigned long)&s&7))*1000+(int)__alignof__(a)*7+(int)__alignof__(c)*11+(int)__alignof__(s)*13;}",
         "auto-type-alignment", clang);
+    // Structures deduced from compound literals at file scope, in a static and in a block, whose static data the deduced
+    // types initialize.
+    check_test_program_source(test,
+        "typedef struct{int x;long y;}P;static __auto_type auto_sp=(P){1,2L};__auto_type auto_gp=(P){5,6L};"
+        "int tested(int n){static __auto_type bp=(P){3,4L};__auto_type lp=(P){n,7L};bp.x+=n;"
+        "return auto_sp.x+(int)auto_sp.y*3+auto_gp.x*5+(int)auto_gp.y*7+bp.x*11+(int)bp.y*13+lp.x*17+(int)lp.y*19;}",
+        "auto-type-static-structures", clang);
     {
         char source[4096];
         uint32_t length = 0;

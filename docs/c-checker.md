@@ -2925,9 +2925,11 @@ initializer with the cached evaluator and gives the declaration, its
 initialization's query and kind, and its linked type the deduced type, before
 any later use reads it. The cached evaluator takes a compound literal now, as the
 expression walk's leaf at its `}`: `(struct S){...}` and `(int[]){...}` are
-initializers it types, in `typeof`'s regions too. A use of the placeholder in a
-constant evaluation's binding is a use of the variable in its own initializer
-(`(typeof(x)){0}`, `sizeof(typeof(x))`), refused there.
+initializers it types, in `typeof`'s regions too. A use of the variable in a
+constant evaluation of its own initializer (`(typeof(x)){0}`,
+`sizeof(typeof(x))`, an array's bound in a compound literal there) binds as
+any use does, recording its declaration, so that the finish's scan of the
+initializer reports it at the use, with clang's message.
 
 Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
 specifiers (a parameter's, a member's, a type name's) at the keyword
