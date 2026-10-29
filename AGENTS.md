@@ -373,8 +373,10 @@ designs and the compilers already built this way.
   executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
   `c_checker_units.c`, the [translation units guide](docs/translation-units.md))
-  the units compile on lanes instead, one unit a lane at a time (`--lanes N`
-  then counts those lanes), each from preprocessing to code as alone
+  the units compile on lanes instead, one unit a lane at a time, with lanes
+  past the units as their sources pay for and the lanes without a unit left
+  taking the units' functions' parts (#777; `--lanes N` then counts those
+  lanes), each from preprocessing to code as alone
   (`check_driver_unit`), and their diagnostics are printed in the command
   line's order: `-fsyntax-only` checks each, `-c` writes each one's object in
   the current directory as clang names it (`-o` refused), and the link merges
@@ -5132,7 +5134,11 @@ measurements.
 files: `./build/compiler [options] a.c b.c ...`. The units are a lane group's
 items, taken costliest first by their sources' sizes; each runs on one lane
 from preprocessing to its code through `check_driver_unit`, the pipeline a
-command of one file runs, its functions on that lane alone. Each lane keeps an
+command of one file runs, its functions on that lane and on the lanes that have
+no unit left to take (#777: the lanes are a board, `CheckEmitBoard`, on which a
+unit's emission that starts while a lane takes no units shares its parts, cut as
+function lanes cut them, with the lanes that take none,
+`check_program_emit_help`; its outputs one lane's). Each lane keeps an
 intern table and a file cache that its units share; no lane shares anything a
 unit writes. Each unit's diagnostics go to a stream of its own, printed in the
 command line's order after every unit has run. A lane keeps its three big
@@ -5172,8 +5178,10 @@ diagnostics, each unit's alone in the command line's order; refusals, one
 of them over a poisoned stack; the merge on lanes against its twin, by
 `--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
 first in the units' order is the one reported, and a wide addend beside a unit
-without symbols, into the same bytes); the jobserver's tokens held while the
-link writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
+without symbols, into the same bytes); a few large units (#777: a unit of 800
+functions beside a small one, whose lanes without units take its functions'
+parts, `--shared-parts`' report, into objects their own alone and executables
+one lane's); the jobserver's tokens held while the link writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
 and 8, poisoned and by each path the same bytes, and each unit's `-c -g`
 object its own alone. With `--corpus DIR` it compiles DIR's `.c` files at once
 with `-c`, plainly and poisoned, against each alone, and with `--generate DIR`

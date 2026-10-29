@@ -679,6 +679,20 @@ static void lane_publish(uint32_t* word, uint32_t value)
     }
 }
 
+// Adds two to *word, its bit 0 cleared, and wakes the lanes sleeping on it in lane_wait: for a word that several threads
+// advance at once, whose advances lane_publish's exchanges could set back (#777's board). A lane waiting on the old
+// value sees the change, and one asleep on it is woken; one that already waits on the new value, if this clears its bit
+// 0, finds the word changed under its futex and sets the bit again before it sleeps.
+static __attribute__((unused)) void lane_advance(uint32_t* word)
+{
+    const uint32_t previous = __atomic_fetch_add(word, 2, __ATOMIC_RELEASE);
+    if ((previous & 1u) != 0)
+    {
+        __atomic_fetch_and(word, ~1u, __ATOMIC_RELAXED);
+        syscall(SYS_futex, word, FUTEX_WAKE_PRIVATE, INT_MAX, 0, 0, 0);
+    }
+}
+
 // Arrives at the sync of `generation`, read before arriving, and returns once every lane of the group has arrived. The
 // release in each arrival and the acquire in the last one, and the release in advancing the generation and the acquire
 // in each waiting lane's read of it, make every lane's writes before the sync visible to every lane after it.
