@@ -166,6 +166,49 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
     return severity;
 }
 
+// Snapshot command-line policy independently of option storage and source-ordered pragma overrides.
+static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options)
+{
+    _Static_assert(CHECK_WARNING_ID_KR_TOO_MANY - CHECK_WARNING_ID_KR_DEFINITION + 1 == BUSTER_ARRAY_LENGTH(input->kr_warning_severities),
+                   "the K&R policy snapshot covers its four stable IDs");
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(input->kr_warning_severities); i += 1)
+    {
+        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false);
+        input->kr_warning_severities[i] = (uint8_t)command.severity;
+        input->kr_warning_quiet = command.quiet;
+        input->kr_warning_system = command.system_headers;
+        input->kr_warning_errors |= command.severity >= CHECK_WARNING_ERROR;
+    }
+    input->kr_warning_policy = true;
+}
+
+// K&R diagnostics retain call-site spelling independently of the definition's compatibility signature.
+static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t known = graph->members != NULL ? graph->members[node] : 0;
+    uint32_t callee = graph->operand0[node];
+    if (callee < graph->count && graph->ops[callee] == CHECK_OP_ADDRESS)
+    {
+        callee = graph->operand0[callee];
+    }
+    return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
+}
+
+static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    // An implicit declaration already has its own diagnostic; Clang does not add a deprecation warning to direct
+    // calls to it. An explicit pointer or a dereferenced designator still has its expression's ordinary policy.
+    const bool implicit = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && declaration < input->token_count &&
+                          (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
+    const uint32_t id = check_diagnostic_warning_index(warning);
+    const CheckWarningSeverity baseline = input->kr_warning_policy && id >= CHECK_WARNING_ID_KR_DEFINITION && id <= CHECK_WARNING_ID_KR_TOO_MANY ?
+        (CheckWarningSeverity)input->kr_warning_severities[id - CHECK_WARNING_ID_KR_DEFINITION] : CHECK_WARNING_WARNING;
+    const bool suppressed = implicit || input->kr_warning_quiet || (!input->kr_warning_system && check_graph_system_token(&input->graph, token));
+    return suppressed ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, baseline);
+}
+
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
 {
     const CheckInputAttributes* attributes = input->attributes != NULL && token < input->token_count ? input->attributes[token] : NULL;
@@ -214,6 +257,15 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         }
     }
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
+    for (uint32_t i = 0; i < input->kr_diagnostic_count; i += 1)
+    {
+        const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+        const uint32_t at = diagnostic.token;
+        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
+        {
+            first = at;
+        }
+    }
     for (uint32_t i = 0; policies && i < input->packed_member_count; i += 1)
     {
         const CheckInputPackedMember* member = input->packed_members + i;
@@ -245,15 +297,18 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
             warnings &= warnings - 1;
         }
     }
-    for (uint32_t node = 0; policies && stream != NULL && node < stream->count; node += 1)
+    for (uint32_t node = 0; (policies || input->kr_warning_errors) && stream != NULL && node < stream->count; node += 1)
     {
-        const uint32_t at = input->graph.tokens[node];
         uint32_t warnings = stream->warnings[node];
-        while (at < first && warnings != 0)
+        while (warnings != 0)
         {
             const uint32_t warning = warnings & (0u - warnings);
+            const bool kr = (warning & CHECK_WARNING_KR_CALLS) != 0;
+            const uint32_t at = kr ? check_diagnostic_kr_call_token(input, node) : input->graph.tokens[node];
             const bool ignored = stream->warning_ignored != NULL && (stream->warning_ignored[node] & warning) != 0;
-            if (check_diagnostic_severity_default(input, at, warning, ignored) >= CHECK_WARNING_ERROR)
+            const CheckWarningSeverity severity = kr ? check_diagnostic_kr_severity(input, at, warning) :
+                                                      check_diagnostic_severity_default(input, at, warning, ignored);
+            if (at < first && severity >= CHECK_WARNING_ERROR)
             {
                 first = at;
             }
