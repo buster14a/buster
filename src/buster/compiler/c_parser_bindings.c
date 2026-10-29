@@ -23,6 +23,9 @@ struct ParseBindings
     uint32_t* declarations;
     uint8_t* namespaces;
     uint8_t* kinds;
+    // Definition declarators in OPEN_BODY source order, separate from their earlier binding activation points.
+    uint32_t* body_declarations;
+    uint32_t body_count;
     uint32_t count;
     CBindingStatistics statistics;
     bool valid;
@@ -123,6 +126,7 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
         .declarations = output->declarations,
         .namespaces = output->namespaces,
         .kinds = output->kinds,
+        .pending_definition = BUSTER_PARSE_NONE,
     };
     ParseTree tree = { 0 };
     if (valid)
@@ -150,6 +154,7 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
         for (uint32_t t = 0; t < count; t += 1)
         {
             trace.matches[t] = t;
+            output->body_count += parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY;
         }
         for (uint32_t t = 0; t < count; t += 1)
         {
@@ -159,7 +164,10 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
                 trace.matches[parent] = t;
             }
         }
-        valid = parse_bindings_prepare_labels(parser, &trace, &parser->scratch);
+        output->body_declarations = output->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, output->body_count) : NULL;
+        trace.body_declarations = output->body_declarations;
+        trace.body_capacity = output->body_count;
+        valid = (output->body_count == 0 || output->body_declarations != NULL) && parse_bindings_prepare_labels(parser, &trace, &parser->scratch);
     }
     if (valid)
     {
@@ -185,7 +193,7 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
             uint32_t diagnostic_count = 0;
             const ParseScalarResult result = parse_scalar_traced(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, count, parser->language,
                                                                  &initial, &tree, &parser->scratch, 0, 0, &diagnostic_count, &trace);
-            valid = !result.out_of_memory && result.errors == 0 && output->events.valid;
+            valid = !result.out_of_memory && result.errors == 0 && output->events.valid && trace.body_count == output->body_count;
             if (valid)
             {
                 c_bindings_restore(&output->events, 0, count);
