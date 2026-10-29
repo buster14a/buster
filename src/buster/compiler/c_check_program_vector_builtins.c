@@ -321,7 +321,8 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
             row->records[0].immediate = in.floating && in.element == 4 && out.element == 2 ? 4 : 0;
             row->record_count = 1;
         }
-        if (reason == NULL && in.bfloat)
+        // bf16's widening to floats, after its first record: an identity conversion of bf16 elements has neither.
+        if (reason == NULL && form != 0 && in.bfloat)
         {
             static const CheckVectorForms shifts = BUSTER_CHECK_VECTOR_FORMS(VPSLLD_X_XM128_IMM8, VPSLLD_Y_YM256_IMM8, VPSLLD_Z_ZM512_IMM8);
             row->records[1] = check_vector_lower_record(shifts.forms[check_vector_builtin_width(out.bytes)], 0, v0, v0);
