@@ -158,8 +158,11 @@
 //   - X86: the machine operation `value` of Tier0Function.operations (Tier0Operation, a short run of records), which
 //     pops its operands, the first pushed first, of the classes its row says, and pushes its result, of the row's result
 //     class (`class`, or nothing for VOID): a vector operation, an intrinsic's instruction.
-// A function with ALLOCA, STACK_SAVE or STACK_RESTORE has a frame pointer, rbp, which then neither a depth nor a home
-// takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
+//   - FRAME_ADDRESS: pushes the function's frame address (`class` U64; `value` 0), its frame pointer: the address of the
+//     caller's rbp that its prologue pushed, under the return address and 16 bytes below its incoming arguments, as
+//     clang -O0's frame has it (__builtin_frame_address(0)).
+// A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
+// nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
 // frame's address, which rsp leaves, and its integer stack has two depths fewer.
 // Long double (F80) takes CONST (`value` an index into Tier0Function.x87_constants), DUP, NEG, CONVERT (to and from every
@@ -233,9 +236,12 @@
 #define BUSTER_TYPED_ALLOCA 42
 #define BUSTER_TYPED_STACK_SAVE 43
 #define BUSTER_TYPED_STACK_RESTORE 44
-#define BUSTER_TYPED_JUMP_INDIRECT 45
-#define BUSTER_TYPED_X86 46
-#define BUSTER_TYPED_KINDS 47
+// After the stack's other kinds, so that the four are one range (tier0_moves_stack).
+#define BUSTER_TYPED_FRAME_ADDRESS 45
+#define BUSTER_TYPED_JUMP_INDIRECT 46
+// The vectors' kind, the last, which the validators' paths test as one with the kinds past it.
+#define BUSTER_TYPED_X86 47
+#define BUSTER_TYPED_KINDS 48
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -404,7 +410,9 @@ struct Tier0Operation
 // defines the symbol whose GLOBAL_ADDRESS is the label's address.
 //
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
-// compile without it allocates and copies nothing for them.
+// compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
+// requests to the form choice (Tier0Code.choice_records and the rest), for measuring the choice on real functions
+// (#221, benchmark-backend-source).
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -451,6 +459,7 @@ struct Tier0Function
     const uint32_t* label_entries;
     uint32_t label_count;
     bool entry_records;
+    bool choice_requests;
 };
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
@@ -517,18 +526,20 @@ typedef enum Tier0Error
 // `entry_records` is each of the function's `entry_count` typed entries' first record, and one more, the epilogue's:
 // ascending, an entry that emits no record (a leaf fused into its consumer) at the next entry's; with branch sizing's
 // offsets, where each entry's code starts in bytes, which source rows give a debugger (debug.c, #395). Without it,
-// entry_records is null and entry_count 0. `deferred` counts the entries the vector path left to tier0_emit_deferred
-// (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
-// (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
-// in their order (0 for a function without them): the label's first record. The frame is the one tier0_emit_prologue
-// made, for its unwind tables (unwind_tier0_frame, #395): the callee-saved registers it pushed (Tier0Frame.saved's
-// bits, in tier0_callee_saved's order), whether it pushed rbp first and pointed it at the push (a frame pointer, which
-// a function that moves rsp as it runs has, and one whose frame is realigned), the bytes it reserved below the pushes,
-// the log2 of the alignment it realigned rsp to after them (0 for none: `and rsp, -alignment`, a frame pointer's alone)
-// and whether it then copied rsp into r15, the realigned frame's base where the body moves rsp (`frame_base`, r15 among
-// the pushes). The prologue's pushes, the frame pointer's mov, the reservation, the realignment and the base's mov are
-// the code's first records, and the epilogue's release (an add, or with a frame pointer the lea or mov), pops and ret
-// its last.
+// entry_records is null and entry_count 0. With Tier0Function.choice_requests, the `choice_count` requests the form
+// choice took (x86_choose_forms's): each one's record before the choice (its template's form, the row's widest
+// immediate), and its row, value and context; without it they are null and 0. `deferred` counts the entries the vector
+// path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose values
+// went to the deep slots (tier0_select_deep). `label_records` has a record index for each of
+// Tier0Function.label_entries, label_count of them in their order (0 for a function without them): the label's first
+// record. The frame is the one tier0_emit_prologue made, for its unwind tables (unwind_tier0_frame, #395): the
+// callee-saved registers it pushed (Tier0Frame.saved's bits, in tier0_callee_saved's order), whether it pushed rbp
+// first and pointed it at the push (a frame pointer, which a function that moves rsp as it runs has, and one whose
+// frame is realigned), the bytes it reserved below the pushes, the log2 of the alignment it realigned rsp to after them
+// (0 for none: `and rsp, -alignment`, a frame pointer's alone) and whether it then copied rsp into r15, the realigned
+// frame's base where the body moves rsp (`frame_base`, r15 among the pushes). The prologue's pushes, the frame
+// pointer's mov, the reservation, the realignment and the base's mov are the code's first records, and the epilogue's
+// release (an add, or with a frame pointer the lea or mov), pops and ret its last.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -541,6 +552,11 @@ struct Tier0Code
     uint32_t reference_count;
     uint32_t* entry_records;
     uint32_t entry_count;
+    X86Instruction* choice_records;
+    uint16_t* choice_rows;
+    int64_t* choice_values;
+    uint16_t* choice_contexts;
+    uint32_t choice_count;
     uint32_t* label_records;
     uint32_t label_count;
     uint32_t deferred;
@@ -609,11 +625,14 @@ static const uint8_t tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS] = {
     X86_REGISTER_RBP,
 };
 
-// Whether an entry of this kind moves rsp in the body (ALLOCA, STACK_SAVE and STACK_RESTORE), which gives its function a
-// frame pointer.
+// Whether an entry of this kind is one of the stack's, which give its function a frame pointer: those that move rsp in
+// the body or read it (ALLOCA, STACK_SAVE and STACK_RESTORE), and FRAME_ADDRESS, which reads the frame pointer itself.
+// A function with any of them has the frame of one whose rsp moves.
 static bool tier0_moves_stack(uint32_t kind)
 {
-    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE;
+    _Static_assert(BUSTER_TYPED_FRAME_ADDRESS == BUSTER_TYPED_STACK_RESTORE + 1 && BUSTER_TYPED_STACK_RESTORE == BUSTER_TYPED_ALLOCA + 2,
+                   "the stack's kinds are one range");
+    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_FRAME_ADDRESS;
 }
 
 // The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer (one whose
@@ -2455,10 +2474,11 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // COPY: tier0_emit_deferred's, its moves by its size.
     tier0_defer(BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
-    // ALLOCA, STACK_SAVE and STACK_RESTORE: tier0_emit_deferred's, which read the frame's outgoing area.
+    // ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS: tier0_emit_deferred's, which read the frame's outgoing area.
     tier0_defer(BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
+    tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -2941,6 +2961,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 2] = BUSTER_TIER0_UNARY,
@@ -4387,6 +4408,14 @@ static X86Instruction tier0_instruction(uint32_t form, uint8_t reg, uint8_t rm, 
     return record;
 }
 
+// Of an operation's imm8 and imm32 forms, the imm8's where its immediate keeps `value` (#221's rule,
+// x86_immediate_encodes), as the emitter's own records with a constant take them: the frame's reservation, its
+// realignment and ALLOCA's rounding.
+static uint32_t tier0_immediate_form(uint32_t imm8, uint32_t imm32, int64_t value)
+{
+    return x86_immediate_encodes(imm8, value) ? imm8 : imm32;
+}
+
 // mov [rsp + offset], reg and back (from rbp with a frame pointer: Tier0Frame's base and bias), 64-bit (a general
 // register) or as a double (an XMM one, BUSTER_TIER0_XMM's).
 static void tier0_spill(Tier0Writer* writer, const Tier0Frame* frame, uint32_t reg, uint32_t offset, bool load)
@@ -5261,14 +5290,14 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
                entries->floating_depths[i]);
 }
 
-// ALLOCA's records, and STACK_SAVE's and STACK_RESTORE's (tier0_emit_stack's).
+// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's).
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
 #define BUSTER_TIER0_STACK_RECORDS 1
 
-// The entries that move rsp, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
+// The stack's entries, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
 // realigned frame's alignment, so that rsp keeps it) and taken from rsp, and the allocation's address in its register,
 // above the outgoing area (add, and, sub and lea, or mov with no area); STACK_SAVE's rsp into the register at its depth,
-// and STACK_RESTORE's back from the one at depth − 1.
+// STACK_RESTORE's back from the one at depth − 1, and FRAME_ADDRESS's rbp into the register at its depth.
 static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -5278,8 +5307,10 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
         const uint8_t count = tier0_integer_depths[depth - 1];
         const uint32_t log2 = frame->alignment_log2 != 0 ? frame->alignment_log2 : BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
         const int32_t alignment = (int32_t)(UINT32_C(1) << log2);
-        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, alignment - 1));
-        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, -alignment));
+        tier0_put(writer, tier0_instruction(tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, alignment - 1), 0, count, BUSTER_X86_REGISTER_DIRECT, 0,
+                                            alignment - 1));
+        tier0_put(writer, tier0_instruction(tier0_immediate_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, -alignment), 0, count, BUSTER_X86_REGISTER_DIRECT, 0,
+                                            -alignment));
         tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         if (frame->outgoing != 0)
         {
@@ -5290,9 +5321,10 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         }
     }
-    else if (kind == BUSTER_TYPED_STACK_SAVE)
+    else if (kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_FRAME_ADDRESS)
     {
-        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, tier0_integer_depths[depth], X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        const uint8_t source = kind == BUSTER_TYPED_STACK_SAVE ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, tier0_integer_depths[depth], source, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
     else
     {
@@ -5892,7 +5924,7 @@ static uint32_t tier0_vector_store(uint32_t bytes)
 // mov dword.
 static bool tier0_vector_word_fits(const Tier0Function* function, uint64_t k, uint32_t w)
 {
-    return tier0_fits_int32((int64_t)function->vector_constants[8 * k + w]);
+    return x86_immediate_encodes(X86_FORM_MOV_RM64_IMM32, (int64_t)function->vector_constants[8 * k + w]);
 }
 
 // Whether constant k is all zeros up to its bytes, which vpxord and one store make.
@@ -6128,7 +6160,7 @@ static bool tier0_vector_register_class(uint32_t class)
 
 static bool tier0_general_register_class(uint32_t class)
 {
-    return class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+    return class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
 }
 
 // A role's register by `placement` (tier0_operation_placement's), in a field of register class `class`: in a vector
@@ -6188,7 +6220,8 @@ static Tier0Reach tier0_operation_reach(const Tier0Operation* operation)
     {
         X86Instruction record = operation->records[r];
         const Tier0Fields fields = tier0_operation_fields(&record);
-        const bool vex = x86_form_description(record.form)->family == BUSTER_X86_FAMILY_VEX;
+        // A VEX form's vector registers are below 16, and so are a legacy one's (SHA's, SSE4A's).
+        const bool vex = x86_form_description(record.form)->family != BUSTER_X86_FAMILY_EVEX;
         for (uint32_t k = 0; k < fields.count; k += 1)
         {
             const uint8_t role = *fields.bytes[k];
@@ -7135,8 +7168,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
 // 128 bytes.
 static X86Instruction tier0_realignment(uint32_t alignment_log2)
 {
-    const uint32_t form = alignment_log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32;
-    return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)-(int64_t)(UINT64_C(1) << alignment_log2));
+    const int64_t mask = -(int64_t)(UINT64_C(1) << alignment_log2);
+    const uint32_t form = tier0_immediate_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, mask);
+    return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)mask);
 }
 
 // A realigned frame's records after its reservation: rsp rounded down to its alignment, and with entries that move rsp
@@ -7170,7 +7204,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     }
     if (frame->size != 0)
     {
-        const uint32_t form = frame->size <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
+        const uint32_t form = tier0_immediate_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
     if (frame->alignment_log2 != 0)
@@ -7373,7 +7407,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     }
     else if (frame->size != 0)
     {
-        const uint32_t form = frame->size <= 127 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32;
+        const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
     for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
@@ -7491,9 +7525,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 }
                 else if (tier0_moves_stack(function->kinds[i]))
                 {
-                    // The frame pointer's; STACK_SAVE's value at its depth (ALLOCA's and STACK_RESTORE's operand is
-                    // the entry before's).
-                    integer_top = function->kinds[i] == BUSTER_TYPED_STACK_SAVE && depth > integer_top ? depth : integer_top;
+                    // The frame pointer's; STACK_SAVE's and FRAME_ADDRESS's value at its depth (ALLOCA's and
+                    // STACK_RESTORE's operand is the entry before's).
+                    const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
+                    integer_top = leaf && depth > integer_top ? depth : integer_top;
                     moves = true;
                 }
                 else if (memory && tier0_vector_entry(entries, i))
@@ -7591,8 +7626,8 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else
     {
-        // ALLOCA, STACK_SAVE and STACK_RESTORE: an operand, a result, or both, at their depths.
-        const bool operand = kind != BUSTER_TYPED_STACK_SAVE;
+        // ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS: an operand, a result, or both, at their depths.
+        const bool operand = kind != BUSTER_TYPED_STACK_SAVE && kind != BUSTER_TYPED_FRAME_ADDRESS;
         uses[0] = true;
         window[0] = operand ? 1 : 0;
         touch[0] = operand ? (int32_t)before[0] - 1 : (int32_t)before[0];
@@ -7937,6 +7972,30 @@ static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t va
     }
 }
 
+// Tier0Function.choice_requests: the requests copied into the code (from `output`), each with its record before the
+// choice rewrites it. Returns false without room. Out of line and cold: a compile without the request runs none of it.
+static __attribute__((cold, noinline)) bool tier0_copy_choices(Tier0Code* code, Arena* output, const Tier0Choices* choices)
+{
+    const uint32_t count = choices->count;
+    code->choice_records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)count + 1);
+    code->choice_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint16_t, (uint64_t)count + 1);
+    code->choice_values = BUSTER_ARENA_PUSH_ARRAY(output, int64_t, (uint64_t)count + 1);
+    code->choice_contexts = BUSTER_ARENA_PUSH_ARRAY(output, uint16_t, (uint64_t)count + 1);
+    const bool room = code->choice_records != 0 && code->choice_rows != 0 && code->choice_values != 0 && code->choice_contexts != 0;
+    for (uint32_t q = 0; room && q < count; q += 1)
+    {
+        code->choice_records[q] = code->records[choices->records[q]];
+    }
+    if (room)
+    {
+        memcpy(code->choice_rows, choices->rows, (uint64_t)count * sizeof(uint16_t));
+        memcpy(code->choice_values, choices->values, (uint64_t)count * sizeof(int64_t));
+        memcpy(code->choice_contexts, choices->contexts, (uint64_t)count * sizeof(uint16_t));
+        code->choice_count = count;
+    }
+    return room;
+}
+
 // Every form's shape (BUSTER_TIER0_SHAPE_*). Returns false for an immediate past 8 bytes.
 static bool tier0_build_choice_shapes(void)
 {
@@ -8209,11 +8268,13 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         if (BUSTER_VECTOR_PATH(vector))
         {
             tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
+            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         else
         {
             tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
+            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
             x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         if (BUSTER_VECTOR_PATH(vector))
@@ -8402,11 +8463,35 @@ static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier
     return tier0_takes_last(function, i) && validator->depth != 0 && tier0_stack_class(validator->stack[validator->depth - 1]) != function->classes[i - 1];
 }
 
+// The legacy forms a row may have (tier0_operation_form_valid), for the x86 builtins VEX and EVEX have no form of
+// (#148): ones that touch no stack, string or fixed register, and whose other effects (flags; the FS and GS bases, the
+// shadow stack, the caches, the x87's tags) aren't any value Tier 0 keeps across an entry. The flags' tests' MOV and
+// CMOVcc, ADC, SBB and NEG, CRC32, RDRAND, RDSEED and RDPID, the FS and GS bases, the non-temporal and direct
+// stores, the cache lines' flushes and prefetches, FXSAVE (not FXRSTOR, which writes the XMM registers floating values
+// live in), the shadow stack's, SHA's and SSE4A's (whose XMM registers are below 16, as VEX's: tier0_operation_reach),
+// and EMMS, WBINVD, WBNOINVD and INVPCID.
+static const uint16_t tier0_operation_legacy_forms[] = {
+    X86_FORM_MOV_R32_IMM32, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64, X86_FORM_MOV_RM16_R16, X86_FORM_MOV_RM32_R32, X86_FORM_MOV_RM64_R64,
+    X86_FORM_CMOVO_R32_RM32, X86_FORM_CMOVNO_R32_RM32, X86_FORM_CMOVB_R32_RM32, X86_FORM_CMOVAE_R32_RM32, X86_FORM_CMOVE_R32_RM32, X86_FORM_CMOVNE_R32_RM32,
+    X86_FORM_CMOVBE_R32_RM32, X86_FORM_CMOVA_R32_RM32, X86_FORM_CMOVS_R32_RM32, X86_FORM_CMOVNS_R32_RM32, X86_FORM_CMOVP_R32_RM32, X86_FORM_CMOVNP_R32_RM32,
+    X86_FORM_CMOVL_R32_RM32, X86_FORM_CMOVGE_R32_RM32, X86_FORM_CMOVLE_R32_RM32, X86_FORM_CMOVG_R32_RM32, X86_FORM_NEG_RM32, X86_FORM_ADC_R32_RM32,
+    X86_FORM_ADC_R64_RM64, X86_FORM_SBB_R32_RM32, X86_FORM_SBB_R64_RM64, X86_FORM_CRC32_R32_RM8, X86_FORM_CRC32_R32_RM16, X86_FORM_CRC32_R32_RM32,
+    X86_FORM_CRC32_R64_RM64, X86_FORM_RDRAND_R16, X86_FORM_RDRAND_R32, X86_FORM_RDRAND_R64, X86_FORM_RDSEED_R16, X86_FORM_RDSEED_R32, X86_FORM_RDSEED_R64,
+    X86_FORM_RDPID_R64, X86_FORM_RDFSBASE_R32, X86_FORM_RDFSBASE_R64, X86_FORM_RDGSBASE_R32, X86_FORM_RDGSBASE_R64, X86_FORM_WRFSBASE_R32,
+    X86_FORM_WRFSBASE_R64, X86_FORM_WRGSBASE_R32, X86_FORM_WRGSBASE_R64, X86_FORM_MOVNTI_M32_R32, X86_FORM_MOVNTI_M64_R64, X86_FORM_MOVDIRI_M32_R32,
+    X86_FORM_MOVDIRI_M64_R64, X86_FORM_MOVDIR64B_R64_M512, X86_FORM_CLWB_M8, X86_FORM_CLFLUSHOPT_M8, X86_FORM_PREFETCHIT0_M8, X86_FORM_PREFETCHIT1_M8,
+    X86_FORM_FXSAVE_M, X86_FORM_FXSAVE64_M, X86_FORM_RDSSPD_R32, X86_FORM_RDSSPQ_R64, X86_FORM_INCSSPD_R32, X86_FORM_INCSSPQ_R64, X86_FORM_WRSSD_M32_R32,
+    X86_FORM_WRSSQ_M64_R64, X86_FORM_WRUSSD_M32_R32, X86_FORM_WRUSSQ_M64_R64, X86_FORM_RSTORSSP_M64, X86_FORM_CLRSSBSY_M64, X86_FORM_SAVEPREVSSP,
+    X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA256MSG1_X_XM128,
+    X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
+    X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128,
+};
+
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
 // branch, whose syntax names no implicit register, that has a vector or an opmask operand when it is EVEX (APX's forms
 // of general registers alone are a target's that Tier 0 doesn't take), and none of those whose implicit operands their
 // syntax doesn't name: vzeroupper and vzeroall (every vector register), mulx (rdx), vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0).
+// string compares (rax, rcx, rdx and xmm0); or one of tier0_operation_legacy_forms.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     static const uint16_t implicit[] = {
@@ -8431,19 +8516,31 @@ static bool tier0_operation_form_valid(uint32_t form)
         const bool evex = description->family == BUSTER_X86_FAMILY_EVEX && x86_form_has_vector_operand(description) &&
                           (description->evex & (BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF)) == 0;
         const bool mulx = vex && description->opcode == 0x0f38f6 && description->prefixes == 0xf2;
-        valid = explicit && (vex || evex) && !mulx && description->relative_bytes == 0;
+        bool legacy = false;
+        for (uint32_t k = 0; !legacy && description->family == BUSTER_X86_FAMILY_LEGACY && k < BUSTER_ARRAY_LENGTH(tier0_operation_legacy_forms); k += 1)
+        {
+            legacy = form == tier0_operation_legacy_forms[k];
+        }
+        valid = legacy || (explicit && (vex || evex) && !mulx && description->relative_bytes == 0);
     }
     return valid;
 }
 
+// Whether a form's operand is no pair or block of registers, but an opmask pair (VP2INTERSECT's k and k + 1), which writes
+// two of the opmask registers no value keeps between entries.
+static bool tier0_operation_single(uint16_t operand)
+{
+    return (operand & (BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK)) == 0 || operand == BUSTER_X86_OPERAND_KP;
+}
+
 // Whether a role may be in a field of register class `class` of `operation`'s records: in a vector register's, VECTOR(j)
 // for any j below 16, FLOATING(j) for a floating operand j and FLOATING_RESULT for a floating result, those two in an XMM
-// field; in a general register's (16, 32 or 64 bits: a memory operand's base or index too), INTEGER(j) for an integer
-// operand j no narrower than the field, INTEGER_RESULT for an integer result and SCRATCH(k); in an opmask register's, k0
-// to k7. An integer's register holds its class's bytes, the rest unspecified, so a field reads it only where it is no
-// wider: a base or an index (GPR64) a 64-bit integer's, a 32-bit field a 32- or 64-bit one's, and a front end extends a
-// narrower operand first (CONVERT). A result's field is written whole: a 32-bit one zero-extends into the register, and
-// none of the forms tier0_operation_form_valid takes has a 16-bit general register (those are APX's).
+// field; in a general register's (8, 16, 32 or 64 bits: a memory operand's base or index too), INTEGER(j) for an integer
+// operand j no narrower than the field, INTEGER_RESULT for an integer result in a field of 32 or 64 bits and SCRATCH(k);
+// in an opmask register's, k0 to k7. An integer's register holds its class's bytes, the rest unspecified, so a field reads
+// it only where it is no wider: a base or an index (GPR64) a 64-bit integer's, a 32-bit field a 32- or 64-bit one's, and a
+// front end extends a narrower operand first (CONVERT). A result's field is written whole: a 32-bit one zero-extends
+// into the register, where an 8- or 16-bit one (the legacy forms', tier0_operation_legacy_forms) would leave the rest.
 static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t role, uint32_t class)
 {
     const uint32_t j = role & 7;
@@ -8459,10 +8556,10 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
     }
     else if (tier0_general_register_class(class))
     {
-        const uint32_t bytes = class == BUSTER_X86_CLASS_GPR64 ? 8 : class == BUSTER_X86_CLASS_GPR32 ? 4 : 2;
+        const uint32_t bytes = class == BUSTER_X86_CLASS_GPR64 ? 8 : class == BUSTER_X86_CLASS_GPR32 ? 4 : class == BUSTER_X86_CLASS_GPR16 ? 2 : 1;
         valid = (role >= BUSTER_TIER0_ROLE_INTEGER(0) && role < BUSTER_TIER0_ROLE_INTEGER(BUSTER_TIER0_OPERATION_OPERANDS) && operand &&
                  tier0_class_integer(operation->operand_classes[j]) && tier0_class_bytes(operation->operand_classes[j]) >= bytes) ||
-                (role == BUSTER_TIER0_ROLE_INTEGER_RESULT && tier0_class_integer(operation->result_class)) ||
+                (role == BUSTER_TIER0_ROLE_INTEGER_RESULT && tier0_class_integer(operation->result_class) && bytes >= 4) ||
                 (role >= BUSTER_TIER0_ROLE_SCRATCH(0) && role < BUSTER_TIER0_ROLE_SCRATCH(BUSTER_TIER0_SCRATCH));
     }
     else if (class == BUSTER_X86_CLASS_OPMASK)
@@ -8475,8 +8572,9 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
 // Whether a machine operation's row is one Tier 0 places and emits as Tier0Operation has it: its counts within their
 // bounds; its operands integers, floating values and VECTORs of 16, 32 or 64 bytes; its result VOID or one of those; and
 // each record of a form tier0_operation_form_valid takes, with its fields' roles as tier0_operation_role_valid has them,
-// no pair or block of registers, a memory operand's address from a base and an optional index (no RIP-relative or
-// absolute one), and then, with its roles placed somewhere (VECTOR(j) as register j), a record x86_validate takes.
+// no pair or block of registers but an opmask pair (tier0_operation_single), a memory operand's address from a base and
+// an optional index (no RIP-relative or absolute one), and then, with its roles placed somewhere (VECTOR(j) as register
+// j), a record x86_validate takes.
 static bool tier0_operation_valid(const Tier0Operation* operation)
 {
     bool valid = operation->record_count <= BUSTER_TIER0_OPERATION_RECORDS && operation->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS;
@@ -8506,10 +8604,9 @@ static bool tier0_operation_valid(const Tier0Operation* operation)
         if (valid)
         {
             const X86FormDescription* description = x86_form_description(record.form);
-            const uint16_t pairs = BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK;
             const bool memory = record.mode != BUSTER_X86_REGISTER_DIRECT;
-            valid = ((description->reg | description->vvvv | description->rm) & pairs) == 0 && (!memory || (record.mode & BUSTER_X86_MODE_BASE) != 0) &&
-                    (record.mode & BUSTER_X86_MODE_RIP) == 0;
+            valid = tier0_operation_single(description->reg) && tier0_operation_single(description->vvvv) && tier0_operation_single(description->rm) &&
+                    (!memory || (record.mode & BUSTER_X86_MODE_BASE) != 0) && (record.mode & BUSTER_X86_MODE_RIP) == 0;
             const Tier0Fields fields = tier0_operation_fields(&record);
             for (uint32_t k = 0; valid && k < fields.count; k += 1)
             {
@@ -9145,16 +9242,20 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
             case BUSTER_TYPED_ALLOCA:
             case BUSTER_TYPED_STACK_SAVE:
             case BUSTER_TYPED_STACK_RESTORE:
-                // A byte count in, an address out; a position out; a position in.
-                if ((kind != BUSTER_TYPED_STACK_SAVE && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+            case BUSTER_TYPED_FRAME_ADDRESS:
+            {
+                // A byte count in, an address out; a position out; a position in; the frame's address out.
+                const bool leaf = kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_FRAME_ADDRESS;
+                if ((!leaf && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
                 {
-                    tier0_reject(&validator, i, "an allocation, or a stack position saved or restored, that isn't U64 or has a value");
+                    tier0_reject(&validator, i, "an allocation, a stack position saved or restored, or a frame's address, that isn't U64 or has a value");
                 }
                 if (kind != BUSTER_TYPED_STACK_RESTORE)
                 {
                     tier0_push(&validator, class);
                 }
                 break;
+            }
             default:
             {
                 // The binary operations and the compares.
@@ -10063,8 +10164,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             }
             else if (tier0_moves_stack(function->kinds[i]))
             {
-                const bool save = function->kinds[i] == BUSTER_TYPED_STACK_SAVE;
-                deferred_integer_top = save && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+                const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
+                deferred_integer_top = leaf && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 moves = true;
             }
             else if (memory && tier0_vector_entry(entries, i))
@@ -10596,6 +10697,7 @@ static const uint8_t tier0_scan_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((a
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_SCAN_PUSH,
     [BUSTER_TYPED_STACK_RESTORE] = 1,
     [BUSTER_TYPED_JUMP_INDIRECT] = 1,
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_SCAN_PUSH,
 };
 
 // Per kind, the bounds of its value (tier0_validate_accepts' table of them, the function's): none; a local, a call, a
@@ -10628,6 +10730,7 @@ static const uint8_t tier0_scan_bounds[BUSTER_TYPED_KIND_LIMIT] __attribute__((a
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_BOUND_ZERO,
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_BOUND_ZERO,
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_BOUND_ZERO,
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_BOUND_ZERO,
 };
 
 // Per kind, its operands' rules: it reads the class of its top operand (TOP: one it pops, or DUP's) and of the one below
@@ -10784,7 +10887,8 @@ _Static_assert(BUSTER_TYPED_CLASS_VECTOR == 14 && BUSTER_TYPED_CLASS_F80 == 11 &
     entry(BUSTER_TYPED_ALLOCA, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                             \
     entry(BUSTER_TYPED_STACK_SAVE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                         \
     entry(BUSTER_TYPED_STACK_RESTORE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
-    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
+    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
+    entry(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
 static const uint8_t tier0_scan_own_low[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_LOW_BYTE) };
 static const uint8_t tier0_scan_own_high[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_HIGH_BYTE) };
 

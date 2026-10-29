@@ -1,0 +1,18 @@
+function (i32) -> i32 {
+  label #0 b1
+  label #1 b2
+b0:
+  %0 = param.i32 0
+  %1 = symbol_addr.ptr @2
+  %2 = symbol_addr.ptr @3
+  %3 = const.i32 0x00000000000000000000000000000000
+  %4 = icmp.i1 %0, %3 ne
+  %5 = select.ptr %4, %1, %2
+  %6 = br_indirect.void %5
+b1:
+  %7 = const.i32 0x0000000000000000000000000000000a
+  %8 = ret.void %7
+b2:
+  %9 = const.i32 0x00000000000000000000000000000014
+  %10 = ret.void %9
+}

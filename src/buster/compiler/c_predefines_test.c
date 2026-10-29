@@ -1653,11 +1653,238 @@ static bool predefines_test_refused(void)
     return result && wrong == 0;
 }
 
+// The target attribute strings predefines_test_attributes asks clang about, besides each flagged feature on and off:
+// strings of clang's headers, CPUs, the attribute's features in each order around the soft rules, APX's, "default", and
+// what clang ignores (each with avx512f, which a baseline unit's function gets only if clang takes the string).
+static const char* const predefines_test_attribute_texts[] = {
+    "avx512fp16,avx512vl", "avx512bw,avx512vl,gfni", "movrs, avx10.2", "amx-avx512,avx10.2", "kl,widekl", "sm4,avx10.2", "avx512f,vaes",
+    "avx10.2", "xop", "avxneconvert", "sha512", "arch=x86-64", "arch=znver5,no-avx2", "arch=x86-64,avx512fp16", "arch=k8",
+    "arch= znver4 ", "arch=", "arch=,arch=skylake", "tune=znver4", "tune=x86-64-v3,avx2", "arch=sapphirerapids,no-avx512fp16",
+    "arch=x86-64-v2", "arch=atom,sse4.2", "popcnt,no-popcnt", "no-popcnt,popcnt", "no-sse4.2", "avx10.2,no-sse4.2", "no-mmx", "no-sse",
+    "no-xsave,avx", "avx,no-xsave", "no-crc32,sse4.2", "sse4.2,no-popcnt", "no-avx512f,avx512fp16", "avx512fp16,no-avx512bw", "egpr",
+    "no-ndd", "egpr,push2pop2,ppx,ndd,ccmp,nf,cf,zu", "default", " avx512f ", "\tavx512f", "avx512f\n", " avx512f , avx2 ",
+    "avx512f,bogus", "avx512f,cmov", "avx512f,64bit", "avx512f,cx8", "avx512f,inline-asm-use-gpr32", "avx512f,", "avx512f,,avx2", "AVX512F",
+    "avx512f,fpmath=sse", "fpmath=sse,avx512f", "avx512f,no-fpmath=x", "avx512f,arch=native", "avx512f,arch=i686", "avx512f,arch=lakemont",
+    "avx512f,tune=generic", "avx512f,tune=i386", "avx512f,arch=znver4,arch=znver5", "avx512f,tune=znver4,tune=znver3",
+    "avx512f,branch-protection=standard", "avx512f,no-", "avx512f,default", "default,avx512f", " default", "avx512f,evex512", "",
+    "avx512f, no-bogus", "avx512f,no-arch=znver5", "avx512f,ARCH=znver5",
+};
+
+// Writes `text` as a C string literal's contents.
+static void predefines_test_put_literal(FILE* file, const char* text)
+{
+    for (const char* p = text; *p != 0; p += 1)
+    {
+        if (*p == '\t' || *p == '\n' || *p == '"' || *p == '\\')
+        {
+            fprintf(file, "\\%c", *p == '\t' ? 't' : *p == '\n' ? 'n' : *p);
+        }
+        else
+        {
+            fputc(*p, file);
+        }
+    }
+}
+
+// The features an IR attribute group's "target-features" turns on (into `on`), by the compiled table's names; false if
+// it has none, or a name the table hasn't.
+static bool predefines_test_group_features(const char* text, PredefinesFeatures* on)
+{
+    static const char key[] = "\"target-features\"=\"";
+    const char* p = text != 0 ? strstr(text, key) : 0;
+    bool result = p != 0;
+    *on = (PredefinesFeatures){ 0 };
+    p = result ? p + sizeof(key) - 1 : 0;
+    while (result && *p != '"' && *p != 0)
+    {
+        const char sign = *p;
+        const char* start = p + 1;
+        p = start;
+        while (*p != ',' && *p != '"' && *p != 0)
+        {
+            p += 1;
+        }
+        const int32_t feature = predefines_feature_index(start, (size_t)(p - start));
+        result = feature >= 0;
+        if (!result)
+        {
+            printf("predefines attributes: clang's IR names a feature the table hasn't: %.*s\n", (int)(p - start), start);
+        }
+        if (result && sign == '+')
+        {
+            predefines_test_set(on, (uint32_t)feature);
+        }
+        p += *p == ',';
+    }
+    return result;
+}
+
+// A function's target attribute (#180), against clang: in a unit of each command line, the features
+// predefines_target_attribute and predefines_apply give a function of each attribute (predefines_test_attribute_texts,
+// and each flagged feature on and off) must be those clang's IR gives it ("target-features"), but the features no flag
+// names (64bit, cmov, cx8, inline-asm-use-gpr32), which clang lists for some CPUs and not others; one clang ignores, or
+// "default", must leave it the unit's, and a function without one must have them too.
+static bool predefines_test_attributes(const char* directory)
+{
+    static const char* const units[] = {
+        "-march=x86-64", "-march=znver5", "-march=x86-64-v3 -mno-popcnt", "-march=sapphirerapids", "-march=native", "-march=x86-64 -mavx512f -mno-xsave",
+        "-march=znver4 -mno-sse4.2", "-march=x86-64-v4 -mno-mmx",
+    };
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/predefines-attributes.c", directory);
+    // The attributes: the fixed ones, then each flagged feature on and off.
+    char flagged[2 * BUSTER_ARRAY_LENGTH(predefines_features)][40];
+    uint32_t flagged_count = 0;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(predefines_features); f += 1)
+    {
+        if (predefines_features[f].flag != PREDEFINES_FLAG_NONE)
+        {
+            snprintf(flagged[flagged_count], sizeof(flagged[0]), "%s", predefines_features[f].name);
+            snprintf(flagged[flagged_count + 1], sizeof(flagged[0]), "no-%s", predefines_features[f].name);
+            flagged_count += 2;
+        }
+    }
+    const uint32_t fixed = BUSTER_ARRAY_LENGTH(predefines_test_attribute_texts);
+    const uint32_t function_count = fixed + flagged_count;
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    for (uint32_t i = 0; file != 0 && i < function_count; i += 1)
+    {
+        fputs("__attribute__((target(\"", file);
+        predefines_test_put_literal(file, i < fixed ? predefines_test_attribute_texts[i] : flagged[i - fixed]);
+        fprintf(file, "\"))) int f%u(void) { return %u; }\n", i, i);
+    }
+    if (file != 0)
+    {
+        fprintf(file, "int f%u(void) { return %u; }\n", function_count, function_count);
+        fclose(file);
+    }
+    PredefinesTestJobs jobs = { 0 };
+    result = result && predefines_test_jobs_initialize(&jobs, BUSTER_ARRAY_LENGTH(units));
+    for (uint32_t u = 0; result && u < BUSTER_ARRAY_LENGTH(units); u += 1)
+    {
+        PredefinesTestJob* job = predefines_test_job(&jobs);
+        result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -O0 -Wno-ignored-attributes -o - -x c") &&
+                 predefines_test_words(&jobs, job, units[u]) && predefines_test_input(&jobs, job, path);
+    }
+    result = result && predefines_test_run_jobs(&jobs, 0);
+    uint32_t checked = 0;
+    uint32_t failures = 0;
+    int32_t* groups = result ? calloc((size_t)function_count + 1, sizeof(int32_t)) : 0;
+    const char** texts = result ? calloc(4096, sizeof(char*)) : 0;
+    result = result && groups != 0 && texts != 0;
+    for (uint32_t u = 0; result && u < BUSTER_ARRAY_LENGTH(units); u += 1)
+    {
+        PredefinesTestJob* clang = &jobs.jobs[u];
+        result = clang->status == 0 && clang->output != 0;
+        if (!result)
+        {
+            printf("predefines attributes: clang %s fails\n", units[u]);
+        }
+        // Each function's attribute group and each group's line, in the IR clang wrote.
+        for (uint32_t f = 0; f <= function_count; f += 1)
+        {
+            groups[f] = -1;
+        }
+        memset(texts, 0, 4096 * sizeof(char*));
+        for (char* line = result ? clang->output : 0; line != 0 && *line != 0;)
+        {
+            char* end = strchr(line, '\n');
+            if (end != 0)
+            {
+                *end = 0;
+            }
+            unsigned number = 0;
+            unsigned group = 0;
+            const char* name = strstr(line, " @f");
+            const char* hash = name != 0 ? strstr(name, ") #") : 0;
+            if (strncmp(line, "define ", 7) == 0 && name != 0 && hash != 0 && sscanf(name + 3, "%u", &number) == 1 && sscanf(hash + 3, "%u", &group) == 1 &&
+                number <= function_count && group < 4096)
+            {
+                groups[number] = (int32_t)group;
+            }
+            else if (strncmp(line, "attributes #", 12) == 0 && sscanf(line + 12, "%u", &group) == 1 && group < 4096)
+            {
+                texts[group] = line;
+            }
+            line = end != 0 ? end + 1 : 0;
+        }
+        // Ours, from the same command line.
+        char storage[256];
+        snprintf(storage, sizeof(storage), "%s", units[u]);
+        char* words[16];
+        int count = 0;
+        for (char* word = strtok(storage, " "); word != 0 && count < 14; word = strtok(0, " "))
+        {
+            words[count] = word;
+            count += 1;
+        }
+        words[count] = path;
+        Arena arena = arena_reserve(1ull << 24);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        result = result && pp_parse_options(count + 1, words, &options, &arena, &input, &output, &markers);
+        const PredefinesHost host = result ? predefines_host_of(&options.predefines) : (PredefinesHost){ 0 };
+        const PredefinesFeatures unit = predefines_apply(&options.predefines, &host, host.cpu, 0, 0);
+        PredefinesFeatures flagged_set = { 0 };
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(predefines_features); f += 1)
+        {
+            if (predefines_features[f].flag != PREDEFINES_FLAG_NONE)
+            {
+                predefines_test_set(&flagged_set, f);
+            }
+        }
+        uint32_t reported = 0;
+        for (uint32_t f = 0; result && f <= function_count; f += 1)
+        {
+            const char* text = f < fixed ? predefines_test_attribute_texts[f] : f < function_count ? flagged[f - fixed] : 0;
+            int32_t cpu = -1;
+            const PredefinesTargetAttribute kind = text != 0 ? predefines_target_attribute(text, (uint32_t)strlen(text), &cpu) : PREDEFINES_TARGET_ATTRIBUTE_DEFAULT;
+            const PredefinesFeatures ours = kind == PREDEFINES_TARGET_ATTRIBUTE_VERSION ?
+                                                predefines_apply(&options.predefines, &host, cpu >= 0 ? cpu : host.cpu, text, (uint32_t)strlen(text)) :
+                                                unit;
+            PredefinesFeatures theirs;
+            const bool read = groups[f] >= 0 && predefines_test_group_features(texts[groups[f]], &theirs);
+            bool same = read;
+            for (uint32_t w = 0; same && w < BUSTER_PREDEFINES_FEATURE_WORDS; w += 1)
+            {
+                same = ((ours.words[w] ^ theirs.words[w]) & flagged_set.words[w]) == 0;
+            }
+            if (!same && reported < 8)
+            {
+                printf("predefines attributes: %s, target(\"%s\") (%s): ", units[u], text != 0 ? text : "(none)",
+                       kind == PREDEFINES_TARGET_ATTRIBUTE_VERSION ? "a version" : kind == PREDEFINES_TARGET_ATTRIBUTE_DEFAULT ? "the default" : "ignored");
+                for (uint32_t g = 0; read && g < BUSTER_ARRAY_LENGTH(predefines_features); g += 1)
+                {
+                    if (predefines_has(flagged_set, g) && predefines_has(ours, g) != predefines_has(theirs, g))
+                    {
+                        printf(" %s%s", predefines_has(ours, g) ? "+" : "-", predefines_features[g].name);
+                    }
+                }
+                printf("%s\n", read ? " ours, against clang's" : " clang's IR has no group for it");
+                reported += 1;
+            }
+            failures += !same;
+            checked += 1;
+        }
+        arena_release(&arena);
+    }
+    free(groups);
+    free(texts);
+    printf("predefines: target attributes' features, %u of %u differ from clang's\n", failures, checked);
+    predefines_test_jobs_release(&jobs);
+    unlink(path);
+    return result && failures == 0 && checked == ((uint64_t)function_count + 1) * BUSTER_ARRAY_LENGTH(units);
+}
+
 // The checks --clang runs (see the file's comment).
 static bool predefines_test_run(const char* directory, uint64_t seed)
 {
     bool result = predefines_test_tables(directory);
     result &= predefines_test_options(directory, seed, 400);
     result &= predefines_test_dump(directory);
+    result &= predefines_test_attributes(directory);
     return result;
 }

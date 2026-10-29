@@ -188,6 +188,8 @@ static void check_builtin_misc_test_values(CheckBuiltinMiscTest* test, TypeTable
     result = check_builtin_misc_test_action(table, CBUILTIN_FRAME_ADDRESS, arguments, 1);
     check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.frame_level == 0,
                                   "an explicitly integer-cast floating literal arrives as an integer ICE");
+    check_builtin_misc_test_expect(test, result.evaluated_operands == 0 && result.runtime_builtin == CBUILTIN_FRAME_ADDRESS,
+                                  "a frame builtin's level, an ICE without effects, is not evaluated at run time");
     arguments[0] = check_test_integer(BUSTER_TYPE_INT, 1);
     result = check_builtin_misc_test_action(table, CBUILTIN_RETURN_ADDRESS, arguments, 1);
     check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.frame_level == 1 &&
