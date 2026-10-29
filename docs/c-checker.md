@@ -94,6 +94,18 @@ definitions as real `Link` atoms and prints their bytes and symbolic fixups.
 Preprocessor options include the
 existing language, include-path and macro-definition options.
 
+The semantic driver refuses unsupported hardening, instrumentation and ABI
+options by name rather than silently producing an object without them (#814).
+This includes stack protection, CET, stack-clash checking, `-pg`, function
+instrumentation and profile-generation forms, coverage flags, explicit TLS models, `-mno-red-zone`,
+`-fno-plt`, and the unsupported structure-return, short-double and
+wide-execution-character options. The last stack-protector and CET option
+decides those families, so `-fno-stack-protector` and `-fcf-protection=none`
+can turn them off. The other listed options are conservatively refused even if
+a later argument would disable them. The separate `-E` preprocessor retains
+its predefined-macro behavior; it emits no object. This list does not cover
+sanitizer options.
+
 Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
 bodies defined in system headers, identified by `-isystem` or system-header

@@ -1604,6 +1604,32 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
     return result;
 }
 
+// These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
+// still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
+// differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
+static bool check_driver_unsupported_codegen_option(const char* argument)
+{
+    static const char* const exact[] = {
+        "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
+        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
+        "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
+        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+    };
+    static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
+                                            "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
+                                            "-fprofile-generate-cold-function-coverage=" };
+    bool unsupported = false;
+    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
+    {
+        unsupported = strcmp(argument, exact[i]) == 0;
+    }
+    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
+    {
+        unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
+    }
+    return unsupported;
+}
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
@@ -1660,6 +1686,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
     };
     bool missing_value = false;
+    const char* unsupported_codegen = NULL;
+    const char* unsupported_stack_protector = NULL;
+    const char* unsupported_cf_protection = NULL;
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
     // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them.
     CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
@@ -1719,6 +1748,22 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             {
                 libraries.directories[libraries.directory_count++] = text;
             }
+        }
+        else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
+                 strcmp(arguments[i], "-fstack-protector-strong") == 0 || strcmp(arguments[i], "-fstack-protector-all") == 0)
+        {
+            unsupported_stack_protector = strcmp(arguments[i], "-fno-stack-protector") == 0 ? NULL : arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-fcf-protection") == 0 || strncmp(arguments[i], "-fcf-protection=", 16) == 0)
+        {
+            unsupported_cf_protection = strcmp(arguments[i], "-fcf-protection=none") == 0 ? NULL : arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (check_driver_unsupported_codegen_option(arguments[i]))
+        {
+            // Values of options above are already consumed, so an output name like -pg is never treated as a flag.
+            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
         }
         else if (strcmp(arguments[i], "--verify") == 0)
         {
@@ -1786,6 +1831,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             filtered[filtered_count++] = arguments[i];
         }
     }
+    // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
+    unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
@@ -1793,7 +1840,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -1811,6 +1858,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     if (worker_budget.dry_run)
     {
         result = 0;
+    }
+    else if (unsupported_codegen != NULL)
+    {
+        fprintf(stderr, "error: unsupported code generation option '%s'\n", unsupported_codegen);
     }
     else if (!parsed)
     {
