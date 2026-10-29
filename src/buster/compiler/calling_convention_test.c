@@ -4068,9 +4068,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         200,
         256,
     };
-    // (A compiled world's of up to 128 bits, which the producer lowers in the classes of 8 to 64 bits (#534) and in the
-    // 128-bit ones.)
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths) && (!world->compiled || widths[i] <= 128); i += 1)
+    // (A compiled world's too, which the producer lowers in the classes of 8 to 64 bits (#534), in the 128-bit ones and,
+    // past 128 bits, in memory, a limb at a time (#137).)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
     {
         abi_test_world_add(world, type_bit_int(table, widths[i], false));
         abi_test_world_add(world, type_bit_int(table, widths[i], true));
@@ -4616,7 +4616,8 @@ static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
+// to 64 bits or 128, a _BitInt of any width (past 128 bits an aggregate's value in its C, a frame object of its limbs), an
+// enum, a pointer, nullptr_t, float and double, a long double, a complex
 // float, double or long double, a complex integer (GNU's, of __int128 too) and a complex _BitInt of up to 128 bits,
 // __float128 (an aggregate's value in its C, whose operations are libgcc's), a struct or a union, and a vector of 16, 32
 // or 64 bytes of integers or floating values of
@@ -4642,8 +4643,8 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                                                               (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128) ||
                                                               complex_bit_int);
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_LONG_DOUBLE || code == BUSTER_TYPE_CODE_FLOAT128)) ||
-                      ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
-                      kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                      ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || (kind == BUSTER_TYPE_KIND_BIT_INT && size > 16) ||
+                      complex || vector || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     // An _Atomic the world made (abi_test_compiled_atomic), behind an aligned typedef or in a record.
     const bool atomic = kind == BUSTER_TYPE_KIND_ATOMIC;
     return (scalar || wide || atomic) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;

@@ -1495,8 +1495,9 @@ failure.
 16 bytes and at 64 (`-march=x86-64-v4`, both sides), put C that this compiler
 compiles on our side. Their worlds (`AbiTestWorld.compiled`,
 `abi_test_compiled_passes`) hold what its C passes: integers of up to 64 bits,
-and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
-bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
+and `_BitInt`s of 2 to 256 bits, the world's widths (#534's lowering, in the
+classes of 8 to 64 bits, the 128-bit classes for 65 to 128, and past 128 bits
+frame objects of their limbs, #137), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
 (#133's lowering, as aggregates of their two parts), GNU's complex integer
@@ -1517,8 +1518,7 @@ them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
-no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
-`_BitInt` past 128 bits, `_Atomic` of another type, and none of the
+no vector of another size or of `bool`, complex `_BitInt` past 128 bits, `_Atomic` of another type, and none of the
 record runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and

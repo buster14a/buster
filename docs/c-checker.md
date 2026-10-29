@@ -1573,7 +1573,7 @@ What the lowering covers past scalars (#145's programs):
   narrower one's: a negative one's conversion to `__int128` or compare reads it
   as it is.
   The overflow builtins of one of 65 to 127 bits are refused by name (their
-  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
+  recipes take a 128-bit operand whole).
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1862,6 +1862,40 @@ What the lowering covers past scalars (#145's programs):
   name ("increments of __float128 values"), and the `q` suffix's literals as
   invalid. `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
+- **`_BitInt` past 128 bits (#137).** A value is an aggregate's: a frame object
+  of its 64-bit limbs, the least significant first, `ceil(N / 64)` of them
+  aligned to 8 as clang lays one out, which the stream carries by its address
+  (`check_lower_limb_type`), so that copies (through `memmove` past 256
+  bytes), calls, returns and `va_arg` take it as the convention classifies it,
+  in memory. A result keeps its bits past N extended from N, as clang's stores
+  leave them; a compare, a right shift, a conversion and a value's truth
+  extend an operand's top limb again as they read it, as clang's loads read N
+  bits alone, since another compiler's value or a byte copy may leave those
+  bits otherwise. Sums, differences and negations go a limb at a time with
+  their carries, the bitwise operations a limb at a time, compares from the
+  least significant limb up (the top limbs signed for a signed type), and
+  shifts through a buffer of twice the limbs, each limb of the result two
+  neighbouring limbs of the buffer shifted (`check_lower_limb_shift`, which
+  keeps a count past the width inside the buffer). As GCC -O0's code does
+  (clang's expands them inline), products, quotients and remainders are
+  libgcc's `__mulbitint3` and `__divmodbitint4`, and conversions to and from
+  `float`, `double`, `long double` and `__float128` libgcc's `__floatbitint*`
+  and `__fix*bitint`, their precisions -N for a signed type and N for an
+  unsigned one. Conversions to and from the other integers take or give the
+  low limbs, then the sign's or zeros past them; a conversion between such
+  types copies the limbs both have. Compound assignments and increments
+  convert the destination to the calculation's type, compute and convert
+  back, a postfix one keeping a copy of the old value. A global without an
+  initializer is zeros. A unit with such a type has room for 64 entries a
+  limb for each node that touches one (`check_lower_limb_room`), so the stream
+  grows with the width as clang's code does: a `_BitInt(1048576)`'s sum and
+  product compile, and a `_BitInt(8388608)`'s too, whose frames need more than
+  the default 8 MB stack. The checker folds none of their constants (its
+  values hold 128 bits), so a static one with an initializer is refused as not
+  constant; a bit-field of one is refused by name, and so is a complex one
+  ("complex types of _BitInt past 128 bits"). `test-checker`'s
+  `bit-int-past-128-bits` program, against clang -O0's build of it, has each of
+  them, clean under clang's UBSan on every input.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -2027,7 +2061,7 @@ What the lowering covers past scalars (#145's programs):
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: increments of `__float128`
-values, `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
+values, bit-fields of `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
