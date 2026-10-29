@@ -179,6 +179,8 @@ static X86Target x86_target_from_cpuid(const X86CpuId* cpu)
     {
         result.features &= ~avx512_bits;
     }
+    // AVX512-FP16 (7:0 EDX bit 23), an extension, with the AVX-512 state.
+    result.extensions = avx512 && ((cpu->words[1][3] >> 23) & 1) != 0 ? BUSTER_X86_EXTENSION(AVX512FP16) : 0;
     return result;
 }
 

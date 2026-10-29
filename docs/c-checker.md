@@ -1380,7 +1380,21 @@ What the lowering covers past scalars (#145's programs):
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
-  type. `op=` loads, computes and stores back. An element is read and written at
+  type. `op=` loads, computes and stores back. Half-precision elements'
+  (`_Float16`'s) arithmetic and compares are AVX512-FP16's (VADDPH, VCMPPH and
+  the others), which the function's target must have (its extension:
+  `X86Target.extensions`), and their negation flips the sign bits. Where the
+  unit's target hasn't the extension, clang gives `_Float16` excess precision,
+  even in a function whose target attribute adds it: it computes `+ - * /` and
+  negation in float and rounds to half precision only where a value leaves the
+  chain of those operators (a store, a cast, a compare, a call's argument, a
+  conditional's or a comma's operand). One operator's row rounds as clang's does
+  (float's 24 bits are at least twice half's 11 and 2 more, so rounding twice
+  rounds as once), and a negation's quiets signaling NaNs as clang's float
+  conversions do (VCVTPH2PS and VCVTPS2PH after the flip); a chain, an operand
+  of those operators that is one of them or a unary plus, is refused by name
+  (`check_lower_vector_half_chain`). A unit whose target has the extension
+  computes chains in half precision, as clang does. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
   (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
   same bytes changes no bits. Integer division and remainder, and 8-bit
@@ -1457,7 +1471,21 @@ What the lowering covers past scalars (#145's programs):
   - the floating reductions of 64 bytes, two rows in clang's order: the
     halvings to 16 bytes, then to the element, the start the last operation's
     first operand where the reduction has one;
-  - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer.
+  - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
+  - AVX512-FP16's, whose rules name its extension (`CheckX86LowerRule.extensions`),
+    which the function's target must have too: the half-precision elements'
+    exponents, reciprocals and conversions to and from floats, doubles and 16-,
+    32- and 64-bit integers under a mask (MASK_UNARY); two vectors' scales and
+    the scalars' operations and conversions under a mask (MASK_MERGE); the
+    complex products, plain and conjugate (VFMADDCPH, VFCMULCSH and the others,
+    of 32-bit lanes), merged as clang's code merges them
+    (`CheckX86LowerMerge`: into w, zeroed, into a, a's first lane by the mask's
+    first bit, or c's other lanes after its first); the masked FMAs at 64 bytes
+    and of the scalars, and the alternating ones without a mask; max and min;
+    the scalar select (VMOVSH); the scalar's masked loads and stores (the
+    vector's, under the mask, as clang's are); the scalar conversions to
+    integers; and `vcomish`, VCMPSH's compare into k1 by the predicate, whose
+    bit 0 is the int (SCALAR_COMPARE), as clang's code compares.
 
   A rounding control, a builtin's last immediate (CheckX86LowerRounding),
   picks the rule's form for 4 (`_MM_FROUND_CUR_DIRECTION`), its form that
@@ -1496,8 +1524,13 @@ What the lowering covers past scalars (#145's programs):
   prototypes' types, the masks' and the vectors' from the call's argument, with
   every result folded into the program's hash, by both paths against clang
   -O0's code for znver5; they run where the host has the rows' features
-  (`x86_target_native`), and compile and link elsewhere. `test-checker
-  --program-vectors` runs them and the vector programs alone.
+  (`x86_target_native`), and compile and link elsewhere. The AVX512-FP16
+  programs (`c_check_program_fp16_test.c`) are a znver5 unit's functions with
+  the headers' `target("avx512fp16")`, and one in a unit whose target has the
+  extension (x86-64-v4's, against clang's for sapphirerapids), of modest values
+  where the forms clang chooses could choose among NaNs and random bits
+  elsewhere; they run where the host has AVX512-FP16 too (not on Zen 5).
+  `test-checker --program-vectors` runs them and the vector programs alone.
 - **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
   `__builtin_convertvector`, the `__builtin_elementwise_*` functions,
   `__builtin_reduce_*` of integer elements and `__builtin_nontemporal_load` and
@@ -1518,7 +1551,9 @@ What the lowering covers past scalars (#145's programs):
     VCVTUDQ2PD, VCVTQQ2PS and the rest, DQ's for 64-bit ones), to them truncated
     as C converts (VCVTTPS2DQ, VCVTTPD2UQQ and the rest), between floats and
     doubles, from half-precision elements to floats (VCVTPH2PS) and from floats
-    to them (VCVTPS2PH at the current rounding), from bf16 elements to floats
+    to them (VCVTPS2PH at the current rounding), between them and 16-, 32- and
+    64-bit integers or doubles with AVX512-FP16 (VCVTW2PH, VCVTTPH2DQ,
+    VCVTPD2PH and the rest), from bf16 elements to floats
     (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), and nothing
     within one format. A widening one is at the result's width, so that it reads
     a shuffle's first elements in place (`_mm_cvtps_pd`'s);
@@ -1537,7 +1572,8 @@ What the lowering covers past scalars (#145's programs):
     VPSHRDV, with VBMI2) are an instruction each, and so are sqrt and fma of
     floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
     rounding, as llvm.sqrt and llvm.fma are), of vectors and of scalars, whose
-    operands are floating values (`check_vector_scalar_row`, with AVX-512F);
+    operands are floating values (`check_vector_scalar_row`, with AVX-512F),
+    and of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH);
   - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
     elements and a nontemporal load VMOVNTDQA, at an address the pointer's
     element type aligns to the vector's bytes, as clang's code needs them;
@@ -1552,9 +1588,11 @@ What the lowering covers past scalars (#145's programs):
   pointers, or between vectors, the value's bits are the result; and between an
   integer and a float or a double they go through a frame temporary, as clang
   -O0's go through memory. The other floating elementwise functions and
-  conversions (of 8- and 16-bit integers, to bf16 elements, between
-  half-precision elements and doubles), the half-precision and bf16 elements'
-  elementwise functions, floating reductions, a shuffle by a vector of indices,
+  conversions (of 8-bit integers, of 16-bit ones but to and from half-precision
+  elements, to bf16 elements, and between half-precision elements and other
+  types than floats without AVX512-FP16), the bf16 elements' elementwise
+  functions and the half-precision ones' without AVX512-FP16, floating
+  reductions, a shuffle by a vector of indices,
   bit reversal, 8-bit multiplication, the funnel shifts of 8-bit elements, the
   leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
   at underaligned addresses, bit casts of other types, and the rows whose
