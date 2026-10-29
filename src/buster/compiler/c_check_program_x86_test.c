@@ -38,6 +38,21 @@ typedef struct CheckTestX86Program
     bool link_only;
 } CheckTestX86Program;
 
+// A program of the x86 builtins after the types and helpers, against clang's build of the same for the target, run where
+// `run` says.
+static void check_test_program_x86_source(CheckTest* test, const char* clang, const X86Target* target, bool run, const char* name, const char* program)
+{
+    const size_t length = strlen(check_test_x86_types) + strlen(program) + 1;
+    char* source = malloc(length);
+    check_test_expect(test, source != 0, "x86 builtin program source");
+    if (source != 0)
+    {
+        snprintf(source, length, "%s%s", check_test_x86_types, program);
+        check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, target, run);
+        free(source);
+    }
+}
+
 static void check_test_program_x86_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
     static const CheckTestX86Program programs[] = {
@@ -1573,6 +1588,38 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "}",
             BUSTER_X86_FEATURE(AVX512VP2INTERSECT),
         },
+        {
+            // #148's SSE builtins: shuffles, the byte shift and the align past their vectors' bytes (zeros, or a's
+            // bytes alone), the word's extraction and insertion, packs, multiplications, and the floating ones on
+            // random bits (NaNs with payloads, denormals) and on the pairs where MAXPS and MINPS give their second
+            // operand (a NaN in either, zeros of either sign). CVTPS2DQ rounds by MXCSR: on halfway values in the
+            // default mode, then under each of the four rounding modes, set and restored by ldmxcsr around it, on
+            // values that each mode rounds its own way.
+            "x86-sse",
+            "int tested(int n){unsigned h=2166136261u;v4si a,b;v8hi w,w2;v16qi c,d;v4sf f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&w,16,n+2);"
+            "fill(&w2,16,n+3);fill(&c,16,n+4);fill(&d,16,n+5);fill(&f,16,n+6);fill(&g,16,n+7);"
+            "v4si s[]={__builtin_ia32_pshufd(a,0x1b),__builtin_ia32_pshufd(b,0),__builtin_ia32_pshufd(a,255)};FOLD(s);"
+            "v8hi sw[]={__builtin_ia32_pshufhw(w,0x4e),__builtin_ia32_pshuflw(w,0xb1),__builtin_ia32_pshufhw(w2,255),__builtin_ia32_pshuflw(w2,0)};"
+            "FOLD(sw);v4sf sp[]={__builtin_ia32_shufps(f,g,0x4e),__builtin_ia32_shufps(g,f,0xe4),__builtin_ia32_shufps(f,f,255)};FOLD(sp);"
+            "v16qi sr[]={__builtin_ia32_psrldqi128_byteshift(c,3),__builtin_ia32_psrldqi128_byteshift(c,15),__builtin_ia32_psrldqi128_byteshift(c,16),"
+            "__builtin_ia32_psrldqi128_byteshift(c,255)};FOLD(sr);"
+            "v16qi al[]={__builtin_ia32_palignr128(c,d,0),__builtin_ia32_palignr128(c,d,5),__builtin_ia32_palignr128(c,d,16),"
+            "__builtin_ia32_palignr128(c,d,20),__builtin_ia32_palignr128(c,d,32),__builtin_ia32_palignr128(c,d,255)};FOLD(al);"
+            "short e[]={__builtin_ia32_vec_ext_v8hi(w,0),__builtin_ia32_vec_ext_v8hi(w,7)};int ei=__builtin_ia32_vec_ext_v8hi(w2,5);FOLD(e);FOLD(ei);"
+            "v8hi st[]={__builtin_ia32_vec_set_v8hi(w,(short)(n*977),3),__builtin_ia32_vec_set_v8hi(w2,-1,7)};FOLD(st);"
+            "v8hi pk=__builtin_ia32_packssdw128(a,b);v16qi pu=__builtin_ia32_packuswb128(w,w2);v8hi mh=__builtin_ia32_pmulhw128(w,w2);"
+            "FOLD(pk);FOLD(pu);FOLD(mh);v2di md=__builtin_ia32_pmuldq128(a,b);v2di mu=__builtin_ia32_pmuludq128(a,b);FOLD(md);FOLD(mu);"
+            "union{unsigned u[4];v4sf v;}z={{0x80000000u,0,0x7fc00000u,0x3f800000u}},z2={{0,0x80000000u,0x3f800000u,0xffc00001u}};"
+            "v4sf mx[]={__builtin_ia32_maxps(f,g),__builtin_ia32_minps(f,g),__builtin_ia32_maxps(z.v,z2.v),__builtin_ia32_maxps(z2.v,z.v),"
+            "__builtin_ia32_minps(z.v,z2.v),__builtin_ia32_minps(z2.v,z.v)};FOLD(mx);"
+            "v4sf half={(float)n+0.5f,-2.5f,(float)n*1e9f,-0.5f};v4si cv[]={__builtin_ia32_cvtps2dq(f),__builtin_ia32_cvtps2dq(half),"
+            "__builtin_ia32_cvtps2dq(z.v),__builtin_ia32_cvtps2dq(z2.v)};FOLD(cv);"
+            "unsigned csr,mode;__asm__ volatile(\"stmxcsr %0\":\"=m\"(csr));v4sf q={1.75f,-1.25f,2.5f,-2.5f},q2={(float)n*0.75f,-(float)n-0.5f,"
+            "0.5f,(float)n*-1.25f};for(unsigned rc=0;rc<4;rc++){mode=(csr&~0x6000u)|rc<<13;__asm__ volatile(\"ldmxcsr %0\"::\"m\"(mode):\"memory\");"
+            "v4si rv[]={__builtin_ia32_cvtps2dq(q),__builtin_ia32_cvtps2dq(q2),__builtin_ia32_cvtps2dq(half),__builtin_ia32_cvtps2dq(f)};"
+            "__asm__ volatile(\"ldmxcsr %0\"::\"m\"(csr):\"memory\");FOLD(rv);}"
+            "return (int)h;}",
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
@@ -1593,6 +1640,19 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             free(source);
         }
     }
+    // The SSE builtins through the headers' intrinsics, as the corpora call them: a program that includes them, which its
+    // preprocessing finds where the oracle's compile does.
+    check_test_program_includes = true;
+    check_test_program_x86_source(test, clang, target, run_native, "x86-sse-intrinsics",
+                                  "#include <smmintrin.h>\n"
+                                  "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&f,16,n+2);"
+                                  "fill(&g,16,n+3);__m128i r[]={_mm_shuffle_epi32(a,_MM_SHUFFLE(3,1,2,0)),_mm_shufflehi_epi16(a,0x4e),"
+                                  "_mm_shufflelo_epi16(b,0xb1),_mm_srli_si128(a,5),_mm_alignr_epi8(a,b,7),_mm_packs_epi32(a,b),_mm_packus_epi16(a,b),"
+                                  "_mm_mulhi_epi16(a,b),_mm_mul_epi32(a,b),_mm_mul_epu32(a,b),_mm_insert_epi16(a,n*31,6),_mm_cvtps_epi32(f)};FOLD(r);"
+                                  "__m128 m[]={_mm_shuffle_ps(f,g,_MM_SHUFFLE(0,1,2,3)),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);"
+                                  "int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);"
+                                  "return (int)h;}");
+    check_test_program_includes = false;
 }
 
 // What the lowering refuses by name: a builtin the table doesn't name, and one whose instructions the target hasn't.
@@ -1610,6 +1670,14 @@ static void check_test_program_x86_refusals(CheckTest* test)
     {
         check_test_program_boundary_target(test, masks[i], "integer-only-opmask-without-avx512", true, false, 0, 0,
                                            "x86 builtins whose instructions the target hasn't", &baseline);
+    }
+    // #148's SSE builtins pass the checker at the default target, as clang's do there, and the lowering refuses their
+    // vectors.
+    if (baseline_parsed)
+    {
+        check_test_program_boundary_target(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n,1,2,3};"
+                                                 "v4si b=__builtin_ia32_pshufd(a,0x1b);return b[0];}",
+                                           "sse-builtin-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);

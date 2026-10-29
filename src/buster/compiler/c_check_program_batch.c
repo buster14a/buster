@@ -126,8 +126,11 @@ static inline __attribute__((always_inline)) bool check_lower_value_payload(cons
     const uint8_t class = (uint8_t)metadata;
     const uint32_t object = value->object;
     const bool known = object != 0 && object < program->object_count;
+    // Not a _BitInt's, whose values check_lower_bit_int_node extends from its width: so no template takes an expression of
+    // one, whose operands are of one or convert to one (check_lower_conversion_empty).
     bool valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
-                 (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC) << 8)) == 0 && value->overload_head == 0;
+                 (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT) << 8)) == 0 &&
+                 value->overload_head == 0;
     valid = valid && (initialized || op != CHECK_OP_VALUE || !known || !program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
     *kind = 0;
     *bits = 0;

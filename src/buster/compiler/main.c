@@ -595,6 +595,34 @@ int main_unit_checker(int argc, char** argv, bool* found);
 int main_unit_check_builtins(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
+int main_preprocessor_command(int count, char** arguments);
+
+// Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
+// options in step with pp_option_takes_value and the C driver's own options.
+static bool main_preprocessing(int count, char** arguments)
+{
+    static const char* const valued[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter",
+                                          "-target", "--predefines", "--location-limit", "--window-bytes", "--lanes",
+                                          "--worker-budget", "--id-order", "-l", "-L" };
+    bool result = false;
+    for (int i = 0; !result && i < count; i += 1)
+    {
+        if (strcmp(arguments[i], "--") == 0)
+        {
+            break;
+        }
+        result = strcmp(arguments[i], "-E") == 0;
+        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(valued); v += 1)
+        {
+            if (strcmp(arguments[i], valued[v]) == 0 && i + 1 < count)
+            {
+                i += 1;
+                break;
+            }
+        }
+    }
+    return result;
+}
 
 // Keep the historical -c assembly spelling while sending C compilation to the semantic driver. Options which
 // take a separate argument cannot make an output or include path look like an assembly input.
@@ -626,7 +654,7 @@ static bool main_assembly_source(int count, char** arguments)
             assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
         }
     }
-    return compile && assembly && !explicit_c;
+    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments);
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
@@ -681,10 +709,6 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
-    }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "-E") == 0)
-    {
-        result = run_preprocessor_command_mode(argc - 1, argv + 1, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
@@ -1387,7 +1411,8 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        result = run_source_check_command(argc - 1, argv + 1);
+        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
+                 run_source_check_command(argc - 1, argv + 1);
     }
     else
     {
@@ -1456,6 +1481,11 @@ int main_unit_x86(int argc, char** argv, bool* found)
     return main_command(argc, argv, found);
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+int main_preprocessor_command(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, false);
+}
+
 int main_unit_frontend(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
@@ -1498,7 +1528,12 @@ int main_unit_checker(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
 int main_unit_check_builtins(int argc, char** argv, bool* found)
 {
-    return main_command(argc, argv, found);
+    const char* command = argc >= 2 ? argv[1] : 0;
+    OracleCache* cache = oracle_test_fresh_builtin(command) ? oracle_cache() : 0;
+    const OracleMode mode = oracle_test_fresh_begin(cache);
+    const int result = main_command(argc, argv, found);
+    oracle_test_fresh_end(cache, mode);
+    return result;
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
 int main_unit_backend(int argc, char** argv, bool* found)

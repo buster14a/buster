@@ -796,6 +796,7 @@ static void check_builtin_bit_cast_test_clang(CheckBuiltinBitCastTest* test, con
 
 static int run_check_builtin_bit_cast_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinBitCastTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -834,5 +835,7 @@ static int run_check_builtin_bit_cast_tests(int argc, char** argv)
     }
     printf("test-check-builtins-bit-cast: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int result = test.failures != 0;
+    oracle_cache_report(oracle_cache(), "test-check-builtins-bit-cast");
+    oracle_epoch_end(epoch);
     return result;
 }
