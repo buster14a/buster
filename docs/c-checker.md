@@ -2017,8 +2017,17 @@ The test command fails if the oracle cannot run. It covers:
   per distinct text, with `-c` and the flags of the one-step build they
   replaced, and a path whose checked object and oracle are byte for byte the
   last linked program's takes that program's run: the same files would link
-  into the same executable (#465). A program that fails is linked and run, and
-  its directory kept with `driver.c` and `oracle.c`.
+  into the same executable (#465). A control's oracle is clang's build of
+  another source of the same names (`check_test_program_against`): a model of
+  what the program computes, or a mutant of it. The program must agree with
+  it, or with `mismatch` differ from it on some input (the harness's status
+  1). A run is taken from the last program only if that run expected the same
+  outcome. fpclassify's selector programs have both kinds (#148). Their model
+  runs the subnormal selector before the normal one, as a GCC-built clang
+  does: the programs agree with it, and the order-recording encoding they had
+  must differ from it. Their mutants evaluate the normal selector twice, the
+  subnormal one never or the argument twice. A program that fails is linked
+  and run, and its directory kept with `driver.c` and `oracle.c`.
 - The passes after checking that visit a unit's few records rather than every
   token (#592), on every program fixture by both paths
   (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
