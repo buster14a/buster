@@ -122,6 +122,12 @@ static const char* const check_clock_phase_names[] = { "preprocess.read", "prepr
 
 #define BUSTER_CHECK_CLOCK_PHASES (sizeof(check_clock_phase_names) / sizeof(check_clock_phase_names[0]))
 
+// The direct path's write's phases (executable_write's, EXECUTABLE_PHASES of them, in their order), which the report
+// gives as `time-write` lines after the stages: what the `write` stage's time went to, on the writer's lane 0 (#778).
+static const char* const check_clock_write_names[] = { "count", "layout", "symbols", "dynamic", "open", "chunks", "finish" };
+
+#define BUSTER_CHECK_CLOCK_WRITE_PHASES (sizeof(check_clock_write_names) / sizeof(check_clock_write_names[0]))
+
 typedef struct CheckClock CheckClock;
 struct CheckClock
 {
@@ -138,6 +144,9 @@ struct CheckClock
     uint64_t stage_system_us[CHECK_STAGE_COUNT];
     uint64_t stage_minor_faults[CHECK_STAGE_COUNT];
     uint64_t stage_peak_kb[CHECK_STAGE_COUNT];
+    // The write's phases' nanoseconds, from executable_write's result, when it wrote.
+    bool wrote;
+    uint64_t write_nanoseconds[BUSTER_CHECK_CLOCK_WRITE_PHASES];
 };
 
 // The process's system time in microseconds, minor faults and peak resident set in KB, or zeros.
@@ -227,6 +236,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         }
     }
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
+    for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
+    }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
     struct rusage usage = { 0 };
     if (getrusage(RUSAGE_SELF, &usage) == 0)
