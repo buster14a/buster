@@ -55,7 +55,8 @@ struct CheckUnitsUnit
 };
 
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
-// preprocessor, parser, memory and function lanes, and the memory of the links it keeps.
+// preprocessor, parser, memory and function lanes, the memory of the links it keeps, and the pool of the arenas its
+// units release (arena_pool).
 typedef struct CheckUnitsLane CheckUnitsLane;
 struct CheckUnitsLane
 {
@@ -71,6 +72,7 @@ struct CheckUnitsLane
     Arena kept;
     Arena kept_bytes;
     CheckProgramLanes functions;
+    ArenaPool pool;
 };
 
 // What every lane of the units' run reads, and each unit's result, which the lane that takes it fills.
@@ -527,17 +529,21 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 }
 
 // A lane of the units' run: takes the units in turn, costliest first, and compiles each as a lane of its own
-// (lane_alone), so that nothing a unit runs takes the group's other lanes for its own.
+// (lane_alone), so that nothing a unit runs takes the group's other lanes for its own. The arenas its units release go
+// to its pool for the next units' reservations, and are unmapped at its end.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
     CheckUnitsLane* lane = run->lanes + lane_index();
+    arena_pool = &lane->pool;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
+    arena_pool = 0;
+    arena_pool_release(&lane->pool);
 }
 
 // The units' objects' names, -c's (check_driver_object_name's), into `units`; false, after saying why, if two units'
@@ -674,6 +680,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             // compiles those alone, as its own lane 0.
             const bool ran = lane_run(active, check_units_lane, &run, NULL);
             const Lane caller = lane_alone();
+            arena_pool = &states->pool;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 if (!units[order[i]].compiled)
@@ -681,6 +688,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
+            arena_pool = 0;
+            arena_pool_release(&states->pool);
             lane_restore(caller);
             const bool returned = worker_budget_release(&lease);
             lanes->active = ran ? active : 1;
