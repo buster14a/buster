@@ -643,7 +643,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
 
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
 // memory of the links it keeps, the first time the lane takes a unit. False, with the lane failed, if it can't be
-// reserved.
+// reserved: what was stays the lane's, for its release.
 static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverCommand* command)
 {
     if (!lane->ready && !lane->failed)
@@ -675,7 +675,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->compiled = true;
     if (errors != NULL && !check_units_lane_ready(lane, command))
     {
-        fprintf(errors, "fatal error: can't reserve checker memory\n");
+        fprintf(errors, "fatal error: can't reserve the lane's memory\n");
     }
     else if (errors != NULL)
     {
@@ -891,15 +891,14 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;
             }
-            // The lanes' caches and arenas: the kept links are all the link reads.
+            // The lanes' caches and arenas: the kept links are all the link reads. A lane whose setup failed releases
+            // what it reserved before the failure, which its table and cache keep as their initializers left them (as a
+            // lane that took no unit has them zero, which their releases take too).
             for (uint32_t l = 0; l < active; l += 1)
             {
                 CheckUnitsLane* lane = states + l;
-                if (lane->ready)
-                {
-                    file_cache_release(&lane->cache);
-                    intern_release(&lane->identifiers);
-                }
+                file_cache_release(&lane->cache);
+                intern_release(&lane->identifiers);
                 arena_release(&lane->output);
                 arena_release(&lane->scratch);
                 arena_release(&lane->arena);
