@@ -1514,10 +1514,12 @@ and the others pass their 21 named and 6 unnamed arguments as drawn. A
 as it loads (the convention leaves the bits past it unspecified), through
 128-bit shifts whose count takes the depth above it, one more than a
 128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
-that writes each parameter's bytes from the signature's data, the last first
-(a parameter kept in a slot shorter than its object would overwrite the
-parameters after it), then stores them, its unnamed ones read with `va_arg`,
-and returns the result's from the data, and a caller that copies each
+that stores each named parameter's bytes as it arrived (its incoming copy's,
+which the C caller checks against the data), its unnamed ones read with
+`va_arg`, then writes each named parameter's bytes from the signature's data,
+the last first, and stores them again, which the C caller checks too (a
+parameter kept in a home shorter than its object would overwrite the
+parameters after it), and returns the result's from the data, and a caller that copies each
 argument's bytes into a local of its type, calls the C callee with them and
 stores the result's bytes. This executable (or `--buster PATH`) compiles it
 with `--verify -std=gnu23 -w -c` and the run's `-march`, the vector paths'
