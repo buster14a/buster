@@ -426,6 +426,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.data.count = candidate.selected_objects;
         candidate.data.reference_count = data_references;
         candidate.program.bodies = candidate.selected_functions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramBody, candidate.selected_functions) : 0;
+        // Each selected body's instruction set, as its body is the full program's: the targets themselves are shared.
+        const bool targeted = full->body_targets != 0 && candidate.selected_functions != 0;
+        candidate.program.body_targets = targeted ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_functions) : 0;
         candidate.program.references = body_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body_references) : 0;
         candidate.program.regions = full->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, full->region_count) : 0;
         candidate.data.objects = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, candidate.selected_objects) : 0;
@@ -433,7 +436,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.data.reference_counts = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_objects) : 0;
         candidate.data.references = data_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, data_references) : 0;
         candidate.program.object_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, objects);
-        valid = (candidate.selected_functions == 0 || candidate.program.bodies != 0) && (body_references == 0 || candidate.program.references != 0) &&
+        valid = (candidate.selected_functions == 0 || candidate.program.bodies != 0) && (!targeted || candidate.program.body_targets != 0) &&
+                (body_references == 0 || candidate.program.references != 0) &&
                 (full->region_count == 0 || candidate.program.regions != 0) && candidate.program.object_symbols != 0 &&
                 (candidate.selected_objects == 0 || (candidate.data.objects != 0 && candidate.data.reference_offsets != 0 && candidate.data.reference_counts != 0)) &&
                 (data_references == 0 || candidate.data.references != 0);
@@ -448,6 +452,10 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             {
                 const CheckProgramBody* source = full->bodies + body;
                 body_map[body] = bodies;
+                if (candidate.program.body_targets != 0)
+                {
+                    candidate.program.body_targets[bodies] = full->body_targets[body];
+                }
                 candidate.program.bodies[bodies] = *source;
                 candidate.program.bodies[bodies++].reference_first = references;
                 for (uint32_t r = 0; r < source->reference_count; r += 1)
