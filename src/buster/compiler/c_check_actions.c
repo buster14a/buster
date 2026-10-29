@@ -607,6 +607,33 @@ static long double check_action_round_float(TypeId type, long double value)
     return result;
 }
 
+// A constant's conversion to a half-precision type, which float, double and long double's folding doesn't take:
+// an integer's exact magnitude rounded once, or a floating value rounded; false, and the value as it was, for any other
+// destination. Out of line, so that check_action_convert_plain's other conversions keep their registers.
+static __attribute__((noinline)) bool check_action_convert_half(const TypeTable* table, CheckValue* value, TypeId destination)
+{
+    uint32_t source_width = 0;
+    bool source_signed = false;
+    const bool source_integer = check_action_integer_type(table, value->type, &source_width, &source_signed);
+    const TypeId base = type_unqualified(type_strip_aligned(table, destination));
+    const CheckHalf half = check_action_half_format(base);
+    const bool integer = half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_INTEGER && source_integer;
+    const bool floating = half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_FLOATING;
+    if (integer)
+    {
+        const unsigned __int128 mask = check_action_mask(source_width);
+        const unsigned __int128 bits = value->integer & mask;
+        const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
+        value->floating = check_action_half_value(half, check_action_half_round(half, negative, negative ? (0 - bits) & mask : bits, 0));
+        value->constant_kind = CHECK_CONSTANT_FLOATING;
+    }
+    else if (floating)
+    {
+        value->floating = check_action_round_float(base, value->floating);
+    }
+    return integer || floating;
+}
+
 // Convert a constant's representation after type checking has authorized the conversion. Every integer operation
 // uses unsigned bits, and every floating-to-integer cast is range checked before host C is allowed to evaluate it.
 static void check_action_convert_plain(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
@@ -687,23 +714,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     {
         if (!check_action_float_supported(table, destination) || (value->constant_kind == CHECK_CONSTANT_INTEGER && !source_integer))
         {
-            // A half-precision destination is one float, double and long double's folding doesn't take: an integer's exact
-            // magnitude rounded once, or a floating value rounded.
-            const TypeId base = type_unqualified(type_strip_aligned(table, destination));
-            const CheckHalf half = check_action_half_format(base);
-            if (half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_INTEGER && source_integer)
-            {
-                const unsigned __int128 mask = check_action_mask(source_width);
-                const unsigned __int128 bits = value->integer & mask;
-                const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
-                value->floating = check_action_half_value(half, check_action_half_round(half, negative, negative ? (0 - bits) & mask : bits, 0));
-                value->constant_kind = CHECK_CONSTANT_FLOATING;
-            }
-            else if (half != CHECK_HALF_NONE && value->constant_kind == CHECK_CONSTANT_FLOATING)
-            {
-                value->floating = check_action_round_float(base, value->floating);
-            }
-            else
+            if (!check_action_convert_half(table, value, destination))
             {
                 check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
             }
