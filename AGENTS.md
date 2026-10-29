@@ -390,17 +390,21 @@ designs and the compilers already built this way.
   lexer in the driver's unit, the preprocessor and the parser in the front
   end's, and the linker's modules (`import.c`, `runtime.c`,
   `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
-  unit. Their entry points that other units call take the module's macro
-  (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
-  `BUSTER_LINKER_ENTRY`) instead of `static`: `main.c` defines it as nothing
+  unit; and `ir_source_test.c`'s `ir_source_prepare`, the check and emission
+  that `test-ir-source` and `benchmark-ir-source` run before the IR, in the
+  checker's unit, whose commands run in the backend's (#784). Their entry
+  points that other units call take the module's macro (`BUSTER_LEXER_ENTRY`,
+  `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`, `BUSTER_LINKER_ENTRY`,
+  `BUSTER_IR_SOURCE_ENTRY`) instead of `static`: `main.c` defines it as nothing
   in the home, and elsewhere as an inline definition that is never inlined,
   which clang doesn't emit, so that neither the entry point nor what only it
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`), and `./build.sh check-call-graph` reports any
-  variable a command reaches in two units ("Call graph check"). A function to
-  home is a module's entry point that several units compile, coarse enough
+  one lane context (`lane.c`) and the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  reports any variable a command reaches in two units ("Call graph check"). A
+  function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its
   arguments. On the 9700X the checker's unit, the longest, took 27.0 s alone
   and all of the build's 40.0 s before the homes, which removed 13% of the
