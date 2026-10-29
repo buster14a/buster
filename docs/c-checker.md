@@ -1421,7 +1421,10 @@ What the lowering covers past scalars (#145's programs):
   (`c_check_program_batch.c`) take none, by its type's fact
   (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
   `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
-  conversion's or constant's type for one. The overflow builtins store into a
+  conversion's or constant's type for one, and its tasks' loop
+  (`check_lower_drain`) is a copy without the expansion's and the
+  conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
+  3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
   `_BitInt` destination its value extended so. `_BitInt(65)` to `_BitInt(128)`
   are refused by name.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are

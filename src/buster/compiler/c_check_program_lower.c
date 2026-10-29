@@ -2248,9 +2248,10 @@ static __attribute__((noinline)) void check_lower_vector_conversion(CheckLowerWr
 }
 
 // A conversion of the value on top of the stack from `from` to `to`, neither of them complex (but to void): a complex
-// one's are check_lower_complex_conversion's, which converts its parts here. Always inlined into both copies of the
-// tasks' loop (check_lower_drain_body), through check_lower_conversion.
-static inline __attribute__((always_inline)) void check_lower_scalar_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+// one's are check_lower_complex_conversion's, which converts its parts here. Always inlined into the copies of the
+// tasks' loop (check_lower_drain_body), through check_lower_conversion_body, with `bit_ints` CheckLowerWriter.bit_ints,
+// which each copy has as a constant.
+static inline __attribute__((always_inline)) void check_lower_scalar_conversion_body(CheckLowerWriter* writer, TypeId from, TypeId to, bool bit_ints)
 {
     const TypeTable* types = writer->program->types;
     const uint8_t source = check_lower_value_class(writer, from);
@@ -2313,7 +2314,7 @@ static inline __attribute__((always_inline)) void check_lower_scalar_conversion(
         check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, target, local);
     }
-    else if (writer->bit_ints && check_lower_bit_int_shift(types, to) != 0)
+    else if (bit_ints && check_lower_bit_int_shift(types, to) != 0)
     {
         // A _BitInt narrower than its class: converted to the class it computes in, extended from its width there, and
         // converted to its own (check_lower_bit_int_extend).
@@ -2327,6 +2328,11 @@ static inline __attribute__((always_inline)) void check_lower_scalar_conversion(
     {
         check_lower_emit(writer, BUSTER_TYPED_CONVERT, target, 0);
     }
+}
+
+static inline __attribute__((always_inline)) void check_lower_scalar_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    check_lower_scalar_conversion_body(writer, from, to, writer->bit_ints);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2534,9 +2540,9 @@ static void check_lower_complex_conversion(CheckLowerWriter* writer, TypeId from
 }
 
 // The conversion of the value on top of the stack from `from` to `to` (a CHECK_LOWER_CONVERSION task's): a complex type's
-// check_lower_complex_conversion's, any other check_lower_scalar_conversion's. Always inlined into both copies of the
-// tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+// check_lower_complex_conversion's, any other check_lower_scalar_conversion_body's. Always inlined into the copies of the
+// tasks' loop (check_lower_drain_body), with their constant `bit_ints`.
+static inline __attribute__((always_inline)) void check_lower_conversion_body(CheckLowerWriter* writer, TypeId from, TypeId to, bool bit_ints)
 {
     if ((check_lower_complex(writer, from) || check_lower_complex(writer, to)) && check_lower_value_class(writer, to) != BUSTER_TYPED_CLASS_VOID)
     {
@@ -2544,8 +2550,13 @@ static inline __attribute__((always_inline)) void check_lower_conversion(CheckLo
     }
     else
     {
-        check_lower_scalar_conversion(writer, from, to);
+        check_lower_scalar_conversion_body(writer, from, to, bit_ints);
     }
+}
+
+static inline __attribute__((always_inline)) void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    check_lower_conversion_body(writer, from, to, writer->bit_ints);
 }
 
 // A long double constant's place in the function's table (CheckLowerWriter.x87_constants), its 80 bits as static data
@@ -4519,8 +4530,10 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     }
 }
 
-// Always inlined into both copies of the tasks' loop (check_lower_drain_body). `bit_int` is CheckLowerTask.bit_int.
-static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_int)
+// Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
+// (CheckLowerWriter.bit_ints). `bit_int` is CheckLowerTask.bit_int.
+static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard, bool bit_ints,
+                                                                     bool bit_int)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -4543,7 +4556,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // An expression of a _BitInt goes to check_lower_bit_int_node first, out of line, which may push it again for what
     // follows (CheckLowerTask.bit_int).
-    if ((facts & BUSTER_CHECK_LOWER_TYPE_BIT_INT) != 0 && !bit_int)
+    if (bit_ints && (facts & BUSTER_CHECK_LOWER_TYPE_BIT_INT) != 0 && !bit_int)
     {
         check_lower_bit_int_node(writer, node, address, initialized, discard);
     }
@@ -5098,7 +5111,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint8_t kind = check_lower_binary(op);
         // A compare of narrow operands, which only a program with a _BitInt type has (CheckLowerWriter.bit_ints), compares
         // in their computing class (check_lower_bit_int_node).
-        if (writer->bit_ints && kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && check_lower_narrow(check_lower_class(writer, type_a)))
+        if (bit_ints && kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && check_lower_narrow(check_lower_class(writer, type_a)))
         {
             check_lower_bit_int_node(writer, node, address, initialized, discard);
         }
@@ -5133,9 +5146,12 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
     writer->source = token;
 }
 
-// The tasks' loop, as check_lower_drain and check_lower_drain_sources compile it: with `sources`, each task's token set
-// before it runs (check_lower_task_source). A constant in each, so that the plain loop does none of it.
-static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources)
+// The tasks' loop, as check_lower_drain, check_lower_drain_bit_ints and check_lower_drain_sources compile it: with
+// `sources`, each task's token set before it runs (check_lower_task_source); with `bit_ints`, a program's that has a
+// _BitInt type (CheckLowerWriter.bit_ints), whose expressions and conversions it tests for one. Constants in each but the
+// last's `bit_ints`, so that the plain loop does none of it: the tests for a _BitInt took 3.9 million of sqlite3.c's
+// instructions there (#137).
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources, bool bit_ints)
 {
     uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
@@ -5168,7 +5184,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
                 {
                     if (!simple && !plain)
                     {
-                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, ((flags >> 4) & 1) != 0);
+                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0, bit_ints, ((flags >> 4) & 1) != 0);
                     }
                     expression_nodes += 1;
                 }
@@ -5180,7 +5196,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_CONVERSION)
         {
-            check_lower_conversion(writer, node, type);
+            check_lower_conversion_body(writer, node, type, bit_ints);
         }
         else if (kind == CHECK_LOWER_LABEL)
         {
@@ -5267,13 +5283,20 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 
 static void check_lower_drain(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, false);
+    check_lower_drain_body(writer, false, false);
+}
+
+// The tasks' loop for a program that has a _BitInt type (CheckLowerWriter.bit_ints): a copy of its own
+// (check_lower_drain_body).
+static __attribute__((noinline)) void check_lower_drain_bit_ints(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false, true);
 }
 
 // The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
 static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter* writer)
 {
-    check_lower_drain_body(writer, true);
+    check_lower_drain_body(writer, true, writer->bit_ints);
 }
 
 // An initializer's value, converted to its part's type: its expression, or the object an overloaded function's
@@ -7051,6 +7074,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 check_lower_drain_sources(writer);
             }
+            else if (writer->bit_ints)
+            {
+                check_lower_drain_bit_ints(writer);
+            }
             else
             {
                 check_lower_drain(writer);
@@ -7095,6 +7122,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             if (sources)
             {
                 check_lower_drain_sources(writer);
+            }
+            else if (writer->bit_ints)
+            {
+                check_lower_drain_bit_ints(writer);
             }
             else
             {
