@@ -3051,6 +3051,96 @@ static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name
     return result;
 }
 
+// Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
+static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "__inline__ int plain(int x){return x+1;} extern __inline__ int ext(int x){return x+2;}"
+        "__inline__ int prior(int); extern __inline__ int prior(int x){return x+3;}"
+        "extern __inline__ int after(int x){return x+4;} __inline__ int after(int);"
+        "extern __inline__ __attribute__((gnu_inline)) int attr(int x){return x+5;}"
+        "__inline__ __attribute__((gnu_inline)) int attrprior(int); extern __inline__ int attrprior(int x){return x+7;}"
+        "extern __inline__ __attribute__((gnu_inline)) int attraft(int x){return x+8;} __inline__ int attraft(int);"
+        "extern __inline__ int block(int x){return x+9;}"
+        "static __inline__ int local(int x){return x+6;}"
+        "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
+    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "use" };
+    static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
+        { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
+        { "-std=c89", "-fgnu89-inline", "-w" }, { "-std=c17", "-fgnu89-inline", "-w" },
+        { "-std=c17", "-w", "-w" }, { "-std=c17", "-fno-gnu89-inline", "-w" },
+        { "-std=c17", "-fgnu89-inline", "-fno-gnu89-inline" },
+        { "-std=c17", "-fno-gnu89-inline", "-fgnu89-inline" },
+    };
+    char source[256], ours_path[256], clang_path[256];
+    snprintf(source, sizeof(source), "%s/inline-modes.c", directory);
+    snprintf(ours_path, sizeof(ours_path), "%s/inline-ours.o", directory);
+    snprintf(clang_path, sizeof(clang_path), "%s/inline-clang.o", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char* ours[] = { (char*)executable, (char*)modes[m].standard, (char*)modes[m].flag, (char*)modes[m].last,
+                             scalar ? "--scalar" : "-w", "-c", "-o", ours_path, source, NULL };
+            char* oracle[] = { (char*)clang, (char*)modes[m].standard, (char*)modes[m].flag, (char*)modes[m].last, "-w", "-c", "-o", clang_path, source, NULL };
+            char* text = NULL;
+            const int ours_status = written ? check_test_driver_spawn(ours, &text) : -1;
+            free(text); text = NULL;
+            const int clang_status = written ? check_test_driver_spawn(oracle, &text) : -1;
+            free(text);
+            Arena arena = arena_reserve(UINT64_C(1) << 24);
+            CheckTestElf ours_elf = { 0 }, clang_elf = { 0 };
+            const bool read = ours_status == 0 && clang_status == 0 && arena.base != NULL &&
+                              check_test_elf_open(&ours_elf, object_test_read_file(&arena, ours_path)) &&
+                              check_test_elf_open(&clang_elf, object_test_read_file(&arena, clang_path));
+            for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+            {
+                char description[256];
+                snprintf(description, sizeof(description), "GNU inline mode %s %s %s %s %s matches clang", modes[m].standard, modes[m].flag, modes[m].last,
+                         scalar ? "scalar" : "vector", names[n]);
+                check_test_expect(test, read && (check_test_elf_defined(&ours_elf, names[n]) != 0) ==
+                                               (check_test_elf_defined(&clang_elf, names[n]) != 0), description);
+            }
+            arena_release(&arena);
+        }
+    }
+    static const char direct_source[] = "inline int f(void){return 7;} int main(void){return f();}\n";
+    char direct_path[256];
+    snprintf(direct_path, sizeof(direct_path), "%s/inline-direct", directory);
+    const bool direct_written = parse_test_write(source, direct_source, sizeof(direct_source) - 1);
+    char* direct[] = { (char*)executable, "-std=gnu89", "-o", direct_path, source, NULL };
+    char* text = NULL;
+    const int built = direct_written ? check_test_driver_spawn(direct, &text) : -1;
+    free(text); text = NULL;
+    char* run[] = { direct_path, NULL };
+    const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    check_test_expect(test, status == 7, "GNU89 plain inline definition links and runs in the direct path");
+    static const char header_user[] = "extern inline int value(void){return 99;} int main(void){return value();}\n";
+    static const char external_body[] = "int value(void){return 7;}\n";
+    char second[256], second_object[256];
+    snprintf(second, sizeof(second), "%s/inline-other.c", directory);
+    snprintf(second_object, sizeof(second_object), "%s/inline-other.o", directory);
+    const bool pair_written = parse_test_write(source, header_user, sizeof(header_user) - 1) &&
+                              parse_test_write(second, external_body, sizeof(external_body) - 1);
+    char* first_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", ours_path, source, NULL };
+    char* second_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", second_object, second, NULL };
+    char* link[] = { (char*)clang, "-o", direct_path, ours_path, second_object, NULL };
+    text = NULL;
+    const int first = pair_written ? check_test_driver_spawn(first_compile, &text) : -1;
+    free(text); text = NULL;
+    const int other = first == 0 ? check_test_driver_spawn(second_compile, &text) : -1;
+    free(text); text = NULL;
+    const int linked = other == 0 ? check_test_driver_spawn(link, &text) : -1;
+    free(text); text = NULL;
+    const int paired = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    check_test_expect(test, paired == 7, "GNU89 extern inline references the external definition across objects");
+    unlink(second); unlink(second_object);
+    unlink(source); unlink(ours_path); unlink(clang_path); unlink(direct_path);
+}
+
 // The section named `name` of `elf`, or 0.
 static uint32_t check_test_elf_named(const CheckTestElf* elf, const char* name)
 {
@@ -3969,6 +4059,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
