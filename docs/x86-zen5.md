@@ -88,7 +88,7 @@ returns. The code mapping is writable while being constructed and executable
 only after construction. Both encoders must produce identical code before it
 can run, and every record must pass `x86_validate`.
 
-Six experiments run in rotating order over an odd number of passes:
+Seven experiments run in rotating order over an odd number of passes:
 
 1. Twelve independent register chains (an address-independent repeated L1
    load for the load case).
@@ -100,6 +100,9 @@ Six experiments run in rotating order over an odd number of passes:
    dependency across the back edge.
 5. Six target chains interleaved with six independent ADD chains.
 6. Six target chains interleaved with six independent IMUL chains.
+7. The twelve independent chains with a never-taken `jo` after each
+   instruction (`branch`): whether a flag-setting instruction and its
+   conditional branch retire as one macro-op, and the cycles per pair.
 
 The ring avoids accidentally turning an ordinary XOR or SUB into its zero
 idiom. IMUL with an immediate chains its source into the result. Loads use an
@@ -172,6 +175,35 @@ latencies rounded to whole cycles. It does not extrapolate them to all operand
 values, addresses, flags or layouts. Of the 57 cases, all have measured
 throughput and retired macro-ops; 53 have measured GPR dependency latency.
 The other four columns remain unknown for every case.
+
+### inc and dec against add and sub (#181)
+
+The form choice can take `inc` and `dec` for an add or sub of 1 or −1 where CF
+(and for −1 AF) is dead: they are a byte shorter than the imm8 forms. Whether
+they cost more is the target's to say (#221's `BUSTER_X86_CONTEXT_INC_DEC`).
+Tier 0 asks for them where this model's observations of `inc` and `dec` at 32
+and 64 bits, its widths, cost no more than `add` and `sub` with an imm8 of the
+same width in GPR latency, throughput and retired macro-ops, each of them
+known (`tier0_inc_dec`, decided once by `tier0_initialize`).
+
+The [2026-10-29 evidence](https://github.com/buster14a/buster-performance/blob/2d837779fb82b86f6f15bb1987e1d88b73a25cc2/docs/measurements/x86-zen5-inc-dec-181-2026-10-29/README.md)
+retains three 9700X processes of the eight cases' seven experiments
+(`measure-x86-zen5 --only CASE --passes 11 --iterations 20000`, CPU 2). Every
+case measured the same in every process, each experiment to within 0.06%:
+
+| Case | Independent | Six chains | Chain | Mix with ADD | Mix with IMUL | Before `jo` (per pair) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `inc` and `dec` r32 and r64 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `add` and `sub` r32 and r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+
+Cycles per instruction (per pair in the mixes and before `jo`); the chain is
+both chains, through the written operand and through the source, which for
+these one-register forms are the same loop. Each instruction retires as one
+macro-op, and each pair with its `jo` as one: all four fuse with the branch.
+So `inc` and `dec` cost no more on Zen 5, Tier 0 keeps asking for them, as it
+did, and its code doesn't change: `sqlite3.c`'s object (`-c`, the 9700X
+job's compile-time options) is the same bytes from the commit before and
+after the decision.
 
 ## Validation and provenance
 

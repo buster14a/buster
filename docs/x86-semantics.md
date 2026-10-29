@@ -283,7 +283,10 @@ value needs a register, or isn't a value of the width.
     too.
 
   inc and dec are smaller and run as fast on the 9700X (below), but whether
-  they are faster is the target's (#181), so the caller turns them on.
+  they cost more is the target's, so the caller turns them on: Tier 0 asks
+  for them where the Zen 5 model's observations of them cost no more than add's
+  and sub's with an imm8 (#181, `tier0_inc_dec`; `x86-zen5.md`'s "inc and dec
+  against add and sub", before a conditional branch too), which they don't.
 
 A substitution's conditions aren't written by hand. Each candidate of another
 instruction names the status flags it defines as the operation would (inc and
@@ -786,7 +789,7 @@ the table compares the second ones. The instructions and cycles are one
   zeroed upper lanes and masks) would let `tier0_operation_form_valid` ask the
   tables for the forms with implicit operands, rather than keep its own list,
   and the resolved effects cover masked records with an opmask resource.
-- **#181:** key its latencies by the same forms, and decide inc and dec.
+- **#181:** key its latencies by the same forms.
 
 ## Boundary audit #298
 
