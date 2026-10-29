@@ -752,18 +752,21 @@ static bool check_lower_limb_types(const TypeTable* types)
     return found;
 }
 
-// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound): each node that computes,
-// converts or updates one writes up to 64 entries a limb (check_lower_limb_arithmetic and the rest go a limb at a time,
-// an update converting, computing and converting back), the most limbs of its value's, its operands' and their converted
-// types, and takes up to 16 temporaries and frame objects (`locals`).
-static uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
+// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound), none in a unit without
+// one (check_lower_limb_types): each node that computes, converts or updates one writes up to 64 entries a limb
+// (check_lower_limb_arithmetic and the rest go a limb at a time, an update converting, computing and converting back),
+// the most limbs of its value's, its operands' and their converted types, and takes up to 16 temporaries and frame
+// objects (`locals`). Out of line, as few units have such a type: the preparation's own loops compile as they do
+// without it.
+static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
+    const uint32_t count = check_lower_limb_types(types) ? graph->count : 0;
     uint64_t entries = 0;
     *locals = 0;
-    for (uint32_t node = 0; node < graph->count; node += 1)
+    for (uint32_t node = 0; node < count; node += 1)
     {
         const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
         uint32_t limbs = check_lower_limb_type(types, stream->values[node].type).count;
@@ -4719,15 +4722,15 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 
 // Whether operation `op` of an expression of `result` computes on complex values (check_lower_complex_compute), on
 // __float128s (check_lower_quad_compute) or on _BitInts past 128 bits (check_lower_limb_compute): an arithmetic one whose
-// result is one, or a comparison whose operands are (`operand` the first one's converted type).
-static bool check_lower_complex_operation(const CheckLowerWriter* writer, CheckOp op, TypeId result, TypeId operand)
+// result is one, or a comparison whose operands are (`operand` the first one's converted type). Every node that the
+// expansion's earlier cases leave asks it, so it is inline: the operators' range, then one type's facts.
+static inline __attribute__((always_inline)) bool check_lower_complex_operation(const CheckLowerWriter* writer, CheckOp op, TypeId result, TypeId operand)
 {
-    const bool arithmetic = (op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) ||
-                            op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT;
     // An aggregate's arithmetic and comparisons are a complex value's (equality alone), a __float128's or a _BitInt's past
-    // 128 bits (check_lower_aggregate), whose remainders, shifts and bitwise operations C gives no other aggregate.
+    // 128 bits (check_lower_aggregate), whose remainders, shifts and bitwise operations C gives no other aggregate. The
+    // arithmetic operators and the comparisons are the operators from the negation to the exclusive or, but `!`.
     const bool comparison = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    return (arithmetic && check_lower_aggregate(writer, result)) || (comparison && check_lower_aggregate(writer, operand));
+    return op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT && check_lower_aggregate(writer, comparison ? operand : result);
 }
 
 // The type an operand of a complex operation is evaluated to, from its own type and the computation's (`converted`, the
@@ -8353,9 +8356,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
     // A unit with a _BitInt past 128 bits (#137) has room for its limbs (check_lower_limb_room).
     uint64_t limb_locals = 0;
-    const uint64_t limb_entries = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 && check_lower_limb_types(types) ?
-                                      check_lower_limb_room(program, &limb_locals) :
-                                      0;
+    const uint64_t limb_entries = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program, &limb_locals) : 0;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
                                 limb_entries + 32;
