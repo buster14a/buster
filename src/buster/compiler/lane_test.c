@@ -43,6 +43,9 @@
 //     the costliest part first (the first of them on a tie), then the others by decreasing bit width of cost and then
 //     by index (one input's costs grow within one bucket, so that its costliest part is its bucket's last). The loops
 //     follow each other with a sync between them, as the counter must reset itself.
+//   - Advance: the lanes but lane 0 (all of them, with one) each advance one word with lane_advance, pausing together now
+//     and then long enough that lane 0, waiting on it with lane_wait for every advance, sleeps on its futex (with more
+//     than one lane, it must have slept): each value it sees must be even and larger than the last, and none lost.
 //   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
 //     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs, or
 //     with lane_team_keep_scratch kept, emptied, and released when the team stops.
@@ -94,6 +97,10 @@
 // Each check prints its first problems, up to this many.
 #define BUSTER_LANE_TEST_REPORTED 3
 #define BUSTER_LANE_TEST_TEAM_ROUNDS 256
+// Advance: each advancing lane's advances, and after how many of them each pauses, long enough
+// (BUSTER_LANE_TEST_STALL_NANOSECONDS) that lane 0, waiting for the word, sleeps on its futex.
+#define BUSTER_LANE_TEST_ADVANCES 20000
+#define BUSTER_LANE_TEST_ADVANCE_PAUSE_INTERVAL 5000
 #define BUSTER_LANE_TEST_TEAM_PARTS 13
 
 static const uint32_t lane_test_counts[] = { 1, 2, 3, 8 };
@@ -176,6 +183,7 @@ typedef enum LaneTestCheck
     LANE_TEST_SCRATCH,
     LANE_TEST_EXCHANGE,
     LANE_TEST_PARTS,
+    LANE_TEST_ADVANCE,
 } LaneTestCheck;
 
 static const char* const lane_test_check_names[] = {
@@ -185,6 +193,7 @@ static const char* const lane_test_check_names[] = {
     "scratch",
     "exchange",
     "parts",
+    "advance",
 };
 
 typedef struct LaneTestRecord LaneTestRecord;
@@ -233,6 +242,8 @@ struct LaneTest
     uint32_t* part_takers;
     uint64_t part_taken[BUSTER_LANE_TEST_MAX_LANES];
     const uint32_t* part_orders[BUSTER_LANE_TEST_MAX_LANES];
+    // Advance: the word the lanes advance (lane_advance) and lane 0 waits on.
+    _Alignas(64) uint32_t advanced;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -642,6 +653,41 @@ static uint64_t lane_test_alone(void)
     return failures;
 }
 
+// Advance: the lanes but lane 0 (all of them, with one) each advance one word BUSTER_LANE_TEST_ADVANCES times with
+// lane_advance, pausing together now and then, while lane 0 waits on it with lane_wait until it holds every advance: each
+// value lane 0 sees must be even and larger than the one before, and none may be lost.
+static uint64_t lane_test_advance(LaneTest* test)
+{
+    const uint32_t lanes = lane_count();
+    const uint32_t index = lane_index();
+    uint64_t failures = 0;
+    if (index == 0)
+    {
+        test->advanced = 0;
+    }
+    lane_sync();
+    const uint32_t total = 2 * BUSTER_LANE_TEST_ADVANCES * (lanes > 1 ? lanes - 1 : 1);
+    for (uint32_t a = 0; (lanes == 1 || index != 0) && a < BUSTER_LANE_TEST_ADVANCES; a += 1)
+    {
+        lane_advance(&test->advanced);
+        if (a % BUSTER_LANE_TEST_ADVANCE_PAUSE_INTERVAL == BUSTER_LANE_TEST_ADVANCE_PAUSE_INTERVAL - 1)
+        {
+            const struct timespec pause = { .tv_sec = 0, .tv_nsec = BUSTER_LANE_TEST_STALL_NANOSECONDS };
+            nanosleep(&pause, NULL);
+        }
+    }
+    uint32_t seen = __atomic_load_n(&test->advanced, __ATOMIC_ACQUIRE) & ~1u;
+    while (index == 0 && seen != total && failures == 0)
+    {
+        const uint32_t next = lane_wait(&test->advanced, seen);
+        failures += (next & 1u) != 0 || next <= seen || next > total ? 1 : 0;
+        seen = next;
+    }
+    lane_sync();
+    failures += (__atomic_load_n(&test->advanced, __ATOMIC_ACQUIRE) & ~1u) != total ? 1 : 0;
+    return failures;
+}
+
 static uint64_t lane_test_scratch(LaneTest* test)
 {
     const uint32_t index = lane_index();
@@ -982,6 +1028,7 @@ static void lane_test_main(void* argument)
         case LANE_TEST_SCRATCH: failures = lane_test_scratch(test); break;
         case LANE_TEST_EXCHANGE: failures = lane_test_exchange(test); break;
         case LANE_TEST_PARTS: failures = lane_test_parts(test); break;
+        case LANE_TEST_ADVANCE: failures = lane_test_advance(test); break;
     }
     test->failures[lane_index()] = failures;
     test->sleeps[lane_index()] = thread_context.sleeps - sleeps;
@@ -1757,18 +1804,29 @@ static int run_lane_tests(int argc, char** argv)
             }
 
             const uint64_t parts_wrong = lane_test_run(test, LANE_TEST_PARTS, lanes, &sleeps);
+            // The advancers' pauses make lane 0 sleep on the word with more than one lane.
+            uint64_t advance_sleeps = 0;
+            const uint64_t advance_wrong = lane_test_run(test, LANE_TEST_ADVANCE, lanes, &advance_sleeps);
+            const bool advance_slept = lanes == 1 ? advance_sleeps == 0 : advance_sleeps > 0;
 
             printf("%u lane%s ranges %lu checked, %lu wrong; syncs %lu rounds, %lu sleeps, %lu wrong; alone %lu wrong; scratch %lu wrong; exchange %lu inputs, %lu differ; "
-                   "parts %lu inputs, %lu wrong\n",
+                   "parts %lu inputs, %lu wrong; advance %lu sleeps, %lu wrong\n",
                    lanes, lanes == 1 ? ": " : "s:", (unsigned long)checked, (unsigned long)ranges_wrong, (unsigned long)rounds, (unsigned long)sync_sleeps,
                    (unsigned long)syncs_wrong, (unsigned long)alone_wrong, (unsigned long)scratch_wrong, (unsigned long)BUSTER_ARRAY_LENGTH(lane_test_record_counts),
-                   (unsigned long)exchange_differ, (unsigned long)BUSTER_LANE_TEST_PART_INPUT_COUNT, (unsigned long)parts_wrong);
+                   (unsigned long)exchange_differ, (unsigned long)BUSTER_LANE_TEST_PART_INPUT_COUNT, (unsigned long)parts_wrong, (unsigned long)advance_sleeps,
+                   (unsigned long)advance_wrong);
             if (!slept)
             {
                 printf("  syncs: %lu sleeps on %u lanes, where the late lanes should have made the others sleep only with more than one\n", (unsigned long)sync_sleeps, lanes);
             }
+            if (!advance_slept)
+            {
+                printf("  advance: %lu sleeps on %u lanes, where the advancers' pauses should have made lane 0 sleep only with more than one\n",
+                       (unsigned long)advance_sleeps, lanes);
+            }
             fflush(stdout);
-            passed = passed && ranges_wrong == 0 && syncs_wrong == 0 && slept && alone_wrong == 0 && scratch_wrong == 0 && exchange_differ == 0 && parts_wrong == 0;
+            passed = passed && ranges_wrong == 0 && syncs_wrong == 0 && slept && alone_wrong == 0 && scratch_wrong == 0 && exchange_differ == 0 && parts_wrong == 0 &&
+                     advance_wrong == 0 && advance_slept;
         }
         result = passed ? 0 : 1;
     }

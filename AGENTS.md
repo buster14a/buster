@@ -2619,6 +2619,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   so late that they wait in `mwaitx`, then as many broadcasts back to back,
   and narrow tasks spread by `lane_from_task_index`;
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
+- `lane_advance` (#777's board): the lanes but lane 0 each advance one word
+  20,000 times, pausing together now and then, while lane 0 waits on it with
+  `lane_wait` for every advance, sleeping on its futex with more than one lane:
+  each value it sees even and larger than the last, and no advance lost;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
