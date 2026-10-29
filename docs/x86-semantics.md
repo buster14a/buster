@@ -450,7 +450,9 @@ Each consumer reads the tables rather than keeping a copy of their rules:
   most aren't covered (the shadow stack's, RDRAND, the FS and GS bases' writes,
   WBINVD, INVPCID), and the harness can't run many of them.
 - **Tier 1's selector** (#141, `tier1_select.c`) chooses its immediates' forms
-  by the rows, one request at a time with the scalar twin; the scheduler (#172,
+  by the rows, a function's requests 32 at a time through `x86_choose_forms`
+  (on the scalar path each as it comes, by the twin), and every record it emits
+  has a covered form, which its tests check; the scheduler (#172,
   `tier1_schedule.c`) builds its dependency graph from the resolved effects.
 - **The unwind tables' analyzer** (`unwind_tier0.c`) refuses a function with an
   uncovered form, which every Tier 0 function with long doubles, 128-bit
@@ -471,7 +473,10 @@ effects: a volatile object read as often as the source reads it (twice for
 write, a load through a pointer kept on its side of a store through it, and an
 atomic increment written by a locked form in its helper. A program whose locals'
 homes are read and written through pointers to them between their uses runs
-natively against clang. Folding loads through pointers is Tier 1's (#141).
+natively against clang. Folding loads through pointers is Tier 1's (#141): its
+selector folds a load into its only consumer in its block past nodes that
+neither write memory, call nor access a volatile object, and past none that do
+(`docs/tier1-selection.md`).
 
 ## Tests
 
@@ -928,11 +933,6 @@ the table compares the second ones. The instructions and cycles are one
 
 ## Next steps
 
-- **#141:** its load folding (addressing modes, loads folded into their
-  consumers) is where single-use and multi-use loads, interfering writes and
-  volatile and atomic accesses decide a fold; its tests of them belong with it,
-  on the resolved effects. Its selector's requests could go to the vector
-  choice in batches, as Tier 0's do.
 - **The X86 rows' legacy forms** (`tier0_operation_legacy_forms`, #148): most
   are uncovered (the shadow stack's, RDRAND and RDSEED, the FS and GS bases'
   writes, the cache flushes, WBINVD, INVPCID), so a record of them reads and

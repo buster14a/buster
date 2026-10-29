@@ -846,6 +846,13 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* 
         {
             const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets);
             ok = tier1_pipeline_expect(test, sized.error == BRANCH_SIZING_OK && x86_target_validate(test->allowed, code->records, code->count) == code->count, "complete records obey the baseline target and branch layout");
+            // #221: every complete record has a form x86_semantics.c covers, which the effects' consumers need.
+            bool covered = true;
+            for (uint32_t r = 0; ok && r < code->count; r += 1)
+            {
+                covered &= x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE;
+            }
+            ok = ok && tier1_pipeline_expect(test, covered, "every complete record has a covered form");
         }
         uint32_t marked = 0;
         for (uint32_t record = 0; ok && record < code->count; record += 1)

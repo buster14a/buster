@@ -2096,16 +2096,19 @@ static const X86EffectsRow x86_effects_rows[] = { BUSTER_X86_EFFECT_ROWS(BUSTER_
 // its form's number (the fixup flag masked off) in x86_effects_by_form, x86_effects_index three times over (a form's,
 // its FS copy's at X86_FORM_COUNT and its GS copy's at twice that) and 0 past them, without x86_semantics_row's
 // arithmetic, which took a quarter of the vector resolver's instructions.
+// main.c's units share these, as they share the encoder's templates (x86_64_encoder.c's BUSTER_X86_SHARED): a command's
+// code runs in more than one unit, as test-ir-source's emission initializes them in the checker's and its IR adapter's
+// tier0_validate reads them in the backend's (#784). So do the form choice's tables and the shapes below.
 #define BUSTER_X86_EFFECTS_CAPACITY 4096
-static X86Effects x86_effects_records[BUSTER_X86_EFFECTS_CAPACITY] __attribute__((aligned(64)));
-static uint16_t x86_effects_index[X86_FORM_COUNT] __attribute__((aligned(64)));
-static uint16_t x86_effects_by_form[BUSTER_X86_FORM_NUMBER + 1] __attribute__((aligned(64)));
+BUSTER_X86_SHARED X86Effects x86_effects_records[BUSTER_X86_EFFECTS_CAPACITY] __attribute__((aligned(64)));
+BUSTER_X86_SHARED uint16_t x86_effects_index[X86_FORM_COUNT] __attribute__((aligned(64)));
+BUSTER_X86_SHARED uint16_t x86_effects_by_form[BUSTER_X86_FORM_NUMBER + 1] __attribute__((aligned(64)));
 _Static_assert(BUSTER_X86_FORM_FS == X86_FORM_COUNT && BUSTER_X86_FORM_GS == 2 * X86_FORM_COUNT && 3 * X86_FORM_COUNT <= BUSTER_X86_FORM_NUMBER + 1,
                "x86_effects_by_form holds a form's record and its FS and GS copies'");
-static uint32_t x86_effects_count;
+BUSTER_X86_SHARED uint32_t x86_effects_count;
 // Whether x86_semantics_initialize has built the tables, for the consumers that build theirs from them on demand (the
 // assembler's matcher, x86_match.c).
-static bool x86_semantics_initialized;
+BUSTER_X86_SHARED bool x86_semantics_initialized;
 
 // The record of an uncovered form: it may read and write every register, flag and byte of memory, fault, and go anywhere.
 #define BUSTER_X86_UNKNOWN_ROLE (BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE | BUSTER_X86_REST_MERGE << BUSTER_X86_ROLE_REST_SHIFT)
@@ -3034,14 +3037,14 @@ struct X86ChoiceRow
     uint8_t kind;
 };
 
-static X86ChoiceRow x86_choice_rows[BUSTER_X86_CHOICE_ROWS_MAX];
-static uint32_t x86_choice_row_count;
+BUSTER_X86_SHARED X86ChoiceRow x86_choice_rows[BUSTER_X86_CHOICE_ROWS_MAX];
+BUSTER_X86_SHARED uint32_t x86_choice_row_count;
 // The row of each operation at each width (log2 of its bytes), or BUSTER_X86_CHOICE_NO_ROW.
-static uint16_t x86_choice_row_index[X86_OPERATION_COUNT][4];
-static uint16_t x86_choice_forms_by_candidate[BUSTER_X86_CHOICE_CANDIDATES][BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
-static uint16_t x86_choice_conditions_by_candidate[BUSTER_X86_CHOICE_CANDIDATES][BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
+BUSTER_X86_SHARED uint16_t x86_choice_row_index[X86_OPERATION_COUNT][4];
+BUSTER_X86_SHARED uint16_t x86_choice_forms_by_candidate[BUSTER_X86_CHOICE_CANDIDATES][BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
+BUSTER_X86_SHARED uint16_t x86_choice_conditions_by_candidate[BUSTER_X86_CHOICE_CANDIDATES][BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
 // Per row: log2 of its width in bits 0-1, and a count row's bit 2.
-static uint16_t x86_choice_row_info[BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
+BUSTER_X86_SHARED uint16_t x86_choice_row_info[BUSTER_X86_CHOICE_ROWS_MAX] __attribute__((aligned(64)));
 #define BUSTER_X86_CHOICE_INFO_COUNT 4
 
 // The row of an operation with an immediate at a width (1, 2, 4 or 8 bytes), for a request's row: BUSTER_X86_CHOICE_NO_ROW
@@ -3367,7 +3370,7 @@ struct X86EffectsShape
 #define BUSTER_X86_SHAPE_SOURCES 0x02
 #define BUSTER_X86_SHAPE_IS4 0x04
 #define BUSTER_X86_SHAPES 512
-static X86EffectsShape x86_effects_shapes[BUSTER_X86_SHAPES];
+BUSTER_X86_SHARED X86EffectsShape x86_effects_shapes[BUSTER_X86_SHAPES];
 
 // A form's shape from its row and the form table: the pattern's accesses by role (the syntax's ACC and CL as RAX and
 // RCX; an x87 row's ST(i), part of the x87's state, none), each register role's class (vector or general) and, for a
