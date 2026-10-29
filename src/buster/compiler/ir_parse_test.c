@@ -44,7 +44,7 @@ static bool ir_parse_test_bytes(const void* a, const void* b, uint64_t count)
 static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
 {
     bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count &&
-                 a->constant_count == b->constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count &&
+                 a->constant_count == b->constant_count && a->vector_constant_count == b->vector_constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count &&
                  a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count &&
                  a->result_type == b->result_type && a->symbol_count == b->symbol_count && a->label_count == b->label_count &&
                  a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count && a->parameter_passed == b->parameter_passed &&
@@ -72,6 +72,7 @@ static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
         {
             equal = a->constants[i].low == b->constants[i].low && a->constants[i].high == b->constants[i].high;
         }
+        equal = equal && ir_parse_test_bytes(a->vector_constants, b->vector_constants, (uint64_t)a->vector_constant_count * sizeof(IrSimdValue));
         for (uint32_t i = 0; equal && i < a->slot_count; i += 1)
         {
             equal = a->slots[i].size == b->slots[i].size && a->slots[i].alignment == b->slots[i].alignment &&
@@ -245,6 +246,14 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
         { "function () -> void {\nb0:\n%0 = ret.void extra\n}\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = const.i64 0x\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = const.i64 0x1g\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x100000000000000000000000000000000\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
+        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x1g\n%1 = ret.void\n}\n", IR_PARSE_SYNTAX },
+        { "function () -> void {\nb0:\n%0 = vconst.v4i32 0x1\n%1 = vcmp.m16 %0, %0 eq\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = const.m8 0x100\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = const.v8i32 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = vconst.m64 0x1\n%1 = ret.void\n}\n", IR_PARSE_VERIFY },
+        { "function () -> void {\nb0:\n%0 = const.m64 0x1\n%1 = bitcast.i64 %0\n%2 = ret.void\n}\n", IR_PARSE_VERIFY },
         { "function () -> void {\nb0:\n%0 = undef.i64\n%1 = add.i64 %0 %0\n%2 = ret.void\n}\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = ret.void\n", IR_PARSE_SYNTAX },
         { "function () -> void {\nb0:\n%0 = call.void @1() fixed=() variadic=2\n%1 = ret.void\n}\n", IR_PARSE_LIMIT },
@@ -666,6 +675,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/dynamic-stack.ir",
                 "tests/ir/labels.ir",
                 "tests/ir/aggregates.ir",
+                "tests/ir/vector-mask.ir",
                 "tests/ir/empty.ir",
                 "tests/ir/tier0-add.ir",
                 "tests/ir/hello.ir",

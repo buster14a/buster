@@ -580,6 +580,7 @@ static int run_ir_reduce_tests(int argc, char** argv)
         ir_reduce_test_rebuild(&test);
         ir_reduce_test_metadata(&test);
         ir_reduce_test_ownership(&test);
+        ir_reduce_test_simd_ownership(&test);
         ir_reduce_test_cache(&test);
         ir_reduce_test_contracts(&test);
         ir_reduce_test_fixture(&test, ir_reduce_test_phi, IR_REDUCE_INJECT_VERIFY_PHI, true);

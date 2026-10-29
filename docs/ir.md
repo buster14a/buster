@@ -81,7 +81,11 @@ tables. `arena_bytes` reports the entire allocation charged to the arena, includ
 alignment gaps. It is not just the sum of payload widths.
 
 Types are `void`, `i1`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, `f64`, `f80`
-and `ptr`. Signedness is in operations such as `sdiv` / `udiv` and `sext` /
+and `ptr`, plus first-class `v4i32`, `v8i32`, `v16i32` vectors and `m8`, `m16`,
+`m32`, `m64` masks. The [SIMD contract](ir-simd.md) records their exact lane,
+predication, sparse-constant and unsupported-consumer rules. Result admission
+uses bounded 32-bit type sets; all old scalar IDs remain unchanged.
+Signedness is in operations such as `sdiv` / `udiv` and `sext` /
 `zext`, rather than duplicated in integer type IDs. Aggregates remain in memory.
 Integer arithmetic wraps at the result width. Division and shift validity are
 the language/lowering pass's responsibility; the structural verifier does not
@@ -95,6 +99,9 @@ column comparisons deterministic.
 | Operations | Operand contract |
 | --- | --- |
 | `const` | `a` indexes a two-u64 bit-pattern constant; `b,c` absent |
+| `vconst` | `a` indexes a sparse eight-u64 vector constant; `b,c` absent |
+| `vcmp` | `a,b` have the same vector shape; `c` is an integer predicate; result is m8 or m16 for that shape |
+| `vselect` | `a` has the shape's mask type; `b,c` match the vector result; inactive lanes take `c` |
 | `undef` | No operands; an unspecified value of its result type |
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
