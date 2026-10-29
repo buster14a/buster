@@ -148,10 +148,12 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
         },
         {
             // Vectors of 8 and 4 bytes, in XMM registers whose bytes past them are zero: operators at each element, a
-            // scalar's splat (5LL into two ints, a constant that fits), calls passing and returning them as clang's
-            // ABI classes them (8 bytes in XMM registers, 4 in general ones, a vector of one double in memory),
-            // members and arrays, globals, ?:, casts to and from integers of their bytes (bit casts, as GNU C's
-            // vectors cast; an ext_vector_type's cast splats), elements, nontemporal stores and loads.
+            // scalar's splat (5LL into two ints, a constant that fits, and 5 into four chars) as either operand, a shift's
+            // count or shifted value, an arm of ?: (with and without its middle operand) and the right of a compound
+            // assignment, calls passing and returning them as clang's ABI classes them (8 bytes in XMM registers, 4 in
+            // general ones, a vector of one double in memory), members and arrays, globals, ?:, casts to and from
+            // integers of their bytes (bit casts, as GNU C's vectors cast, a constant's too; an ext_vector_type's cast
+            // splats), elements, nontemporal stores and loads.
             "vector-narrow",
             "typedef int v2si __attribute__((vector_size(8)));typedef unsigned v2su __attribute__((vector_size(8)));"
             "typedef short v4hi __attribute__((vector_size(8)));typedef signed char v8qi __attribute__((vector_size(8)));"
@@ -167,6 +169,8 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "v4hi w4={(short)n,-2,300,(short)(n*1000)};v8qi q={1,2,3,(signed char)n,5,6,7,-8};v4qi s={(signed char)n,-1,64,9};"
             "v4qu t={200,(unsigned char)n,3,255};v2hi w={(short)-n,1234};v2sf f={1.5f,(float)n};"
             "v2si r1[]={a+b,a*b-(a>>1),a==b,a<(v2si){n,100},a+5LL,(v2si)(v4hi)a};FOLD(r1);"
+            "v2si r9[]={5LL+a,(n&1)?a:5LL,(n&2)?7LL:a,a<<2LL,3LL<<(a&7),(v2si)5LL,(n&4)?:a,5LL?:a};v2si c2=a;c2+=5LL;c2<<=1LL;FOLD(r9);FOLD(c2);"
+            "v4hi r10=w4==3LL;v4qi r11[]={(n&1)?9:s,s};r11[1]+=1;FOLD(r10);FOLD(r11);"
             "v2su r2=u>>3;v4hi r3[]={w4<<2,-w4,w4*(short)3};v8qi r4[]={q+q,~q&(v8qi){15,15,15,15,127,127,127,127}};FOLD(r2);FOLD(r3);FOLD(r4);"
             "v4qi r5=s^(v4qi){85,85,85,85};v4qu r6=t+5;v2hi r7=w*(short)3;v2sf r8[]={f*2.0f+f,-f};FOLD(r5);FOLD(r6);FOLD(r7);FOLD(r8);"
             "long long bits=(long long)a;v2si back=(v2si)(bits+1);int four=(int)s;v4qi from4=(v4qi)(four^0x01010101);v1di one=(v1di)(bits*3);"

@@ -1431,7 +1431,10 @@ What the lowering covers past scalars (#145's programs):
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
-  type. `op=` loads, computes and stores back. Half-precision elements'
+  type, and so is a conditional's scalar arm (`check_lower_vector_operand`: the
+  operator splats it itself, so that an integer's conversion to a GNU C vector
+  of its bytes is a cast's, below, and the tasks' loop asks no cast whether it is
+  one). `op=` loads, computes and stores back. Half-precision elements'
   (`_Float16`'s) arithmetic and compares are AVX512-FP16's (VADDPH, VCMPPH and
   the others), which the function's target must have (its extension:
   `X86Target.extensions`), and their negation flips the sign bits. Where the
