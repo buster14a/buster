@@ -2864,7 +2864,8 @@ static void tier0_define_templates(void)
 
 static bool tier0_initialize(void)
 {
-    if (!tier0_initialized)
+    // Tier 0 reads the effects tables: its immediates' forms (x86_choose_forms) and its rows' (tier0_operation_form_valid).
+    if (!tier0_initialized && (x86_semantics_initialized || x86_semantics_initialize()))
     {
         memset(tier0_slot_bases, 0, sizeof(tier0_slot_bases));
         tier0_template_count = 0;
@@ -8642,23 +8643,18 @@ static const uint16_t tier0_operation_legacy_forms[] = {
 };
 
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
-// branch, whose syntax names no implicit register, that has a vector or an opmask operand when it is EVEX (APX's forms
-// of general registers alone are a target's that Tier 0 doesn't take), and none of those whose implicit operands their
-// syntax doesn't name: vzeroupper and vzeroall (every vector register), mulx (rdx), vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0); or one of tier0_operation_legacy_forms.
+// branch, whose syntax names its operands, that has a vector or an opmask operand when it is EVEX (APX's forms of general
+// registers alone are a target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its
+// syntax doesn't name: a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A
+// form the tables don't cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's
+// memory) and the string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
+// x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
-    static const uint16_t implicit[] = {
-        X86_FORM_VZEROUPPER, X86_FORM_VZEROALL, X86_FORM_VMASKMOVDQU_X_X, X86_FORM_VPCMPESTRM_X_XM128_IMM8, X86_FORM_VPCMPESTRI_X_XM128_IMM8,
-        X86_FORM_VPCMPISTRM_X_XM128_IMM8, X86_FORM_VPCMPISTRI_X_XM128_IMM8, X86_FORM_VPCMPESTRMQ_X_XM128_IMM8, X86_FORM_VPCMPESTRIQ_X_XM128_IMM8,
-    };
     bool valid = form < X86_FORM_COUNT;
-    for (uint32_t k = 0; valid && k < BUSTER_ARRAY_LENGTH(implicit); k += 1)
-    {
-        valid = form != implicit[k];
-    }
     if (valid)
     {
+        const X86Effects* effects = x86_effects(form);
         const X86FormDescription* description = x86_form_description(form);
         const uint8_t syntax = description->syntax;
         const bool explicit = syntax == X86_SYNTAX_RM || syntax == X86_SYNTAX_RM_REG || syntax == X86_SYNTAX_REG_RM || syntax == X86_SYNTAX_RM_IMM ||
@@ -8669,13 +8665,14 @@ static bool tier0_operation_form_valid(uint32_t form)
         const bool vex = description->family == BUSTER_X86_FAMILY_VEX;
         const bool evex = description->family == BUSTER_X86_FAMILY_EVEX && x86_form_has_vector_operand(description) &&
                           (description->evex & (BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF)) == 0;
-        const bool mulx = vex && description->opcode == 0x0f38f6 && description->prefixes == 0xf2;
+        const bool named = effects->operation != X86_OPERATION_NONE && effects->implicit_reads == 0 && effects->implicit_writes == 0 &&
+                           (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) == 0;
         bool legacy = false;
         for (uint32_t k = 0; !legacy && description->family == BUSTER_X86_FAMILY_LEGACY && k < BUSTER_ARRAY_LENGTH(tier0_operation_legacy_forms); k += 1)
         {
             legacy = form == tier0_operation_legacy_forms[k];
         }
-        valid = legacy || (explicit && (vex || evex) && !mulx && description->relative_bytes == 0);
+        valid = legacy || (explicit && (vex || evex) && named && description->relative_bytes == 0);
     }
     return valid;
 }
