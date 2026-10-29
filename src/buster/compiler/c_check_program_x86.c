@@ -409,6 +409,11 @@ _Static_assert(X86_EXTENSION_COUNT <= 32, "a rule's extensions are a 32-bit word
 #define BUSTER_CHECK_X86_XOP_COMPARE(name, element, is_signed, features) \
     { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_XOP_COMPARE, element, 16, is_signed, false, 2, X86_FORM_NONE, 0, false, \
       features, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(XOP) },
+// XOP's instructions of its own (its extension's, no feature past AVX-512F and VL), as clang's code has them for every
+// target: `family`'s row of the form.
+#define BUSTER_CHECK_X86_XOP(name, family, element, bytes, swap, form) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, swap, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_X86_EXTENSION(XOP) },
 // AVX10.2's masked load and store of bf16's first element, the whole vector's under the mask, as AVX512-FP16's of a
 // half's are.
 #define BUSTER_CHECK_X86_BF16_MEMORY(name, family) \
@@ -1305,10 +1310,56 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_XOP_COMPARE("vpcomuw", 2, false, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_XOP_COMPARE("vpcomud", 4, false, BUSTER_X86_FEATURE(AVX512DQ))
     BUSTER_CHECK_X86_XOP_COMPARE("vpcomuq", 8, false, BUSTER_X86_FEATURE(AVX512DQ))
+    // XOP's own: FRCZ's fractions, the horizontal sums and differences of adjacent elements into wider ones, the shifts by
+    // a vector of counts (the source in ModRM.rm and the counts in VEX.vvvv, W0's forms, as LLVM emits them: `swap`), the
+    // multiply-accumulates of a and b into c and VPPERM's bytes of a and b by c (c the /is4 register, BLENDV's).
+    BUSTER_CHECK_X86_XOP("vfrczps", UNARY, 4, 16, false, VFRCZPS_X_XM128)
+    BUSTER_CHECK_X86_XOP("vfrczps256", UNARY, 4, 32, false, VFRCZPS_Y_YM256)
+    BUSTER_CHECK_X86_XOP("vfrczpd", UNARY, 8, 16, false, VFRCZPD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vfrczpd256", UNARY, 8, 32, false, VFRCZPD_Y_YM256)
+    BUSTER_CHECK_X86_XOP("vfrczss", UNARY, 4, 16, false, VFRCZSS_X_XM32)
+    BUSTER_CHECK_X86_XOP("vfrczsd", UNARY, 8, 16, false, VFRCZSD_X_XM64)
+    BUSTER_CHECK_X86_XOP("vphaddbw", UNARY, 1, 16, false, VPHADDBW_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddbd", UNARY, 1, 16, false, VPHADDBD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddbq", UNARY, 1, 16, false, VPHADDBQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddwd", UNARY, 2, 16, false, VPHADDWD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddwq", UNARY, 2, 16, false, VPHADDWQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphadddq", UNARY, 4, 16, false, VPHADDDQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddubw", UNARY, 1, 16, false, VPHADDUBW_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddubd", UNARY, 1, 16, false, VPHADDUBD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddubq", UNARY, 1, 16, false, VPHADDUBQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphadduwd", UNARY, 2, 16, false, VPHADDUWD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphadduwq", UNARY, 2, 16, false, VPHADDUWQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphaddudq", UNARY, 4, 16, false, VPHADDUDQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphsubbw", UNARY, 1, 16, false, VPHSUBBW_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphsubwd", UNARY, 2, 16, false, VPHSUBWD_X_XM128)
+    BUSTER_CHECK_X86_XOP("vphsubdq", UNARY, 4, 16, false, VPHSUBDQ_X_XM128)
+    BUSTER_CHECK_X86_XOP("vpshab", BINARY, 1, 16, true, VPSHAB_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshaw", BINARY, 2, 16, true, VPSHAW_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshad", BINARY, 4, 16, true, VPSHAD_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshaq", BINARY, 8, 16, true, VPSHAQ_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshlb", BINARY, 1, 16, true, VPSHLB_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshlw", BINARY, 2, 16, true, VPSHLW_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshld", BINARY, 4, 16, true, VPSHLD_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpshlq", BINARY, 8, 16, true, VPSHLQ_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacssww", BLENDV, 2, 16, false, VPMACSSWW_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacsswd", BLENDV, 2, 16, false, VPMACSSWD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacssdql", BLENDV, 4, 16, false, VPMACSSDQL_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacssdd", BLENDV, 4, 16, false, VPMACSSDD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacssdqh", BLENDV, 4, 16, false, VPMACSSDQH_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacsww", BLENDV, 2, 16, false, VPMACSWW_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacswd", BLENDV, 2, 16, false, VPMACSWD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacsdql", BLENDV, 4, 16, false, VPMACSDQL_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacsdd", BLENDV, 4, 16, false, VPMACSDD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmacsdqh", BLENDV, 4, 16, false, VPMACSDQH_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmadcsswd", BLENDV, 2, 16, false, VPMADCSSWD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpmadcswd", BLENDV, 2, 16, false, VPMADCSWD_X_X_XM128_X)
+    BUSTER_CHECK_X86_XOP("vpperm", BLENDV, 1, 16, false, VPPERM_X_X_XM128_X)
 };
 
 #undef BUSTER_CHECK_X86_BF16_MEMORY
 #undef BUSTER_CHECK_X86_XOP_COMPARE
+#undef BUSTER_CHECK_X86_XOP
 #undef BUSTER_CHECK_X86_HALF_REDUCE
 #undef BUSTER_CHECK_X86_HALF_CONVERSIONS
 #undef BUSTER_CHECK_X86_HALF_COMPLEX

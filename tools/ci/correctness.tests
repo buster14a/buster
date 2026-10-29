@@ -355,6 +355,11 @@ corpus=$BUSTER_CORPUS
 # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
 # with GNU as and compares the bytes.
 ./build/compiler test-x86-semantics --cross-check
+== Compare the headers' x86 intrinsics with clang's code
+# #136: the intrinsics whose instructions no host of the tests runs (XOP's), and controls that run, by clang -O0
+# and by both paths of this compiler, decoded and followed through x86_semantics.c's effects: each case's result
+# and stores must be the same expressions of its arguments.
+./build/compiler test-x86-intrinsics
 == Test Tier 1 frame planning and slot coloring
 ./build/compiler test-tier1-frame
 ./build/compiler test-tier1-frame-execution

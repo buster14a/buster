@@ -317,6 +317,9 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
+// The compiler's code of the headers' x86 intrinsics against clang -O0's, for the test-x86-intrinsics command: the objects
+// decoded by the disassembler and followed by the effects above.
+#include "buster/compiler/x86_intrinsics_test.c"
 
 // Experimental postallocation scheduling over resolved machine-record effects and measured operand costs.
 #include "buster/compiler/tier1_schedule.c"
@@ -707,6 +710,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
     {
         result = run_x86_semantics_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-intrinsics") == 0)
+    {
+        result = run_x86_intrinsic_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
     {

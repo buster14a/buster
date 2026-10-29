@@ -960,6 +960,17 @@ designs and the compilers already built this way.
   `x86_semantics_benchmark.c` provides `benchmark-x86-semantics`.
   `docs/x86-semantics.md` has the contract, the covered subset, how to add a
   form and the measurements.
+- `src/buster/compiler/x86_intrinsics_test.c` is `test-x86-intrinsics` (#136):
+  the compiler's code of the headers' x86 intrinsics whose instructions no
+  host of the tests runs (XOP's) against clang -O0's. A source takes each
+  case's address, both compilers compile it (this one by both paths into the
+  same bytes), and each case's function is decoded (`x86_64_disassembler.c`)
+  and followed through `x86_semantics.c`'s effects, every register's and stack
+  byte's value an expression of the arguments: its result and stores must be
+  the same expressions in both objects, controls that run natively must agree
+  too, and an intrinsic's two orders of operands must differ. `--cases FILE`
+  takes other cases and `--print NAME` prints a case's traces; the checker
+  guide's "Intrinsics no host runs" has the details.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
   clang's record layout (one record at a time, and 16 at once in vectors), each
