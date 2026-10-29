@@ -1,0 +1,200 @@
+name: Prepare issue 764 patch
+
+on:
+  push:
+    branches: [chatgpt/issue-764-materialize]
+    paths: [.github/workflows/issue-764-materialize.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: chatgpt/issue-764-materialize
+      - name: Apply the bounded source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD:src/buster/compiler/c_check_input.c)" = 1db16bc2174d34821fd95b5e4999d5a06ed50aa2
+          test "$(git rev-parse HEAD:src/buster/compiler/c_check_deferred_test.c)" = 81fef87525ef51b3a9460186b2ec89b7b2c9437b
+          git apply --recount <<'PATCH'
+          diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+          --- a/src/buster/compiler/c_check_input.c
+          +++ b/src/buster/compiler/c_check_input.c
+          @@ -5786,6 +5786,15 @@
+           #include "c_check_comma_input.c"
+           
+          +// #764: deferred bodies first-touch disjoint entries in shared huge-page regions. Give their fresh sparse
+          +// arena base pages before any walk, including on one lane and on a state's later readings. Source order,
+          +// including the fallback and lazy bodies that are never read, keeps its small prefix and huge-page tail.
+          +static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool deferred)
+          +{
+          +    const uint64_t small = deferred ? bytes : small_bytes > BUSTER_ARENA_SMALL_BYTES ? small_bytes : BUSTER_ARENA_SMALL_BYTES;
+          +    return arena_reserve_small(bytes, small);
+          +}
+          +
+           // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
+           // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
+           static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+          @@ -6026,9 +6035,10 @@
+               // zero, so a column that is zero where nothing is written needs no clearing, and takes memory only where the walk
+               // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
+               // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
+          -    // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
+          -    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
+          -    // base pages at the arena's start.
+          +    // are huge in source order, since the walk reads most of these columns at every token, which in base pages would
+          +    // fault each one; but the scope stacks and the enumeration constants' values, which only the tokens that write
+          +    // them read, are in base pages at the arena's start. Deferred bodies use base pages throughout: lanes otherwise
+          +    // race to allocate and clear the same huge-page region before one of their pages is installed (#764).
+           #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
+               X(scope_marks, uint32_t) \
+               X(scope_ends, uint32_t) \
+          @@ -6071,7 +6081,7 @@
+               const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+               const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
+           #undef BUSTER_CHECK_SPARSE_BYTES
+          -    Arena sparse = valid ? arena_reserve_small(sparse_bytes, sparse_small > BUSTER_ARENA_SMALL_BYTES ? sparse_small : BUSTER_ARENA_SMALL_BYTES) : (Arena){ 0 };
+          +    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, deferred != 0) : (Arena){ 0 };
+           #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+               BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+               BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+          diff --git a/src/buster/compiler/c_check_deferred_test.c b/src/buster/compiler/c_check_deferred_test.c
+          --- a/src/buster/compiler/c_check_deferred_test.c
+          +++ b/src/buster/compiler/c_check_deferred_test.c
+          @@ -463,6 +463,83 @@
+          -// Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_commit asks for.
+          +// #764's fresh sparse arena: base pages throughout for deferred bodies, but source order keeps its small
+          +// prefix and huge-page tail. Check the kernel's advice, not timing or whether THP happened to be allocated.
+          +// Repeat with fresh mappings, including byte-sized and non-page-sized capacities and both sides of the prefix.
+          +static bool check_deferred_test_sparse_pages(void)
+          +{
+          +    const uint64_t capacities[] =
+          +    {
+          +        1,
+          +        BUSTER_ARENA_SMALL_BYTES,
+          +        BUSTER_ARENA_SMALL_BYTES + 1,
+          +        3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 17,
+          +    };
+          +    const uint64_t prefixes[] =
+          +    {
+          +        0,
+          +        BUSTER_ARENA_PAGE_BYTES,
+          +        BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_PAGE_BYTES,
+          +        BUSTER_ARENA_HUGE_PAGE_BYTES,
+          +    };
+          +    bool valid = true;
+          +    for (uint32_t reading = 0; valid && reading < 2; reading += 1)
+          +    {
+          +        for (uint32_t mode = 0; valid && mode < 2; mode += 1)
+          +        {
+          +            for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
+          +            {
+          +                for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(prefixes); p += 1)
+          +                {
+          +                    const uint64_t bytes = capacities[c];
+          +                    const uint64_t small = prefixes[p] > BUSTER_ARENA_SMALL_BYTES ? prefixes[p] : BUSTER_ARENA_SMALL_BYTES;
+          +                    const bool deferred = mode != 0;
+          +                    Arena arena = check_input_sparse_arena(bytes, prefixes[p], deferred);
+          +                    valid = arena.base != 0 && arena.capacity == bytes && arena.length == 0;
+          +                    // Reserving must not eagerly clear or commit the columns on the calling thread.
+          +                    valid = valid && !check_deferred_test_resident(arena.base, 1) && !check_deferred_test_resident(arena.base + bytes - 1, 1);
+          +                    const uint64_t offsets[] =
+          +                    {
+          +                        0,
+          +                        small < bytes ? small - 1 : bytes - 1,
+          +                        small < bytes ? small : bytes - 1,
+          +                        bytes - 1,
+          +                    };
+          +                    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
+          +                    {
+          +                        const bool huge = !deferred && offsets[i] >= small;
+          +                        const uintptr_t address = (uintptr_t)arena.base + offsets[i];
+          +                        bool found = false;
+          +                        const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
+          +                        valid = found && no_huge_flag == !huge;
+          +                        const bool huge_flag = lane_test_vm_flag(address, "hg", &found);
+          +                        valid = valid && found && huge_flag == huge && arena.base[offsets[i]] == 0;
+          +                    }
+          +                    if (valid)
+          +                    {
+          +                        arena.base[0] = 0x5a;
+          +                        arena.base[bytes - 1] = 0xa5;
+          +                        valid = arena.base[0] == (bytes == 1 ? 0xa5 : 0x5a) && arena.base[bytes - 1] == 0xa5;
+          +                    }
+          +                    arena_release(&arena);
+          +                    valid = valid && arena.base == 0 && arena.capacity == 0 && arena.length == 0;
+          +                }
+          +            }
+          +        }
+          +    }
+          +    Arena empty = check_input_sparse_arena(0, 0, true);
+          +    Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
+          +    valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;
+          +    arena_release(&empty);
+          +    arena_release(&oversized);
+          +    return valid;
+          +}
+          +
+          +// Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_commit asks for.
+           static bool check_deferred_test_populates(void)
+           {
+               const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+          @@ -1300,6 +1377,13 @@
+               {
+                   fprintf(stderr, "test-checker-deferred: the state's memory wasn't laid out, kept or released as it should be\n");
+               }
+          +    const bool sparse_pages = check_deferred_test_sparse_pages();
+          +    checks += 1;
+          +    failures += !sparse_pages;
+          +    if (!sparse_pages)
+          +    {
+          +        fprintf(stderr, "test-checker-deferred: the sparse arena's page policy, demand-zero storage or release differs\n");
+          +    }
+               const bool names = check_deferred_test_lane_names();
+               checks += 1;
+               failures += !names;
+          PATCH
+          cat >> docs/c-deferred-bodies.md <<'DOC'
+
+          ## The shared sparse arena's pages (#764)
+
+          `check_input_run` reserves its rare token columns and binding table afresh
+          for every reading, independently of the deferred state's reusable arenas.
+          `check_input_sparse_arena` gives this mapping base pages throughout when
+          the reader will revisit bodies on deferred lanes. The policy is selected
+          before either the top level or a body touches it, not after a huge zero
+          page might already have been installed. It is the same on one or many
+          lanes and on a state's first or later reading.
+
+          Source order keeps its existing small prefix (the scope stacks and enum
+          values) and huge-page tail. This includes a deferred reading's fallback
+          and the lazy path that never revisits its skipped bodies: the policy
+          tests the deferred reader, not merely the deferred-token mask. No new
+          pre-touch pass, per-token branch, lane synchronization or merge copy is
+          introduced. Existing vector and scalar walks are unchanged.
+
+          `test-checker-deferred` checks the allocator's Linux `nh`/`hg` mapping
+          flags at the beginning, both sides of the small-prefix boundary and the
+          last byte. It covers repeated fresh mappings, sub-page and non-page-sized
+          capacities, minimum-prefix clamping, initially uncommitted demand-zero
+          storage, writable endpoints, release and refused capacities. The existing
+          deferred fixture suite compares source order with one, two, three and
+          eight lanes, delayed/held lanes and reused or poisoned states.
+
+          This removes eligibility for competing transparent-huge-page allocations
+          in this mapping where Linux accepts the arena's page-size advice. It is
+          not by itself the performance acceptance for #764: five-round walk
+          spreads on diag9 and A2's 43 units, source-order timings including SQLite,
+          and a cold lane-rule refit on A2 are still required on the locked 9700X.
+          The lane-rule constants are deliberately unchanged until that refit.
+          DOC
+          git diff --check
+          git add src/buster/compiler/c_check_input.c src/buster/compiler/c_check_deferred_test.c docs/c-deferred-bodies.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Use base pages for deferred readers sparse columns (#764)'
+          git push origin HEAD:refs/heads/chatgpt/issue-764-materialize
