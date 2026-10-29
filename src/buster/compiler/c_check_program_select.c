@@ -9,7 +9,7 @@
 //
 // Definition IDs interleave code and data in original definition order. Canonical objects join redeclarations;
 // prototype declarations are not graph definitions. C99 inline-only bodies have an external symbol but no local
-// emission/dependencies. GNU inline uses the retained declaration spelling and gnu_inline attribute. There is no
+// emission/dependencies. GNU inline uses the language mode and retained declaration spellings and attribute. There is no
 // inliner here; any future inliner must attribute its retained dependencies to the emitted caller before this pass.
 // A body also selects its own block-scope statics, referenced or not, as clang emits every static local of a function
 // it emits, even at -O0 (#129's comparison with clang's objects, c_lowering_symbols.c).
@@ -297,9 +297,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             bool gnu_inline = false;
             roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
             inline_rules[group] |= gnu_inline ? 2 : 0;
+            const uint8_t spelling = function && input->function_flags != 0 ? input->function_flags[token] : 0;
+            // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
+            // spells extern inline. Clang applies this rule to declarations both before and after the definition.
+            inline_rules[group] |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE ? 4 : 0;
             if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
             {
-                const uint8_t spelling = input->function_flags != 0 ? input->function_flags[token] : 0;
                 if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
                 {
                     inline_rules[group] &= (uint8_t)~1u;
@@ -337,8 +340,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     {
                         const uint32_t body_declaration = full->bodies[raw].declaration;
                         const uint8_t spelling = input->function_flags != 0 ? input->function_flags[body_declaration] : 0;
-                        inline_only = (inline_rules[declared] & 2) != 0 && (spelling & CHECK_INPUT_FUNCTION_INLINE) != 0 ?
-                                      (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0 : (inline_rules[declared] & 1) != 0;
+                        const Preprocessor* pp = full->parser->preprocessor;
+                        const bool gnu = (inline_rules[declared] & 2) != 0 ||
+                                         (pp != NULL && predefines_gnu_inline(&pp->options.predefines, pp->options.language));
+                        inline_only = gnu ? (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) ==
+                                                (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN) && (inline_rules[declared] & 4) == 0 :
+                                      (inline_rules[declared] & 1) != 0;
                     }
                     flags |= inline_only ? BUSTER_C_LOWERING_INLINE_ONLY : BUSTER_C_LOWERING_EXTERNAL;
                 }

@@ -651,8 +651,8 @@ static bool snapshot_test_opening(const ExecutableTestDirectory* directory, cons
         }
     }
     struct stat status;
-    snapshot_test_expect(&tally, stat(place, &status) == 0 && S_ISDIR(status.st_mode) && (status.st_mode & 0777) == 0700, "the directory made, private", 0);
-    snapshot_test_expect(&tally, stat(parent, &status) == 0 && S_ISDIR(status.st_mode) && (status.st_mode & 0777) == 0700, "the one above it made, private", 0);
+    snapshot_test_expect(&tally, stat(place, &status) == 0 && S_ISDIR(status.st_mode) && (status.st_mode & 0077) == 0, "the directory made, private", 0);
+    snapshot_test_expect(&tally, stat(parent, &status) == 0 && S_ISDIR(status.st_mode) && (status.st_mode & 0077) == 0, "the one above it made, private", 0);
     bool named = false;
     snapshot_test_expect(&tally, snapshot_test_entries(place, BUSTER_SNAPSHOT_NAME, &named) == 1 && named, "only the snapshot in it", 0);
     // Without a directory or an identity: imported, and nothing written.
@@ -1786,40 +1786,125 @@ static void snapshot_test_environment(const char* name, const char* value)
     }
 }
 
-static bool snapshot_test_directories(void)
+static bool snapshot_test_directories(const ExecutableTestDirectory* directory, const RuntimeProbe* compiler)
 {
     SnapshotTestTally tally = {
         .check = "cache directory",
     };
     char* saved_cache = getenv("XDG_CACHE_HOME") != 0 ? strdup(getenv("XDG_CACHE_HOME")) : 0;
     char* saved_home = getenv("HOME") != 0 ? strdup(getenv("HOME")) : 0;
-    typedef struct SnapshotTestEnvironment SnapshotTestEnvironment;
-    struct SnapshotTestEnvironment
+    char missing[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char parent[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char expected[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char path[BUSTER_RUNTIME_PATH_BYTES];
+    struct stat status;
+    snapshot_test_path(missing, directory->path, "missing-home");
+    snapshot_test_environment("XDG_CACHE_HOME", 0);
+    snapshot_test_environment("HOME", missing);
+    const bool found = snapshot_directory(path, sizeof(path));
+    snapshot_test_expect(&tally, found && lstat(missing, &status) != 0 && errno == ENOENT,
+                         "missing HOME is not created", 0);
+    Runtime runtime;
+    SnapshotResult result = runtime_open_as_mode(&runtime, found ? path : 0, RUNTIME_KIND_DYNAMIC, compiler, true, true);
+    snapshot_test_expect(&tally, result.error == RUNTIME_ERROR_NONE && !result.written && lstat(missing, &status) != 0 && errno == ENOENT,
+                         "missing HOME falls back to import", 0);
+    if (result.error == RUNTIME_ERROR_NONE)
     {
-        const char* cache;
-        const char* home;
-        const char* expected;
-    };
-    static const SnapshotTestEnvironment cases[] = {
-        { "/cache", "/home/user", "/cache/buster" },
-        { 0, "/home/user", "/home/user/.cache/buster" },
-        { "relative", "/home/user", "/home/user/.cache/buster" },
-        { "", "/home/user", "/home/user/.cache/buster" },
-        { 0, 0, 0 },
-        { "relative", "relative", 0 },
-    };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
-    {
-        snapshot_test_environment("XDG_CACHE_HOME", cases[i].cache);
-        snapshot_test_environment("HOME", cases[i].home);
-        char path[BUSTER_RUNTIME_PATH_BYTES];
-        const bool found = snapshot_directory(path, sizeof(path));
-        snapshot_test_expect(&tally, cases[i].expected != 0 ? found && strcmp(path, cases[i].expected) == 0 : !found && path[0] == 0, "the cache directory", i);
+        runtime_release(&runtime);
     }
-    // A path that doesn't fit.
-    snapshot_test_environment("XDG_CACHE_HOME", "/cache");
+    snapshot_test_environment("XDG_CACHE_HOME", missing);
+    snapshot_test_environment("HOME", directory->path);
+    const bool missing_xdg_found = snapshot_directory(path, sizeof(path));
+    result = runtime_open_as_mode(&runtime, missing_xdg_found ? path : 0, RUNTIME_KIND_DYNAMIC, compiler, true, false);
+    snapshot_test_expect(&tally, missing_xdg_found && result.error == RUNTIME_ERROR_NONE && !result.written &&
+                                    lstat(missing, &status) != 0 && errno == ENOENT,
+                         "missing XDG cache root falls back without creating it or using HOME", 0);
+    if (result.error == RUNTIME_ERROR_NONE)
+    {
+        runtime_release(&runtime);
+    }
+    char non_directory[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snapshot_test_path(non_directory, directory->path, "not-a-directory");
+    const bool file_made = snapshot_test_put(non_directory, "file");
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        snapshot_test_environment("XDG_CACHE_HOME", i == 0 ? non_directory : 0);
+        snapshot_test_environment("HOME", i == 1 ? non_directory : directory->path);
+        snapshot_test_path(parent, directory->path, ".cache");
+        const bool cache_file_made = i != 2 || snapshot_test_put(parent, "file");
+        const bool selected = snapshot_directory(path, sizeof(path));
+        result = runtime_open_as_mode(&runtime, selected ? path : 0, RUNTIME_KIND_DYNAMIC, compiler, true, i != 0);
+        snapshot_test_expect(&tally, file_made && cache_file_made && selected && result.error == RUNTIME_ERROR_NONE && !result.written,
+                             "a file in place of a cache directory falls back to import", i);
+        if (result.error == RUNTIME_ERROR_NONE)
+        {
+            runtime_release(&runtime);
+        }
+        if (i == 2)
+        {
+            unlink(parent);
+        }
+    }
+    unlink(non_directory);
+    snapshot_test_environment("XDG_CACHE_HOME", directory->path);
+    snapshot_test_path(expected, directory->path, "buster");
+    const bool xdg_found = snapshot_directory(path, sizeof(path));
+    snapshot_test_expect(&tally, xdg_found && strcmp(path, expected) == 0, "existing XDG cache root", 0);
+    const bool leaf_file_made = snapshot_test_put(path, "file");
+    result = runtime_open_as_mode(&runtime, xdg_found ? path : 0, RUNTIME_KIND_DYNAMIC, compiler, true, false);
+    snapshot_test_expect(&tally, leaf_file_made && result.error == RUNTIME_ERROR_NONE && !result.written,
+                         "file as cache directory falls back to import", 0);
+    if (result.error == RUNTIME_ERROR_NONE)
+    {
+        runtime_release(&runtime);
+    }
+    unlink(path);
+    result = runtime_open_as_mode(&runtime, xdg_found ? path : 0, RUNTIME_KIND_DYNAMIC, compiler, true, false);
+    snapshot_test_expect(&tally, result.error == RUNTIME_ERROR_NONE && result.written && stat(path, &status) == 0 &&
+                                    S_ISDIR(status.st_mode) && (status.st_mode & 0077) == 0,
+                         "XDG cache is writable and private", 0);
+    if (result.error == RUNTIME_ERROR_NONE)
+    {
+        runtime_release(&runtime);
+    }
+    char file[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snapshot_test_path(file, path, BUSTER_SNAPSHOT_NAME);
+    unlink(file);
+    rmdir(path);
+    snapshot_test_environment("XDG_CACHE_HOME", "relative");
+    snapshot_test_path(parent, directory->path, ".cache");
+    snapshot_test_path(expected, parent, "buster");
+    snapshot_test_expect(&tally, snapshot_directory(path, sizeof(path)) && strcmp(path, expected) == 0 && lstat(parent, &status) != 0 && errno == ENOENT,
+                         "selecting HOME does not create .cache", 0);
+    result = runtime_open_as_mode(&runtime, path, RUNTIME_KIND_DYNAMIC, compiler, true, true);
+    snapshot_test_expect(&tally, stat(parent, &status) == 0 && S_ISDIR(status.st_mode) && (status.st_mode & 0077) == 0,
+                         "HOME .cache is private", 0);
+    snapshot_test_expect(&tally, result.error == RUNTIME_ERROR_NONE && result.written && stat(path, &status) == 0 && S_ISDIR(status.st_mode),
+                         "HOME cache is writable", 0);
+    if (result.error == RUNTIME_ERROR_NONE)
+    {
+        runtime_release(&runtime);
+    }
+    snapshot_test_path(file, path, BUSTER_SNAPSHOT_NAME);
+    unlink(file);
+    rmdir(path);
+    rmdir(parent);
+    // If a parent disappears after selection, writing must not recreate it.
+    snapshot_test_path(path, missing, "buster");
+    SnapshotResult failed = { 0 };
+    snapshot_test_expect(&tally, !snapshot_make_cache(path, &failed, false) && lstat(missing, &status) != 0 && errno == ENOENT,
+                         "a removed parent is not recreated", 0);
+    SnapshotResult explicit_result = { 0 };
+    snapshot_test_expect(&tally, snapshot_make_directory(path, &explicit_result) && stat(path, &status) == 0 && S_ISDIR(status.st_mode),
+                         "an explicit cache creates missing parents", 0);
+    rmdir(path);
+    rmdir(missing);
+    snapshot_test_environment("XDG_CACHE_HOME", directory->path);
     char small[8];
     snapshot_test_expect(&tally, !snapshot_directory(small, sizeof(small)) && small[0] == 0, "a path that doesn't fit", 0);
+    snapshot_test_environment("XDG_CACHE_HOME", 0);
+    snapshot_test_environment("HOME", "relative");
+    snapshot_test_expect(&tally, !snapshot_directory(path, sizeof(path)) && path[0] == 0, "relative HOME is ignored", 0);
     snapshot_test_environment("XDG_CACHE_HOME", saved_cache);
     snapshot_test_environment("HOME", saved_home);
     free(saved_cache);
@@ -1932,7 +2017,7 @@ static int run_snapshot_tests(int argc, char** argv)
         passed = statics && snapshot_test_damaged(&directory, &static_runtime, &compiler, seed, "static damaged pieces", "static-damaged") && passed;
         passed = static_pies && snapshot_test_damaged(&directory, &static_pie_runtime, &compiler, seed, "static PIE damaged pieces", "static-pie-damaged") && passed;
         passed = snapshot_test_concurrency(&directory, &runtime, &compiler) && passed;
-        passed = snapshot_test_directories() && passed;
+        passed = snapshot_test_directories(&directory, &compiler) && passed;
         if (statics)
         {
             runtime_release(&static_runtime);

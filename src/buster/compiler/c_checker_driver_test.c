@@ -1904,6 +1904,223 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Diagnostic examples include missing indices: the writer does not attach an atom to every failure.
+static void check_test_driver_link_failure_messages(CheckTest* test)
+{
+    const uint8_t* names[] = { NULL, (const uint8_t*)"large" };
+    uint32_t lengths[] = { 0, 5 };
+    NameId symbol_names[] = { 0, 1 };
+    AtomId symbol_atoms[] = { 0, 1 };
+    uint64_t sizes[] = { 0, (3ull << 30), (3ull << 30) };
+    Link link = {
+        .names = { .bytes = names, .length = lengths, .count = 2 },
+        .atoms = { .size = sizes, .count = 3 },
+        .symbols = { .name = symbol_names, .atom = symbol_atoms, .count = 2 },
+    };
+    Runtime runtime = { 0 };
+    static const struct
+    {
+        ExecutableResult result;
+        const char* expected;
+    } cases[] = {
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 1 }, "atom 1 ('large') has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT, .atom = 2 }, "atom 2 has 3221225472 bytes; the maximum atom size is 2147483648 bytes" },
+        { { .error = EXECUTABLE_ERROR_LAYOUT }, "image, TLS or section-name layout exceeds executable limits" },
+        { { .error = EXECUTABLE_ERROR_MEMORY }, "linker scratch memory exhausted" },
+        { { .error = EXECUTABLE_ERROR_ENTRY, .symbol = 1 }, "entry point 'large' is not defined in code" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 1 }, "unwind atom 1 ('large') cannot be indexed" },
+        { { .error = EXECUTABLE_ERROR_UNWIND, .atom = 99 }, "unwind table cannot be indexed" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 1 }, "unsupported symbol 'large'" },
+        { { .error = EXECUTABLE_ERROR_UNSUPPORTED, .symbol = 99 }, "unsupported executable configuration" },
+        { { .error = EXECUTABLE_ERROR_UNDEFINED, .symbol = 1 }, "undefined reference to 'large'" },
+        { { .error = EXECUTABLE_ERROR_FILE, .call = "open", .system_error = EACCES }, "can't write out: open:" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        FILE* output = tmpfile();
+        char* text = NULL;
+        size_t length = 0;
+        if (output != NULL)
+        {
+            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+        }
+        const bool read = output != NULL && pp_test_read_output(output, &text, &length);
+        check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");
+        free(text);
+        if (output != NULL)
+        {
+            fclose(output);
+        }
+    }
+}
+
+// A large BSS atom is refused without writing gigabytes; the driver must explain the writer's atom limit.
+static void check_test_driver_link_layout_error(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char source_text[] = "char gbig[3L << 30]; int main(void) { return 0; }\n";
+    char source[256];
+    char output[256];
+    snprintf(source, sizeof(source), "%s/large-bss.c", directory);
+    snprintf(output, sizeof(output), "%s/large-bss", directory);
+    const bool made = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        char* const vector[] = { (char*)executable, "-o", output, source, NULL };
+        char* const scalar_args[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn(scalar ? scalar_args : vector, &text) : -1;
+        check_test_expect(test, status != 0 && text != NULL && strstr(text, "gbig") != NULL &&
+                                  strstr(text, "3221225472 bytes") != NULL && strstr(text, "maximum atom size is 2147483648 bytes") != NULL,
+                          "a too-large atom's link diagnostic names its symbol, size and limit");
+        free(text);
+    }
+    unlink(output);
+    unlink(source);
+}
+
+// -E is an action at any argument position, but an option's value can spell -E without selecting that action.
+static void check_test_driver_preprocess_action(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#define VALUE 42\nint value = VALUE;\n";
+    char compiler[PATH_MAX];
+    char source[256];
+    char output[256];
+    char operand[256];
+    snprintf(source, sizeof(source), "%s/action.c", directory);
+    snprintf(output, sizeof(output), "%s/action.i", directory);
+    snprintf(operand, sizeof(operand), "%s/-E", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const first[] = { compiler, "-E", "-P", "-o", output, source, NULL };
+    char* const later[] = { compiler, "-O2", "-I", (char*)directory, "-E", "-P", "-o", output, source, NULL };
+    char* const after[] = { compiler, "-c", "-P", source, "-E", "-o", output, NULL };
+    char* const macros[] = { compiler, "-O2", "-E", "-dM", "-o", output, source, NULL };
+    char* const* cases[] = { first, later, after, macros };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        unlink(output);
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn(cases[i], &text) : -1;
+        free(text);
+        char captured[65536] = { 0 };
+        FILE* output_file = status == 0 ? fopen(output, "rb") : NULL;
+        const size_t length = output_file != NULL ? fread(captured, 1, sizeof(captured) - 1, output_file) : 0;
+        const bool read = output_file != NULL && !ferror(output_file) && feof(output_file);
+        captured[length] = 0;
+        if (output_file != NULL)
+        {
+            fclose(output_file);
+        }
+        check_test_expect(test, read && strstr(captured, i == 3 ? "#define VALUE 42" : "int value = 42;") != NULL,
+                          "-E selects preprocessing before or after other options and input, including -c and -dM");
+    }
+    // A separate argument that spells -E is an output name, not the preprocessing action.
+    char* const object[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-E", "action.c", NULL };
+    char* text = NULL;
+    const int status = made ? check_test_driver_spawn(object, &text) : -1;
+    free(text);
+    FILE* file = fopen(operand, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = file != NULL && fread(magic, 1, sizeof(magic), file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    check_test_expect(test, status == 0 && elf, "an option value spelled -E does not select preprocessing");
+    char* const parallel[] = { compiler, "parallel", "-E", NULL };
+    text = NULL;
+    const int parallel_status = check_test_driver_spawn(parallel, &text);
+    check_test_expect(test, parallel_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "an explicit driver command takes precedence over -E");
+    free(text);
+    char* const end_options[] = { compiler, "--", "-E", source, NULL };
+    text = NULL;
+    const int end_status = check_test_driver_spawn(end_options, &text);
+    check_test_expect(test, end_status != 0 && text != NULL && strstr(text, "unknown argument: --") != NULL,
+                      "-E after -- does not select preprocessing; unsupported -- is diagnosed");
+    free(text);
+    unlink(operand);
+    unlink(output);
+    unlink(source);
+}
+
+// Code generation flags must not silently produce an object without the requested hardening or instrumentation.
+static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char source_text[] = "int main(void) { return 0; }\n";
+    static const char sentinel[] = "unchanged output\n";
+    static const char* const options[] = {
+        "-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all", "-fstack-protector-explicit",
+        "-fcf-protection", "-fcf-protection=full", "-fcf-protection=branch", "-fcf-protection=return",
+        "-fstack-clash-protection", "-fstack-check", "-fstack-check=specific", "-pg", "-finstrument-functions",
+        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-generate=path", "-fprofile-instr-generate",
+        "-fprofile-instr-generate=path", "-fcs-profile-generate", "-fcs-profile-generate=path",
+        "-fprofile-generate-cold-function-coverage", "-fprofile-generate-cold-function-coverage=path", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-ftls-model=global-dynamic", "-ftls-model=local-exec",
+        "-mno-red-zone", "-fno-plt", "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fwide-exec-charset=UTF-32",
+    };
+    char source[256];
+    char output[256];
+    char compiler[PATH_MAX];
+    char named[256];
+    snprintf(source, sizeof(source), "%s/codegen-flags.c", directory);
+    snprintf(output, sizeof(output), "%s/codegen-flags.o", directory);
+    snprintf(named, sizeof(named), "%s/-pg", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        const bool saved = made && parse_test_write(output, sentinel, sizeof(sentinel) - 1);
+        char* const arguments[] = { compiler, "-c", (char*)options[i], "-o", output, source, NULL };
+        char* text = NULL;
+        const int status = saved ? check_test_driver_spawn(arguments, &text) : -1;
+        char contents[sizeof(sentinel)] = { 0 };
+        FILE* file = fopen(output, "rb");
+        const size_t length = file != NULL ? fread(contents, 1, sizeof(contents), file) : 0;
+        if (file != NULL)
+        {
+            fclose(file);
+        }
+        const bool named_option = text != NULL && strstr(text, "unsupported code generation option") != NULL && strstr(text, options[i]) != NULL;
+        char label[192];
+        snprintf(label, sizeof(label), "%s fails by name without overwriting output", options[i]);
+        check_test_expect(test, status == 1 && named_option && length == sizeof(sentinel) - 1 && memcmp(contents, sentinel, length) == 0, label);
+        free(text);
+    }
+    char* text = NULL;
+    char* const link[] = { compiler, "-o", output, source, "-fstack-protector-strong", NULL };
+    const int link_status = made ? check_test_driver_spawn(link, &text) : -1;
+    check_test_expect(test, link_status == 1 && text != NULL && strstr(text, "-fstack-protector-strong") != NULL,
+                      "the executable route rejects unsupported hardening");
+    free(text);
+    char* const allowed[] = { compiler, "-c", "-fno-stack-protector", "-fcf-protection=none", "-o", output, source, NULL };
+    const int allowed_status = made ? check_test_driver_spawn(allowed, &text) : -1;
+    check_test_expect(test, allowed_status == 0, "disabling stack protection and CET remains supported");
+    free(text);
+    char* const disabled_last[] = { compiler, "-c", "-fstack-protector-strong", "-fno-stack-protector",
+                                    "-fcf-protection=full", "-fcf-protection=none", "-o", output, source, NULL };
+    const int disabled_status = made ? check_test_driver_spawn(disabled_last, &text) : -1;
+    check_test_expect(test, disabled_status == 0, "the last stack-protector and CET options may disable unsupported instrumentation");
+    free(text);
+    char* const enabled_last[] = { compiler, "-c", "-fno-stack-protector", "-fstack-protector-all", "-o", output, source, NULL };
+    const int enabled_status = made ? check_test_driver_spawn(enabled_last, &text) : -1;
+    check_test_expect(test, enabled_status == 1 && text != NULL && strstr(text, "-fstack-protector-all") != NULL,
+                      "a later stack-protector option enables the refused instrumentation");
+    free(text);
+    char* const cet_last[] = { compiler, "-c", "-fcf-protection=none", "-fcf-protection=branch", "-o", output, source, NULL };
+    const int cet_status = made ? check_test_driver_spawn(cet_last, &text) : -1;
+    check_test_expect(test, cet_status == 1 && text != NULL && strstr(text, "-fcf-protection=branch") != NULL,
+                      "a later CET option enables the refused instrumentation");
+    free(text);
+    char* const value[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-pg", "codegen-flags.c", NULL };
+    const int value_status = made ? check_test_driver_spawn(value, &text) : -1;
+    struct stat stat_output;
+    check_test_expect(test, value_status == 0 && stat(named, &stat_output) == 0 && stat_output.st_size > 0,
+                      "an option value named -pg remains an output path");
+    free(text);
+    unlink(source);
+    unlink(output);
+    unlink(named);
+}
+
 // Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
 // directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
 // include's macro and a header that only -Lheaders has, and the program runs.
@@ -2811,6 +3028,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
@@ -2983,6 +3201,96 @@ static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name
                  symbol->st_shndx < elf->section_count ? symbol->st_shndx : 0;
     }
     return result;
+}
+
+// Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
+static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "__inline__ int plain(int x){return x+1;} extern __inline__ int ext(int x){return x+2;}"
+        "__inline__ int prior(int); extern __inline__ int prior(int x){return x+3;}"
+        "extern __inline__ int after(int x){return x+4;} __inline__ int after(int);"
+        "extern __inline__ __attribute__((gnu_inline)) int attr(int x){return x+5;}"
+        "__inline__ __attribute__((gnu_inline)) int attrprior(int); extern __inline__ int attrprior(int x){return x+7;}"
+        "extern __inline__ __attribute__((gnu_inline)) int attraft(int x){return x+8;} __inline__ int attraft(int);"
+        "extern __inline__ int block(int x){return x+9;}"
+        "static __inline__ int local(int x){return x+6;}"
+        "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
+    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "use" };
+    static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
+        { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
+        { "-std=c89", "-fgnu89-inline", "-w" }, { "-std=c17", "-fgnu89-inline", "-w" },
+        { "-std=c17", "-w", "-w" }, { "-std=c17", "-fno-gnu89-inline", "-w" },
+        { "-std=c17", "-fgnu89-inline", "-fno-gnu89-inline" },
+        { "-std=c17", "-fno-gnu89-inline", "-fgnu89-inline" },
+    };
+    char source[256], ours_path[256], clang_path[256];
+    snprintf(source, sizeof(source), "%s/inline-modes.c", directory);
+    snprintf(ours_path, sizeof(ours_path), "%s/inline-ours.o", directory);
+    snprintf(clang_path, sizeof(clang_path), "%s/inline-clang.o", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            char* ours[] = { (char*)executable, (char*)modes[m].standard, (char*)modes[m].flag, (char*)modes[m].last,
+                             scalar ? "--scalar" : "-w", "-c", "-o", ours_path, source, NULL };
+            char* oracle[] = { (char*)clang, (char*)modes[m].standard, (char*)modes[m].flag, (char*)modes[m].last, "-w", "-c", "-o", clang_path, source, NULL };
+            char* text = NULL;
+            const int ours_status = written ? check_test_driver_spawn(ours, &text) : -1;
+            free(text); text = NULL;
+            const int clang_status = written ? check_test_driver_spawn(oracle, &text) : -1;
+            free(text);
+            Arena arena = arena_reserve(UINT64_C(1) << 24);
+            CheckTestElf ours_elf = { 0 }, clang_elf = { 0 };
+            const bool read = ours_status == 0 && clang_status == 0 && arena.base != NULL &&
+                              check_test_elf_open(&ours_elf, object_test_read_file(&arena, ours_path)) &&
+                              check_test_elf_open(&clang_elf, object_test_read_file(&arena, clang_path));
+            for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(names); n += 1)
+            {
+                char description[256];
+                snprintf(description, sizeof(description), "GNU inline mode %s %s %s %s %s matches clang", modes[m].standard, modes[m].flag, modes[m].last,
+                         scalar ? "scalar" : "vector", names[n]);
+                check_test_expect(test, read && (check_test_elf_defined(&ours_elf, names[n]) != 0) ==
+                                               (check_test_elf_defined(&clang_elf, names[n]) != 0), description);
+            }
+            arena_release(&arena);
+        }
+    }
+    static const char direct_source[] = "inline int f(void){return 7;} int main(void){return f();}\n";
+    char direct_path[256];
+    snprintf(direct_path, sizeof(direct_path), "%s/inline-direct", directory);
+    const bool direct_written = parse_test_write(source, direct_source, sizeof(direct_source) - 1);
+    char* direct[] = { (char*)executable, "-std=gnu89", "-o", direct_path, source, NULL };
+    char* text = NULL;
+    const int built = direct_written ? check_test_driver_spawn(direct, &text) : -1;
+    free(text); text = NULL;
+    char* run[] = { direct_path, NULL };
+    const int status = built == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    check_test_expect(test, status == 7, "GNU89 plain inline definition links and runs in the direct path");
+    static const char header_user[] = "extern inline int value(void){return 99;} int main(void){return value();}\n";
+    static const char external_body[] = "int value(void){return 7;}\n";
+    char second[256], second_object[256];
+    snprintf(second, sizeof(second), "%s/inline-other.c", directory);
+    snprintf(second_object, sizeof(second_object), "%s/inline-other.o", directory);
+    const bool pair_written = parse_test_write(source, header_user, sizeof(header_user) - 1) &&
+                              parse_test_write(second, external_body, sizeof(external_body) - 1);
+    char* first_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", ours_path, source, NULL };
+    char* second_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", second_object, second, NULL };
+    char* link[] = { (char*)clang, "-o", direct_path, ours_path, second_object, NULL };
+    text = NULL;
+    const int first = pair_written ? check_test_driver_spawn(first_compile, &text) : -1;
+    free(text); text = NULL;
+    const int other = first == 0 ? check_test_driver_spawn(second_compile, &text) : -1;
+    free(text); text = NULL;
+    const int linked = other == 0 ? check_test_driver_spawn(link, &text) : -1;
+    free(text); text = NULL;
+    const int paired = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    check_test_expect(test, paired == 7, "GNU89 extern inline references the external definition across objects");
+    unlink(second); unlink(second_object);
+    unlink(source); unlink(ours_path); unlink(clang_path); unlink(direct_path);
 }
 
 // The section named `name` of `elf`, or 0.
@@ -3437,6 +3745,67 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "K&R definition emits its deprecated-non-prototype warning",
+            .source = "int f(a)float a;{return (int)a;}\n",
+            .warnings = 1,
+        },
+        {
+            .name = "K&R arity warnings do not block object emission",
+            .source = "int f(a)int a;{return a;}int g(void){return f()+f(1,2); }\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R deprecation suppression leaves the independent arity warning",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}int g(void){return (&f)(1,2); }\n",
+            .warnings = 1,
+        },
+        {
+            .name = "promoted K&R definition warning blocks object emission",
+            .source = "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "K&R indirect call warning follows source-ordered diagnostic policy",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint g(void){return (*f)(1,2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "quiet K&R warnings still emit an object",
+            .source = "int f(a)int a;{return a;}int g(void){return f(1,2);}\n",
+            .quiet = true,
+        },
+        {
+            .name = "K&R source-only sizeof call retains its arity warning",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof(f(1,2));}\n",
+            .warnings = 2,
+        },
+        {
+            .name = "K&R source-only grouped and addressed calls retain arity warnings",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((f)(1,2))+sizeof((&f)(1,2));}\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R source-only addressed call retains known argument constraints",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((&f)((int*)0));}\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "source-only implicit calls do not add non-prototype warnings",
+            .source = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\n"
+                      "int g(void){int i=missing(1);return i+sizeof((&missing)(2))+sizeof((missing)(3));}\n",
+        },
+        {
+            .name = "K&R source-only call obeys warning promotion",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}\n#pragma clang diagnostic error \"-Weverything\"\n"
+                      "int g(void){return sizeof(f(1,2));}\n",
+            .rejected = true,
+        },
+        {
             "valid functions and relocatable static storage",
             "static int value=7; int *pointer=&value; int f(int x){return x+value;}\n",
             false,
@@ -3793,7 +4162,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
-            check_test_expect(&test, warnings == fixtures[i].warnings, "driver renders each semantic warning once");
+            snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
+                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
+            check_test_expect(&test, warnings == fixtures[i].warnings, description);
             FILE* emitted = fopen(object, "rb");
             unsigned char magic[4] = { 0 };
             const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&
@@ -3824,6 +4195,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_link_failure_messages(&test);
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
@@ -3840,6 +4212,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_inline_modes(&test, clang, executable, directory);
+            check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
@@ -3854,6 +4228,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_unsupported_codegen(&test, executable, directory);
+            check_test_driver_preprocess_action(&test, executable, directory);
+            check_test_driver_link_layout_error(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }
         rmdir(directory);

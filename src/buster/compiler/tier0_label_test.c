@@ -238,5 +238,51 @@ static void tier0_test_labels(Tier0TestTally* tally)
     {
         munmap(shared, sizeof(Tier0TestLabelShared));
     }
+    // Jump tables (#785): the second jump (entry 43) a table's of label 4 alone, the first a goto * of the others. Tier 0
+    // takes the columns, by both validators, and compiles the function into the same code; and each break of them is
+    // refused: a table's jump that isn't a JUMP_INDIRECT or past the end, tables' jumps out of order, a label past the
+    // tables, tables' labels out of their order, a table without a label and the columns' count without them.
+    static const uint32_t tables[] = { 0, 0, 0, 0, 1 };
+    static const uint32_t jumps[] = { 43 };
+    Tier0Function tabled = function;
+    tabled.label_tables = tables;
+    tabled.table_jumps = jumps;
+    tabled.table_count = 1;
+    // Against a fresh compile without them: branch sizing rewrote the first one's records for the native run.
+    const Tier0Code plain = tier0_compile_scalar(&function, &arena);
+    const Tier0Code tabled_code = tier0_compile_scalar(&tabled, &arena);
+    const Tier0Code tabled_vector = tier0_compile(&tabled, &arena);
+    tier0_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK && tier0_validate_scalar(&tabled).error == TIER0_OK && plain.error == TIER0_OK &&
+                                 tier0_test_same_code(&plain, &tabled_code) && tier0_test_same_code(&plain, &tabled_vector),
+                      "labels", "a jump table's columns change Tier 0's code or aren't taken");
+    typedef struct Tier0TestTableBreak Tier0TestTableBreak;
+    struct Tier0TestTableBreak
+    {
+        const char* name;
+        uint32_t tables[BUSTER_TIER0_TEST_LABEL_COUNT];
+        uint32_t jumps[2];
+        uint32_t count;
+        bool without;
+    };
+    static const Tier0TestTableBreak table_breaks[] = {
+        { "a table's jump that isn't a JUMP_INDIRECT", { 0, 0, 0, 0, 1 }, { 42 }, 1, false },
+        { "a table's jump past the end", { 0, 0, 0, 0, 1 }, { BUSTER_ARRAY_LENGTH(tier0_test_label_entries) }, 1, false },
+        { "tables' jumps out of order", { 0, 0, 0, 1, 2 }, { 43, 20 }, 2, false },
+        { "a label past the tables", { 0, 0, 0, 0, 2 }, { 43 }, 1, false },
+        { "tables' labels out of their order", { 2, 1, 0, 0, 0 }, { 20, 43 }, 2, false },
+        { "a table without a label", { 0, 0, 0, 0, 1 }, { 20, 43 }, 2, false },
+        { "the tables' count without their columns", { 0, 0, 0, 0, 1 }, { 43 }, 1, true },
+    };
+    for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(table_breaks); b += 1)
+    {
+        Tier0Function broken = function;
+        broken.label_tables = table_breaks[b].without ? 0 : table_breaks[b].tables;
+        broken.table_jumps = table_breaks[b].jumps;
+        broken.table_count = table_breaks[b].count;
+        const Tier0Check vector = tier0_validate(&broken);
+        const Tier0Check exact = tier0_validate_scalar(&broken);
+        tier0_test_expect(tally, vector.error == TIER0_ERROR_INVALID && exact.error == TIER0_ERROR_INVALID && vector.node == exact.node, "labels", "%s: taken (%d, %d)",
+                          table_breaks[b].name, vector.error, exact.error);
+    }
     arena_release(&arena);
 }

@@ -3,9 +3,11 @@
 //
 // Native calls for the scalar interpreter (#176), included after interpreter.c and calling_convention.c. Explicit
 // symbol bindings own native addresses; this file neither resolves symbols nor synthesizes function pointer casts.
-// interpreter_native_invoke accepts the IR's scalar values only. I8/I16 arguments require the explicit extensions
-// column, since IR integer types alone cannot distinguish C's sign/zero extension to 32 bits. Aggregates, vectors,
-// callbacks into interpreted functions, and unpromoted variadic operands are rejected. The bridge loads the SysV
+// interpreter_native_invoke accepts the IR's scalar values, and aggregates where a call's ABI records (#131) say how they
+// pass: each argument in its location's registers or stack slot, a result in registers or through a hidden pointer, what
+// the bridge can't place (a vector register's upper half, st1) refused. I8/I16 arguments without records require the
+// explicit extensions column, since IR integer types alone cannot distinguish C's sign/zero extension to 32 bits.
+// Vectors, callbacks into interpreted functions, and unpromoted variadic operands are rejected. The bridge loads the SysV
 // argument registers and copies the bounded overflow area; its result captures rax/rdx, xmm0 and optionally st0.
 // Native code executes with the process's ordinary authority. The memory flags describe trusted libc-compatible
 // malloc/free/realloc/calloc/memcpy/memmove/memset bindings so the interpreter can maintain allocation metadata.
@@ -90,6 +92,180 @@ static __attribute__((naked, noinline)) void interpreter_native_bridge(Interpret
         "popq %r12\n"
         "popq %rbp\n"
         "retq\n");
+}
+
+// A scalar's place without records, as LLVM's x86-64 assignment gives one: the next general register (two for an i128,
+// which LLVM never splits) or vector register of its kind, or an 8-byte stack slot (16 bytes, aligned to 16, for an i128
+// and for a long double, which no register takes).
+static AbiLocation interpreter_native_place(uint16_t type, uint32_t* integers, uint32_t* vectors, uint64_t* stack_bytes, uint8_t* stack_alignment)
+{
+    const bool floating = type == IR_F32 || type == IR_F64;
+    const bool pair = type == IR_I128;
+    const bool wide = pair || type == IR_F80;
+    AbiLocation location = {
+        .registers = {
+            BUSTER_ABI_REGISTER_NONE,
+            BUSTER_ABI_REGISTER_NONE,
+        },
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+    };
+    if (floating && *vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
+    {
+        location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR + *vectors);
+        *vectors += 1;
+    }
+    else if (!floating && type != IR_F80 && *integers + (pair ? 2u : 1u) <= BUSTER_ABI_INTEGER_ARGUMENTS)
+    {
+        location.registers[0] = abi_integer_arguments[*integers];
+        location.registers[1] = pair ? abi_integer_arguments[*integers + 1] : BUSTER_ABI_REGISTER_NONE;
+        *integers += pair ? 2u : 1u;
+    }
+    else
+    {
+        location.kind = BUSTER_ABI_LOCATION_STACK;
+        location.stack_offset = abi_stack_place(stack_bytes, stack_alignment, wide ? 16 : BUSTER_ABI_SLOT_BYTES, wide ? 4 : BUSTER_ABI_SLOT_LOG2);
+    }
+    return location;
+}
+
+// An argument register's slot where a register save area keeps it (rdi to r9 at 0 to 40, xmm0 to xmm7 in 16-byte slots
+// from 48), or UINT32_MAX for a register that passes no argument.
+static uint32_t interpreter_native_register_slot(uint8_t r)
+{
+    uint32_t result = UINT32_MAX;
+    for (uint32_t k = 0; k < BUSTER_ABI_INTEGER_ARGUMENTS; k += 1)
+    {
+        result = abi_integer_arguments[k] == r ? 8 * k : result;
+    }
+    if (r >= BUSTER_ABI_REGISTER_VECTOR && r < BUSTER_ABI_REGISTER_VECTOR + BUSTER_ABI_VECTOR_ARGUMENTS)
+    {
+        result = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * (r - BUSTER_ABI_REGISTER_VECTOR);
+    }
+    return result;
+}
+
+// Argument registers laid out as a register save area lays them out, and an argument area's bytes from rsp at the call,
+// each with an optional map of the bytes defined.
+typedef struct InterpreterNativeArea InterpreterNativeArea;
+struct InterpreterNativeArea
+{
+    uint8_t* registers;
+    uint8_t* registers_defined;
+    uint8_t* stack;
+    uint8_t* stack_defined;
+    uint64_t stack_capacity;
+};
+
+static void interpreter_native_store(uint8_t* bytes, uint8_t* bytes_defined, const uint8_t* source, const uint8_t* source_defined, uint64_t size)
+{
+    memcpy(bytes, source, size);
+    if (bytes_defined != 0)
+    {
+        if (source_defined != 0)
+        {
+            memcpy(bytes_defined, source_defined, size);
+        }
+        else
+        {
+            memset(bytes_defined, 1, size);
+        }
+    }
+}
+
+// An argument's `size` bytes (and their definedness: all defined without a map) placed as `location` says: its parts,
+// an eightbyte each (the high one alone with HIGH), in their registers, a SPLIT's part without one in its 8-byte slot, or
+// the whole in its stack slot. False for what can't be placed: a register that passes no argument, a part past its
+// location's registers (a vector register's upper half), a slot past the area.
+static bool interpreter_native_put(const InterpreterNativeArea* area, AbiLocation location, const uint8_t* bytes, const uint8_t* defined, uint64_t size)
+{
+    bool result = location.kind == BUSTER_ABI_LOCATION_IGNORE;
+    if (location.kind == BUSTER_ABI_LOCATION_STACK)
+    {
+        // The whole value at its offset; or a part alone in its 8-byte slot (an eightbyte at a time, #765), the value's
+        // high eightbyte (HIGH) or its low one (LOW), the other one not passed.
+        const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+        const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+        const uint64_t first = high ? 8 : 0;
+        const uint64_t take = !high && !low ? size : first < size ? (size - first < 8 ? size - first : 8) : 0;
+        result = !(high && low) && take != 0 && location.stack_offset <= area->stack_capacity && take <= area->stack_capacity - location.stack_offset;
+        if (result)
+        {
+            interpreter_native_store(area->stack + location.stack_offset, area->stack_defined == 0 ? 0 : area->stack_defined + location.stack_offset, bytes + first,
+                                     defined == 0 ? 0 : defined + first, take);
+        }
+    }
+    else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT)
+    {
+        const uint64_t first = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+        const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT;
+        result = size <= first + 16 && (size <= first + 8 || location.registers[1] != BUSTER_ABI_REGISTER_NONE || split);
+        for (uint32_t part = 0; result && part < 2; part += 1)
+        {
+            const uint64_t offset = first + 8 * part;
+            const uint64_t take = offset < size ? (size - offset < 8 ? size - offset : 8) : 0;
+            const uint8_t r = location.registers[part];
+            const uint32_t slot = r == BUSTER_ABI_REGISTER_NONE ? UINT32_MAX : interpreter_native_register_slot(r);
+            if (r != BUSTER_ABI_REGISTER_NONE)
+            {
+                result = slot != UINT32_MAX;
+                if (result)
+                {
+                    interpreter_native_store(area->registers + slot, area->registers_defined == 0 ? 0 : area->registers_defined + slot, bytes + offset, defined == 0 ? 0 : defined + offset, take);
+                }
+            }
+            else if (split && take != 0)
+            {
+                result = location.stack_offset <= area->stack_capacity && BUSTER_ABI_SLOT_BYTES <= area->stack_capacity - location.stack_offset;
+                if (result)
+                {
+                    interpreter_native_store(area->stack + location.stack_offset, area->stack_defined == 0 ? 0 : area->stack_defined + location.stack_offset, bytes + offset, defined == 0 ? 0 : defined + offset, take);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// Whether the bridge captures every part of an aggregate result in registers: rax, rdx and xmm0's and xmm1's low
+// eightbytes (8-byte parts), and st0's ten bytes (a 16-byte part), not x87's st1; `x87` says whether st0 is one.
+static bool interpreter_native_returns(AbiReturn returned, bool* x87)
+{
+    bool result = returned.kind == BUSTER_ABI_RESULT_REGISTERS;
+    *x87 = false;
+    for (uint32_t part = 0; result && part < BUSTER_ABI_RESULT_PARTS; part += 1)
+    {
+        const uint8_t r = returned.registers[part];
+        const bool word = r == BUSTER_ABI_RAX || r == BUSTER_ABI_RDX || r == BUSTER_ABI_REGISTER_VECTOR || r == BUSTER_ABI_REGISTER_VECTOR + 1;
+        const bool top = r == BUSTER_ABI_REGISTER_X87;
+        result = r == BUSTER_ABI_REGISTER_NONE || (word && returned.part_bytes == 8) || (top && returned.part_bytes == 16);
+        *x87 = *x87 || top;
+    }
+    return result;
+}
+
+// An aggregate result's parts, as interpreter_native_returns admits them, written to `destination` (part i at byte
+// i * part_bytes, past the low eightbyte with HIGH), at most `size` bytes, each byte written then defined.
+static void interpreter_native_returned(const InterpreterNativeFrame* frame, AbiReturn returned, uint8_t* destination, uint8_t* defined, uint32_t size)
+{
+    const uint64_t first = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+    for (uint32_t part = 0; part < BUSTER_ABI_RESULT_PARTS; part += 1)
+    {
+        const uint8_t r = returned.registers[part];
+        const uint64_t offset = first + (uint64_t)part * returned.part_bytes;
+        const uint8_t* source = r == BUSTER_ABI_RAX ? (const uint8_t*)&frame->integer_result.low : r == BUSTER_ABI_RDX ? (const uint8_t*)&frame->integer_result.high
+                              : r == BUSTER_ABI_REGISTER_VECTOR ? (const uint8_t*)&frame->vector_result.low : r == BUSTER_ABI_REGISTER_VECTOR + 1 ? (const uint8_t*)&frame->vector_result.high
+                                                                                                                                              : (const uint8_t*)&frame->x87_result;
+        const uint64_t available = r == BUSTER_ABI_REGISTER_X87 ? 10 : 8;
+        const uint64_t take = r == BUSTER_ABI_REGISTER_NONE || offset >= size ? 0 : size - offset < available ? size - offset : available;
+        if (take != 0)
+        {
+            memcpy(destination + offset, source, take);
+            if (defined != 0)
+            {
+                memset(defined + offset, 1, take);
+            }
+        }
+    }
 }
 
 static bool interpreter_native_type(uint16_t type, bool result)
@@ -386,59 +562,80 @@ static bool interpreter_native_invoke(const InterpreterNativeRequest* request, I
         ok = ok && (request->argument_count == 0 || (request->types != 0 && request->arguments != 0));
         ok = ok && request->named_count <= request->argument_count && (request->variadic || request->named_count == request->argument_count);
         ok = ok && interpreter_native_type(request->result_type, true);
+        // Records place every argument and the result, in an area the bridge aligns to 16 alone; a binding with memory
+        // flags takes none, and an aggregate result leaves the call no value of its own.
+        ok = ok && (request->abi == 0 || (request->passed != 0 && request->binding->flags == 0 && request->abi->stack_bytes <= BUSTER_INTERPRETER_NATIVE_STACK_BYTES &&
+                                          request->abi->stack_alignment_log2 <= BUSTER_ABI_STACK_ALIGNMENT_LOG2 && (request->result_size == 0 || request->result_type == IR_VOID)));
     }
     InterpreterNativeFrame frame = {
         0
     };
+    uint8_t registers[BUSTER_ABI_SAVE_AREA_BYTES] = {
+        0
+    };
     uint8_t stack[BUSTER_INTERPRETER_NATIVE_STACK_BYTES] = {
         0
+    };
+    const InterpreterNativeArea area = {
+        .registers = registers,
+        .stack = stack,
+        .stack_capacity = sizeof(stack),
     };
     uint64_t stack_bytes = 0;
     uint8_t stack_alignment = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     uint32_t integers = 0;
     uint32_t vectors = 0;
     uint8_t* defined = 0;
+    const AbiCall* abi = ok ? request->abi : 0;
+    const bool aggregate_result = abi != 0 && request->result_size != 0;
+    InterpreterNativeRange destination = {
+        0
+    };
     if (ok)
     {
         frame.address = request->binding->address;
         frame.stack = stack;
         frame.x87 = request->result_type == IR_F80;
+        if (aggregate_result)
+        {
+            // The destination's bytes, which the callee writes through a hidden pointer, the first integer argument, or
+            // the bridge from the registers that return them.
+            bool x87 = false;
+            ok = (request->runtime == 0 || interpreter_native_range(request->runtime, request->destination, request->result_size, true, &destination)) &&
+                 (abi->result.kind == BUSTER_ABI_RESULT_MEMORY || interpreter_native_returns(abi->result, &x87));
+            frame.x87 = x87;
+            if (abi->result.kind == BUSTER_ABI_RESULT_MEMORY)
+            {
+                memcpy(registers, &request->destination, sizeof(request->destination));
+            }
+        }
         for (uint32_t i = 0; i < request->argument_count && ok; i += 1)
         {
             const uint16_t type = request->types[i];
             const bool floating = type == IR_F32 || type == IR_F64;
-            const bool pair = type == IR_I128;
-            const bool long_double = type == IR_F80;
-            const bool sign = request->extensions != 0 && request->extensions[i] != 0;
+            const bool wide = type == IR_I128 || type == IR_F80;
+            const uint32_t size = abi != 0 ? request->passed[i].size : 0;
+            const AbiLocation location = abi != 0 ? request->passed[i].location : interpreter_native_place(type, &integers, &vectors, &stack_bytes, &stack_alignment);
+            const bool sign = abi != 0 ? (location.flags & BUSTER_ABI_FLAG_SIGN) != 0 : request->extensions != 0 && request->extensions[i] != 0;
             ok = interpreter_native_type(type, false);
-            ok = ok && (request->extensions != 0 || (type != IR_I8 && type != IR_I16));
+            ok = ok && (abi != 0 || request->extensions != 0 || (type != IR_I8 && type != IR_I16));
             ok = ok && (!request->variadic || i < request->named_count || (type != IR_F32 && (type < IR_I1 || type > IR_I16)));
-            if (ok)
+            if (ok && size != 0)
+            {
+                // An aggregate by value: its bytes at its value's address, read as an object's representation is.
+                const uint64_t address = request->arguments[i].low;
+                InterpreterNativeRange range;
+                ok = type == IR_PTR && (request->runtime == 0 ? address != 0 : interpreter_native_range(request->runtime, address, size, false, &range));
+                ok = ok && interpreter_native_put(&area, location, (const uint8_t*)(uintptr_t)address, 0, size);
+            }
+            else if (ok)
             {
                 InterpreterValue value = request->arguments[i];
-                if (!floating && !pair && !long_double)
+                if (!floating && !wide)
                 {
                     value.low = interpreter_native_narrow(value.low, type, sign);
                 }
-                if (floating && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
-                {
-                    frame.vectors[vectors++] = value.low;
-                }
-                else if (!floating && !long_double && integers + (pair ? 2u : 1u) <= BUSTER_ABI_INTEGER_ARGUMENTS)
-                {
-                    frame.integers[integers++] = value.low;
-                    if (pair)
-                    {
-                        frame.integers[integers++] = value.high;
-                    }
-                }
-                else
-                {
-                    const uint32_t bytes = pair || long_double ? 16 : BUSTER_ABI_SLOT_BYTES;
-                    const uint32_t alignment = pair || long_double ? 4 : BUSTER_ABI_SLOT_LOG2;
-                    const uint32_t offset = abi_stack_place(&stack_bytes, &stack_alignment, bytes, alignment);
-                    memcpy(stack + offset, &value, bytes);
-                }
+                ok = interpreter_native_put(&area, location, (const uint8_t*)&value, 0, wide ? 16 : 8);
             }
         }
         ok = ok && interpreter_native_flags(request);
@@ -447,14 +644,38 @@ static bool interpreter_native_invoke(const InterpreterNativeRequest* request, I
     }
     if (ok)
     {
-        frame.stack_bytes = (stack_bytes + 15) & ~15ull;
-        frame.vector_count = vectors;
+        for (uint32_t k = 0; k < BUSTER_ABI_INTEGER_ARGUMENTS; k += 1)
+        {
+            memcpy(&frame.integers[k], registers + 8 * k, sizeof(frame.integers[k]));
+        }
+        for (uint32_t k = 0; k < BUSTER_ABI_VECTOR_ARGUMENTS; k += 1)
+        {
+            memcpy(&frame.vectors[k], registers + BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * k, sizeof(frame.vectors[k]));
+        }
+        frame.stack_bytes = ((abi != 0 ? abi->stack_bytes : stack_bytes) + 15) & ~15ull;
+        frame.vector_count = abi != 0 ? abi->vector_registers : vectors;
         interpreter_native_bridge(&frame);
         InterpreterValue value = {
             0
         };
         const uint16_t type = request->result_type;
-        if (type == IR_F80)
+        if (aggregate_result)
+        {
+            uint8_t* bytes = (uint8_t*)(uintptr_t)request->destination;
+            uint8_t* bytes_defined = destination.memory != 0 && destination.memory->defined != 0 ? destination.memory->defined + destination.offset : 0;
+            if (abi->result.kind == BUSTER_ABI_RESULT_MEMORY)
+            {
+                if (bytes_defined != 0)
+                {
+                    memset(bytes_defined, 1, request->result_size);
+                }
+            }
+            else
+            {
+                interpreter_native_returned(&frame, abi->result, bytes, bytes_defined, request->result_size);
+            }
+        }
+        else if (type == IR_F80)
         {
             value = frame.x87_result;
             value.high &= UINT16_MAX;

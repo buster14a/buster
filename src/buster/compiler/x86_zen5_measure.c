@@ -3,7 +3,10 @@
 //
 // Original instruction microbenchmarks for #181. Encoder records generate bounded W^X mappings. Twelve independent
 // chains, matched six-chain controls, two dependency paths, and mixes with six ADD/IMUL chains measure throughput
-// and possible contention. A mix can be dependency-limited; compare it with the matched six-chain observations.
+// and possible contention; the twelve chains again with a never-taken jo after each instruction measure whether the
+// pair fuses (one retired macro-op), as a flag-setting instruction and a conditional branch may, for the cases whose
+// OF the fixture keeps clear (x86_zen5_branch_case). A mix can be dependency-limited; compare it with the matched
+// six-chain observations.
 // PMCx0C1 is RETIRED MACRO-OPS, not executed micro-ops. Neither that counter nor a mixed result identifies a pipe.
 // Only measure-x86-zen5 requires a 9700X; construction/encoding tests never label another CPU's results as Zen 5.
 
@@ -16,6 +19,8 @@
 #define BUSTER_X86_COST_CODE_SIZE 32768
 #define BUSTER_X86_COST_RECORDS 640
 #define BUSTER_X86_COST_MAX_PASSES 31
+// The most loop iterations a call runs (`--iterations`); each call sets its registers again.
+#define BUSTER_X86_COST_MAX_ITERATIONS 10000000
 _Static_assert(2 * BUSTER_X86_COST_BLOCK + 96 <= BUSTER_X86_COST_RECORDS, "records include the largest body, alignment padding and saved-register wrapper");
 _Static_assert(BUSTER_X86_COST_BLOCK % 12 == 0, "source chains remain connected across the loop back edge");
 
@@ -27,6 +32,7 @@ typedef enum X86CostExperiment
     X86_COST_CHAIN_SOURCE,
     X86_COST_MIX_ADD,
     X86_COST_MIX_IMUL,
+    X86_COST_BRANCH,
     X86_COST_EXPERIMENT_COUNT,
 } X86CostExperiment;
 
@@ -82,8 +88,77 @@ static bool x86_zen5_source_path(uint8_t id)
     return entry->operands != X86_COST_ZERO && (form->reg != BUSTER_X86_OPERAND_NONE || entry->operands == X86_COST_L1_LOAD);
 }
 
+// The most a register's chain moves in a call of the twelve chains: a step per BUSTER_X86_COST_BLOCK / 12 instructions
+// an iteration, from 3, its value at the call's start.
+#define BUSTER_X86_COST_CHAIN_STEPS ((uint64_t)(BUSTER_X86_COST_BLOCK / 12) * BUSTER_X86_COST_MAX_ITERATIONS)
+_Static_assert(3 + 3 * BUSTER_X86_COST_CHAIN_STEPS <= INT32_MAX, "an add or sub of 3, an inc or a dec never overflows a 32-bit chain");
+
+// Whether the branch experiment's jo after the case's instruction is never taken: the instruction defines OF, and the
+// chain's values keep it clear. The logic operations clear it; an add or sub of 3 (R14's value, or the imm8), an inc
+// and a dec stay inside the range of the chain's width (an add of 4660 doesn't at 32 bits); neg's values, 3 and -3,
+// are never the most negative; shr and sar by one of a nonnegative value clear it. The multiplies overflow, the shifts
+// by 3 leave OF undefined, shl by one shifts the chain's bits into the sign, and not, lea and mov write no flags (the
+// jo would read what came before them): those cases don't run the experiment.
+static bool x86_zen5_branch_case(uint8_t id)
+{
+    const X86CostCase* entry = &x86_zen5_cases[id];
+    const uint64_t step = entry->immediate > 0 ? (uint64_t)entry->immediate : 3;
+    bool result = false;
+    switch (entry->form)
+    {
+    case X86_FORM_AND_RM32_R32:
+    case X86_FORM_AND_RM64_R64:
+    case X86_FORM_OR_RM32_R32:
+    case X86_FORM_OR_RM64_R64:
+    case X86_FORM_XOR_RM32_R32:
+    case X86_FORM_XOR_RM64_R64:
+    case X86_FORM_AND_RM32_IMM8:
+    case X86_FORM_AND_RM64_IMM8:
+    case X86_FORM_OR_RM32_IMM8:
+    case X86_FORM_OR_RM64_IMM8:
+    case X86_FORM_XOR_RM32_IMM8:
+    case X86_FORM_XOR_RM64_IMM8:
+    case X86_FORM_NEG_RM32:
+    case X86_FORM_NEG_RM64:
+    case X86_FORM_SHR_RM32_1:
+    case X86_FORM_SHR_RM64_1:
+    case X86_FORM_SAR_RM32_1:
+    case X86_FORM_SAR_RM64_1:
+        result = true;
+        break;
+    case X86_FORM_ADD_RM32_R32:
+    case X86_FORM_ADD_R32_RM32:
+    case X86_FORM_SUB_RM32_R32:
+    case X86_FORM_ADD_RM32_IMM8:
+    case X86_FORM_ADD_RM32_IMM32:
+    case X86_FORM_SUB_RM32_IMM8:
+        result = 3 + step * BUSTER_X86_COST_CHAIN_STEPS <= INT32_MAX;
+        break;
+    case X86_FORM_INC_RM32:
+    case X86_FORM_DEC_RM32:
+        result = 3 + BUSTER_X86_COST_CHAIN_STEPS <= INT32_MAX;
+        break;
+    case X86_FORM_ADD_RM64_R64:
+    case X86_FORM_ADD_R64_RM64:
+    case X86_FORM_SUB_RM64_R64:
+    case X86_FORM_ADD_RM64_IMM8:
+    case X86_FORM_ADD_RM64_IMM32:
+    case X86_FORM_SUB_RM64_IMM8:
+        result = 3 + step * BUSTER_X86_COST_CHAIN_STEPS <= INT64_MAX;
+        break;
+    case X86_FORM_INC_RM64:
+    case X86_FORM_DEC_RM64:
+        result = 3 + BUSTER_X86_COST_CHAIN_STEPS <= INT64_MAX;
+        break;
+    default:
+        break;
+    }
+    return id != 0 && result;
+}
+
 // The generated call preserves all SysV callee-saved registers. RDI is the positive loop count, RSI points to an
-// aligned word containing its own address. No generated instruction writes memory except the prologue's pushes.
+// aligned word containing its own address. No generated instruction writes memory except the prologue's pushes. The
+// branch experiment is refused for a case outside x86_zen5_branch_case.
 static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostProgram* program)
 {
     const uint8_t saved[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
@@ -100,6 +175,7 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
     records[count++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_R12, .rm = X86_REGISTER_RDI };
     records[count++] = (X86Instruction){ .form = X86_FORM_MOV_R64_IMM64, .rm = X86_REGISTER_R14, .immediate = 3 };
     const bool load = x86_zen5_cases[id].operands == X86_COST_L1_LOAD;
+    bool valid = experiment != X86_COST_BRANCH || x86_zen5_branch_case(id);
     for (uint32_t i = 0; i < sizeof(registers); i += 1)
     {
         records[count++] = load ? (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = registers[i], .rm = X86_REGISTER_RSI } :
@@ -107,7 +183,7 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
     }
     uint8_t prefix[512];
     const int64_t prefix_length = x86_encode_scalar(records, count, prefix, sizeof(prefix), 0, 0);
-    bool valid = prefix_length > 0;
+    valid &= prefix_length > 0;
     if (valid)
     {
         for (uint32_t i = 0; i < (64 - prefix_length % 64) % 64; i += 1)
@@ -116,6 +192,7 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
         }
         const uint32_t loop = count;
         const bool mix = experiment == X86_COST_MIX_ADD || experiment == X86_COST_MIX_IMUL;
+        const bool fused = experiment == X86_COST_BRANCH;
         const bool chain = experiment == X86_COST_CHAIN_DESTINATION || experiment == X86_COST_CHAIN_SOURCE;
         const bool source_path = experiment == X86_COST_CHAIN_SOURCE && x86_zen5_source_path(id);
         for (uint32_t i = 0; id != 0 && i < BUSTER_X86_COST_BLOCK; i += 1)
@@ -133,6 +210,11 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
             records[count] = x86_zen5_fixture(id, destination, simple_index ? destination : source, source_path || simple_index);
             valid &= x86_zen5_id(&records[count]) == id;
             count += 1;
+            // A jo to the next instruction, which isn't taken: the case keeps OF clear (x86_zen5_branch_case).
+            if (fused)
+            {
+                records[count++] = (X86Instruction){ .form = X86_FORM_JO_REL8 };
+            }
             if (mix)
             {
                 const uint8_t blocker = registers[6 + i % 6];
@@ -313,7 +395,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
     {
         if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc)
         {
-            valid = x86_zen5_number(argv[++i], 1, 10000000, &iterations);
+            valid = x86_zen5_number(argv[++i], 1, BUSTER_X86_COST_MAX_ITERATIONS, &iterations);
         }
         else if (strcmp(argv[i], "--passes") == 0 && i + 1 < argc)
         {
@@ -353,7 +435,8 @@ static int run_x86_zen5_measure(int argc, char** argv)
     if (valid)
     {
         printf("# CPU=%s CPUID=%08x compiler=%s iterations=%lu passes=%lu block=%u\n", brand, signature, __clang_version__, iterations, passes, BUSTER_X86_COST_BLOCK);
-        printf("# cycles are core cycles; ops are retired macro-ops with the empty loop subtracted; mixes are cycles per target+blocker pair\n");
+        printf("# cycles are core cycles; ops are retired macro-ops with the empty loop subtracted; mixes are cycles per target+blocker pair, branch per\n");
+        printf("# instruction+jo pair, whose ops are 1 where the pair fuses, for the cases whose OF the chains keep clear\n");
         printf("case\texperiment\tcycles\tmin\tmax\tretired_ops\tinstructions\tcode_hash\n");
     }
     uint32_t matched = 0;
@@ -366,7 +449,9 @@ static int run_x86_zen5_measure(int argc, char** argv)
             uint64_t cycles[X86_COST_EXPERIMENT_COUNT][BUSTER_X86_COST_MAX_PASSES] = {0};
             uint64_t operations[X86_COST_EXPERIMENT_COUNT][BUSTER_X86_COST_MAX_PASSES] = {0};
             uint64_t instructions[X86_COST_EXPERIMENT_COUNT][BUSTER_X86_COST_MAX_PASSES] = {0};
-            for (uint32_t experiment = 0; valid && experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
+            // The experiments the case runs: all but the branch one where its jo could be taken.
+            const uint32_t experiments = x86_zen5_branch_case((uint8_t)id) ? X86_COST_EXPERIMENT_COUNT : X86_COST_BRANCH;
+            for (uint32_t experiment = 0; valid && experiment < experiments; experiment += 1)
             {
                 valid = x86_zen5_program(id, experiment, &programs[experiment]);
                 if (valid)
@@ -378,9 +463,9 @@ static int run_x86_zen5_measure(int argc, char** argv)
             {
                 X86CostSample empty = {0};
                 valid = x86_zen5_sample(&baseline, iterations, &counters, &empty);
-                for (uint32_t j = 0; valid && j < X86_COST_EXPERIMENT_COUNT; j += 1)
+                for (uint32_t j = 0; valid && j < experiments; j += 1)
                 {
-                    const uint32_t experiment = (pass + j) % X86_COST_EXPERIMENT_COUNT;
+                    const uint32_t experiment = (pass + j) % experiments;
                     X86CostSample sample = {0};
                     valid = x86_zen5_sample(&programs[experiment], iterations, &counters, &sample) && sample.values[2] >= empty.values[2];
                     cycles[experiment][pass] = sample.values[0];
@@ -390,9 +475,9 @@ static int run_x86_zen5_measure(int argc, char** argv)
             }
             if (valid)
             {
-                static const char* const names[] = { "independent", "independent-six", "chain-destination", "chain-source", "mix-add", "mix-imul" };
+                static const char* const names[] = { "independent", "independent-six", "chain-destination", "chain-source", "mix-add", "mix-imul", "branch" };
                 const double denominator = (double)iterations * BUSTER_X86_COST_BLOCK;
-                for (uint32_t experiment = 0; experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
+                for (uint32_t experiment = 0; experiment < experiments; experiment += 1)
                 {
                     const uint64_t median = x86_zen5_median(cycles[experiment], passes);
                     const uint64_t ops = x86_zen5_median(operations[experiment], passes);

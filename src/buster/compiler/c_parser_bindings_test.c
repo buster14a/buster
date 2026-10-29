@@ -278,6 +278,14 @@ static const ParseBindingFixture parse_binding_fixtures[] =
         .declarations = { 1, 2, 2 },
     },
     {
+        .source = "int oldstyle(a) int a; { return oldstyle(a); }\n",
+        .name = "oldstyle",
+        .count = 2,
+        .declarations = { 1, 1 },
+        .kinds = { C_BINDING_FUNCTION, C_BINDING_FUNCTION },
+        .check_kinds = true,
+    },
+    {
         .source = "int labels(void) { goto L; { __label__ L; goto L; L:; } L: return 0; }\n",
         .name = "L",
         .count = 5,
