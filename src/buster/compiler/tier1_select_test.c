@@ -190,6 +190,22 @@ static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruct
     return ready;
 }
 
+// A node's records with its immediate's form chosen, as the emitters' batch chooses it (a batch of one), by both paths,
+// which must choose alike.
+static Tier1SelectRecords tier1_select_test_expand(Tier1SelectTest* test, const Tier1SelectHoles* holes)
+{
+    Tier1SelectRecords chosen[2];
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        chosen[path] = tier1_select_expand(holes);
+        Tier1SelectRequests requests = { .vector = path == 0 };
+        tier1_select_requests_add(&requests, &chosen[path], 0, chosen[path].records);
+        tier1_select_requests_flush(&requests, chosen[path].records);
+    }
+    tier1_select_test_expect(test, memcmp(chosen[0].records, chosen[1].records, chosen[0].count * sizeof(X86Instruction)) == 0, "both paths choose an immediate's form alike");
+    return chosen[0];
+}
+
 // Generated functions have no compiler-emitted UBSan function metadata before their entry point.
 static __attribute__((no_sanitize("function"))) uint64_t tier1_select_test_call(Tier1SelectTest* test, uint64_t a, uint64_t b, uint64_t c)
 {
@@ -200,7 +216,7 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_select_test_call(
 
 static void tier1_select_test_holes(Tier1SelectTest* test, const Tier1SelectHoles* holes, uint64_t* random)
 {
-    Tier1SelectRecords selected = tier1_select_expand(holes);
+    Tier1SelectRecords selected = tier1_select_test_expand(test, holes);
     X86Instruction records[16];
     uint32_t count = selected.count;
     memcpy(records, selected.records, count * sizeof(*records));
@@ -413,7 +429,7 @@ static void tier1_select_test_memory(Tier1SelectTest* test)
                         .left = X86_REGISTER_RDX,
                         .right = X86_REGISTER_RDX,
                     };
-                    Tier1SelectRecords selected = tier1_select_expand(&holes);
+                    Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
                     X86Instruction records[16];
                     uint32_t count = selected.count;
                     memcpy(records, selected.records, count * sizeof(*records));
@@ -465,7 +481,7 @@ static void tier1_select_test_branches(Tier1SelectTest* test)
                     .condition = (uint8_t)condition,
                     .compare_immediate = immediate != 0,
                 };
-                Tier1SelectRecords selected = tier1_select_expand(&holes);
+                Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
                 X86Instruction records[7];
                 memcpy(records, selected.records, 3 * sizeof(*records));
                 records[3] = (X86Instruction){ .immediate = 11, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 };
