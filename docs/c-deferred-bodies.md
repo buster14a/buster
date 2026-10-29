@@ -1069,9 +1069,10 @@ region takes with a compare-and-exchange, faults the region in with a store of
 the byte it is about to write, and sets; a lane that finds the region taken
 waits for that. No two lanes then clear a huge page for one region, and no
 region is cleared that no lane writes. Every write of the walk into the token
-columns claims first (46 places, and the warnings' suppression by the first byte
-its vector store selects); a claim where the reader has no claim words, as on
-one lane, in source order or in a large unit, is a load and a branch. On the
+columns claims first (47 indexed write sites, including a cleanup declaration's
+scope-end store before the lane is refused). Warnings' suppression claims the
+first byte its vector store selects. A claim where the reader has no claim words,
+as on one lane, in source order or in a large unit, is a load and a branch. On the
 9700X's kernel (6.18), a store into a fresh 2 MB region, a load and then a
 store, and a locked `or` each give the region a huge page in 58 to 87 µs, and a
 store where a load had mapped the huge zero page gives it one in 61 to 62 µs.
