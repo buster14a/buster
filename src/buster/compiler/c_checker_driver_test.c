@@ -3197,6 +3197,8 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
     {
         const char* name;
         const char* source;
+        // The fixture's -std=, or null for gnu17.
+        const char* standard;
     } fixtures[] = {
         { "the first function's errors alone",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
@@ -3216,6 +3218,23 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int x) { return x + 2; }\n"
           "int e(int n)\n{\n    int s = 0;\n    for (int i = h(n); i < g(n); i = h(i)) { s += g(i); }\n    while (h(s) < n) { s += g(s); }\n"
           "    do { s += g(s); } while (h(s) < n);\n    return ({ int t = g(s); t; }) + h(s);\n}\n" },
+        // Which functions clang emits where they are (ASTContext::DeclMustBeEmitted), and so whose errors come first: an
+        // external definition by the inline rules, before a later ordinary function's (#863's review).
+        { "a GNU89 inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n", "-std=gnu89" },
+        { "a C99 extern inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n" },
+        { "a gnu_inline plain inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n__attribute__((gnu_inline)) inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n" },
+        { "a C99 inline definition and a gnu_inline extern inline one, never emitted",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\n__attribute__((gnu_inline)) extern inline int c(int x) { return h(x + 2); }\n"
+          "int b(int x) { return h(x + 1) + a(x) + c(x); }\n" },
+        { "a used static function emitted where it is, a retain one deferred",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic __attribute__((retain)) int r(void) { return h(1); }\nstatic __attribute__((used)) int s(void) { return h(2); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a destructor and a constructor emitted where they are",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic __attribute__((destructor)) void d(void) { h(3); }\nint b(int x) { return h(x + 1); }\n"
+          "static __attribute__((constructor)) void c(void) { h(4); }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
@@ -3224,9 +3243,10 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         snprintf(source, sizeof(source), "%s/target-feature-errors-%u.c", directory, i);
         snprintf(object, sizeof(object), "%s/target-feature-errors-%u.o", directory, i);
         const bool written = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
-        char* const theirs_arguments[] = { (char*)clang, "-std=gnu17", "-march=x86-64", "-w", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-c", "-o",
+        char* const standard = (char*)(fixtures[i].standard != NULL ? fixtures[i].standard : "-std=gnu17");
+        char* const theirs_arguments[] = { (char*)clang, standard, "-march=x86-64", "-w", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-c", "-o",
                                            "/dev/null", source, NULL };
-        char* const ours_arguments[] = { (char*)executable, "-std=gnu17", "-march=x86-64", "-w", "-c", "-o", object, source, NULL };
+        char* const ours_arguments[] = { (char*)executable, standard, "-march=x86-64", "-w", "-c", "-o", object, source, NULL };
         char* theirs_text = NULL;
         char* ours_text = NULL;
         const int theirs_status = written ? check_test_driver_spawn(theirs_arguments, &theirs_text) : -1;

@@ -194,6 +194,12 @@ struct CheckProgram
     // -march=native reads, and code generation's check of target features takes them from here.
     PredefinesHost host;
     bool host_read;
+    // Per body of a selection (check_program_select_mode), whether clang's code generation emits its function where the
+    // unit defines it rather than when its emission first refers to it (ASTContext::DeclMustBeEmitted): an external
+    // definition, by the selection's rules of GNU's and C99's inline functions, or a function with a used, constructor
+    // or destructor attribute. Code generation's check of target features takes clang's order of emission from it
+    // (#775); null in a program that no selection made.
+    uint8_t* body_eager;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX

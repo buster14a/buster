@@ -348,11 +348,15 @@ attribute alone. The calls are those clang emits: the walk of the x86 builtins'
 range errors (#487) reaches what a constant condition leaves running, and a
 direct callee is the function's name alone, not `(*f)` or `(&f)`.
 
-Clang's errors are unrecoverable, so it emits no top-level function after the
-first one that has any, nor the static and inline functions it defers to the
-unit's end; where no top-level function has an error, it emits every deferred
-one, past their errors. So the driver reports the first externally visible
-function's errors alone, or else every deferred function's: each function's in
+Clang's errors are unrecoverable. It emits the functions it must emit where the
+unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
+GNU's and C99's rules of inline functions, or a function with a `used`,
+`constructor` or `destructor` attribute) and none after the first that has an
+error, nor the functions it defers to the unit's end; where none of those has
+one, it emits every deferred function, past their errors. So the driver reports
+the first such function's errors alone, or else every deferred function's, by
+the selection's classification of each body (`CheckProgram.body_eager`, from the
+same rules that decide which inline definitions `-c` emits): each function's in
 clang's emission order, by statement in the lowering's order of them (a for
 loop's increment after its body) and in a statement by the calls' ends (an
 argument's call before its own), after its closing brace, as clang reports them
@@ -371,12 +375,15 @@ every definition it lowers, those clang never emits among them.
 it: callees' attributes before and after the call, callers' that add and turn
 off features, `flatten`, calls through the address, dead branches, which
 function's errors clang reports and in which order, and `<immintrin.h>`'s
-`_bzhi_u32` at targets with BMI2 and without. Five fixtures' every error, line
+`_bzhi_u32` at targets with BMI2 and without. Eleven fixtures' every error, line
 for line, must be clang's: the first external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
 deferred one's unreported, two deferred functions', where no external function
-has any, and loops' and a statement expression's, a for loop's increment after
-its body.
+has any, loops' and a statement expression's, a for loop's increment after its
+body, and which functions clang emits where they are: GNU89's plain inline,
+C99's extern inline and a `gnu_inline` plain inline definition before an
+ordinary function, inline-only definitions, `used` beside `retain`, and a
+destructor and a constructor.
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

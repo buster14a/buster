@@ -57,6 +57,21 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
     return flags;
 }
 
+// Whether a declaration's `attributes` make clang emit its function where the unit defines it rather than when its
+// emission first refers to it (ASTContext::DeclMustBeEmitted): used, constructor or destructor, but not retain, which
+// keeps a function that is emitted without making it one (CheckProgram.body_eager).
+static bool check_program_attribute_eager(const CheckInputAttributes* attributes)
+{
+    bool eager = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        eager |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ||
+                                         attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+    }
+    return eager;
+}
+
 // The tokens a unit's post-checking stages visit for its declarations: those that declare (`declarations[t] == t`), and
 // with `nodes`, those whose nodes[t] is below `limit` too (the lowering's initializers), in token order into `tokens`,
 // which has room for `count` + 16: how many. The emission's attributes and the lowering's initializer pass visit these
@@ -301,6 +316,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             // Any plain inline declaration gives GNU inline's body external linkage, even if the definition itself
             // spells extern inline. Clang applies this rule to declarations both before and after the definition.
             inline_rules[group] |= function && (spelling & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_EXTERN)) == CHECK_INPUT_FUNCTION_INLINE ? 4 : 0;
+            // 8: a declaration whose attributes make clang emit the function where it is defined (body_eager).
+            inline_rules[group] |= function && check_program_attribute_eager(input->attributes[token]) ? 8 : 0;
             if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
             {
                 if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
@@ -436,6 +453,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         // Each selected body's instruction set, as its body is the full program's: the targets themselves are shared.
         const bool targeted = full->body_targets != 0 && candidate.selected_functions != 0;
         candidate.program.body_targets = targeted ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_functions) : 0;
+        candidate.program.body_eager = candidate.selected_functions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, candidate.selected_functions) : 0;
         candidate.program.references = body_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body_references) : 0;
         candidate.program.regions = full->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, full->region_count) : 0;
         candidate.data.objects = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, candidate.selected_objects) : 0;
@@ -443,7 +461,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.data.reference_counts = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_objects) : 0;
         candidate.data.references = data_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, data_references) : 0;
         candidate.program.object_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, objects);
-        valid = (candidate.selected_functions == 0 || candidate.program.bodies != 0) && (!targeted || candidate.program.body_targets != 0) &&
+        valid = (candidate.selected_functions == 0 || (candidate.program.bodies != 0 && candidate.program.body_eager != 0)) &&
+                (!targeted || candidate.program.body_targets != 0) &&
                 (body_references == 0 || candidate.program.references != 0) &&
                 (full->region_count == 0 || candidate.program.regions != 0) && candidate.program.object_symbols != 0 &&
                 (candidate.selected_objects == 0 || (candidate.data.objects != 0 && candidate.data.reference_offsets != 0 && candidate.data.reference_counts != 0)) &&
@@ -463,6 +482,11 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 {
                     candidate.program.body_targets[bodies] = full->body_targets[body];
                 }
+                // Emitted where it is defined: an external definition (not an inline-only one), or by its attributes.
+                const uint32_t flags = definition_flags[object_definitions[source->object] - 1];
+                candidate.program.body_eager[bodies] = (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0 &&
+                                                       ((flags & BUSTER_C_LOWERING_EXTERNAL) != 0 ||
+                                                        (inline_rules[check_data_declared_index(data, source->object)] & 8) != 0);
                 candidate.program.bodies[bodies] = *source;
                 candidate.program.bodies[bodies++].reference_first = references;
                 for (uint32_t r = 0; r < source->reference_count; r += 1)

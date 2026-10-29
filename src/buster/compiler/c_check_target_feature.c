@@ -15,17 +15,18 @@
 // definition (the caller's), as a declaration's inherited attributes are. The calls are those clang emits: the walk
 // of #487's diagnostics (c_check_x86_diagnostic.c) reaches what a constant condition leaves running, not a dead
 // branch's or operand's, sizeof's or what follows a return; a callee is direct where it is the function's name alone,
-// not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits no top-level function
-// after the first that has one, nor the static and inline functions it defers to the unit's end; where no top-level
-// function has one, it emits every deferred function, past their errors. So this reports the first externally visible
-// function's errors alone, or else every deferred function's, each function's in clang's emission order: by statement,
-// in the lowering's order of them (a for loop's increment after its body), and in a statement by the calls' ends (an
-// argument's call before its own; but where clang evaluates out of source order, an assignment's right side first).
-// Clang emits the externally visible functions in source order, and the deferred ones depth first
-// from where its emission first referred to them; this takes those in source order too. Where the feature an error
-// names is the first of the rest of a function's map (an attribute's arch= CPU's, or a caller's attribute that turns
-// several off), clang's order is its StringMap's and this one predefines_features', so the two may name another feature
-// for the same call.
+// not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits the functions it must
+// emit where the unit defines them (ASTContext::DeclMustBeEmitted: an external definition, by GNU's and C99's rules of
+// inline functions, or one with a used, constructor or destructor attribute), and none after the first that has one,
+// nor the functions it defers to the unit's end; where none of those has one, it emits every deferred function, past
+// their errors. So this reports the first such function's errors alone, or else every deferred function's, by the
+// selection's CheckProgram.body_eager, each function's in clang's emission order: by statement, in the lowering's order
+// of them (a for loop's increment after its body), and in a statement by the calls' ends (an argument's call before its
+// own; but where clang evaluates out of source order, an assignment's right side first). Clang emits the eager
+// functions in source order, and the deferred ones depth first from where its emission first referred to them; this
+// takes those in source order too. Where the feature an error names is the first of the rest of a function's map (an
+// attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its StringMap's and this
+// one predefines_features', so the two may name another feature for the same call.
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute alone (CheckProgram.attribute_keys), and walks
 // only a body that refers to a callee that may fail, whose call sites it then finds (clang's headers give every intrinsic
@@ -307,8 +308,8 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
 }
 
 // Code generation's check of target features of `program`'s bodies (-c's selection): *errors, `*count` of them in
-// `output`, as clang reports them: the first externally visible function's to have any, or else every deferred one's.
-// Returns false without room in either arena.
+// `output`, as clang reports them: the first function's to have any of those it emits where the unit defines them
+// (CheckProgram.body_eager), or else every deferred one's. Returns false without room in either arena.
 static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PredefinesOptions* options, bool scalar, Arena* output,
                                                                   Arena* scratch, CheckTargetFeatureError** errors, uint32_t* count)
 {
@@ -340,20 +341,19 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
         }
         const uint64_t items = (uint64_t)input->graph.count + program->control_count;
         CheckX86DiagnosticWalk walk = { .program = program, .calls = scratch };
-        // Clang's emission order: the externally visible functions, the first with an error the last (it emits no top-level
-        // function after it, nor the deferred ones); then, where none has one, every deferred function (its deferred
-        // emission goes on past an error).
+        // Clang's emission order: the functions it must emit, where the unit defines them (body_eager), the first with an
+        // error the last (it emits no function after it, nor the deferred ones); then, where none has one, every deferred
+        // function (its deferred emission goes on past an error).
         for (uint32_t deferred = 0; valid && *count == 0 && deferred < 2; deferred += 1)
         {
             for (uint32_t b = 0; valid && (deferred != 0 || *count == 0) && b < program->body_count; b += 1)
             {
                 const CheckProgramBody* body = program->bodies + b;
-                const uint8_t spelling = input->function_flags != 0 ? input->function_flags[body->declaration] : 0;
-                const bool external = input->linkage[body->declaration] == 2 && (spelling & CHECK_INPUT_FUNCTION_INLINE) == 0;
+                const bool eager = program->body_eager != 0 && program->body_eager[b] != 0;
                 bool candidate = false;
                 CheckTargetFeatureAttributes caller = { 0 };
                 PredefinesFeatures caller_map = maps.unit;
-                if (external == (deferred == 0))
+                if (eager == (deferred == 0))
                 {
                     const bool keyed_caller = body->object < program->object_count && ((attributed[body->object / 64] >> (body->object % 64)) & 1) != 0;
                     caller = keyed_caller ? check_target_feature_attributes(program, body->object, body->declaration + 1) : (CheckTargetFeatureAttributes){ 0 };
