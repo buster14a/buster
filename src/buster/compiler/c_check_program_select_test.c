@@ -392,12 +392,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_case(test,
         "int kept __attribute__((nocommon));int tested(int n) __attribute__((visibility(\"default\")));int tested(int n){return n+kept;}",
         "default-visibility-and-nocommon-publication", 1, 1, clang, true);
+    // A weak declaration's references publish as weak undefined symbols, whose addresses may be null (#147).
     check_test_program_selection_run(test,
         "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
-        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-weak-function-truth-emits-weak-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
-        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-weak-object-truth-emits-weak-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
         "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);

@@ -29,7 +29,9 @@ Issue #147 stays open until the rows that say so are done.
 | `transparent_union` | Checked as clang checks it, a conversion to the union selecting its member as clang's does; its arguments, parameters and `va_arg` pass as its first member, as clang's code passes them ([the checker guide](c-checker.md)'s "Transparent unions (#147)") | A union sized or aligned otherwise than its first member, or made transparent after a function definition or an initializer naming a function where its first member passes otherwise, is refused by name |
 | `gnu_inline`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |
-| `weak`, `alias`, `visibility`, constructors/destructors | Parsed and retained; link representation has relevant primitives | Source-to-symbol/atom creation, init/fini entries and execution tests |
+| `constructor`, `destructor` | An entry of `.init_array` or `.fini_array` each, its priority's `.init_array.N` or `.fini_array.N` in `-c`'s object, in LLVM's order (stably by priority, past 65535 its default), run against clang's build ([the checker guide](c-checker.md)) | None |
+| `weak` | A weak symbol, defined or undefined; clang's error without external linkage, and one after the definition ignored | A weak declaration after a use makes the reference weak, as GCC's does, where clang's stays global (GCC says the behavior is unspecified) |
+| `alias`, `ifunc`, `weakref` | Parsed and retained; link representation has relevant primitives | Refused by name at emission: the symbols they name |
 | `section` | Parsed and retained | Custom named-section representation and source emission |
 | Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers ([the inline assembly guide](c-inline-assembly.md)) | `asm goto`, naked functions, and templates that refer to symbols |
 

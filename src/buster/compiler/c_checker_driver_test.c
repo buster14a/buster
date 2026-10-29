@@ -3763,6 +3763,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
+#include "c_check_symbol_driver_test.c"
+
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
@@ -4603,6 +4605,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
+            check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);

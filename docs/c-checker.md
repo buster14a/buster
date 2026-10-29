@@ -2125,6 +2125,33 @@ What the lowering covers past scalars (#145's programs):
   of 39 fixtures with clang's, its place and its message, on both paths
   (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
   the deferred reader's fixtures and the selection's take a cleanup too.
+- **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
+  emission's attribute pass). A weak declaration's symbol is weak, defined
+  or undefined; on a declaration without external linkage it is clang's error
+  "weak declaration cannot have internal linkage", at the attribute, and on a
+  typedef it is ignored. One after its entity's definition is dropped, as
+  clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
+  constructors and destructors there (`check_input_attribute_late`, which
+  copies a specifier's list before marking one declarator's). A weak
+  declaration after a use makes the reference weak, as GCC's does; clang's
+  stays global, as its code generation made it at the use (GCC says the
+  behavior is unspecified). A defined function's constructor and destructor
+  each give an entry of the init or fini array: an atom of a pointer to the
+  function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
+  `llvm.global_dtors`, stably by priority from the definitions' order (an
+  attribute's priority, 65535 without one and past it, as
+  `preprocessXXStructorList` clamps it). The latest declaration's attribute
+  applies, and in one declaration the first, as clang takes them. An entry
+  below 65535 has its priority (`link_add_priority`), which the direct path's
+  executable orders and `-c`'s object puts in `.init_array.N` or
+  `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
+  has them. The selection takes constructors and destructors as roots.
+  `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
+  of them by clang and both paths: each symbol's binding must be clang's,
+  both paths' objects the same bytes, and the objects, linked by `cc` alone
+  and with another object's strong definitions, and the direct path's
+  executables, must print what clang's build prints, its constructors' order
+  before `main` and its destructors' after it.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
