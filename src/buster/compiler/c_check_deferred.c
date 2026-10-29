@@ -46,9 +46,10 @@
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
 // The bodies' tokens that pay for a lane past the first, beyond their critical path (check_deferred_bodies): this many,
 // and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
-// grows with the top level (docs/c-deferred-bodies.md, "How many lanes").
-#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
-#define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
+// grows with the top level, and so do its first touches of the rare columns' base pages where more than one lane reads
+// (docs/c-deferred-bodies.md, "How many lanes" and "The rare columns' huge pages").
+#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1280
+#define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 3
 // A lane's arenas (CheckDeferredArenas), in this order in one mapping: its reader's records, its scratch and its
 // bodies' results of 64 GB each, its copy of the top level's table of 16 GB, the table's index of 4 GB and its per-name
 // columns of 4 GB.
