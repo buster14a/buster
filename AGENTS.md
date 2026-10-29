@@ -378,8 +378,9 @@ designs and the compilers already built this way.
   (`check_driver_unit`), and their diagnostics are printed in the command
   line's order: `-fsyntax-only` checks each, `-c` writes each one's object in
   the current directory as clang names it (`-o` refused), and the link merges
-  the units' links (`check_units_merge`) into one executable, with `-g` of
-  their DWARF units, one each (#779).
+  the units' links (`check_units_merge`, on the units' lanes by the vector path:
+  `check_units_merge_lanes`, #778) into one executable, with `-g` of their DWARF
+  units, one each (#779).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -437,9 +438,10 @@ designs and the compilers already built this way.
   time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
   stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
-  encoding, the object's build and write, the release; on several lanes their run is one stage, `lanes`), with its
-  system time, page faults and peak resident set added, and the process's resource use; off by default, its laps test
-  a null pointer. `measure-compile [--runs N]
+  encoding, the object's build and write, the direct path's runtime, binding and write, with the write's phases on
+  `time-write` lines (#778), the release; on several lanes their run is one stage, `lanes`), with its system time,
+  page faults and peak resident set added, and the process's resource use; off by default, its laps test a null
+  pointer. `measure-compile [--runs N]
   [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
   against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
@@ -5142,13 +5144,21 @@ unit of less than 1 MB of source start with 16 MB of base pages
 which every reservation took for writing, were what limited the lanes.
 `--poison-arenas`, a test option, overwrites what a unit left in its lane's
 three arenas (`arena_poison`), so that a compile that read a byte it didn't
-write would show. A link keeps each unit's link
-(`check_units_keep`) and merges them in the command line's order
+write would show. Each lane releases what its units shared, into its pool and
+then the pool itself, on the lane once it takes no more units, and the
+command's lanes are one team (`lane_team_start`) that runs the units, the
+merge, `link_check` and the executable's write (#778). A link keeps each
+unit's link (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes
-it as it does one unit's; with `-g`, each unit keeps its DWARF as `-c -g`
-writes it, and the merge joins them (`check_units_merge_debug`, #779). `-c
--o`, the dumps, `--id-order` and two units of one object's name are refused.
+it as it does one unit's; on more than one lane the vector path merges them on
+the units' lanes into the same link (`check_units_merge_lanes`, #778: rule 4's
+exchange of the global names by their hashes' partitions, then the records
+copied at places that prefix sums give), whose exact twin `check_units_merge`
+is, and checks the bound link on them (`link_check_lanes`); with `-g`, each
+unit keeps its DWARF as `-c -g` writes it, and the merge joins them
+(`check_units_merge_debug`, #779). `-c -o`, the dumps, `--id-order` and two
+units of one object's name are refused.
 
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
 [--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
@@ -5159,8 +5169,11 @@ and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 `clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
 objects defines, and each of whose units' `-c` objects is the unit's alone;
 diagnostics, each unit's alone in the command line's order; refusals, one
-of them over a poisoned stack; the jobserver's tokens held while the link
-writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
+of them over a poisoned stack; the merge on lanes against its twin, by
+`--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
+first in the units' order is the one reported, and a wide addend beside a unit
+without symbols, into the same bytes); the jobserver's tokens held while the
+link writes; and lanes that don't start; with `-g`, the executables by `--lanes` 1
 and 8, poisoned and by each path the same bytes, and each unit's `-c -g`
 object its own alone. With `--corpus DIR` it compiles DIR's `.c` files at once
 with `-c`, plainly and poisoned, against each alone, and with `--generate DIR`

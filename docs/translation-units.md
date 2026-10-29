@@ -55,6 +55,12 @@ executable's writers, which run on as many, and its slots go back once both
 are done. Lanes that can't start leave their units to the calling thread,
 which compiles them alone: the same outputs.
 
+The command's lanes are one team (`lane_team_start`, as `link-foreign`'s:
+#501), started before the units run: the units' run, the merge of their links,
+its `link_check` and the executable's write are each an operation of the
+team's workers, which keep their threads and scratch arenas from one to the
+next rather than starting and joining threads of their own (#778).
+
 Before the lanes start, the calling thread builds the tables every unit's code
 reads and the first unit to need them would otherwise build: the parser's
 (through `parse_initialize`, in the front end's home: `main.c`), the
@@ -138,7 +144,7 @@ musl's 1,006 (`-c`, CPUs 0 to 7):
   `sqlite3.c` reach 2.9 times one's, at 268.73 bytes of DRAM traffic per
   source byte).
 
-So a units lane does three things:
+So a units lane does four things:
 
 - **It keeps its three big arenas** (the driver's arena, scratch and output,
   which the checker and the emission fill) from one unit to the next, emptied
@@ -177,6 +183,13 @@ So a units lane does three things:
   0.131 and 0.136 s on one lane with those floors, and 0.124 s alone. So a
   unit of 1 MB of source or more reserves its arenas as a command of one file
   does.
+- **It releases its memory itself** (#778): once it takes no more units, the
+  lane releases its intern table, its file cache and its three arenas into its
+  pool, then unmaps the pool's arenas, their pages freed already. So the lanes
+  free their memory at once, `MADV_DONTNEED` taking the address space's lock
+  for reading, where the calling thread released every lane's after them,
+  alone: on synth's link by 8 lanes, that release took 7.5 to 8.2 ms, and the
+  calling thread's release after the lanes now takes 0.6 to 0.7 ms.
 
 ## The link
 
@@ -212,6 +225,43 @@ names no unit defines. Then `check_driver_executable` binds and writes the
 executable as it does one unit's: `bind_end`, `link_check`, `dynamic_inputs`
 and `executable_write`, with the same errors, and once more from a fresh
 runtime when the snapshot is damaged.
+
+### On the units' lanes
+
+On more than one lane, the vector path merges the units' links on the units'
+lanes (`check_units_merge_lanes`, #778) into the same link, every record with
+the same id. `check_units_merge` is its exact twin, which one lane and
+`--scalar` run, and which the merge leaves the work to when its memory or its
+lanes can't be had.
+
+1. **The global names** are rule 4's exchange ([the linker's
+   design](object-writer-and-linker.md), "Lanes"). Each lane takes a share of
+   the units, by their symbols (`lane_range_by_cost`), counts their global
+   symbols by partition of their names' hashes (64 partitions per lane, a
+   power of two), and places them, partition by partition in the lanes'
+   order, so that each partition holds its symbols in the units' order. Then
+   each lane resolves the partitions it takes (`lane_take`), in a table of each
+   one's names, as the twin resolves them one symbol at a time: a name's first
+   symbol stands for it, with its definition (the first strong one, else the
+   first weak one), its first duplicate definition, its most constraining
+   visibility and whether any symbol binds it otherwise than weakly.
+2. **The ids.** Each unit's locals and the global symbols that are their
+   names' first take the link's next ids, in the units' order (each unit's
+   count, a prefix sum, then each lane its units'), and every other global
+   symbol its name's first's.
+3. **The records.** The symbols and their names' bytes, each lane a range of
+   the ids, the bytes at places that a prefix sum of the names' lengths gives;
+   then each unit's atoms, fixups (their wide addends numbered as
+   `link_add_fixup` numbers them), priorities and definitions, at places that
+   prefix sums of the units' counts give, each lane its units by their
+   records.
+
+Between those steps lane 0 alone takes what the twin decides in its order: the
+first duplicate in the units' order (the least of each partition's first),
+which it reports as the twin does; the names no unit defines, which give the
+runtime's room; `bind_begin`; and `-g`'s DWARF. The kept links passed
+`link_check`, so their records are copied as they are, their ids remapped, and
+the bound link's `link_check` runs on the same lanes (`link_check_lanes`).
 
 A unit's code reaches the symbols other units define as it reaches any it
 doesn't define: through the GOT, which the executable's write relaxes for
@@ -349,6 +399,13 @@ driver as a process, in a directory of its own:
   whose stack was filled with a mapping's address first, which must exit with
   its message as with a clean stack: a local the driver read before setting
   it would release an arena of that address and unmap the child's code.
+- **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8
+  and by the scalar path: four units that define three names twice, refused
+  with the same standard error, which names the first duplicate in the units'
+  order (`beta`, which the third unit defines again, though `alpha`'s first
+  definition comes first) and its first definition's unit; and units of a
+  pointer whose addend doesn't fit 32 bits (a wide addend) and of no symbols,
+  linked into the same bytes, a program in which the pointer holds its addend.
 - **The jobserver:** four units by `--lanes 4` under a GNU make jobserver of
   three tokens, linked into an executable of more than a megabyte whose path
   is a FIFO, which the test reads: while the writer writes, the jobserver
