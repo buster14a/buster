@@ -2216,6 +2216,115 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Layout flags not implemented by the checker must not silently produce objects with another ABI.
+static void check_test_driver_layout_options(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "enum E { A, B }; struct S { char c; int i; }; int value;\n";
+    static const char sentinel[] = "existing output";
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/layout.c", directory);
+    snprintf(object, sizeof(object), "%s/layout.o", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    static const struct
+    {
+        const char* first;
+        const char* second;
+        bool reject;
+        const char* diagnostic;
+    } cases[] = {
+        { "-fshort-enums", NULL, true, "-fshort-enums" },
+        { "-fpack-struct", NULL, true, "-fpack-struct" },
+        { "-fpack-struct=2", NULL, true, "-fpack-struct=2" },
+        { "-fpack-struct=abc", "-fno-pack-struct", true, "-fpack-struct=abc" },
+        { "-fpack-struct=08", "-fno-pack-struct", true, "-fpack-struct=08" },
+        { "-fpack-struct=4294967296", "-fno-pack-struct", true, "-fpack-struct=4294967296" },
+        { "-fshort-enums", "-fno-short-enums", false, NULL },
+        { "-fno-short-enums", "-fshort-enums", true, "-fshort-enums" },
+        { "-fpack-struct=2", "-fno-pack-struct", true, "-fpack-struct=2" },
+        { "-fpack-struct", "-fno-pack-struct", false, NULL },
+        { "-fpack-struct", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct=0", "-fpack-struct", false, NULL },
+        { "-fpack-struct=bad", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct=2", "-fpack-struct=0", false, NULL },
+        { "-fpack-struct", "-fpack-struct=0x0", false, NULL },
+        { "-fpack-struct=0", "-fpack-struct=2", true, "-fpack-struct=2" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* arguments[] = { (char*)executable, "-c", "-o", object, source, (char*)cases[i].first, (char*)cases[i].second, NULL };
+        char* text = NULL;
+        const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
+        const int status = written && prior ? check_test_driver_spawn(arguments, &text) : -1;
+        if (cases[i].reject)
+        {
+            FILE* file = fopen(object, "rb");
+            char bytes[sizeof(sentinel) + 1] = { 0 };
+            const size_t length = file != NULL ? fread(bytes, 1, sizeof(bytes), file) : 0;
+            if (file != NULL)
+            {
+                fclose(file);
+            }
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, cases[i].diagnostic) != NULL &&
+                                    length == sizeof(sentinel) && memcmp(bytes, sentinel, sizeof(sentinel)) == 0,
+                              "unsupported ABI layout option is named and preserves the output");
+        }
+        else
+        {
+            FILE* file = fopen(object, "rb");
+            unsigned char magic[4] = { 0 };
+            const bool elf = file != NULL && fread(magic, 1, sizeof(magic), file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+            if (file != NULL)
+            {
+                fclose(file);
+            }
+            check_test_expect(test, status == 0 && elf, "a resolved default ABI layout permits ordinary object output");
+        }
+        free(text);
+    }
+    char* const syntax[] = { (char*)executable, "check", "-fsyntax-only", "-fshort-enums", source, NULL };
+    char* text = NULL;
+    const int syntax_status = check_test_driver_spawn(syntax, &text);
+    check_test_expect(test, syntax_status == 1 && text != NULL && strstr(text, "-fshort-enums") != NULL,
+                      "the check command refuses unsupported layout options");
+    free(text);
+    char* const preprocess[] = { (char*)executable, "-E", "-fshort-enums", "-fpack-struct=2", source, NULL };
+    text = NULL;
+    const int preprocess_status = check_test_driver_spawn(preprocess, &text);
+    check_test_expect(test, preprocess_status == 0, "preprocessing accepts layout flags that do not affect its output");
+    free(text);
+    static const char* const value_options[] = { "--lanes", "--worker-budget", "--id-order", "-l", "-L" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(value_options); i += 1)
+    {
+        char* const valued[] = { (char*)executable, (char*)value_options[i], "-fshort-enums", "-fsyntax-only", source, NULL };
+        text = NULL;
+        const int valued_status = check_test_driver_spawn(valued, &text);
+        check_test_expect(test, text != NULL && strstr(text, "the checker does not implement its ABI layout") == NULL &&
+                                (i >= 3 || valued_status != 0),
+                          "a driver option's operand is not interpreted as a layout option");
+        free(text);
+    }
+    char compiler[PATH_MAX];
+    char output_value[256];
+    snprintf(output_value, sizeof(output_value), "%s/-fshort-enums", directory);
+    const bool absolute = realpath(executable, compiler) != NULL;
+    char* const named[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-fshort-enums", "layout.c", NULL };
+    text = NULL;
+    const int named_status = absolute ? check_test_driver_spawn(named, &text) : -1;
+    FILE* output_file = fopen(output_value, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output_file != NULL && fread(magic, 1, sizeof(magic), output_file) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output_file != NULL)
+    {
+        fclose(output_file);
+    }
+    check_test_expect(test, named_status == 0 && elf, "an output operand spelled as a layout option remains a filename");
+    free(text);
+    unlink(output_value);
+    unlink(object);
+    unlink(source);
+}
+
 // Diagnostic examples include missing indices: the writer does not attach an atom to every failure.
 static void check_test_driver_link_failure_messages(CheckTest* test)
 {
@@ -2254,7 +2363,7 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
         size_t length = 0;
         if (output != NULL)
         {
-            check_driver_executable_failure(&link, &runtime, "out", &cases[i].result, output);
+            check_driver_executable_failure(&link, &runtime, 1, "out", &cases[i].result, output);
         }
         const bool read = output != NULL && pp_test_read_output(output, &text, &length);
         check_test_expect(test, read && strstr(text, cases[i].expected) != NULL, "link failure describes its cause and available input");
@@ -2561,6 +2670,20 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     {
         printf("  --time-stages: status %d: %s\n", link_status, text != NULL ? text : "");
     }
+    // The write's phases after the stages (#778), each once, adding up to no more than the write's stage.
+    double write_phases = 0;
+    bool phases_once = text != NULL;
+    for (uint32_t p = 0; phases_once && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\ntime-write\t%s\t", check_clock_write_names[p]);
+        const char* found = strstr(text, needle);
+        double value = -1;
+        phases_once = found != NULL && strstr(found + 1, needle) == NULL && sscanf(found + strlen(needle), "%lf", &value) == 1 && value >= 0;
+        write_phases += value;
+    }
+    check_test_expect(test, link_report && phases_once && write_phases <= stages[CHECK_STAGE_WRITE] + 0.001 * BUSTER_CHECK_CLOCK_WRITE_PHASES,
+                      "--time-stages on the direct path gives the write's phases once each, within its stage");
     free(text);
     text = NULL;
     const int ran = link_status == 0 ? check_test_driver_spawn(run, &text) : -1;
@@ -3342,6 +3465,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_implicit_driver_test.c"
 #include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
+#include "c_check_transparent_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -3433,6 +3557,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_checker_driver_const_test.c"
+#include "c_checker_driver_gnu_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -4517,6 +4642,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
+        check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
@@ -4529,6 +4655,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_sockets(&test, clang, executable, directory);
             check_test_driver_target_selection(&test, executable, directory);
             check_test_driver_mmx(&test, clang, executable, directory);
             check_test_driver_halves(&test, clang, executable, directory);
@@ -4544,6 +4671,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_option_values(&test, executable, directory);
             check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
+            check_test_driver_layout_options(&test, executable, directory);
             check_test_driver_link_layout_error(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }

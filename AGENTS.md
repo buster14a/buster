@@ -374,7 +374,18 @@ designs and the compilers already built this way.
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](docs/function-lanes.md)): by default as many as the bodies'
   tokens pay for, up to one per CPU the process may run on, and with
-  `--lanes N` N of them; the output is one lane's, byte for byte.
+  `--lanes N` N of them; the output is one lane's, byte for byte. An
+  executable carries the program's symbols in `.symtab` (but `.L` labels; with
+  `-g`, its DWARF units' functions'). With several source files (#152,
+  `c_checker_units.c`, the [translation units guide](docs/translation-units.md))
+  the units compile on lanes instead, one unit a lane at a time (`--lanes N`
+  then counts those lanes), each from preprocessing to code as alone
+  (`check_driver_unit`), and their diagnostics are printed in the command
+  line's order: `-fsyntax-only` checks each, `-c` writes each one's object in
+  the current directory as clang names it (`-o` refused), and the link merges
+  the units' links (`check_units_merge`, on the units' lanes by the vector path:
+  `check_units_merge_lanes`, #778) into one executable, with `-g` of their DWARF
+  units, one each (#779).
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -390,17 +401,21 @@ designs and the compilers already built this way.
   lexer in the driver's unit, the preprocessor and the parser in the front
   end's, and the linker's modules (`import.c`, `runtime.c`,
   `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
-  unit. Their entry points that other units call take the module's macro
-  (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
-  `BUSTER_LINKER_ENTRY`) instead of `static`: `main.c` defines it as nothing
+  unit; and `ir_source_test.c`'s `ir_source_prepare`, the check and emission
+  that `test-ir-source` and `benchmark-ir-source` run before the IR, in the
+  checker's unit, whose commands run in the backend's (#784). Their entry
+  points that other units call take the module's macro (`BUSTER_LEXER_ENTRY`,
+  `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`, `BUSTER_LINKER_ENTRY`,
+  `BUSTER_IR_SOURCE_ENTRY`) instead of `static`: `main.c` defines it as nothing
   in the home, and elsewhere as an inline definition that is never inlined,
   which clang doesn't emit, so that neither the entry point nor what only it
   reaches compiles there; a unit without `main.c` (a benchmark's) gets
   `static`. A command then runs in two units' copies of the code, so a home
   must share no static variable with its callers' units: `main.c`'s units share
-  one lane context (`lane.c`), and `./build.sh check-call-graph` reports any
-  variable a command reaches in two units ("Call graph check"). A function to
-  home is a module's entry point that several units compile, coarse enough
+  one lane context (`lane.c`) and the x86 encoder's templates
+  (`x86_64_encoder.c`'s `BUSTER_X86_SHARED`), and `./build.sh check-call-graph`
+  reports any variable a command reaches in two units ("Call graph check"). A
+  function to home is a module's entry point that several units compile, coarse enough
   that a call from another unit costs nothing, which keeps its state in its
   arguments. On the 9700X the checker's unit, the longest, took 27.0 s alone
   and all of the build's 40.0 s before the homes, which removed 13% of the
@@ -432,9 +447,10 @@ designs and the compilers already built this way.
   time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
   stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
-  encoding, the object's build and write, the release; on several lanes their run is one stage, `lanes`), with its
-  system time, page faults and peak resident set added, and the process's resource use; off by default, its laps test
-  a null pointer. `measure-compile [--runs N]
+  encoding, the object's build and write, the direct path's runtime, binding and write, with the write's phases on
+  `time-write` lines (#778), the release; on several lanes their run is one stage, `lanes`), with its system time,
+  page faults and peak resident set added, and the process's resource use; off by default, its laps test a null
+  pointer. `measure-compile [--runs N]
   [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
   against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
@@ -1291,6 +1307,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
 ./build/compiler test-check-lanes
+./build/compiler test-check-units
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -5184,6 +5201,64 @@ and the benchmark on the frozen SQLite source where the emission changes.
 [docs/function-lanes.md](docs/function-lanes.md) has the design and the
 measurements.
 
+## Translation units
+
+`check_driver_units` (`c_checker_units.c`) is #152's driver of several source
+files: `./build/compiler [options] a.c b.c ...`. The units are a lane group's
+items, taken costliest first by their sources' sizes; each runs on one lane
+from preprocessing to its code through `check_driver_unit`, the pipeline a
+command of one file runs, its functions on that lane alone. Each lane keeps an
+intern table and a file cache that its units share; no lane shares anything a
+unit writes. Each unit's diagnostics go to a stream of its own, printed in the
+command line's order after every unit has run. A lane keeps its three big
+arenas from one unit to the next, emptied; it pools the other arenas its units
+release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
+mappings kept for the next reservations of their shapes); and the arenas of a
+unit of less than 1 MB of source start with 16 MB of base pages
+(`arena_small_floor`): fresh arenas' huge pages and the address space's lock,
+which every reservation took for writing, were what limited the lanes.
+`--poison-arenas`, a test option, overwrites what a unit left in its lane's
+three arenas (`arena_poison`), so that a compile that read a byte it didn't
+write would show. Each lane releases what its units shared, into its pool and
+then the pool itself, on the lane once it takes no more units, and the
+command's lanes are one team (`lane_team_start`) that runs the units, the
+merge, `link_check` and the executable's write (#778). A link keeps each
+unit's link (`check_units_keep`) and merges them in the command line's order
+(`check_units_merge`: a global name once, each unit's locals its own, a name
+two units define an error) before `check_driver_executable` binds and writes
+it as it does one unit's; on more than one lane the vector path merges them on
+the units' lanes into the same link (`check_units_merge_lanes`, #778: rule 4's
+exchange of the global names by their hashes' partitions, then the records
+copied at places that prefix sums give), whose exact twin `check_units_merge`
+is, and checks the bound link on them (`link_check_lanes`); with `-g`, each
+unit keeps its DWARF as `-c -g` writes it, and the merge joins them
+(`check_units_merge_debug`, #779). `-c -o`, the dumps, `--id-order` and two
+units of one object's name are refused.
+
+`./build/compiler test-check-units [--executable PATH] [--clang PATH]
+[--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
+[--generate DIR [--units N] [--functions N]]` runs the driver as a process:
+generated programs of 2 to 7 units and one of synth's shape (12 units of 30
+functions), each of whose executables, by `--lanes` 1, 2, 3 and 8, by default
+and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
+`clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
+objects defines, and each of whose units' `-c` objects is the unit's alone;
+diagnostics, each unit's alone in the command line's order; refusals, one
+of them over a poisoned stack; the merge on lanes against its twin, by
+`--lanes` 1, 2 and 8 and the scalar path (several duplicate definitions, whose
+first in the units' order is the one reported, and a wide addend beside a unit
+without symbols, into the same bytes); every reservation of two units' `-c`
+failed in turn, each run reported and its memory released (a lane's partial
+setup among them); the jobserver's tokens held while the link writes; and
+lanes that don't start; with `-g`, the executables by `--lanes` 1 and 8,
+poisoned and by each path the same bytes, and each unit's `-c -g` object its
+own alone. With `--corpus DIR` it compiles DIR's `.c` files at once with `-c`,
+plainly and poisoned, against each alone, and with `--generate DIR` it writes
+a program of synth's shape (512 units of 200 functions by default) for
+measurements, and tests nothing.
+[docs/translation-units.md](docs/translation-units.md) has the design and the
+measurements.
+
 ## Selective lowering
 
 `./build/compiler test-lowering --clang` compares selective function/object
@@ -5436,10 +5511,12 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
 this compiler on our side: a world of what its C passes (integers to 64 bits,
-`_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
-`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
+`_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
+and `unsigned __int128`, enums, pointers,
+`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types
+(and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
-`_BitInt`s to 128 bits, `__float128`, in clang's `_Atomic`s of those
+`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of those
 scalars and records (themselves, records holding them and aligned typedefs of
 them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the

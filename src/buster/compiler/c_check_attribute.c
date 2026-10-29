@@ -1015,8 +1015,9 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, const CheckIn
 
 // Mode/vector attributes change the scalar element, while a typedef's alignment wraps the resulting complete type.
 // An object's/member's alignment is declaration metadata: applying ALIGNED to its type would incorrectly alter
-// pointer/array compatibility. The caller feeds the alignment to the layout/storage consumer instead.
-static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId base, bool is_typedef)
+// pointer/array compatibility. The caller feeds the alignment to the layout/storage consumer instead. Of `deduced`
+// specifiers, __auto_type's, an _Alignas waits for the deduced type (check_input_auto_type_finish), which `base` isn't.
+static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId base, bool is_typedef, bool deduced)
 {
     TypeId result = base;
     bool valid = base != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
@@ -1065,7 +1066,7 @@ static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAtt
             check_input_attribute_error(reader, attributes, attribute->first, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
         }
     }
-    if (valid && attributes->required_alignment_log2 != 0)
+    if (valid && attributes->required_alignment_log2 != 0 && !deduced)
     {
         valid = type_kind(reader->types, result) != BUSTER_TYPE_KIND_FUNCTION && attributes->required_alignment_log2 - 1 >= type_alignment_log2(reader->types, result);
         if (!valid)

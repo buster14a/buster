@@ -201,7 +201,7 @@ static void check_test_program_half_refusals(CheckTest* test)
         check_test_program_boundary_target(test, "int tested(int n){__bf16 a=(__bf16)n,b=a+(__bf16)1;return (int)b;}", "bf16-native-arithmetic", true, false,
                                            0, 2, "__bf16 arithmetic where the unit's target has AVX10.2", &avx10);
         check_test_program_boundary_target(test, "int tested(int n){_Complex _Float16 z=(_Float16)n;return (int)__real__ z;}", "complex-float16", true, false, 0, 1,
-                                           "complex types other than _Complex float, double and long double", &avx10);
+                                           "complex types other than _Complex float, double, long double and __float128", &avx10);
         check_test_program_boundary_target(test, "int tested(int n){__bf16 b=(float)n;return b==1;}", "bf16-without-vl", true, false, 0, 1,
                                            "conversions to __bf16 with AVX512-BF16 but not AVX-512VL", &without_vl);
     }

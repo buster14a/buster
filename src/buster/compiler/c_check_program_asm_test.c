@@ -324,6 +324,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*7+(unsigned)dense(i+n)+(unsigned)relay(i);return (int)s+total;}";
     check_test_program_source(test, asm_tables, "asm-names-switch-tables", clang);
     check_test_program_tables(test, asm_tables, "asm-names-switch-tables", 1, 6);
+    // Clang takes its flag-output path; buster selects the equivalent setcc fallback until it supports flag outputs.
+    check_test_program_source(test,
+        "int tested(int n){int z;\n"
+        "#ifdef __GCC_ASM_FLAG_OUTPUTS__\n"
+        "__asm__(\"testl %1,%1\" : \"=@ccz\"(z) : \"r\"(n) : \"cc\");\n"
+        "#else\n"
+        "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
+        "#endif\n"
+        "return z;}", "asm-flag-output-fallback", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
