@@ -1969,6 +1969,84 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     unlink(source);
 }
 
+// Code generation flags must not silently produce an object without the requested hardening or instrumentation.
+static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char source_text[] = "int main(void) { return 0; }\n";
+    static const char sentinel[] = "unchanged output\n";
+    static const char* const options[] = {
+        "-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all", "-fstack-protector-explicit",
+        "-fcf-protection", "-fcf-protection=full", "-fcf-protection=branch", "-fcf-protection=return",
+        "-fstack-clash-protection", "-fstack-check", "-fstack-check=specific", "-pg", "-finstrument-functions",
+        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-generate=path", "-fprofile-instr-generate",
+        "-fprofile-instr-generate=path", "-fcs-profile-generate", "-fcs-profile-generate=path",
+        "-fprofile-generate-cold-function-coverage", "-fprofile-generate-cold-function-coverage=path", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-ftls-model=global-dynamic", "-ftls-model=local-exec",
+        "-mno-red-zone", "-fno-plt", "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+        "-fwide-exec-charset=UTF-32",
+    };
+    char source[256];
+    char output[256];
+    char compiler[PATH_MAX];
+    char named[256];
+    snprintf(source, sizeof(source), "%s/codegen-flags.c", directory);
+    snprintf(output, sizeof(output), "%s/codegen-flags.o", directory);
+    snprintf(named, sizeof(named), "%s/-pg", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        const bool saved = made && parse_test_write(output, sentinel, sizeof(sentinel) - 1);
+        char* const arguments[] = { compiler, "-c", (char*)options[i], "-o", output, source, NULL };
+        char* text = NULL;
+        const int status = saved ? check_test_driver_spawn(arguments, &text) : -1;
+        char contents[sizeof(sentinel)] = { 0 };
+        FILE* file = fopen(output, "rb");
+        const size_t length = file != NULL ? fread(contents, 1, sizeof(contents), file) : 0;
+        if (file != NULL)
+        {
+            fclose(file);
+        }
+        const bool named_option = text != NULL && strstr(text, "unsupported code generation option") != NULL && strstr(text, options[i]) != NULL;
+        char label[192];
+        snprintf(label, sizeof(label), "%s fails by name without overwriting output", options[i]);
+        check_test_expect(test, status == 1 && named_option && length == sizeof(sentinel) - 1 && memcmp(contents, sentinel, length) == 0, label);
+        free(text);
+    }
+    char* text = NULL;
+    char* const link[] = { compiler, "-o", output, source, "-fstack-protector-strong", NULL };
+    const int link_status = made ? check_test_driver_spawn(link, &text) : -1;
+    check_test_expect(test, link_status == 1 && text != NULL && strstr(text, "-fstack-protector-strong") != NULL,
+                      "the executable route rejects unsupported hardening");
+    free(text);
+    char* const allowed[] = { compiler, "-c", "-fno-stack-protector", "-fcf-protection=none", "-o", output, source, NULL };
+    const int allowed_status = made ? check_test_driver_spawn(allowed, &text) : -1;
+    check_test_expect(test, allowed_status == 0, "disabling stack protection and CET remains supported");
+    free(text);
+    char* const disabled_last[] = { compiler, "-c", "-fstack-protector-strong", "-fno-stack-protector",
+                                    "-fcf-protection=full", "-fcf-protection=none", "-o", output, source, NULL };
+    const int disabled_status = made ? check_test_driver_spawn(disabled_last, &text) : -1;
+    check_test_expect(test, disabled_status == 0, "the last stack-protector and CET options may disable unsupported instrumentation");
+    free(text);
+    char* const enabled_last[] = { compiler, "-c", "-fno-stack-protector", "-fstack-protector-all", "-o", output, source, NULL };
+    const int enabled_status = made ? check_test_driver_spawn(enabled_last, &text) : -1;
+    check_test_expect(test, enabled_status == 1 && text != NULL && strstr(text, "-fstack-protector-all") != NULL,
+                      "a later stack-protector option enables the refused instrumentation");
+    free(text);
+    char* const cet_last[] = { compiler, "-c", "-fcf-protection=none", "-fcf-protection=branch", "-o", output, source, NULL };
+    const int cet_status = made ? check_test_driver_spawn(cet_last, &text) : -1;
+    check_test_expect(test, cet_status == 1 && text != NULL && strstr(text, "-fcf-protection=branch") != NULL,
+                      "a later CET option enables the refused instrumentation");
+    free(text);
+    char* const value[] = { "env", "-C", (char*)directory, compiler, "-c", "-o", "-pg", "codegen-flags.c", NULL };
+    const int value_status = made ? check_test_driver_spawn(value, &text) : -1;
+    struct stat stat_output;
+    check_test_expect(test, value_status == 0 && stat(named, &stat_output) == 0 && stat_output.st_size > 0,
+                      "an option value named -pg remains an output path");
+    free(text);
+    unlink(source);
+    unlink(output);
+    unlink(named);
+}
+
 // Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
 // directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
 // include's macro and a header that only -Lheaders has, and the program runs.
@@ -3984,6 +4062,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
             check_test_driver_time_stages(&test, executable, directory);
         }
