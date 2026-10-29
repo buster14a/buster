@@ -2854,8 +2854,12 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
         }
         if (check_lower_wide_class(class))
         {
-            // (A _BitInt's of 65 to 127 bits comes folded to its width and extended from it, as its values are kept.)
-            check_lower_wide_constant(writer, class, value->integer);
+            // A _BitInt's of 65 to 127 bits comes folded to its width's bits too, and extends from its width here, as its
+            // values are kept: a conversion to __int128 or a compare reads it as it is.
+            const uint32_t shift = writer->bit_ints ? check_lower_bit_int_shift(writer->program->types, value->type) : 0;
+            const unsigned __int128 integer = (unsigned __int128)value->integer << shift;
+            check_lower_wide_constant(writer, class, shift == 0 ? (unsigned __int128)value->integer :
+                                                     class == BUSTER_TYPED_CLASS_I128 ? (unsigned __int128)((__int128)integer >> shift) : integer >> shift);
         }
         else
         {
