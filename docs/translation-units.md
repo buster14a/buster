@@ -21,9 +21,9 @@ With one source file the driver runs as before, byte for byte. With several:
   default) through the direct path (#157): the units' links, merged into one
   and bound against the C runtime's snapshot as one unit's link is
   (`check_driver_executable`). `-l` and `-L` work as for one unit.
-- `--dump-typed` and `--dump-static` take one source file, and `-g` for an
-  executable of several units is refused for now (`-c -g` writes each unit's
-  object with its DWARF).
+- **`-g`** gives the executable each unit's DWARF ("The DWARF" below), and
+  `-c -g` each unit's object its own.
+- `--dump-typed`, `--dump-static` and `--id-order` take one source file.
 
 Every unit is compiled whatever the others do, as clang compiles them: a unit
 with errors writes no object, and the others write theirs; any unit's error
@@ -226,10 +226,38 @@ The direct path's executables now carry the program's symbols in `.symtab`
 (`ExecutableOptions.symbols`), as a linker writes its objects': every named
 symbol of the program's but the compiler's `.L` labels, which an assembler
 leaves out of its objects, and a TLS variable of no size, which the writer
-has no section for. With `-g`, the DWARF unit's function symbols stay what
+has no section for. With `-g`, the DWARF units' function symbols stay what
 they were. So `nm` and `perf` name an executable's functions, and
 `test-check-units` compares the symbols an executable of several units
 defines with those of the units' objects linked by `cc`.
+
+### The DWARF
+
+With `-g` (#779), each unit builds its DWARF on its lane as `-c -g` writes it
+into the unit's object (`c_check_debug.c`'s unit, written alone: its four
+fields that point into its other sections, the header's abbreviation offset
+and the unit's line program, address base and range lists, hold offsets in
+its own sections), and keeps it with its link (`CheckUnitsKept.debug`, an
+`ObjectDebug`): its five sections' bytes, its functions' symbols and line
+addresses, and where its fields are. The merge
+(`check_units_merge_debug`) lays the units' contributions out one after
+another in the command line's order, adds to each unit's fields where its
+contributions start, as a linker's relocations against the sections do, maps
+its functions to the merged link's symbols and moves its line addresses by
+where its `.debug_line` starts; the executable's write takes them as units
+(`ExecutableDebug.unit_functions`), each finalized at its functions'
+addresses. A weak function that another unit's definition replaces keeps its
+code, which its unit's DWARF describes: the merge gives it a local symbol of
+its own at that code, after the program's other symbols, as a linker relocates
+an object's DWARF against its section rather than its name (the checker
+refuses the weak attribute until #758).
+
+On the 9700X, `-g` costs Lua's 33 units linked by 8 lanes 1.3 ms (35.5 ms
+against 34.2) and by one lane 5.1 ms (83.5 against 78.4): whole processes on
+CPUs 0 to 7, the medians of 15 runs, at #779's commit (`520ba859`), whose
+commands without `-g` run as #763's head's; [the
+record](https://github.com/buster14a/buster-performance/tree/d3ed81314e41efdf56e776e8c0ba1bee2efb0fec/docs/measurements/units-tail-778-779-2026-10-29)
+has the commands and the logs.
 
 ## Measurements
 
@@ -310,18 +338,24 @@ driver as a process, in a directory of its own:
   does, and defines the symbols (by name, binding and kind) that `cc`'s link of
   the units' objects compiled one at a time defines; that link runs as clang's
   too. Each unit's object of `-c` of all the units is its object alone, at
-  every lane count and poisoned.
+  every lane count and poisoned. With `-g`, the executable is the same bytes
+  by `--lanes` 1 and 8, by 8 poisoned and by the scalar path, and runs as
+  clang's build does; and each unit's object of `-c -g` is its object of
+  `-c -g` alone. `test-check-debug --cross-check` links two units with `-g`
+  and reads them with `llvm-dwarfdump --verify` and gdb: each unit's functions
+  and lines in their own files, the static functions of one name apart, and
+  backtraces across the units; and a third unit's weak function that the
+  second's replaces, at its own code (once the checker takes `weak`).
 - **Diagnostics:** a unit with a warning, one with an error and a clean one,
   with `-c`, `-fsyntax-only` and into an executable, at every lane count:
   standard error is each unit's alone, in the command line's order; `-c`
   writes the objects of the units without errors only, and the link writes
   nothing.
 - **Refusals:** a name two units define, a name none defines, `-c -o`, a dump,
-  `-g` for an executable, two units of one object's name; and that last one in
-  a child whose stack was filled with a mapping's address first, which must
-  exit with its message as with a clean stack: a local the driver read before
-  setting it would release an arena of that address and unmap the child's
-  code.
+  `--id-order`, two units of one object's name; and that last one in a child
+  whose stack was filled with a mapping's address first, which must exit with
+  its message as with a clean stack: a local the driver read before setting
+  it would release an arena of that address and unmap the child's code.
 - **Reservations:** two units that include one header, with `-c` by one lane,
   in children whose address space may grow a page less than a run reached (as
   `test-parser` fails its driver's): the run's last reservation or mapping

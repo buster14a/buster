@@ -27,13 +27,16 @@
 
 // A unit's link kept for the units' link (check_units_keep): a copy of its records, with room for no more, and which of
 // its undefined global symbols a system header declared, for the link's error about them (check_driver_executable's,
-// as check_driver_system_declared tells it for one unit).
+// as check_driver_system_declared tells it for one unit); and with -g (#779), its DWARF as -c -g's object carries it
+// (c_check_debug.c's unit written alone, whose four fields hold offsets in its own sections), its functions the copy's
+// symbols, or none.
 struct CheckUnitsKept
 {
     Link link;
     uint8_t* system;
-    // Where the copy goes: its tables and names, and its atoms' bytes (its lane's arenas, which keep every unit's that
-    // the lane compiled until the link).
+    ObjectDebug debug;
+    // Where the copy goes: its tables and names, and its atoms' and DWARF's bytes (its lane's arenas, which keep every
+    // unit's that the lane compiled until the link).
     Arena* arena;
     Arena* bytes;
 };
@@ -89,9 +92,11 @@ struct CheckUnitsRun
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
 // `kept`: its tables, names and atoms' bytes into its arenas, with each record's id as it was; and marks its undefined
-// global symbols that `program`'s declarations in a system header gave (check_driver_system_declared's rule). False
-// without room, with the arenas as they were.
-static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp)
+// global symbols that `program`'s declarations in a system header gave (check_driver_system_declared's rule). With
+// `debug` (-g), the unit's DWARF too, its sections' bytes, its functions' symbols and line addresses and its fields.
+// False without room, with the arenas as they were.
+static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
+                             const ObjectDebug* debug)
 {
     const uint64_t mark = kept->arena->length;
     const uint64_t byte_mark = kept->bytes->length;
@@ -186,12 +191,43 @@ static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const Check
             kept->system[symbol] = undefined && declaration < parser->tokens.count && check_lazy_system(pp, parser->tokens.sources[declaration]);
         }
     }
+    kept->debug = (ObjectDebug){ 0 };
+    if (result && debug != NULL)
+    {
+        const uint64_t functions = debug->function_count;
+        SymbolId* symbols_copy = BUSTER_ARENA_PUSH_ARRAY(kept->arena, SymbolId, functions + 1);
+        uint32_t* addresses = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, functions + 1);
+        uint32_t* fields = BUSTER_ARENA_PUSH_ARRAY(kept->arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS);
+        result = symbols_copy != NULL && addresses != NULL && fields != NULL;
+        for (uint32_t section = 0; result && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            const String8 bytes = debug->sections[section];
+            char* copy_bytes = arena_push(kept->bytes, bytes.length != 0 ? bytes.length : 1, 16);
+            result = copy_bytes != NULL;
+            if (result)
+            {
+                memcpy(copy_bytes, bytes.pointer, bytes.length);
+                kept->debug.sections[section] = (String8){ .pointer = copy_bytes, .length = bytes.length };
+            }
+        }
+        if (result)
+        {
+            memcpy(symbols_copy, debug->functions, functions * sizeof(*symbols_copy));
+            memcpy(addresses, debug->line_addresses, functions * sizeof(*addresses));
+            memcpy(fields, debug->fields, BUSTER_OBJECT_DEBUG_FIELDS * sizeof(*fields));
+            kept->debug.functions = symbols_copy;
+            kept->debug.line_addresses = addresses;
+            kept->debug.function_count = debug->function_count;
+            kept->debug.fields = fields;
+        }
+    }
     if (!result)
     {
         arena_pop_to(kept->arena, mark);
         arena_pop_to(kept->bytes, byte_mark);
         kept->link = (Link){ 0 };
         kept->system = NULL;
+        kept->debug = (ObjectDebug){ 0 };
     }
     return result;
 }
@@ -225,6 +261,94 @@ static uint32_t check_units_visibility_rank(uint8_t flags)
                                                         : 3;
 }
 
+// -g's DWARF of the units' link (#779): each unit's (CheckUnitsKept.debug, as -c -g's object carries it) joined into
+// `debug`, in the units' order, as a linker joins the objects' sections. Each section's bytes are the units'
+// contributions one after another, in `arena`; each unit's four fields, which hold offsets in its own sections, move by
+// where its contributions start, as a linker's relocations against the sections move them (object_writer.c's
+// ObjectDebug); its functions are `described`'s symbols, in the link, and its line addresses move by where its
+// .debug_line contribution starts. False, with nothing pushed, for sections past DWARF32's or without room.
+static bool check_units_merge_debug(ExecutableDebug* debug, const CheckUnitsUnit* units, uint32_t count, SymbolId* const* described, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    uint64_t sizes[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
+    uint64_t functions = 0;
+    bool valid = true;
+    for (uint32_t u = 0; u < count; u += 1)
+    {
+        const ObjectDebug* own = &units[u].kept.debug;
+        for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            sizes[section] += own->sections[section].length;
+        }
+        for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            valid = valid && own->sections[BUSTER_OBJECT_DEBUG_INFO].length >= 4 && own->fields[field] <= own->sections[BUSTER_OBJECT_DEBUG_INFO].length - 4;
+        }
+        functions += own->function_count;
+    }
+    valid = valid && functions < UINT32_MAX;
+    char* sections[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t section = 0; valid && section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+    {
+        valid = sizes[section] < BUSTER_DEBUG_DWARF32_LIMIT;
+        sections[section] = valid ? arena_push(arena, sizes[section] != 0 ? sizes[section] : 1, 16) : NULL;
+        valid = sections[section] != NULL;
+    }
+    SymbolId* symbols = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, functions + 1) : NULL;
+    uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, functions + 1) : NULL;
+    uint32_t* unit_functions = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count) : NULL;
+    valid = valid && symbols != NULL && addresses != NULL && unit_functions != NULL;
+    uint64_t bases[BUSTER_OBJECT_DEBUG_SECTIONS] = { 0 };
+    uint32_t function = 0;
+    for (uint32_t u = 0; valid && u < count; u += 1)
+    {
+        const ObjectDebug* own = &units[u].kept.debug;
+        for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            memcpy(sections[section] + bases[section], own->sections[section].pointer, own->sections[section].length);
+        }
+        // The header's abbreviation offset, and the DIE's line program, address base and range lists, in that order.
+        for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            char* at = sections[BUSTER_OBJECT_DEBUG_INFO] + bases[BUSTER_OBJECT_DEBUG_INFO] + own->fields[field];
+            uint32_t value = 0;
+            memcpy(&value, at, 4);
+            value += (uint32_t)bases[BUSTER_OBJECT_DEBUG_ABBREV + field];
+            memcpy(at, &value, 4);
+        }
+        for (uint32_t f = 0; f < own->function_count; f += 1)
+        {
+            symbols[function] = described[u][f];
+            addresses[function] = (uint32_t)(bases[BUSTER_OBJECT_DEBUG_LINE] + own->line_addresses[f]);
+            function += 1;
+        }
+        unit_functions[u] = own->function_count;
+        for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            bases[section] += own->sections[section].length;
+        }
+    }
+    if (valid)
+    {
+        *debug = (ExecutableDebug){
+            .functions = symbols,
+            .line_addresses = addresses,
+            .function_count = (uint32_t)functions,
+            .unit_functions = unit_functions,
+            .unit_count = count,
+        };
+        for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            debug->sections[section] = (String8){ .pointer = sections[section], .length = sizes[section] };
+        }
+    }
+    else
+    {
+        arena_pop_to(arena, mark);
+    }
+    return valid;
+}
+
 // The units' kept links joined into `link`, in the units' order, as check_program_emit builds one unit's (#152): every
 // symbol first, a global name's once and each unit's locals its own, the units' definitions marked as the program's;
 // then the C runtime, which binding (`binding`, bind_begin) joins between the program's symbols and its atoms, its units
@@ -234,8 +358,10 @@ static uint32_t check_units_visibility_rank(uint8_t flags)
 // tables go in `output`, the runtime's atoms' bytes in `bytes`; the units' atoms' bytes stay in their kept links, where
 // the executable's write patches them. A name that two units define (strongly: a weak definition yields to another) is
 // an error, which this prints, as it prints a failure of memory; bind_begin's failure is binding's (bind->error, with
-// binding->failed_name), which its caller reports as it reports one unit's.
-static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, Arena* output, Arena* bytes, Arena* scratch)
+// binding->failed_name), which its caller reports as it reports one unit's. With `debug` (-g, #779), the units' DWARF
+// joined into it, in `output` (check_units_merge_debug).
+static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
+                              Arena* bytes, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     uint64_t symbols = 0;
@@ -355,6 +481,27 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 (const char*)unit->names.bytes[name], units[duplicate_unit].path, units[defining_unit[duplicate]].path);
         valid = false;
     }
+    // With -g, each unit's DWARF functions' symbols in the link (`described`). A function that another unit's definition
+    // takes the place of (a weak one, which a strong one or an earlier weak one replaces) keeps its code, which its
+    // unit's DWARF describes: it gets a local symbol of its own at that code, after the program's others, as a linker
+    // relocates an object's DWARF against its section rather than its name.
+    SymbolId** described = valid && debug != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId*, count) : NULL;
+    valid = valid && (debug == NULL || described != NULL);
+    uint64_t replaced = 0;
+    for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
+    {
+        const ObjectDebug* own = &units[u].kept.debug;
+        described[u] = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)own->function_count + 1);
+        valid = described[u] != NULL;
+        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        {
+            const SymbolId s = own->functions[f];
+            const SymbolId merged = maps[u][s];
+            const bool kept = defining_unit[merged] == u && defining_symbol[merged] == s;
+            described[u][f] = kept ? merged : (SymbolId)(next + replaced);
+            replaced += !kept;
+        }
+    }
     // The names no unit defines, for the runtime's room in the link (bind_capacity_needed).
     String8* externals = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, next) : NULL;
     uint32_t external_count = 0;
@@ -372,9 +519,9 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
     const LinkCapacity runtime = valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) : (LinkCapacity){ 0 };
-    const uint64_t total_names = (uint64_t)next - 1 + runtime.names;
+    const uint64_t total_names = (uint64_t)next - 1 + replaced + runtime.names;
     const uint64_t total_atoms = atoms + runtime.atoms;
-    const uint64_t total_symbols = (uint64_t)next - 1 + runtime.symbols;
+    const uint64_t total_symbols = (uint64_t)next - 1 + replaced + runtime.symbols;
     const uint64_t total_fixups = fixups + runtime.fixups;
     const uint64_t total_wides = wides + runtime.wide_addends;
     const uint64_t total_priorities = priorities + runtime.priorities;
@@ -406,6 +553,24 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
         }
         const uint8_t source = absolute ? BUSTER_LINK_SOURCE_ABSOLUTE : defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE;
         valid = (own == 0 || name != 0) && link_add_symbol(link, name, 0, absolute ? unit->symbols.value[s] : 0, absolute ? unit->symbols.size[s] : 0, flags, source) == m;
+    }
+    // The replaced functions' local symbols (`described`), which the units' atoms define.
+    for (uint32_t u = 0; described != NULL && valid && u < count; u += 1)
+    {
+        const Link* unit = &units[u].kept.link;
+        const ObjectDebug* own = &units[u].kept.debug;
+        for (uint32_t f = 0; valid && f < own->function_count; f += 1)
+        {
+            const SymbolId s = own->functions[f];
+            const NameId own_name = unit->symbols.name[s];
+            if (described[u][f] != maps[u][s])
+            {
+                const NameId name = own_name != 0 ? link_add_name_hashed(link, unit->names.bytes[own_name], unit->names.length[own_name], unit->names.hash[own_name]) : 0;
+                const uint8_t flags = (uint8_t)((unit->symbols.flags[s] & ~(BUSTER_LINK_SYMBOL_BINDING | BUSTER_LINK_SYMBOL_VISIBILITY)) | BUSTER_LINK_SYMBOL_LOCAL |
+                                                BUSTER_LINK_SYMBOL_DEFAULT);
+                valid = (own_name == 0 || name != 0) && link_add_symbol(link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_PROGRAM) == described[u][f];
+            }
+        }
     }
     const bool symbols_added = valid;
     // Every symbol of the program's exists: the runtime joins now, before the program's atoms.
@@ -449,9 +614,26 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
                 valid = link_define_symbol(link, merged, placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
             }
         }
+        for (uint32_t f = 0; described != NULL && valid && f < units[u].kept.debug.function_count; f += 1)
+        {
+            const SymbolId s = units[u].kept.debug.functions[f];
+            if (described[u][f] != maps[u][s])
+            {
+                valid = link_define_symbol(link, described[u][f], placed[unit->symbols.atom[s]], unit->symbols.value[s], unit->symbols.size[s]);
+            }
+        }
         arena_pop_to(scratch, unit_mark);
     }
-    if (!valid && duplicate == 0 && (!symbols_added || begun))
+    const bool atoms_added = valid;
+    if (valid && debug != NULL)
+    {
+        valid = check_units_merge_debug(debug, units, count, described, output);
+        if (!valid)
+        {
+            fprintf(stderr, "error: can't make the debug information: no memory, or sections past DWARF32's\n");
+        }
+    }
+    if (!atoms_added && duplicate == 0 && (!symbols_added || begun))
     {
         fprintf(stderr, "fatal error: can't link the units: %s (link error %u)\n", sized ? "their records don't fit the link" : "no memory", (uint32_t)link->error);
     }
@@ -592,7 +774,8 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
 // The command's translation units (`count` source files, `inputs`, two or more): the lanes compile them (at most
 // `lanes->lanes` of them, one per unit, which a GNU make jobserver's budget may reduce), the units' diagnostics are
 // printed in the command line's order, and then with a link to make, the units' links are merged and linked
-// (check_driver_executable). -o with -c, a dump and -g's DWARF for a link are refused: their outputs are one unit's.
+// (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
+// outputs are one unit's.
 // With `stage_clock`, the setup, the lanes' run, the link and the release are its stages. Returns the command's exit
 // status: 0 when every unit compiled without errors and every output was written.
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock)
@@ -610,10 +793,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
     else if (command->dump || command->dump_static || command->id_ordered)
     {
         fprintf(stderr, "error: --dump-typed, --dump-static and --id-order take one source file\n");
-    }
-    else if (command->link && command->source_rows)
-    {
-        fprintf(stderr, "error: unsupported: -g for an executable of several translation units (-c -g writes each one's object with it)\n");
     }
     else if (order == NULL)
     {
@@ -729,8 +908,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 // The executable is written on the units' lanes.
                 CheckProgramLanes writers = { .lanes = ran ? active : 1 };
                 const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
-                                                            command->verify, false, command->unwind_tables, command->libraries, &writers, &arena, stage_clock, units,
-                                                            count);
+                                                            command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
+                                                            stage_clock, units, count);
                 result = linked ? 0 : 1;
                 check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
             }
