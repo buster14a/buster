@@ -36,6 +36,18 @@ typedef enum CheckInputMessage
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
     CHECK_INPUT_OPTIMIZE,
+    // A goto, a switch's case and a computed goto that enter a variable-length array's or a cleanup's scope, or for a
+    // computed goto leave a cleanup's, as clang's JumpScopeChecker reports them.
+    CHECK_INPUT_JUMP_GOTO,
+    CHECK_INPUT_JUMP_SWITCH,
+    CHECK_INPUT_JUMP_INDIRECT,
+    // GNU's cleanup attribute's argument and function (c_check_cleanup_input.c).
+    CHECK_INPUT_CLEANUP_FUNCTION,
+    CHECK_INPUT_CLEANUP_PARAMETERS,
+    CHECK_INPUT_CLEANUP_TYPE,
+    CHECK_INPUT_CLEANUP_ARGUMENTS,
+    // GNU's weak attribute on a declaration without external linkage.
+    CHECK_INPUT_WEAK_LINKAGE,
     // Labels' errors, at the label's name (check_input_controls_mode): a use of one no definition has, or a local
     // label's declaration without one; a second definition in the label's scope; a name a block's `__label__` lists
     // declare twice.
@@ -53,6 +65,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_TYPE_BIT_FIELD,
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
+    CHECK_INPUT_PRAGMA_SEMANTICS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -78,6 +91,14 @@ static const char* const check_input_messages[] =
     "initializer element is not a compile-time constant",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
+    "cannot jump from this goto statement to its label",
+    "cannot jump from switch statement to this case label",
+    "cannot jump from this indirect goto statement to one of its possible targets",
+    "'cleanup' argument is not a function",
+    "'cleanup' function must take 1 parameter",
+    "'cleanup' function's parameter has a type incompatible with the variable's address",
+    "'cleanup' attribute takes one argument",
+    "weak declaration cannot have internal linkage",
     "use of undeclared label",
     "redefinition of label",
     "ambiguous reference to a label",
@@ -88,6 +109,7 @@ static const char* const check_input_messages[] =
     "cannot use '__auto_type' with array in C",
     "cannot pass bit-field as __auto_type initializer in C",
     "bit-precise integer constants wider than 128 bits are not supported",
+    "unsupported semantic pragma",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -207,6 +229,19 @@ struct CheckInputRegion
     uint32_t final_statement;
 };
 
+// A variable with GNU's cleanup attribute (c_check_cleanup_input.c): its declaration (its name's token), the declaration
+// of the function the attribute's argument names, the argument's token, its scope's opening (its block's brace, or its
+// for statement's parenthesis) and the token after the scope's last.
+typedef struct CheckInputCleanup CheckInputCleanup;
+struct CheckInputCleanup
+{
+    uint32_t declaration;
+    uint32_t function;
+    uint32_t argument;
+    uint32_t scope;
+    uint32_t end;
+};
+
 struct CheckInput
 {
     CheckGraph graph;
@@ -282,6 +317,8 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     CheckWarningEvents warning_events;
+    // Directive-only warnings survive parser recovery independently of expression facts.
+    CheckWarningEvents pragma_warnings;
     CheckConstValues const_values;
     uint8_t* constant_warnings;
     uint32_t constant_warning_count;
@@ -289,6 +326,8 @@ struct CheckInput
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
     uint32_t* declaration_bodies;
+    // At a body opening: its first named parameter token. At a parameter name: its zero-based ordinal in the full
+    // parameter list, including unnamed parameters. These token roles are disjoint; no additional column is needed.
     uint32_t* parameters;
     uint32_t* parameter_next;
     uint32_t* control_owners;
@@ -302,6 +341,10 @@ struct CheckInput
     CheckInputVla* vlas;
     uint32_t vla_count;
     uint32_t vla_capacity;
+    // The variables with GNU's cleanup attribute, in source order: none in a unit without one.
+    CheckInputCleanup* cleanups;
+    uint32_t cleanup_count;
+    uint32_t cleanup_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -334,6 +377,9 @@ struct CheckInput
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;
+    // Whether the reader's arena of rare columns was base pages throughout, as where more than one lane reads the deferred
+    // bodies (check_input_sparse_arena, #764): the tests require it of those readings and of no other.
+    bool rare_columns_shared;
     bool resource;
 };
 
@@ -501,6 +547,9 @@ typedef struct CheckInputReader CheckInputReader;
 typedef struct CheckDeferred CheckDeferred;
 static void check_deferred_cut(CheckInputReader* reader, uint32_t opening);
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader);
+// Whether the deferred reader's rule gives the bodies more than one lane, which write their entries of the token columns
+// at once (#764).
+static bool check_deferred_shared(const CheckDeferred* deferred);
 // The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
 // body's opening.
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
@@ -710,6 +759,13 @@ struct CheckInputReader
     uint32_t section_event_count;
     uint32_t section_event_capacity;
     uint32_t section_record_from;
+    // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
+    // (check_input_cleanup_declaration), a weak one, which only then each declarator's are for its linkage, and a weak,
+    // a constructor or a destructor, which only then each redeclaration's are for those after a definition
+    // (check_input_attribute_late).
+    bool cleanup_attributes;
+    bool weak_attributes;
+    bool late_attributes;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -1881,6 +1937,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 
 #include "c_check_function_name_input.c"
 #include "c_check_pragma_input.c"
+#include "c_check_ignored_pragma.c"
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
 #include "c_check_fp_input.c"
@@ -2088,6 +2145,7 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
+#include "c_check_cleanup_input.c"
 #include "c_check_overload_input.c"
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
@@ -2550,6 +2608,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 reader->output->declarations[token] = token;
                 reader->output->explicit_abis[token] = 0;
                 reader->output->attributes[token] = 0;
+                reader->parameters[token] = function->last_name != BUSTER_CHECK_NONE ? reader->parameters[function->last_name] + 1 : 0;
                 reader->parameter_next[token] = BUSTER_CHECK_NONE;
                 if (function->last_name != BUSTER_CHECK_NONE)
                 {
@@ -2854,6 +2913,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 {
                                     valid &= check_input_attribute_function(reader, reader->output->attributes[token], adjusted);
                                 }
+                                reader->parameters[token] = function->parameter_count - 1;
                                 reader->parameter_next[token] = BUSTER_CHECK_NONE;
                                 if (function->last_name != BUSTER_CHECK_NONE)
                                 {
@@ -3832,6 +3892,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            if (valid && reader->cleanup_attributes && attributes != 0)
+            {
+                // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
+                // ignores.
+                const bool automatic = !file && !is_typedef && !function && !is_static && !thread_local && storage != C_NAME_EXTERN;
+                valid = check_input_cleanup_declaration(reader, attributes, name, type, automatic);
+            }
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {
@@ -3873,6 +3940,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     {
                         const uint32_t declaration = reader->bindings.declaration[previous - 1];
                         reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
+                    }
+                }
+                // GNU's weak attribute needs external linkage (#147): clang's error at the attribute, but on a typedef,
+                // where it warns and ignores it (all of a typedef's declarators are typedefs).
+                for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
+                {
+                    CheckInputAttribute* attribute = attributes->records + a;
+                    attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
+                    if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
+                    {
+                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
+                        valid = false;
                     }
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
@@ -4096,6 +4175,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
+                check_input_attribute_late(reader, token, previous);
                 reader->definition_seen[token] |= reader->definition_seen[previous];
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);
@@ -6222,6 +6302,19 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
 
 #include "c_check_comma_input.c"
 
+// check_input_run's arena of rare columns: its first `small_bytes` (a multiple of BUSTER_ARENA_PAGE_BYTES) in base pages
+// and the rest in huge pages, or with `shared` all of it in base pages. `shared` is for a deferred reading whose bodies
+// more than one lane reads (check_deferred_shared, #764): the lanes write their bodies' entries of the arena's token
+// columns at once, and lanes that write a 2 MB region of them which has no page yet, or the huge zero page, each
+// allocate and clear a huge page for it, of which the kernel maps one. A deferred reading on one lane, as source order,
+// keeps the huge pages.
+static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool shared)
+{
+    const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t small = shared ? pages : small_bytes;
+    return arena_reserve_small(bytes, small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES);
+}
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options);
@@ -6471,7 +6564,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
     // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
     // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
-    // base pages at the arena's start.
+    // base pages at the arena's start. Where more than one lane reads the deferred bodies, the arena is base pages
+    // throughout (check_input_sparse_arena, #764).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
@@ -6511,7 +6605,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
 #undef BUSTER_CHECK_SPARSE_BYTES
-    Arena sparse = valid ? arena_reserve_small(sparse_bytes, sparse_small > BUSTER_ARENA_SMALL_BYTES ? sparse_small : BUSTER_ARENA_SMALL_BYTES) : (Arena){ 0 };
+    input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
+    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
 #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
@@ -6720,6 +6815,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
+                prepared = prepared && check_input_ignored_pragmas(&reader, handled);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -6734,12 +6830,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         handled[pragma] = 1;
                     }
+                    const CheckInputPragmaDisposition disposition = handled[pragma] == 0 ? check_input_pragma_disposition(&reader, pragma) : CHECK_PRAGMA_OWNED;
+                    if (handled[pragma] == 0 && disposition != CHECK_PRAGMA_OWNED && disposition != CHECK_PRAGMA_SEMANTIC)
+                    {
+                        handled[pragma] = 1;
+                    }
                     if ((handled[pragma] == 0 || handled[pragma] >= 3) &&
                         (input->deferred_tokens == 0 || deferred != 0 || input->deferred_tokens[position] == 0))
                     {
                         reader.resolve_limit = parser->tokens.pragma_positions[pragma];
                         reader.resolve_pragma = pragma;
-                        reader.resolve_message = handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
+                        reader.resolve_message = disposition == CHECK_PRAGMA_SEMANTIC ? CHECK_INPUT_PRAGMA_SEMANTICS :
+                                                 handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
                                                  loop_messages[pragma] != 0 ? (CheckInputMessage)loop_messages[pragma] : CHECK_INPUT_DECLARATION;
                         handler_error = handled[pragma] == BUSTER_CHECK_LOOP_HANDLER_ERROR;
                         if (handler_error && position != 0)

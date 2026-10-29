@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The fortified libc builtin adapter and lowering in `c_builtin_fortify.c`,
+`c_check_program_fortify.c`, their integration changes and original fixtures in
+`c_check_fortify_driver_test.c` (#803) use the project default terms. The existing
+Clang builtin metadata retains its recorded LLVM provenance; Clang and system
+libc are external behavioral oracles. No implementation or header fixture is
+imported. Scope and behavioral references are in `docs/c-builtins-fortify.md`.
+
 `ir_rebuild.c` and the `ir_reduce*.c` test/tool family (#733) are original
 project C under Apache-2.0 WITH LLVM-exception. They use this repository's
 public IR, verifier, optimizer and interpreter interfaces; no external reducer,
