@@ -23,6 +23,10 @@ struct Tier1SelectTest
     uint64_t native_skipped;
     uint64_t emitted_records[3];
     uint64_t unknown_costs[3];
+    // #221: the records whose forms x86_semantics.c doesn't cover, which the effects' consumers (the scheduler, #172)
+    // need of each record Tier 1 emits; and the first such form.
+    uint64_t uncovered[3];
+    uint16_t uncovered_form;
     uint64_t missing_columns[3][X86_COST_COLUMN_COUNT];
     bool manifest;
 };
@@ -149,6 +153,9 @@ static bool tier1_select_test_load_code(Tier1SelectTest* test, const X86Instruct
     {
         const uint32_t origin = i >= selected_count ? 2 : plan ? 0 : 1;
         test->emitted_records[origin] += 1;
+        const bool covered = x86_effects(records[i].form)->operation != X86_OPERATION_NONE;
+        test->uncovered_form = !covered && test->uncovered[0] + test->uncovered[1] + test->uncovered[2] == 0 ? records[i].form : test->uncovered_form;
+        test->uncovered[origin] += !covered;
         const uint8_t id = x86_zen5_id(&records[i]);
         test->unknown_costs[origin] += id == 0;
         uint16_t costs[X86_COST_COLUMN_COUNT];
@@ -1758,6 +1765,12 @@ static int run_tier1_select_tests(int argc, char** argv)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);
             }
+            // #221: every record the selections emitted has a form x86_semantics.c covers, as test-tier0 checks Tier 0's.
+            const uint64_t uncovered = test.uncovered[0] + test.uncovered[1] + test.uncovered[2];
+            char coverage[192];
+            snprintf(coverage, sizeof(coverage), "every emitted record has a covered form: %" PRIu64 " uncovered, the first %s", uncovered,
+                     uncovered != 0 ? x86_form_description(test.uncovered_form)->mnemonic : "none");
+            tier1_select_test_expect(&test, uncovered == 0, coverage);
             FILE* report = manifest ? stderr : stdout;
             fprintf(report, "tier1 selection: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
             for (uint32_t origin = 0; origin < 3; origin += 1)
