@@ -68,7 +68,7 @@ struct WorkerBudgetLease
 };
 
 // A '+' recipe is needed for inherited pipe descriptors and also runs under make -n. GNU make's first MAKEFLAGS
-// word contains its short flags; honor n there, never an n in a later option or variable value.
+// word contains its short flags only when it does not begin with '-'; ignore option words and variable values.
 static bool worker_budget_dry_run(const char* flags)
 {
     const char* cursor = flags;
@@ -78,7 +78,7 @@ static bool worker_budget_dry_run(const char* flags)
     }
     const char* first = cursor;
     bool result = false;
-    bool option = cursor != NULL && !(cursor[0] == '-' && cursor[1] == '-');
+    bool option = cursor != NULL && cursor[0] != '-';
     while (cursor != NULL && *cursor != 0 && !isspace((unsigned char)*cursor))
     {
         option &= *cursor != '=';
