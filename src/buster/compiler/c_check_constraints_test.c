@@ -946,7 +946,7 @@ static const CheckConstraintFixture check_constraint_fixtures[] =
         "int a[X];\n",
     },
     {
-        "6.6p6", "an integer constant expression of a const object", CHECK_CONSTRAINT_ACCEPT, 2,
+        "6.6p6", "an integer constant expression of a const object", CHECK_CONSTRAINT_ACCEPT, 0,
         "const int k = 3;\n"
         "enum { E = k };\n",
         "const int k = 3;\n"

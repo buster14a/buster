@@ -1041,7 +1041,9 @@ designs and the compilers already built this way.
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
-  records (`tier0_select_deep`). The output is
+  records (`tier0_select_deep`); long double's, the 128-bit integers' and the
+  vectors' values keep their own slots there, by their true depths (#780). The
+  output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
   tables, and, when asked for (`Tier0Function.entry_records`), each entry's
@@ -2001,13 +2003,29 @@ mode: `use` takes an entry rather than run the tool and writes an entry for
 each run; `check` runs every one and writes it, and where the entry it would
 have taken, found before it runs, holds another result reports it as stale,
 which fails the run; anything else, or unset, keeps nothing (local runs). The
-9700X job's test step uses `use` on a push and a pull request's run, and
-`check` on the daily and dispatched runs, which then remove the entries no
+hosted native and baseline correctness jobs use `check` on every revision.
+Only after both succeed does Benchpress run native correctness: its persistent
+cache uses `use` on pushes and pull requests, and `check` on daily and
+dispatched runs. Thus reuse never replaces the triggering revision's independent
+hosted oracles. Check runs then remove the entries no
 test has written for two days, and the keys left without one. An entry is only
 as right as the run that wrote it: the daily check finds one a pull request's
 run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
 to, and a test prints them at its end (`oracle_cache_report`).
+
+The twelve standalone `test-check-builtins` commands (the base command and
+`-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
+`-atomic-rmw`, `-typed-overflow`, `-rounds`) run their cheap references freshly
+in `use`: native qualification found validation cost more than execution.
+`main_unit_check_builtins` applies this exact-name policy before dispatch and
+restores the prior mode after success, failure or argument rejection. It does
+not affect other commands or timed competitors. `check` is unchanged, so both
+hosted variants and daily/manual native runs still execute and validate these
+oracles independently. Backend capture/status/cache plumbing is retained for
+that path. An inactive scope prints no cache counters; the independent tools
+still execute. Assembler reuse remains separate, with its cold/check costs
+retained in #542's evidence rather than inferred from hit counts.
 
 The tool runs in a process group of its own: what it leaves running there is
 killed when it ends, and the whole group at its time limit
@@ -2037,6 +2055,22 @@ Its users:
   sources given the epoch's time for GCC's runs);
 - test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
   in `--self-test`, which turns the cache off.
+- the standalone checker-builtin commands, including their diagnostic-preserving
+  Clang boundaries (atomic/float warnings, vector constraints, x86 ranges and
+  atomic RMW). Each command fixes the epoch only when absent and restores that
+  ambient state on return. Existing parser-oracle calls therefore cache too;
+- the assembler's independent Clang/GCC assembly generation and C harness
+  object compiles, Clang's `.S` preprocessing, and GNU as's object oracles.
+  Test-authored assembly inputs receive the epoch's mtime for tools whose
+  `__TIMESTAMP__` ignores the epoch. Repeated fixtures have stable distinct
+  source paths to avoid churning one key's 32 variants.
+
+These adapters cache object/text bytes. Links and generated-program execution
+always run fresh, observing the current runtime. The cache does not store an
+artifact's executable permission, so an executable must not be a cached output.
+The standalone adapter preserves normal nonzero statuses and bounded diagnostic
+prefixes, but launcher, timeout, capture and stale-entry failures remain failures
+(`oracle_test_run`). Timed benchmark competitors are not routed through it.
 
 Each of these tests prints a line of what its runs did (`oracle_cache_report`).
 
@@ -5395,9 +5429,10 @@ first against clang `(nullptr_t, long × 5, U, long)` for a union U whose high
 eightbyte is padding, which passes in one 8-byte stack slot before the last
 `long`; our caller and callee per signature as C, which this executable (or
 `--buster PATH`) compiles for the run's target with `--verify -c` and with
-`--scalar` into the same bytes, our callee writing each parameter back from
-the data, the last first, before it stores them, and the C side checks every
-argument and result both ways (the al and the hidden pointer, which C doesn't
+`--scalar` into the same bytes, our callee storing each named parameter as it
+arrived, then writing each back from the data, the last first, and storing it
+again, and the C side checks both stores and every argument and result both
+ways (the al and the hidden pointer, which C doesn't
 name, are the record runs' checks); the 64-byte runs execute where the host has x86-64-v4's
 features, and elsewhere compile and link. Two
 extension runs (#475's review), with plain char signed and with it unsigned
@@ -5583,8 +5618,10 @@ kind and conversion of the class and both arms of a `?:`. Any refusal except a
 random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
-its entry; a stack of a memory class's values up to the last 16-byte slot,
-which runs, and one past it, which both paths refuse (for long double too);
+its entry; stacks of a memory class's values to the last 16-byte slot of the
+integer table, one and two past it and 40, which run (past the table through
+the deep slots, #780), of 238, which compiles, and of 239, past the deep slots
+with the output's address, which both paths refuse (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
 stack, called from C, and calling C; each class's compares and shifts on every
 pair of ten boundary values, against C's own operators too; and `--count`
@@ -5592,7 +5629,7 @@ random programs over every kind of the classes, frame objects as the x87
 check's, shifts by constant and variable counts and conversions to and from the
 other integers, under live values where
 `MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
-past the slots fails it, and only the entries that ran in the programs both
+past the deep slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
 both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
@@ -5605,7 +5642,7 @@ converted and two compared among them); each row under no
 live values, under 8 floats and 3 integers, and under as many floats as leave
 its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
 one past it and a scratch register past the integer table, which both paths
-refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads

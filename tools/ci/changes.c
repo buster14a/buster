@@ -2295,6 +2295,96 @@ static void changes_test_split(ChangesTest* test)
     changes_expect(test, none.count == 0, "an empty workflow has no steps", (Text){ 0 });
 }
 
+// Reuse on the persistent host is safe only behind independent correctness on both hosted variants of this revision.
+// Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
+static bool changes_oracle_policy(Text workflow)
+{
+    uint32_t job = 0;
+    bool hosted_check = false;
+    bool hosted_variants = false;
+    bool hosted_revision = false;
+    bool native_needs = false;
+    bool native_success = false;
+    bool native_modes = false;
+    bool native_revision = false;
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(workflow, &offset, &line))
+    {
+        if (text_equal_c(line, "  test:"))
+        {
+            job = 1;
+        }
+        else if (text_equal_c(line, "  benchmarks:"))
+        {
+            job = 2;
+        }
+        else if (line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
+        {
+            job = 0;
+        }
+        hosted_check |= job == 1 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
+        hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
+        hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test]");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' }}");
+        native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
+        native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+    }
+    return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision;
+}
+
+static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
+{
+    changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+    static const struct
+    {
+        const char* before;
+        const char* after;
+    } mutants[] = {
+        { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
+        { "        host_arch: [x86-64, native]", "        host_arch: [native]" },
+        { "        host_arch: [x86-64, native]", "        host_arch: [x86-64]" },
+        { "    needs: [changes, test]", "    needs: changes" },
+        { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
+          "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'schedule' && 'check' || 'use' }}" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
+          "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'workflow_dispatch' && 'check' || 'use' }}" },
+        { "&& 'check' || 'use'", "&& 'use' || 'use'" },
+    };
+    const char* original = text_terminated(workflow);
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        const char* found = strstr(original, mutants[i].before);
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(mutants[i].before);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
+    }
+    const char* jobs[] = { "\n  test:\n", "\n  benchmarks:\n" };
+    const char* revision = "          ref: ${{ github.sha }}";
+    for (uint32_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i += 1)
+    {
+        const char* job = strstr(original, jobs[i]);
+        const char* found = job != NULL ? strstr(job, revision) : NULL;
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(revision);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c("          ref: main")),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects a different tested revision", text_c(jobs[i]));
+    }
+}
+
 static int changes_self_test(const char* root)
 {
     ChangesTest test = { 0 };
@@ -2309,6 +2399,7 @@ static int changes_self_test(const char* root)
         changes_test_workflow(&test, workflow, root);
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
+        changes_test_oracle_policy(&test, workflow);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0 ? 1 : 0;
