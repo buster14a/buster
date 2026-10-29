@@ -1,0 +1,390 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// #131's acceptance on real C (test-ir-source): the IR lowered from every function the driver's -c compiles of a set of
+// files, by both of ir_lower.c's paths, which must agree column for column and verify, each function then promoted by
+// both of ssa_ir.c's paths, whose results must verify with dominance (#134's use of the verifier). Include after
+// ir_lower_test.c, ssa_ir.c and tier0_source_benchmark.c.
+//
+//   build/compiler test-ir-source [--print NAME] [preprocessor options] file...
+//
+// Each file is checked and its definitions selected and emitted as benchmark-backend-source has them
+// (ir_source_prepare, which benchmark-ir-source shares), their typed streams in an arena that outlives the file's other
+// state. A function's semantic result type, which the typed stream's ABI record doesn't give, is its RETURN entries'
+// class, or for a function with none its declared result's (ir_source_result). A file the checker rejects, or whose
+// checked program or emission refuses a feature by name, is left out with the reason, as -c refuses it; any other
+// failure of the file fails the command. So does a function either lowering refuses, that the paths lower apart, or
+// that either promotion refuses: the report names each, with the first one's error. --print NAME prints the IR of the
+// function of that name, as lowered and as promoted. It is a test outside the compile path, with no vector path of its
+// own.
+
+// The functions -c compiles of one file, as ir_source_prepare leaves them: each one's typed stream (in the caller's
+// `lowered` arena), its semantic result type, its symbol bound (Tier0Function.symbol_count, the emission's link's
+// symbols) and its name, and the file's tokens (the parser's: those that reach it after preprocessing).
+typedef struct IrSourceFunction IrSourceFunction;
+struct IrSourceFunction
+{
+    const Tier0Function* function;
+    const uint8_t* name;
+    uint32_t name_length;
+    uint32_t symbol_count;
+    IrType result_type;
+};
+
+typedef enum IrSourceStatus
+{
+    IR_SOURCE_PREPARED,
+    // The file is left out: the checker rejects it, or its checked program or emission refuses a feature by name.
+    IR_SOURCE_LEFT_OUT,
+    // The file failed: it doesn't preprocess, a resource runs out, an emission fails otherwise.
+    IR_SOURCE_FAILED,
+} IrSourceStatus;
+
+typedef struct IrSourceFile IrSourceFile;
+struct IrSourceFile
+{
+    IrSourceFunction* functions;
+    uint32_t count;
+    uint64_t tokens;
+    IrSourceStatus status;
+    // What left the file out or failed it, for the report (a static string, or the checker's message, copied).
+    char reason[256];
+};
+
+// The semantic result type of body `b`'s function: its RETURN entries' class (each RETURN of a function returns its
+// class: tier0_validate), which for a struct or a union is the address of its bytes (U64) or nothing (an empty one's);
+// or for a function no RETURN leaves, its declared result's class, an aggregate's taken as its address's.
+static IrType ir_source_result(const Tier0Function* function, const CheckProgram* program, uint32_t b, bool naked)
+{
+    uint8_t class = UINT8_MAX;
+    for (uint32_t i = 0; class == UINT8_MAX && i < function->count; i += 1)
+    {
+        class = function->kinds[i] == BUSTER_TYPED_RETURN ? function->classes[i] : class;
+    }
+    if (class == UINT8_MAX && !naked)
+    {
+        const TypeTable* types = program->types;
+        const TypeId result = type_return(types, program->input->declared_types[program->bodies[b].declaration]);
+        class = check_lower_type_class(types, result);
+        class = class != UINT8_MAX ? class : type_size(types, result) == 0 ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64;
+    }
+    return class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[class];
+}
+
+// Checks, selects and emits `file` read with `options` as benchmark-backend-source does (backend_source_file), into
+// `*result`: its functions' streams in `lowered`, their table and names in `arena`. Both arenas keep what they hold
+// for the caller; everything else the file needed is released.
+static void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    memset(result, 0, sizeof(*result));
+    Arena option_arena = arena_reserve(UINT64_C(1) << 24);
+    char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
+    bool valid = own != 0;
+    for (uint32_t i = 0; valid && i < option_count; i += 1)
+    {
+        own[i] = options[i];
+    }
+    PPOptions pp_options;
+    const char* input = 0;
+    const char* output_file = 0;
+    bool markers = false;
+    if (valid)
+    {
+        own[option_count] = (char*)file;
+    }
+    valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
+    pp_options.semantic_pragmas = true;
+    CheckCorpusPath path = { 0 };
+    const bool preprocessed = valid && intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) && pp_run(&pp, input);
+    const bool accepted = preprocessed && check_corpus_check_policy(&path, &parser, &pp, false, pp_options.quiet);
+    const bool exhausted = preprocessed && !accepted && path.resource;
+    CheckDataPrepared data = { 0 };
+    CheckProgram program = { 0 };
+    bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser.options.scalar, &path.output_arena, &path.scratch);
+    const CheckProgramOptions program_options = {
+        .initializers = &path.initializers,
+        .asms = &path.asms,
+        .identifiers = pp.table,
+        .initializer_references = data.references,
+        .initializer_reference_count = data.reference_count,
+    };
+    prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
+    const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
+    CheckProgramSelection selected = { 0 };
+    Arena bytes = arena_reserve(UINT64_C(1) << 34);
+    const bool chosen = prepared && bytes.base != 0 &&
+                        check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
+    CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
+    const bool emitted = chosen && check_program_emit(&code, &selected.program, &parser, pp.table, selected.data.capacity, false, lowered, &bytes,
+                                                      &path.scratch, NULL, NULL, false, false);
+    const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
+    uint8_t* defined = 0;
+    const bool accessed = emitted && check_program_access(&code, &selected.program, lowered, &path.scratch, &defined);
+    const uint32_t count = accessed ? selected.program.body_count : 0;
+    result->functions = accessed ? BUSTER_ARENA_PUSH_ARRAY(arena, IrSourceFunction, (uint64_t)count + 1) : 0;
+    bool named = result->functions != 0;
+    for (uint32_t b = 0; named && b < count; b += 1)
+    {
+        const Tier0Function* function = &code.lowered.functions[b];
+        const bool naked = code.lowered.asms.naked != 0 && code.lowered.asms.naked[b].planned;
+        const SymbolId symbol = selected.program.object_symbols[selected.program.bodies[b].object];
+        const NameId name = code.link.symbols.name[symbol];
+        const uint32_t length = code.link.names.length[name];
+        uint8_t* spelling = arena_push(arena, (uint64_t)length + 1, 1);
+        named = spelling != 0;
+        if (named)
+        {
+            memcpy(spelling, code.link.names.bytes[name], length);
+            spelling[length] = 0;
+            result->functions[b] = (IrSourceFunction){
+                .function = function,
+                .name = spelling,
+                .name_length = length,
+                .symbol_count = function->symbol_count != 0 ? function->symbol_count : code.link.symbols.count,
+                .result_type = ir_source_result(function, &selected.program, b, naked),
+            };
+        }
+    }
+    result->count = named ? count : 0;
+    result->tokens = accepted ? parser.tokens.count : 0;
+    const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
+                        (chosen && !emitted && !refused) || (emitted && !named);
+    result->status = failed ? IR_SOURCE_FAILED : named ? IR_SOURCE_PREPARED : IR_SOURCE_LEFT_OUT;
+    if (!valid)
+    {
+        snprintf(result->reason, sizeof(result->reason), "its options couldn't be read");
+    }
+    else if (!preprocessed)
+    {
+        snprintf(result->reason, sizeof(result->reason), "it couldn't be preprocessed");
+    }
+    else if (exhausted)
+    {
+        snprintf(result->reason, sizeof(result->reason), "the checker ran out of a resource");
+    }
+    else if (!accepted)
+    {
+        snprintf(result->reason, sizeof(result->reason), "rejected: %s:%u:%u: %s", path.file, path.line, path.column, path.message);
+    }
+    else if (!prepared)
+    {
+        snprintf(result->reason, sizeof(result->reason), "%s",
+                 unsupported ? "its checked program has an unsupported C statement" : "its static data or checked program couldn't be prepared");
+    }
+    else if (!chosen)
+    {
+        snprintf(result->reason, sizeof(result->reason), "its definitions couldn't be selected");
+    }
+    else if (!emitted)
+    {
+        snprintf(result->reason, sizeof(result->reason), "%s: %s", refused ? "unsupported" : "its emission failed", code.reason != NULL ? code.reason : "this C type or operation");
+    }
+    else if (!named)
+    {
+        snprintf(result->reason, sizeof(result->reason), "memory ran out for its functions' names");
+    }
+    arena_release(&bytes);
+    check_corpus_close(&path);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&option_arena);
+}
+
+// What the command found, over every file.
+typedef struct IrSourceTotals IrSourceTotals;
+struct IrSourceTotals
+{
+    uint64_t files;
+    uint64_t left_out;
+    uint64_t failed_files;
+    uint64_t functions;
+    uint64_t entries;
+    uint64_t tokens;
+    uint64_t instructions;
+    uint64_t bytes;
+    uint64_t promoted_instructions;
+    uint64_t promoted_bytes;
+    // Functions a lowering refused, that the two paths lowered apart, and that a promotion refused.
+    uint64_t refused;
+    uint64_t disagreed;
+    uint64_t unpromoted;
+};
+
+static const char* const ir_source_errors[IR_ERROR_IO + 1] = {
+    "ok",
+    "limit",
+    "memory",
+    "structure",
+    "opcode",
+    "type",
+    "operand",
+    "metadata",
+    "terminator",
+    "phi",
+    "dominance",
+    "io",
+};
+
+// Lowers, compares and promotes each of `file`'s functions, adding to `totals`, and prints the file's line and a line
+// per function that fails. `print` names a function to print the IR of, or is null.
+// Each lowering goes into its own arena and each promotion into another, which mustn't hold its input (ssa_ir.c).
+static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, Arena* output, Arena* twin_output, Arena* promoted_output,
+                            Arena* scratch)
+{
+    uint64_t entries = 0;
+    uint64_t instructions = 0;
+    uint64_t bytes = 0;
+    uint32_t failures = 0;
+    for (uint32_t f = 0; f < file->count; f += 1)
+    {
+        const IrSourceFunction* source = &file->functions[f];
+        const uint64_t output_mark = output->length;
+        const uint64_t twin_mark = twin_output->length;
+        const uint64_t promoted_mark = promoted_output->length;
+        IrFunction vector = { 0 };
+        IrFunction scalar = { 0 };
+        const IrCheck vector_check = ir_lower_typed(source->function, source->result_type, source->symbol_count, output, scratch, &vector);
+        const IrCheck scalar_check = ir_lower_typed_scalar(source->function, source->result_type, source->symbol_count, twin_output, scratch, &scalar);
+        const bool lowered = vector_check.error == IR_OK && scalar_check.error == IR_OK;
+        const bool agree = lowered && ir_lower_test_equal(&vector, &scalar);
+        IrFunction promoted = { 0 };
+        IrFunction promoted_twin = { 0 };
+        const IrCheck promotion = agree ? ssa_ir_promote(&vector, promoted_output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const IrCheck promotion_twin = agree ? ssa_ir_promote_scalar(&scalar, promoted_output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const bool promotes = agree && promotion.error == IR_OK && promotion_twin.error == IR_OK && promotion.dominance_checked && promotion_twin.dominance_checked;
+        totals->refused += !lowered;
+        totals->disagreed += lowered && !agree;
+        totals->unpromoted += agree && !promotes;
+        entries += source->function->count;
+        if (agree)
+        {
+            instructions += vector.instruction_count;
+            bytes += vector.arena_bytes;
+        }
+        if (promotes)
+        {
+            totals->promoted_instructions += promoted.instruction_count;
+            totals->promoted_bytes += promoted.arena_bytes;
+        }
+        if (!promotes)
+        {
+            failures += 1;
+            const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
+            printf("ir-source: file=%s function=%s %s error=%s instruction=%u detail=%u\n", name, source->name,
+                   !lowered ? "refused" : !agree ? "the paths disagree" : "unpromoted", ir_source_errors[first.error <= IR_ERROR_IO ? first.error : IR_ERROR_IO],
+                   first.instruction, first.detail);
+        }
+        if (print != 0 && strcmp(print, (const char*)source->name) == 0)
+        {
+            printf("ir-source: %s as lowered:\n", source->name);
+            fflush(stdout);
+            if (agree)
+            {
+                ir_print(&vector, scratch, stdout);
+            }
+            printf("ir-source: %s as promoted:\n", source->name);
+            fflush(stdout);
+            if (promotes)
+            {
+                ir_print(&promoted, scratch, stdout);
+            }
+        }
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin_output, twin_mark);
+        arena_pop_to(promoted_output, promoted_mark);
+    }
+    printf("ir-source: file=%s functions=%u entries=%" PRIu64 " instructions=%" PRIu64 " bytes=%" PRIu64 " tokens=%" PRIu64 " failures=%u\n", name, file->count, entries,
+           instructions, bytes, file->tokens, failures);
+    totals->files += 1;
+    totals->functions += file->count;
+    totals->entries += entries;
+    totals->tokens += file->tokens;
+    totals->instructions += instructions;
+    totals->bytes += bytes;
+}
+
+static int run_ir_source_tests(int count, char** arguments)
+{
+    const char* print = 0;
+    char** options = calloc((size_t)count + 1, sizeof(char*));
+    char** files = calloc((size_t)count + 1, sizeof(char*));
+    uint32_t option_count = 0;
+    uint32_t file_count = 0;
+    bool valid = options != 0 && files != 0;
+    for (int i = 0; valid && i < count; i += 1)
+    {
+        if (strcmp(arguments[i], "--print") == 0)
+        {
+            valid = i + 1 < count;
+            print = valid ? arguments[++i] : 0;
+        }
+        else if (arguments[i][0] != '-')
+        {
+            files[file_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "--no-default-config") != 0)
+        {
+            // An option and its value, which pp_parse_options reads with each file; clang's --no-default-config, which the
+            // 9700X job's options for the frozen corpora pass, is dropped, as benchmark-backend-source drops it.
+            options[option_count++] = arguments[i];
+            if (pp_option_takes_value(arguments[i]))
+            {
+                valid = i + 1 < count;
+                options[option_count++] = valid ? arguments[++i] : 0;
+            }
+        }
+    }
+    valid = valid && file_count != 0;
+    Arena lowered = arena_reserve(UINT64_C(1) << 36);
+    Arena arena = arena_reserve(UINT64_C(1) << 32);
+    Arena output = arena_reserve(UINT64_C(1) << 34);
+    Arena twin_output = arena_reserve(UINT64_C(1) << 34);
+    Arena promoted = arena_reserve(UINT64_C(1) << 34);
+    Arena scratch = arena_reserve(UINT64_C(1) << 34);
+    valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0;
+    IrSourceTotals totals = { 0 };
+    for (uint32_t i = 0; valid && i < file_count; i += 1)
+    {
+        IrSourceFile file;
+        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena);
+        if (file.status == IR_SOURCE_PREPARED)
+        {
+            ir_source_check(&totals, &file, files[i], print, &output, &twin_output, &promoted, &scratch);
+        }
+        else
+        {
+            totals.left_out += file.status == IR_SOURCE_LEFT_OUT;
+            totals.failed_files += file.status == IR_SOURCE_FAILED;
+            printf("ir-source: file=%s %s=\"%s\"\n", files[i], file.status == IR_SOURCE_LEFT_OUT ? "left_out" : "failed", file.reason);
+        }
+        fflush(stdout);
+        arena_pop_to(&lowered, 0);
+        arena_pop_to(&arena, 0);
+    }
+    if (valid)
+    {
+        printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
+               " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
+               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 "\n",
+               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
+               totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
+               totals.disagreed, totals.unpromoted);
+    }
+    else
+    {
+        fprintf(stderr, "usage: compiler test-ir-source [--print NAME] [preprocessor options] file...\n");
+    }
+    arena_release(&scratch);
+    arena_release(&promoted);
+    arena_release(&twin_output);
+    arena_release(&output);
+    arena_release(&arena);
+    arena_release(&lowered);
+    free(files);
+    free(options);
+    return valid && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
+}

@@ -120,10 +120,13 @@ struct CheckProgramOptions
     bool folded_ifs;
     // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
     uint64_t* return_flow_work;
-    // The generated code's instruction set past x86-64's (x86_target.c's X86Target.features, the preprocessor's from
-    // -march and the -m flags): which vector types the lowering takes, and how wide a vector register the convention
-    // passes them in. Zero is x86-64 baseline.
-    uint64_t target_features;
+    // The generated code's instruction set (x86_target.c's X86Target, the preprocessor's from -march and the -m flags):
+    // which vector types the lowering takes, how wide a vector register the convention passes them in, and which
+    // instructions its rows use. Zero is x86-64 baseline.
+    X86Target target;
+    // The options it came from (c_predefines.c), against which a function's target attribute resolves (#180); null leaves
+    // every function the unit's target.
+    const PredefinesOptions* predefines;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -184,11 +187,20 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, folded_ifs and target_features.
+    // CheckProgramOptions.unselected_operands, folded_ifs and target.
     bool unselected_operands;
     bool folded_ifs;
-    uint64_t target_features;
+    X86Target target;
+    // Per body, the instruction set of its function (#180), by its target attribute: 0 for the unit's (`target`), n for
+    // targets[n - 1], or BUSTER_CHECK_PROGRAM_TARGET_VERSIONS for one of several versions (GNU's function
+    // multiversioning: target_clones, or target attributes of other strings, which the lowering refuses); null where no
+    // body has an attribute that applies (check_program_targets).
+    uint32_t* body_targets;
+    X86Target* targets;
+    uint32_t target_count;
 };
+
+#define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
 
 typedef enum CheckControlTaskKind
 {
@@ -288,6 +300,55 @@ static bool check_program_attribute_naked(const CheckInputAttributes* attributes
         naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
     }
     return naked;
+}
+
+// The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
+// resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
+// object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
+typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
+struct CheckProgramTargetEvents
+{
+    Arena* scratch;
+    uint64_t* keys;
+    uint32_t count;
+    uint32_t capacity;
+    bool room;
+};
+
+// Whether a declaration's `attributes` hold a target or target_clones attribute (CheckProgramTargetEvents).
+static bool check_program_attribute_target(const CheckInputAttributes* attributes)
+{
+    bool target = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        target |= (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES) && !attribute->ignored;
+    }
+    return target;
+}
+
+static void check_program_target_event(CheckProgramTargetEvents* events, uint32_t object, uint32_t token)
+{
+    if (events->room && events->count == events->capacity)
+    {
+        const uint32_t capacity = events->capacity == 0 ? 64 : events->capacity <= UINT32_MAX / 2 ? events->capacity * 2 : 0;
+        uint64_t* keys = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(events->scratch, uint64_t, capacity) : 0;
+        events->room = keys != 0;
+        if (events->room)
+        {
+            if (events->count != 0)
+            {
+                memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            }
+            events->keys = keys;
+            events->capacity = capacity;
+        }
+    }
+    if (events->room)
+    {
+        events->keys[events->count] = ((uint64_t)object << 32) | token;
+        events->count += 1;
+    }
 }
 
 // Compact builtin descriptors start with their stable graph node and are source ordered in both schedulers.
@@ -461,7 +522,8 @@ static bool check_program_case_value(const CheckProgram* program, uint32_t node,
     bool valid = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
     if (valid)
     {
-        const CheckValue* value = program->stream->values + node;
+        const CheckValue converted = check_graph_context_value(program->types, &program->input->graph, program->stream, node);
+        const CheckValue* value = &converted;
         valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
                 (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(program->types, value->type, &source_width, &source_sign);
         if (valid)
@@ -2219,10 +2281,11 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
     return found;
 }
 
-// A static object's declaration at `token`: its object's declaration, whether the object is needed, and the first of its
-// declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one). Returns
-// whether the column had room, `room` again unless making it failed.
-static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room)
+// A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
+// declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
+// function's declaration with a target or target_clones attribute (`events`). Returns whether the column had room, `room`
+// again unless making it failed.
+static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
@@ -2231,6 +2294,10 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     {
         program->object_declarations[object] = token;
         needed[object] |= input->defined[token] || input->tentative[token];
+        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_target(input->attributes[token]))
+        {
+            check_program_target_event(events, object, token);
+        }
         if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
         {
             if (program->object_naked == 0 && room)
@@ -2251,10 +2318,10 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     return room;
 }
 
-// The static objects' declarations, needs and naked functions, by object, in token order (#530): AVX-512 finds the static
-// declarations 16 tokens at a time; the rest and the `scalar` path test every token. Returns whether the naked functions'
-// column had room.
-static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, bool scalar)
+// The static objects' declarations, needs, naked functions and target attributes, by object, in token order (#530):
+// AVX-512 finds the static declarations 16 tokens at a time; the rest and the `scalar` path test every token. Returns
+// whether the naked functions' column had room.
+static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, bool scalar, CheckProgramTargetEvents* events)
 {
     (void)scalar;
 
@@ -2270,29 +2337,169 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
                                    _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128());
         for (uint32_t bits = declared; bits != 0; bits &= bits - 1)
         {
-            room = check_program_static_object(program, needed, token + (uint32_t)__builtin_ctz(bits), output, room);
+            room = check_program_static_object(program, needed, token + (uint32_t)__builtin_ctz(bits), output, room, events);
         }
     }
     for (; token < count; token += 1)
     {
         if (input->declarations[token] == token && input->static_objects[token])
         {
-            room = check_program_static_object(program, needed, token, output, room);
+            room = check_program_static_object(program, needed, token, output, room, events);
         }
     }
     return room;
 }
 
 // Preparation already grouped each object's declarations in their original token order. Different objects have no
-// shared state here: the last declaration, first naked spelling and needed bit are each an object's own reduction.
-static bool check_program_static_prepared(CheckProgram* program, const CheckDataPrepared* prepared, uint8_t* needed, Arena* output)
+// shared state here: the last declaration, first naked spelling, needed bit and target attributes are each an object's
+// own reduction.
+static bool check_program_static_prepared(CheckProgram* program, const CheckDataPrepared* prepared, uint8_t* needed, Arena* output,
+                                          CheckProgramTargetEvents* events)
 {
     bool room = true;
     for (uint32_t d = 0; d < prepared->declaration_count; d += 1)
     {
-        room = check_program_static_object(program, needed, (uint32_t)prepared->declaration_keys[d], output, room);
+        room = check_program_static_object(program, needed, (uint32_t)prepared->declaration_keys[d], output, room, events);
     }
     return room;
+}
+
+static bool check_program_text_equal(String8 a, String8 b)
+{
+    return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
+}
+
+// Each body's instruction set by its function's target attributes (#180, CheckProgram.body_targets), as clang takes
+// them: the first that applies, on the definition or a declaration before it, of a string predefines_target_attribute
+// finds a version or the default (clang drops one after the definition where none came before, with a warning); and a
+// function of several versions where another one's string differs, or it has target_clones. Each string resolves once
+// (predefines_function_target), against the unit's -march=native host features, read once, and an attribute of the same
+// string as the one before is taken as it was. The keys sort by object with the radix kernel's twins (c_bindings_sort),
+// and a body in their objects' range finds its object's by a binary search: the rest is scalar, as a unit holds few of
+// them (main.c's 5,344 among its 23.5 MB of preprocessed text, the clang headers' intrinsics), and none in the usual
+// unit, which this leaves at once. Returns false if a column had no room.
+static bool check_program_targets(CheckProgram* program, const CheckProgramOptions* options, CheckProgramTargetEvents* events, Arena* output, Arena* scratch)
+{
+    bool valid = events->room;
+    const CheckInput* input = program->input;
+    uint64_t* keys = events->keys;
+    const uint32_t count = valid ? events->count : 0;
+    if (count != 0)
+    {
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count);
+        valid = temporary != 0;
+        uint32_t varying = 0;
+        for (uint32_t e = 1; valid && e < count; e += 1)
+        {
+            varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
+        }
+        keys = valid ? c_bindings_sort(keys, temporary, count, !BUSTER_SCALAR_PATH(options->scalar), varying) : keys;
+    }
+    // The strings of the targets made so far, in their order.
+    String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
+    valid = valid && (count == 0 || texts != 0);
+    PredefinesHost host = { 0 };
+    bool host_read = false;
+    uint32_t last_target = UINT32_MAX;
+    // The last string read and how predefines_target_attribute takes it: a header's functions share theirs, so most
+    // attributes are the one before.
+    String8 last_text = { 0 };
+    PredefinesTargetAttribute last_kind = PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+    int32_t last_cpu = -1;
+    bool last_read = false;
+    // The keys' objects' range: a body outside it has none, as most of a unit's bodies (main.c's own, after its headers').
+    const uint32_t first_object = count != 0 ? (uint32_t)(keys[0] >> 32) : 0;
+    const uint32_t last_object = count != 0 ? (uint32_t)(keys[count - 1] >> 32) : 0;
+    for (uint32_t b = 0; valid && count != 0 && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody body = program->bodies[b];
+        // The object's first key: the first whose object isn't below the body's.
+        uint32_t low = body.object < first_object || body.object > last_object ? count : 0;
+        uint32_t high = count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            low = (uint32_t)(keys[middle] >> 32) < body.object ? middle + 1 : low;
+            high = (uint32_t)(keys[middle] >> 32) < body.object ? high : middle;
+        }
+        const CheckInputAttribute* applied = 0;
+        PredefinesTargetAttribute kind = PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+        int32_t cpu = -1;
+        bool versions = false;
+        for (uint32_t e = low; e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
+        {
+            const uint32_t token = (uint32_t)keys[e];
+            const CheckInputAttributes* attributes = input->attributes[token];
+            for (uint32_t i = 0; i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = &attributes->records[i];
+                const bool readable = !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX;
+                if (readable && !(last_read && check_program_text_equal(attribute->text, last_text)))
+                {
+                    last_kind = predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &last_cpu);
+                    last_text = attribute->text;
+                    last_read = true;
+                }
+                const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
+                const int32_t attribute_cpu = readable ? last_cpu : -1;
+                versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES && !attribute->ignored;
+                if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
+                {
+                    applied = attribute;
+                    kind = attribute_kind;
+                    cpu = attribute_cpu;
+                }
+                else if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied != 0)
+                {
+                    versions |= !check_program_text_equal(attribute->text, applied->text);
+                }
+            }
+        }
+        uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
+        if (!versions && kind == PREDEFINES_TARGET_ATTRIBUTE_VERSION && options->predefines != NULL)
+        {
+            // The target of the same string (the last body's, as a header's functions share theirs, first), or a new one.
+            uint32_t found = last_target < program->target_count && check_program_text_equal(texts[last_target], applied->text) ? last_target :
+                                                                                                                                  program->target_count;
+            for (uint32_t t = 0; t < program->target_count && found == program->target_count; t += 1)
+            {
+                found = check_program_text_equal(texts[t], applied->text) ? t : found;
+            }
+            if (found == program->target_count)
+            {
+                program->targets = program->targets == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Target, count) : program->targets;
+                valid = program->targets != 0;
+                if (valid && !host_read)
+                {
+                    host = predefines_host_of(options->predefines);
+                    host_read = true;
+                }
+                if (valid)
+                {
+                    program->targets[found] = predefines_function_target(options->predefines, &host, program->target, applied->text.pointer,
+                                                                         (uint32_t)applied->text.length, cpu);
+                    texts[found] = applied->text;
+                    program->target_count += 1;
+                }
+            }
+            last_target = found;
+            target = found + 1;
+        }
+        if (valid && target != 0 && program->body_targets == 0)
+        {
+            program->body_targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->body_count);
+            valid = program->body_targets != 0;
+            if (valid)
+            {
+                memset(program->body_targets, 0, (uint64_t)program->body_count * sizeof(uint32_t));
+            }
+        }
+        if (valid && target != 0)
+        {
+            program->body_targets[b] = target;
+        }
+    }
+    return valid;
 }
 
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
@@ -2337,7 +2544,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .folded_ifs = options.folded_ifs, .target_features = options.target_features, .token = BUSTER_CHECK_NONE,
+                               .folded_ifs = options.folded_ifs, .target = options.target, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
     if (options.return_flow_work != NULL)
     {
@@ -2347,6 +2554,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
     const uint32_t node_count = input->graph.count;
+    CheckProgramTargetEvents target_events = { .scratch = scratch, .room = true };
     bool valid = output != scratch && count == parser->tokens.count && count < (UINT32_MAX - 16) / 8 &&
                  stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0 &&
                  !input->visibility_error;
@@ -2690,9 +2898,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
-        // column comes with the unit's first one.
-        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output) :
-                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
+        // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
+        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, &target_events) :
+                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), &target_events);
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
@@ -2712,6 +2920,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, BUSTER_SCALAR_PATH(options.scalar));
         }
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
     {
