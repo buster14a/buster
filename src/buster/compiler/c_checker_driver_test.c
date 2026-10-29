@@ -2811,6 +2811,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 #include "c_check_transparent_driver_test.c"
 
@@ -3438,6 +3439,67 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "K&R definition emits its deprecated-non-prototype warning",
+            .source = "int f(a)float a;{return (int)a;}\n",
+            .warnings = 1,
+        },
+        {
+            .name = "K&R arity warnings do not block object emission",
+            .source = "int f(a)int a;{return a;}int g(void){return f()+f(1,2); }\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R deprecation suppression leaves the independent arity warning",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}int g(void){return (&f)(1,2); }\n",
+            .warnings = 1,
+        },
+        {
+            .name = "promoted K&R definition warning blocks object emission",
+            .source = "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "K&R indirect call warning follows source-ordered diagnostic policy",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint g(void){return (*f)(1,2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "quiet K&R warnings still emit an object",
+            .source = "int f(a)int a;{return a;}int g(void){return f(1,2);}\n",
+            .quiet = true,
+        },
+        {
+            .name = "K&R source-only sizeof call retains its arity warning",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof(f(1,2));}\n",
+            .warnings = 2,
+        },
+        {
+            .name = "K&R source-only grouped and addressed calls retain arity warnings",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((f)(1,2))+sizeof((&f)(1,2));}\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R source-only addressed call retains known argument constraints",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((&f)((int*)0));}\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "source-only implicit calls do not add non-prototype warnings",
+            .source = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\n"
+                      "int g(void){int i=missing(1);return i+sizeof((&missing)(2))+sizeof((missing)(3));}\n",
+        },
+        {
+            .name = "K&R source-only call obeys warning promotion",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}\n#pragma clang diagnostic error \"-Weverything\"\n"
+                      "int g(void){return sizeof(f(1,2));}\n",
+            .rejected = true,
+        },
+        {
             "valid functions and relocatable static storage",
             "static int value=7; int *pointer=&value; int f(int x){return x+value;}\n",
             false,
@@ -3794,7 +3856,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
-            check_test_expect(&test, warnings == fixtures[i].warnings, "driver renders each semantic warning once");
+            snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
+                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
+            check_test_expect(&test, warnings == fixtures[i].warnings, description);
             FILE* emitted = fopen(object, "rb");
             unsigned char magic[4] = { 0 };
             const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&
@@ -3841,6 +3905,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);

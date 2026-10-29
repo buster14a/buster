@@ -2261,6 +2261,251 @@ static void oracle_test_process(OracleTest* test)
                        "the process's cache from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, made private, and turned off");
 }
 
+// The adapter used by standalone compiler/assembler tests must restore object artifacts, preserve diagnostic
+// status and bounded captures, and propagate cache-check/launcher/capture failures instead of calling them rejection.
+static void oracle_test_adapter(OracleTest* test)
+{
+    OracleCache use;
+    OracleCache check;
+    OracleCache off;
+    oracle_test_open(test, &use, "use", "adapter");
+    oracle_test_open(test, &check, "check", "adapter");
+    oracle_cache_open(&off, 0, 0);
+    const char* directory = test->runs[0];
+    char program[BUSTER_ORACLE_PATH_BYTES + 32];
+    char object[BUSTER_ORACLE_PATH_BYTES + 32];
+    char output[BUSTER_ORACLE_PATH_BYTES + 32];
+    char errors[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(program, sizeof(program), "%s/adapter-program", directory);
+    snprintf(object, sizeof(object), "%s/adapter.o", directory);
+    snprintf(output, sizeof(output), "%s/adapter-output", directory);
+    snprintf(errors, sizeof(errors), "%s/adapter-errors", directory);
+    bool ready = oracle_test_write_epoch(directory, "adapter.c", "#include \"adapter.h\"\nint main(void) { return VALUE + ADD; }\n") &&
+                 oracle_test_write_epoch(directory, "adapter.h", "#define VALUE 7\n");
+    // As oracle_test_outputs does: direct Clang output can read /dev/urandom for a temporary name, which is rightly
+    // unkept. Its stdout object has the same bytes, written by the traced shell. That shell's inputs include mtimes.
+    char* arguments[] = { "sh", "-c", "clang -std=c17 \"$1\" -c adapter.c -o - > adapter.o", "sh", "-DADD=0", 0 };
+    const char* files[] = { "adapter.o" };
+    OracleRun run = {
+        .cache = &use,
+        .purpose = "oracle test: standalone compiler adapter",
+        .arguments = arguments,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    ready = ready && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
+    uint64_t original_length = 0;
+    char* original = ready ? oracle_test_read(object, &original_length) : 0;
+    ready = ready && original != 0 && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && run.taken;
+    uint64_t restored_length = 0;
+    char* restored = ready ? oracle_test_read(object, &restored_length) : 0;
+    oracle_test_expect(test, ready && restored != 0 && original_length == restored_length && memcmp(original, restored, original_length) == 0,
+                       "adapter: warm compile restores exact object bytes");
+    free(original);
+    free(restored);
+    char* execute[] = { program, 0 };
+    char* link[] = { "clang", object, "-o", program, 0 };
+    // Both linking and execution run fresh: the cache's artifact contract is bytes, without executable mode.
+    OracleRun linking = { .cache = &off, .purpose = "oracle test: fresh runtime linking", .arguments = link, .timeout = 10 };
+    OracleRun execution = { .cache = &off, .purpose = "oracle test: fresh artifact execution", .arguments = execute, .timeout = 10 };
+    oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && !linking.taken &&
+                       oracle_test_run(&execution, 0, 0, 0, 0) == 7 && !execution.taken,
+                       "adapter: restored object links and executes independently");
+    ready = ready && oracle_test_write_epoch(directory, "adapter.h", "#define VALUE 8\n") && unlink(object) == 0 &&
+            oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
+    oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 8,
+                       "adapter: header change rebuilds executable behavior");
+    arguments[4] = "-DADD=1";
+    ready = ready && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
+    oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 9,
+                       "adapter: exact compiler flags change executable behavior");
+    run.cache = &check;
+    ready = ready && unlink(object) == 0 && oracle_test_run(&run, output, errors, 0, 0) == 0 && !run.taken;
+    oracle_test_expect(test, ready && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 9 && check.counts->stale == 0,
+                       "adapter: check mode recompiles and independently links its object");
+    run.cache = &use;
+    struct
+    {
+        char bytes[17];
+        uint8_t guard;
+    } diagnostic = { .guard = 0xa7 };
+    ready = ready && oracle_test_write_epoch(directory, "adapter.c", "#error deliberately rejected source\n") && unlink(object) == 0;
+    const int rejected = ready ? oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) : -1;
+    uint64_t full_length = 0;
+    char* full = oracle_test_read(errors, &full_length);
+    oracle_test_expect(test, rejected == 1 && full != 0 && full_length > sizeof(diagnostic.bytes) && diagnostic.guard == 0xa7 &&
+                       diagnostic.bytes[sizeof(diagnostic.bytes) - 1] == 0 && memcmp(full, diagnostic.bytes, sizeof(diagnostic.bytes) - 1) == 0,
+                       "adapter: rejection preserves full capture and bounded diagnostic prefix");
+    free(full);
+    // The shell made an empty output even on rejection; restore the cold run's absent output pre-state first.
+    oracle_test_expect(test, rejected == 1 && unlink(object) == 0 &&
+                       oracle_test_run(&run, output, errors, diagnostic.bytes, sizeof(diagnostic.bytes)) == 1 && run.taken,
+                       "adapter: cached rejection retains its nonzero status");
+    oracle_test_expect(test, oracle_test_run(&run, directory, errors, 0, 0) == -1, "adapter: capture write failure is not compiler rejection");
+    // Uncacheable dependencies are a safe fallback, not a compiler rejection or launcher failure. Force one even
+    // on hosts whose Clang uses getrandom instead of the random device for direct output's temporary name.
+    char* uncacheable[] = { "sh", "-c", "head -c 1 /dev/urandom > /dev/null && clang -c adapter.c -o adapter.o", 0 };
+    OracleRun fallback = { .cache = &use, .purpose = "oracle test: uncacheable compiler adapter", .arguments = uncacheable,
+                           .directory = directory, .files = files, .file_count = 1, .dependencies = true, .timeout = 10 };
+    const uint64_t unkept = use.counts->unkept;
+    bool fresh = oracle_test_write_epoch(directory, "adapter.c", "int main(void) { return 3; }\n") &&
+                 oracle_test_run(&fallback, output, errors, 0, 0) == 0 && !fallback.taken;
+    fresh = fresh && unlink(object) == 0 && oracle_test_run(&fallback, output, errors, 0, 0) == 0 && !fallback.taken;
+    oracle_test_expect(test, fresh && use.counts->unkept == unkept + 2,
+                       "adapter: uncacheable compiler success runs again without becoming rejection");
+    oracle_test_expect(test, fresh && oracle_test_run(&linking, 0, 0, 0, 0) == 0 && oracle_test_run(&execution, 0, 0, 0, 0) == 3,
+                       "adapter: uncacheable object still links and executes freshly");
+    char* missing[] = { "buster-oracle-test-tool-that-does-not-exist", 0 };
+    OracleRun absent = { .cache = &use, .purpose = "oracle test: absent adapter tool", .arguments = missing, .timeout = 1 };
+    oracle_test_expect(test, oracle_test_run(&absent, 0, 0, 0, 0) == -1, "adapter: missing tool is not compiler rejection");
+    char* sleeping[] = { "sh", "-c", "sleep 3", 0 };
+    OracleRun timeout = { .cache = &off, .purpose = "oracle test: adapter deadline", .arguments = sleeping, .timeout = 1 };
+    oracle_test_expect(test, oracle_test_run(&timeout, 0, 0, 0, 0) == -1 && timeout.killed, "adapter: deadline failure propagates");
+    // Deliberately violate the untraced-tool contract: check mode must detect the changed result and fail the adapter.
+    char* value[] = { "sh", "-c", "cat adapter-value", 0 };
+    OracleRun stale = { .cache = &use, .purpose = "oracle test: adapter stale result", .arguments = value, .directory = directory, .timeout = 10 };
+    bool checked = oracle_test_write_text(directory, "adapter-value", "first\n") && oracle_test_run(&stale, output, errors, 0, 0) == 0;
+    checked = checked && oracle_test_write_text(directory, "adapter-value", "second\n");
+    stale.cache = &check;
+    oracle_test_expect(test, checked && oracle_test_run(&stale, output, errors, 0, 0) == -1 && check.counts->stale == 1,
+                       "adapter: independent check rejects a stale success");
+    oracle_cache_close(&off);
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
+// The measured standalone policy must execute references freshly in USE without changing CHECK or leaking its
+// temporary mode to reusable callers. The untraced counter is deliberate: a replay would omit that side effect.
+static void oracle_test_fresh_scopes(OracleTest* test)
+{
+    OracleCache use;
+    OracleCache check;
+    OracleCache off;
+    oracle_test_open(test, &use, "use", "fresh");
+    oracle_test_open(test, &check, "check", "fresh");
+    oracle_cache_open(&off, 0, 0);
+    const char* directory = test->runs[0];
+    char counter[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(counter, sizeof(counter), "%s/fresh-calls", directory);
+    char* arguments[] = { "sh", "-c", "printf x >> fresh-calls; printf x", 0 };
+    OracleRun run = { .cache = &use, .purpose = "oracle test: fresh reference scope", .arguments = arguments, .directory = directory, .timeout = 10 };
+    const bool primed = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken &&
+                        oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken;
+    oracle_test_expect(test, primed, "fresh scope: a reference that would otherwise be reused");
+    static const char* const commands[] = {
+        "test-check-builtins", "test-check-builtins-misc", "test-check-builtins-query", "test-check-builtins-bit-cast",
+        "test-check-builtins-float", "test-check-builtins-x86", "test-check-builtins-vector", "test-check-builtins-math",
+        "test-check-builtins-atomic", "test-check-builtins-atomic-rmw", "test-check-builtins-typed-overflow", "test-check-builtins-rounds",
+    };
+    for (uint32_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c += 1)
+    {
+        OracleCache* scope = oracle_test_fresh_builtin(commands[c]) ? &use : 0;
+        const OracleMode mode = oracle_test_fresh_begin(scope);
+        const bool fresh = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken &&
+                           oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+        oracle_test_fresh_end(scope, mode);
+        char what[160];
+        snprintf(what, sizeof(what), "fresh scope: %s executes twice and restores USE", commands[c]);
+        oracle_test_expect(test, fresh && use.mode == ORACLE_MODE_USE, what);
+    }
+    uint64_t length = 0;
+    char* calls = oracle_test_read(counter, &length);
+    oracle_test_expect(test, calls != 0 && length == 25, "fresh scope: all selected references actually executed, without cached side effects");
+    free(calls);
+    static const char* const other[] = {
+        0, "", "test-check-builtins-extra", "test-check-builtins-math-extra", "test-check-varargs",
+        "test-builtin-intrinsic-types", "test-parser", "benchmark-checker",
+    };
+    bool unchanged = true;
+    for (uint32_t c = 0; c < sizeof(other) / sizeof(other[0]); c += 1)
+    {
+        OracleCache* scope = oracle_test_fresh_builtin(other[c]) ? &use : 0;
+        const OracleMode mode = oracle_test_fresh_begin(scope);
+        unchanged &= scope == 0 && oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken;
+        oracle_test_fresh_end(scope, mode);
+        unchanged &= use.mode == ORACLE_MODE_USE;
+    }
+    oracle_test_expect(test, unchanged, "fresh scope: exact membership leaves other commands and timed competitors unchanged");
+    const OracleMode outer = oracle_test_fresh_begin(&use);
+    const OracleMode inner = oracle_test_fresh_begin(&use);
+    oracle_test_fresh_end(&use, inner);
+    const bool nested = use.mode == ORACLE_MODE_OFF && oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+    oracle_test_fresh_end(&use, outer);
+    oracle_test_expect(test, nested && use.mode == ORACLE_MODE_USE && oracle_test_run(&run, 0, 0, 0, 0) == 0 && run.taken,
+                       "fresh scope: nested scopes preserve the outer mode and restore reuse");
+    char* failure[] = { "sh", "-c", "exit 7", 0 };
+    char* rejected[] = { "sh", "-c", 0 };
+    char* missing[] = { "buster-oracle-test-fresh-tool-not-found", 0 };
+    char* const* failures[] = { failure, rejected, missing };
+    const int expected[] = { 7, 2, -1 };
+    bool restored = true;
+    for (uint32_t f = 0; f < sizeof(failures) / sizeof(failures[0]); f += 1)
+    {
+        OracleRun failed = { .cache = &use, .purpose = "oracle test: fresh failure", .arguments = failures[f], .timeout = 10 };
+        const OracleMode mode = oracle_test_fresh_begin(&use);
+        const int status = oracle_test_run(&failed, 0, 0, 0, 0);
+        oracle_test_fresh_end(&use, mode);
+        restored &= status == expected[f] && use.mode == ORACLE_MODE_USE;
+    }
+    oracle_test_expect(test, restored, "fresh scope: command failure, rejected arguments and launcher failure restore USE");
+    run.cache = &off;
+    const OracleMode disabled = oracle_test_fresh_begin(&off);
+    const bool ran_off = oracle_test_run(&run, 0, 0, 0, 0) == 0 && !run.taken;
+    oracle_test_fresh_end(&off, disabled);
+    oracle_test_expect(test, ran_off && off.mode == ORACLE_MODE_OFF, "fresh scope: OFF stays OFF and executes independently");
+    char* value[] = { "sh", "-c", "cat fresh-value", 0 };
+    OracleRun checked = { .cache = &use, .purpose = "oracle test: fresh scope check", .arguments = value, .directory = directory, .timeout = 10 };
+    const bool made = oracle_test_write_text(directory, "fresh-value", "first\n") && oracle_test_run(&checked, 0, 0, 0, 0) == 0 &&
+                      oracle_test_write_text(directory, "fresh-value", "second\n");
+    checked.cache = &check;
+    const OracleMode checking = oracle_test_fresh_begin(&check);
+    printf("oracle cache: fresh scope deliberately changes an untraced result; CHECK must still reject it:\n");
+    fflush(stdout);
+    const bool stale = made && oracle_test_run(&checked, 0, 0, 0, 0) == -1 && check.counts->stale == 1;
+    oracle_test_fresh_end(&check, checking);
+    oracle_test_expect(test, stale && check.mode == ORACLE_MODE_CHECK, "fresh scope: CHECK remains independent and rejects stale success");
+    oracle_test_unlink(directory, "fresh-calls");
+    oracle_test_unlink(directory, "fresh-value");
+    oracle_cache_close(&off);
+    oracle_cache_close(&check);
+    oracle_cache_close(&use);
+}
+
+static void oracle_test_epoch_scopes(OracleTest* test)
+{
+    const char* ambient = getenv("SOURCE_DATE_EPOCH");
+    char* saved = ambient != 0 ? strdup(ambient) : 0;
+    bool ready = ambient == 0 || saved != 0;
+    if (ready)
+    {
+        ready = ready && setenv("SOURCE_DATE_EPOCH", "1792454401", 1) == 0;
+        const bool supplied = oracle_epoch_begin();
+        oracle_test_expect(test, ready && !supplied && strcmp(getenv("SOURCE_DATE_EPOCH"), "1792454401") == 0,
+                           "epoch: caller-supplied value is preserved");
+        oracle_epoch_end(supplied);
+        oracle_test_expect(test, getenv("SOURCE_DATE_EPOCH") != 0 && strcmp(getenv("SOURCE_DATE_EPOCH"), "1792454401") == 0,
+                           "epoch: nested end preserves caller-supplied value");
+        ready = ready && unsetenv("SOURCE_DATE_EPOCH") == 0;
+        const bool outer = oracle_epoch_begin();
+        const bool inner = oracle_epoch_begin();
+        oracle_epoch_end(inner);
+        oracle_test_expect(test, ready && outer && !inner && getenv("SOURCE_DATE_EPOCH") != 0 && strcmp(getenv("SOURCE_DATE_EPOCH"), BUSTER_ORACLE_EPOCH) == 0,
+                           "epoch: nested scope leaves the outer fixed value in place");
+        oracle_epoch_end(outer);
+        oracle_test_expect(test, getenv("SOURCE_DATE_EPOCH") == 0, "epoch: outer scope restores absent ambient value");
+        const bool restored = saved != 0 ? setenv("SOURCE_DATE_EPOCH", saved, 1) == 0 : unsetenv("SOURCE_DATE_EPOCH") == 0;
+        oracle_test_expect(test, ready && restored, "epoch: test restores its original ambient environment");
+    }
+    else
+    {
+        oracle_test_expect(test, false, "epoch: ambient value can be saved");
+    }
+    free(saved);
+}
+
 static int run_oracle_cache_tests(int argc, char** argv)
 {
     (void)argv;
@@ -2304,6 +2549,9 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_modes(&test);
         oracle_test_writers(&test);
         oracle_test_process(&test);
+        oracle_test_adapter(&test);
+        oracle_test_fresh_scopes(&test);
+        oracle_test_epoch_scopes(&test);
         printf("oracle cache: %u checks, %u failures\n", test.checks, test.failures);
     }
     else
@@ -2332,7 +2580,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
-                                               "writers/oracle",     "process/one/two/buster/oracle",            "" };
+                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);

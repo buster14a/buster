@@ -3,7 +3,8 @@
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
 // every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
-// elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of vector type.
+// va_arg of them, elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of
+// vector type.
 // Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign its frame
 // (#552). Then what the lowering refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other
 // sizes. Include after c_check_program_test.c's runners.
@@ -157,6 +158,45 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "typedef union __attribute__((transparent_union)){struct{_Alignas(16) float a[4];}s;v4sf v;}TV;"
             "static unsigned sum(int k,TV x){unsigned h=2166136261u+(unsigned)k;FOLD(x.s);return h;}"
             "int tested(int n){v4sf v;fillf((float*)&v,4,n);TV t={.v=v+1};unsigned h=sum(1,v)^sum(2,t)^sum(3,v*v);return (int)h;}",
+        },
+        {
+            // Unnamed vectors (#137): 16-byte ones from the save area's vector slots until the eight registers are taken,
+            // then from the overflow area, also through a va_copy; and the wider ones, which a variadic call passes in
+            // memory, from the overflow area at their alignments, 16 (the aligned typedefs) and 32 and 64.
+            "vector-varargs",
+            "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
+            "static unsigned narrow(int n,...){unsigned h=2166136261u;__builtin_va_list ap,copy;__builtin_va_start(ap,n);"
+            "for(int i=0;i<n;i++){v4si a=__builtin_va_arg(ap,v4si);v2df d=__builtin_va_arg(ap,v2df);FOLD(a);FOLD(d);if(i==2)__builtin_va_copy(copy,ap);}"
+            "double e=__builtin_va_arg(ap,double);v4si t=__builtin_va_arg(copy,v4si);FOLD(e);FOLD(t);__builtin_va_end(copy);__builtin_va_end(ap);return h;}"
+            "static unsigned wide(int n,...){unsigned h=2166136261u;__builtin_va_list ap;__builtin_va_start(ap,n);"
+            "for(int i=0;i<n;i++){v8sf b=__builtin_va_arg(ap,v8sf);v16su c=__builtin_va_arg(ap,v16su);v16si f=__builtin_va_arg(ap,v16si);"
+            "v4df g=__builtin_va_arg(ap,v4df);FOLD(b);FOLD(c);FOLD(f);FOLD(g);}__builtin_va_end(ap);return h;}"
+            "int tested(int n){v4si a={n,2,-3,4};v8sf b;fillf((float*)&b,8,n);v16su c;fill(&c,64,n);v2df d={(double)n,0.25};"
+            "v16si f={n,n*n,-n};v4df g={0.5,(double)n};"
+            "unsigned x=narrow(5,a,d,a+1,d+d,a*3,d,a-n,d*d,a,d,1.5);unsigned y=wide(2,b,c,f,g,b*2.0f,c^1u,f+n,g+g);return (int)(x^y);}",
+        },
+        {
+            // Past the integer depth table (#780): calls of 16 arguments that return vectors of 16, 32 and 64 bytes (the
+            // first as _mm_set1_epi8 calls _mm_set_epi8), one of 16 and two vectors computed past it, and an addition
+            // nested 18 deep beside a vector.
+            "vectors-past-the-depth-tables",
+            "v16qu vector_spread(unsigned char a0,unsigned char a1,unsigned char a2,unsigned char a3,unsigned char a4,unsigned char a5,unsigned char a6,"
+            "unsigned char a7,unsigned char a8,unsigned char a9,unsigned char a10,unsigned char a11,unsigned char a12,unsigned char a13,unsigned char a14,"
+            "unsigned char a15){v16qu v={a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15};return v;}"
+            "v8si vector_pairs(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9,int a10,int a11,int a12,int a13,int a14,int a15)"
+            "{v8si v={a0+a8,a1+a9,a2+a10,a3+a11,a4+a12,a5+a13,a6+a14,a7+a15};return v;}"
+            "v16su vector_wide(unsigned a0,unsigned a1,unsigned a2,unsigned a3,unsigned a4,unsigned a5,unsigned a6,unsigned a7,unsigned a8,unsigned a9,"
+            "unsigned a10,unsigned a11,unsigned a12,unsigned a13,unsigned a14,unsigned a15)"
+            "{v16su v={a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15};return v*3u;}"
+            "int vector_taken(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9,int a10,int a11,int a12,int a13,int a14,int a15,"
+            "v8si v,v16qu q){return a0+a15+v[a1&7]+q[a2&15];}"
+            "int tested(int n){unsigned h=2166136261u;unsigned char b=(unsigned char)n;"
+            "v16qu q=vector_spread(b,b,b,b,b,b,b,b,b,b,b,b,b,b,b,b);FOLD(q);"
+            "v8si s=vector_pairs(n+0,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15);FOLD(s);"
+            "v16su d=vector_wide(n*1,n*2,n*3,n*4,n*5,n*6,n*7,n*8,n*9,n*10,n*11,n*12,n*13,n*14,n*15,n*16);FOLD(d);"
+            "int t=vector_taken(n+0,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15,s*s+s,q+q);FOLD(t);"
+            "v8si u=s+(n+0+(n+1+(n+2+(n+3+(n+4+(n+5+(n+6+(n+7+(n+8+(n+9+(n+10+(n+11+(n+12+(n+13+(n+14+(n+15+(n+16+(n+17+(n)))))))))))))))))));"
+            "FOLD(u);return (int)h;}",
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
