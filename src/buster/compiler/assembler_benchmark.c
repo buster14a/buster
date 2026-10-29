@@ -200,7 +200,7 @@ static int run_assembler_benchmark(int count, char** arguments)
     Arena work = arena_reserve(1ull << 32);
     X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&source_arena, X86MatchIndex, 1);
     const uint64_t initialization_start = asm_clock();
-    okay = okay && index != 0 && x86_encoder_initialize();
+    okay = okay && index != 0 && x86_encoder_initialize() && x86_semantics_initialize();
     if (okay)
     {
         X86Target target;

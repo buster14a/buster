@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Tier 1's per-function IR. Include after lane.c. ir_create allocates exact-sized columns in a function arena;
+// Tier 1's per-function IR. Include after lane.c and calling_convention.c. ir_create allocates exact-sized columns in a function arena;
 // producers write those columns directly, in batches, and publish only a complete function. Value IDs are instruction
 // indices, blocks are contiguous nonempty ranges, block zero is entry and has no phis, and BUSTER_IR_NONE is never a
 // value. The four byte columns and three u32 operand columns cost 16 bytes/instruction. Constants, calls, addresses
-// and variable operands have sparse tables.
+// and variable operands have sparse tables, and so do labels, a variadic definition's incoming frame and by-value
+// aggregates' ABI records, which the IR's types can't give a backend.
 // No column has readable padding: ir_verify uses masked tails and scalar indexed byte loads, never a gather of four
 // bytes from a one-byte type. Rewrites build new columns; CFG and use lists are explicitly rebuilt when needed.
 //
@@ -27,6 +28,13 @@
 #define BUSTER_IR_SLOT_ADDRESS_TAKEN 1
 #define BUSTER_IR_SLOT_VOLATILE 2
 #define BUSTER_IR_SLOT_TEMPORARY 4
+// A variadic definition's incoming frame (#148, IrFunction.variadic): the register save area, which holds at the function's
+// entry its argument registers as the psABI lays them out (rdi, rsi, rdx, rcx, r8 and r9 from byte 0, then xmm0 to
+// xmm7 from byte 48: BUSTER_ABI_SAVE_AREA_BYTES), and the overflow area, which has no bytes of its own: its address is
+// where the incoming stack arguments past the named ones start. Each is address-taken and untyped, at most one of each.
+#define BUSTER_IR_SLOT_REGISTER_SAVE_AREA 8
+#define BUSTER_IR_SLOT_OVERFLOW_AREA 16
+#define BUSTER_IR_SLOT_FLAGS (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_TEMPORARY | BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA)
 
 typedef enum IrType
 {
@@ -102,6 +110,7 @@ typedef enum IrOp
     IR_ALLOCA,
     IR_STACK_SAVE,
     IR_STACK_RESTORE,
+    IR_BR_INDIRECT,
     IR_OP_COUNT,
 } IrOp;
 
@@ -145,8 +154,32 @@ struct IrAddress
     uint8_t scale;
 };
 
+// An argument's or a parameter's ABI record (#131), which a call (IrAbiCall.passed) or the function
+// (IrFunction.parameter_passed) has for a by-value aggregate: its location as the producer's calling convention
+// assigned it, and its size, nonzero for an aggregate (a struct or a union, an __int128, a long double parameter or
+// another object of the typed stream's), whose IR value is a ptr to its bytes, which the callee receives a copy of.
+// The locations are the producer's, trusted as IrDominance is: the verifier checks the IR's rules, not the convention's.
+typedef struct IrPassed IrPassed;
+struct IrPassed
+{
+    AbiLocation location;
+    uint32_t size;
+};
+
+// A call's ABI records: its totals and result as the convention assigned them, its arguments' IrPassed
+// (passed[this.passed..+argument_count)), and, nonzero, its aggregate result's bytes, which the call writes where its
+// instruction's c operand (a ptr) points; the call's own result type is then void.
+typedef struct IrAbiCall IrAbiCall;
+struct IrAbiCall
+{
+    AbiCall call;
+    uint32_t passed;
+    uint32_t result_size;
+};
+
 // Arguments in extra[argument_first..+argument_count), fixed parameter types in call_types[type_first..+parameter_count).
-// The result and argument types are semantic IR types. ABI locations/registers are deliberately absent.
+// The result and argument types are semantic IR types. ABI locations/registers are absent but for a call that passes or
+// returns an aggregate by value: `abi` is then 1 + its records' index in IrFunction.abi_calls, and 0 for any other call.
 typedef struct IrCall IrCall;
 struct IrCall
 {
@@ -156,6 +189,7 @@ struct IrCall
     uint32_t parameter_count;
     uint8_t result_type;
     bool variadic;
+    uint32_t abi;
 };
 
 typedef struct IrSizes IrSizes;
@@ -170,6 +204,9 @@ struct IrSizes
     uint64_t call_count;
     uint64_t call_type_count;
     uint64_t parameter_count;
+    uint64_t label_count;
+    uint64_t abi_call_count;
+    uint64_t passed_count;
 };
 
 typedef struct IrFunction IrFunction;
@@ -202,6 +239,28 @@ struct IrFunction
     uint8_t result_type;
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
+    // The labels (GNU C's && and goto *, and the producer's jump tables' cases): label k's block, at whose code the
+    // producer defines its k-th label symbol, and which every br_indirect may go to; or BUSTER_IR_NONE for a label no
+    // block holds, in a function without br_indirect (whose labels no jump can reach: a backend defines their symbols
+    // anywhere in the function).
+    uint32_t* labels;
+    uint32_t label_count;
+    // By-value aggregates' ABI records: the calls' (IrCall.abi), and the function's own when parameter_passed isn't 0:
+    // its parameters' IrPassed, passed[parameter_passed - 1..+parameter_count), its result as the convention returns it
+    // (result_abi) and, nonzero, its aggregate result's bytes, which it returns from the address its ret operand (a
+    // ptr, its result type) holds.
+    IrAbiCall* abi_calls;
+    uint32_t abi_call_count;
+    IrPassed* passed;
+    uint32_t passed_count;
+    uint32_t parameter_passed;
+    uint32_t result_size;
+    AbiReturn result_abi;
+    // A variadic definition's incoming frame, which its BUSTER_IR_SLOT_REGISTER_SAVE_AREA and _OVERFLOW_AREA slots reach:
+    // with `variadic`, `incoming` is its named arguments' assignment (abi_assign's named-only signature, as
+    // Tier0Function.incoming_variadic): the overflow area starts stack_bytes past the incoming stack arguments.
+    bool variadic;
+    AbiCall incoming;
     // Exact bytes charged to the arena, alignment gaps included; excludes this view and optional derived arrays.
     uint64_t arena_bytes;
 };
@@ -363,6 +422,7 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "alloca",
     "stack_save",
     "stack_restore",
+    "br_indirect",
 };
 
 static bool ir_integer(uint32_t type)
@@ -399,7 +459,8 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
 {
     const uint64_t mark = arena->length;
     IrError error = IR_OK;
-    if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX)
+    if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX ||
+        sizes->label_count > UINT32_MAX || sizes->abi_call_count > UINT32_MAX || sizes->passed_count > UINT32_MAX)
     {
         error = IR_ERROR_LIMIT;
     }
@@ -417,6 +478,9 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
             .call_type_count = (uint32_t)sizes->call_type_count,
             .parameter_count = (uint32_t)sizes->parameter_count,
             .symbol_count = UINT32_MAX,
+            .label_count = (uint32_t)sizes->label_count,
+            .abi_call_count = (uint32_t)sizes->abi_call_count,
+            .passed_count = (uint32_t)sizes->passed_count,
         };
         candidate.op = ir_allocate(arena, sizes->instruction_count, 1, &ok);
         candidate.type = ir_allocate(arena, sizes->instruction_count, 1, &ok);
@@ -433,6 +497,9 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         candidate.calls = ir_allocate(arena, sizes->call_count, sizeof(IrCall), &ok);
         candidate.call_types = ir_allocate(arena, sizes->call_type_count, 1, &ok);
         candidate.parameter_types = ir_allocate(arena, sizes->parameter_count, 1, &ok);
+        candidate.labels = ir_allocate(arena, sizes->label_count, 4, &ok);
+        candidate.abi_calls = ir_allocate(arena, sizes->abi_call_count, sizeof(IrAbiCall), &ok);
+        candidate.passed = ir_allocate(arena, sizes->passed_count, sizeof(IrPassed), &ok);
         if (ok)
         {
             if (sizes->instruction_count != 0)
@@ -483,6 +550,7 @@ typedef enum IrRule
     IR_RULE_SWITCH,
     IR_RULE_RETURN,
     IR_RULE_STACK,
+    IR_RULE_INDIRECT,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -535,8 +603,8 @@ typedef enum IrRule
     X(IR_ADDRESS,       1, 7, 1u << IR_PTR, IR_RULE_ADDRESS, 0) \
     X(IR_LOAD,          1, 1, BUSTER_IR_VALUES, IR_RULE_LOAD, 0) \
     X(IR_STORE,         3, 3, 1u << IR_VOID, IR_RULE_STORE, 0) \
-    X(IR_CALL,          0, 3, BUSTER_IR_TYPES, IR_RULE_CALL, 0) \
-    X(IR_CALL_INDIRECT, 1, 3, BUSTER_IR_TYPES, IR_RULE_CALL, 0) \
+    X(IR_CALL,          0, 7, BUSTER_IR_TYPES, IR_RULE_CALL, 0) \
+    X(IR_CALL_INDIRECT, 1, 7, BUSTER_IR_TYPES, IR_RULE_CALL, 0) \
     X(IR_PHI,           0, 3, BUSTER_IR_VALUES, IR_RULE_PHI, 0) \
     X(IR_BR,            0, 1, 1u << IR_VOID, IR_RULE_BRANCH, 1) \
     X(IR_CBR,           1, 7, 1u << IR_VOID, IR_RULE_CONDITIONAL, 1) \
@@ -545,11 +613,20 @@ typedef enum IrRule
     X(IR_UNREACHABLE,   0, 0, 1u << IR_VOID, IR_RULE_NONE, 1) \
     X(IR_ALLOCA,        1, 1, 1u << IR_PTR, IR_RULE_STACK, 0) \
     X(IR_STACK_SAVE,    0, 0, 1u << IR_I64, IR_RULE_NONE, 0) \
-    X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0)
+    X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0) \
+    X(IR_BR_INDIRECT,   1, 1, 1u << IR_VOID, IR_RULE_INDIRECT, 1)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
 #undef BUSTER_IR_OPERAND_ROW
+// The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
+// a return's value (a) and a call's destination for its aggregate result (c).
+static const uint8_t ir_optional_table[64] = {
+    [IR_ADDRESS] = 2,
+    [IR_RET] = 1,
+    [IR_CALL] = 4,
+    [IR_CALL_INDIRECT] = 4,
+};
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
 #undef BUSTER_IR_FIELD_ROW
@@ -599,7 +676,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
 {
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     const uint32_t n = f->instruction_count;
-    if (f->result_type >= IR_TYPE_COUNT || f->block_offsets == 0 || ((n == 0) != (f->block_count == 0)) || (n == 0 && f->result_type != IR_VOID) || (n != 0 && (f->op == 0 || f->type == 0 || f->flags == 0 || f->alignment_log2 == 0 || f->a == 0 || f->b == 0 || f->c == 0)) || (f->extra_count != 0 && f->extra == 0) || (f->constant_count != 0 && f->constants == 0) || (f->slot_count != 0 && f->slots == 0) || (f->address_count != 0 && f->addresses == 0) || (f->call_count != 0 && f->calls == 0) || (f->call_type_count != 0 && f->call_types == 0) || (f->parameter_count != 0 && f->parameter_types == 0))
+    if (f->result_type >= IR_TYPE_COUNT || f->block_offsets == 0 || ((n == 0) != (f->block_count == 0)) || (n == 0 && f->result_type != IR_VOID) || (n != 0 && (f->op == 0 || f->type == 0 || f->flags == 0 || f->alignment_log2 == 0 || f->a == 0 || f->b == 0 || f->c == 0)) || (f->extra_count != 0 && f->extra == 0) || (f->constant_count != 0 && f->constants == 0) || (f->slot_count != 0 && f->slots == 0) || (f->address_count != 0 && f->addresses == 0) || (f->call_count != 0 && f->calls == 0) || (f->call_type_count != 0 && f->call_types == 0) || (f->parameter_count != 0 && f->parameter_types == 0) || (f->label_count != 0 && f->labels == 0) || (f->abi_call_count != 0 && f->abi_calls == 0) || (f->passed_count != 0 && f->passed == 0))
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -628,12 +705,39 @@ static IrCheck ir_check_shape(const IrFunction* f)
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, p);
         }
     }
+    // The incoming frame's anchors: at most one of each, untyped, address-taken, of their sizes, in a variadic definition.
+    uint32_t anchors = 0;
     for (uint32_t s = 0; check.error == IR_OK && s < f->slot_count; s += 1)
     {
         const IrSlot slot = f->slots[s];
-        if (slot.type >= IR_TYPE_COUNT || slot.alignment == 0 || (slot.alignment & (slot.alignment - 1)) != 0 || (slot.flags & ~(BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_VOLATILE | BUSTER_IR_SLOT_TEMPORARY)) != 0 || (slot.type < IR_TYPE_COUNT && slot.size < (ir_type_bits[slot.type] + 7u) / 8u))
+        const uint32_t anchor = slot.flags & (BUSTER_IR_SLOT_REGISTER_SAVE_AREA | BUSTER_IR_SLOT_OVERFLOW_AREA);
+        const uint64_t anchor_size = anchor == BUSTER_IR_SLOT_REGISTER_SAVE_AREA ? BUSTER_ABI_SAVE_AREA_BYTES : 0;
+        const bool anchor_valid = anchor == 0 || ((anchor & (anchor - 1)) == 0 && (anchors & anchor) == 0 && f->variadic && slot.type == IR_VOID &&
+                                                  (slot.flags & BUSTER_IR_SLOT_ADDRESS_TAKEN) != 0 && slot.size == anchor_size && slot.alignment >= 16);
+        anchors |= anchor;
+        if (slot.type >= IR_TYPE_COUNT || slot.alignment == 0 || (slot.alignment & (slot.alignment - 1)) != 0 || (slot.flags & ~BUSTER_IR_SLOT_FLAGS) != 0 || (slot.type < IR_TYPE_COUNT && slot.size < (ir_type_bits[slot.type] + 7u) / 8u) || !anchor_valid)
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, s);
+        }
+    }
+    for (uint32_t l = 0; check.error == IR_OK && l < f->label_count; l += 1)
+    {
+        if (f->labels[l] >= f->block_count && f->labels[l] != BUSTER_IR_NONE)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, l);
+        }
+    }
+    // The function's own ABI records: its parameters', an aggregate's a ptr, and an aggregate result's a ptr too.
+    const uint32_t own = f->parameter_passed;
+    if (check.error == IR_OK && ((own != 0 && !ir_slice(own - 1, f->parameter_count, f->passed_count)) || (f->result_size != 0 && (own == 0 || f->result_type != IR_PTR))))
+    {
+        check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+    }
+    for (uint32_t p = 0; check.error == IR_OK && own != 0 && p < f->parameter_count; p += 1)
+    {
+        if (f->passed[own - 1 + p].size != 0 && f->parameter_types[p] != IR_PTR)
+        {
+            check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, p);
         }
     }
     for (uint32_t a = 0; check.error == IR_OK && a < f->address_count; a += 1)
@@ -647,7 +751,9 @@ static IrCheck ir_check_shape(const IrFunction* f)
     for (uint32_t c = 0; check.error == IR_OK && c < f->call_count; c += 1)
     {
         const IrCall call = f->calls[c];
-        if (call.result_type >= IR_TYPE_COUNT || call.argument_count > UINT32_MAX - 3 || !ir_slice(call.argument_first, call.argument_count, f->extra_count) || !ir_slice(call.type_first, call.parameter_count, f->call_type_count) || call.argument_count < call.parameter_count || (!call.variadic && call.argument_count != call.parameter_count))
+        const IrAbiCall* abi = call.abi != 0 && call.abi <= f->abi_call_count ? &f->abi_calls[call.abi - 1] : 0;
+        if (call.result_type >= IR_TYPE_COUNT || call.argument_count > UINT32_MAX - 3 || !ir_slice(call.argument_first, call.argument_count, f->extra_count) || !ir_slice(call.type_first, call.parameter_count, f->call_type_count) || call.argument_count < call.parameter_count || (!call.variadic && call.argument_count != call.parameter_count) ||
+            (call.abi != 0 && (abi == 0 || !ir_slice(abi->passed, call.argument_count, f->passed_count) || (abi->result_size != 0 && call.result_type != IR_VOID))))
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, c);
         }
@@ -738,11 +844,15 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 if (valid)
                 {
                     const IrCall call = f->calls[b];
-                    valid = call.result_type == type;
+                    // A call that returns an aggregate writes it where c points (IrAbiCall.result_size); any other has no c.
+                    const IrAbiCall* abi = call.abi != 0 ? &f->abi_calls[call.abi - 1] : 0;
+                    const bool into = abi != 0 && abi->result_size != 0;
+                    valid = call.result_type == type && (into ? c < f->instruction_count && f->type[c] == IR_PTR : c == BUSTER_IR_NONE);
                     for (uint32_t p = 0; valid && p < call.argument_count; p += 1)
                     {
                         const uint32_t value = f->extra[call.argument_first + p];
-                        valid = value < f->instruction_count && f->type[value] != IR_VOID && f->type[value] < IR_TYPE_COUNT && (p >= call.parameter_count || f->type[value] == f->call_types[call.type_first + p]);
+                        valid = value < f->instruction_count && f->type[value] != IR_VOID && f->type[value] < IR_TYPE_COUNT && (p >= call.parameter_count || f->type[value] == f->call_types[call.type_first + p]) &&
+                                (abi == 0 || f->passed[abi->passed + p].size == 0 || f->type[value] == IR_PTR);
                     }
                 }
             } break;
@@ -763,6 +873,15 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 }
             } break;
             case IR_RULE_RETURN: valid = f->result_type == IR_VOID ? a == BUSTER_IR_NONE : a < f->instruction_count && f->type[a] == f->result_type; break;
+            case IR_RULE_INDIRECT:
+            {
+                // An indirect branch goes to the label whose address it holds: every label must have its block.
+                valid = ta == IR_PTR;
+                for (uint32_t l = 0; valid && l < f->label_count; l += 1)
+                {
+                    valid = f->labels[l] != BUSTER_IR_NONE;
+                }
+            } break;
             // Validate the fixed-width stack rule outside the established explicit semantic cases.
             default: valid = ir_rule_table[op] == IR_RULE_STACK && ta == IR_I64; break;
         }
@@ -915,7 +1034,7 @@ static IrCheck ir_check_rows(const IrFunction* f, bool vector)
 static uint32_t ir_successor_count(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
-    return op == IR_BR ? 1 : op == IR_CBR ? 2 : op == IR_SWITCH ? f->c[i] + 1 : 0;
+    return op == IR_BR ? 1 : op == IR_CBR ? 2 : op == IR_SWITCH ? f->c[i] + 1 : op == IR_BR_INDIRECT ? f->label_count : 0;
 }
 
 static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
@@ -928,6 +1047,10 @@ static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
     else if (f->op[i] == IR_SWITCH)
     {
         result = f->extra[f->b[i] + edge * 2];
+    }
+    else if (f->op[i] == IR_BR_INDIRECT)
+    {
+        result = f->labels[edge];
     }
     return result;
 }
@@ -1070,14 +1193,13 @@ struct IrOperand
 
 static uint32_t ir_value_mask(const IrFunction* f, uint32_t i)
 {
-    uint32_t result = ir_operand_table[f->op[i]];
-    if (f->op[i] == IR_ADDRESS && f->b[i] != BUSTER_IR_NONE)
+    const uint32_t op = f->op[i];
+    uint32_t result = ir_operand_table[op];
+    const uint32_t optional = ir_optional_table[op];
+    if (optional != 0)
     {
-        result |= 2;
-    }
-    if (f->op[i] == IR_RET && f->a[i] != BUSTER_IR_NONE)
-    {
-        result |= 1;
+        const uint32_t present = (uint32_t)(f->a[i] != BUSTER_IR_NONE) | (uint32_t)(f->b[i] != BUSTER_IR_NONE) << 1 | (uint32_t)(f->c[i] != BUSTER_IR_NONE) << 2;
+        result |= optional & present;
     }
     return result;
 }
@@ -1498,6 +1620,27 @@ static void ir_print_constant(FILE* output, IrConstant value)
     fprintf(output, "0x%016" PRIx64 "%016" PRIx64, value.high, value.low);
 }
 
+// The ABI records' fields, in their structs' order but for the padding: loc(kind,register0,register1,stack_offset,flags),
+// ret(kind,flags,part_bytes,register0,...,register3) and call(stack_bytes,stack_alignment_log2,integer_registers,
+// vector_registers,ret(...)).
+static void ir_print_location(FILE* output, AbiLocation location)
+{
+    fprintf(output, "loc(%u,%u,%u,%" PRIu32 ",%u)", location.kind, location.registers[0], location.registers[1], location.stack_offset, location.flags);
+}
+
+static void ir_print_return(FILE* output, AbiReturn result)
+{
+    _Static_assert(BUSTER_ABI_RESULT_PARTS == 4, "a result prints four registers");
+    fprintf(output, "ret(%u,%u,%u,%u,%u,%u,%u)", result.kind, result.flags, result.part_bytes, result.registers[0], result.registers[1], result.registers[2], result.registers[3]);
+}
+
+static void ir_print_abi_call(FILE* output, AbiCall call)
+{
+    fprintf(output, "call(%" PRIu32 ",%u,%u,%u,", call.stack_bytes, call.stack_alignment_log2, call.integer_registers, call.vector_registers);
+    ir_print_return(output, call.result);
+    fputc(')', output);
+}
+
 static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
 {
     IrCheck check = ir_verify(f, scratch, 0);
@@ -1513,10 +1656,45 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
             fprintf(output, "%s%s", p == 0 ? "" : ", ", ir_type_names[f->parameter_types[p]]);
         }
         fprintf(output, ") -> %s {\n", ir_type_names[f->result_type]);
+        if (f->variadic)
+        {
+            fprintf(output, "  variadic ");
+            ir_print_abi_call(output, f->incoming);
+            fputc('\n', output);
+        }
+        if (f->parameter_passed != 0)
+        {
+            fprintf(output, "  result size=%" PRIu32 " ", f->result_size);
+            ir_print_return(output, f->result_abi);
+            fprintf(output, " passed=#%" PRIu32 "\n", f->parameter_passed - 1);
+        }
+        for (uint32_t p = 0; p < f->passed_count; p += 1)
+        {
+            fprintf(output, "  passed #%" PRIu32 " size=%" PRIu32 " ", p, f->passed[p].size);
+            ir_print_location(output, f->passed[p].location);
+            fputc('\n', output);
+        }
+        for (uint32_t c = 0; c < f->abi_call_count; c += 1)
+        {
+            fprintf(output, "  abi #%" PRIu32 " ", c);
+            ir_print_abi_call(output, f->abi_calls[c].call);
+            fprintf(output, " passed=#%" PRIu32 " result=%" PRIu32 "\n", f->abi_calls[c].passed, f->abi_calls[c].result_size);
+        }
         for (uint32_t s = 0; s < f->slot_count; s += 1)
         {
             const IrSlot slot = f->slots[s];
             fprintf(output, "  slot $%" PRIu32 " size=%" PRIu64 " align=%" PRIu32 " type=%s flags=0x%02x\n", s, slot.size, slot.alignment, ir_type_names[slot.type], slot.flags);
+        }
+        for (uint32_t l = 0; l < f->label_count; l += 1)
+        {
+            if (f->labels[l] == BUSTER_IR_NONE)
+            {
+                fprintf(output, "  label #%" PRIu32 " none\n", l);
+            }
+            else
+            {
+                fprintf(output, "  label #%" PRIu32 " b%" PRIu32 "\n", l, f->labels[l]);
+            }
         }
         for (uint32_t block = 0; block < f->block_count; block += 1)
         {
@@ -1562,6 +1740,14 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             fprintf(output, "%s%s", p == 0 ? "" : ", ", ir_type_names[f->call_types[call.type_first + p]]);
                         }
                         fprintf(output, ") variadic=%u", (unsigned)call.variadic);
+                        if (call.abi != 0)
+                        {
+                            fprintf(output, " abi=#%" PRIu32, call.abi - 1);
+                        }
+                        if (c != BUSTER_IR_NONE)
+                        {
+                            fprintf(output, " into=%%%" PRIu32, c);
+                        }
                     } break;
                     case IR_PHI:
                     {

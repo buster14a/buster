@@ -28,6 +28,16 @@ from its own width, as GCC and clang place it (`"=r"(long) : "0"(-1)` is
 loaded and stored back, as clang's code does. An output that nothing writes
 keeps its value; GCC and clang leave it unspecified.
 
+Such a template also takes a vector in a vector register's constraint, which a
+helper doesn't load or store yet: `main.c`'s barriers `__asm__("" : "+v"(x))`
+of an `__m512i` (`c_lexer.c`'s `shift_in_previous`, `x86_64_encoder.c`'s
+`encode_group`). The planning holds such an operand aside
+(`BUSTER_CHECK_ASM_HELD`) until the template is assembled. A template of
+instructions, or one that refers to the operand, is then refused. In one of
+none, an output is evaluated as its object's address, which the template leaves
+as it was, and an input as its value, which is dropped. A volatile output isn't
+held, since clang's code loads and stores it.
+
 Why a call rather than records in Tier 0's own code:
 
 - The template's registers stay out of Tier 0's depth registers and homes, and
@@ -145,7 +155,7 @@ alternative (`check_asm_constraint_parse`):
 | --- | --- |
 | `r`, `q`, `l`, `R`, `Q` | a general register of the class (`Q`: rax, rbx, rcx, rdx; `R`: the first eight) |
 | `a b c d S D` | that register |
-| `x`, `v` | an XMM register, for a `float` or a `double` |
+| `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
 | `m`, `o`, `V`, `<`, `>` | memory at an lvalue's address, which a general register holds |
 | `i`, `n`, `I J K M N O`, `e`, `Z` | an integer constant, within its letter's range |
 | a digit, `[name]` | the output's register (a matching input) |
@@ -221,11 +231,12 @@ in a template. The lowering makes the index on its scratch arena, once per unit
 with asm statements, and frees it after the planning.
 
 The matcher admits `cpuid`, `xgetbv`, `xchg`, `fnstcw`, `fldcw`, `fnstsw`,
-`fnclex`, `stmxcsr`, `ldmxcsr` and SSE2's `pcmpeqd`, which `main.c`'s statements
-use, and the `bswap` of `<linux/swab.h>`'s helpers. For `main.c`'s naked
-functions it also admits `pushfq`, `popfq`, SSE2's `movq`, the x87's `fld` and
-`fstp` of every width, the string instructions with their prefixes (`rep movsb`)
-and AVX-512F's `vmovdqa64` and `vmovdqu64`. Its other families are in
+`fnclex`, `stmxcsr`, `ldmxcsr`, `fxsave` and `fxrstor` (and their `64` forms)
+and SSE2's `pcmpeqd`, which `main.c`'s statements use, and the `bswap` of
+`<linux/swab.h>`'s helpers. For `main.c`'s naked functions it also admits
+`pushfq`, `popfq`, SSE2's `movq`, the x87's `fld` and `fstp` of every width, the
+string instructions with their prefixes (`rep movsb`) and AVX-512F's
+`vmovdqa64` and `vmovdqu64`. Its other families are in
 [the assembler's guide](assembler.md).
 `test-assembler --cross-check` compares them with GNU as. An `xchg` takes its
 memory operand first in Intel order, as the catalogue has it: `xchgl %ecx,(%rdi)`,
@@ -276,7 +287,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - the x87's, MMX's, the opmasks' and the rax and rdx pair's constraints (`f t u`,
   `y`, `k`, `A`), and the other letters it doesn't place;
 - symbolic immediates, and constants outside their letter's range;
-- operands of types no general or XMM register holds by value, outside memory;
+- operands of types no general or XMM register holds by value, outside memory,
+  but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields, and explicit register variables (`register long r asm("r10")`);
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
@@ -344,7 +356,16 @@ has the commands, the logs and the default path's numbers against main.
   - memory operands;
   - outputs of every width, and `%h`;
   - `xgetbv`, rsp's alignment and basic asm;
+  - `fxsave`, `fxrstor` and their `64` forms on aligned arrays, as `main.c`'s
+    test of DAZ saves the state: MXCSR's control bits and its mask from the
+    saved state, against `stmxcsr`'s;
   - XMM operands;
+  - vectors in vector registers' constraints in templates of no instructions,
+    for x86-64-v4: `+v` and `+x` outputs of 64, 32 and 16 bytes that keep their
+    values, one through a call's pointer, evaluated once, an input that is
+    evaluated and dropped, and a comment without operands. Their refusals: a
+    template of instructions with an output or an input, a comment that refers
+    to the vector, a volatile output, and an input matching a vector output;
   - the operands' order of evaluation, each once, through functions that
     record their calls;
   - rdi and rsi as operands, constants sign-extended as clang prints them, a

@@ -754,8 +754,8 @@ static __attribute__((unused)) String8 type_print(const TypeTable* table, Arena*
 static __attribute__((unused)) bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t count, uint32_t parameters, uint32_t members);
 static __attribute__((unused)) void type_changes_at(TypeTable* table, uint32_t position);
 // Copies `source` into `table`, its columns from `arena` with room for `extra` more of each kind of record, and its index
-// from `index_arena`, with room for the source's types and BUSTER_TYPE_COPY_INDEX_SLACK more, which grows past them as any
-// index does (type_view_reset takes it back to a mark). False, with the arenas as they were, without room.
+// from `index_arena`, with room for the source's types and a slack more (BUSTER_TYPE_COPY_INDEX_SLACK), which grows past
+// them as any index does (type_view_reset takes it back to a mark). False, with the arenas as they were, without room.
 static __attribute__((unused)) bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra);
 // Takes a copy back to the counts it had (`mark`, from type_view_mark), the types made since out of its index, and
 // hides nothing. An index that grew since is rebuilt at the mark's size.
@@ -981,8 +981,10 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_BUCKET_SLOTS 4
 #define BUSTER_TYPE_BUCKET_BYTES 64
 #define BUSTER_TYPE_INITIAL_BUCKETS 64
-// The types past a copy's own that its index has room for before it grows (type_copy).
+// The types past a copy's own that its index has room for before it grows (type_copy): at most this many, and at most
+// as many as the source's types, but no fewer than the minimum.
 #define BUSTER_TYPE_COPY_INDEX_SLACK 4096
+#define BUSTER_TYPE_COPY_INDEX_MINIMUM 512
 _Static_assert(sizeof(TypeSlot) * BUSTER_TYPE_BUCKET_SLOTS == BUSTER_TYPE_BUCKET_BYTES, "a bucket is a cache line");
 _Static_assert(sizeof(TypeLookupBucket) == BUSTER_TYPE_COLUMN_ALIGNMENT, "a lookup bucket is a cache line");
 
@@ -5861,6 +5863,32 @@ static bool type_index_rebuild(TypeTable* table, uint64_t buckets, uint32_t type
     return result;
 }
 
+// The index made the source's, slot for slot, in the memory it has and past it: the same types in the same slots, as a
+// rebuild at the source's size would place them from the same columns. If the arena can't hold it, the index stays as
+// it was, as type_index_rebuild leaves it.
+static bool type_index_copy_slots(TypeTable* table, const TypeTable* source)
+{
+    TypeIndex* index = &table->index;
+    const uint64_t start = (uint64_t)((uint8_t*)index->slots - index->arena->base);
+    const uint64_t slots = (uint64_t)source->index.bucket_count * BUSTER_TYPE_BUCKET_SLOTS;
+    arena_pop_to(index->arena, start);
+    TypeSlot* copy = arena_push_array(index->arena, slots, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT);
+    const bool result = copy != 0;
+    if (result)
+    {
+        memcpy(copy, source->index.slots, slots * sizeof(TypeSlot));
+        index->slots = copy;
+        index->bucket_count = source->index.bucket_count;
+        index->count = source->index.count;
+    }
+    else
+    {
+        arena_pop_to(index->arena, start);
+        arena_push_array(index->arena, (uint64_t)index->bucket_count * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT);
+    }
+    return result;
+}
+
 static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra)
 {
     const uint64_t length = arena->length;
@@ -5920,14 +5948,28 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         table->char_unsigned = source->char_unsigned;
         // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
         // empty, and its probes would miss the caches: #113's lanes each copy a unit's table with room for eight types a
-        // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane.
-        const uint64_t slack = extra.types < BUSTER_TYPE_COPY_INDEX_SLACK ? extra.types : BUSTER_TYPE_COPY_INDEX_SLACK;
-        uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
-        while (buckets * 3 < (uint64_t)table->types.count + slack + 1)
+        // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane. So it has room for a slack
+        // of types past the source's, no more than BUSTER_TYPE_COPY_INDEX_SLACK and than the source's own (512 at
+        // least): a copy that outgrows it places its types again as any index does, in time proportional to those types.
+        // A larger slack cost every copy its pages, a memset copy's first touches: 32 of the 55 to 63 page faults of a
+        // lane's table on #697's units of a few hundred to a few thousand types. The source's index is copied as it is
+        // where it has the room, its slots rather than its types placed again.
+        const uint64_t own = source->index.count > BUSTER_TYPE_COPY_INDEX_MINIMUM ? source->index.count : BUSTER_TYPE_COPY_INDEX_MINIMUM;
+        uint64_t slack = extra.types < BUSTER_TYPE_COPY_INDEX_SLACK ? extra.types : BUSTER_TYPE_COPY_INDEX_SLACK;
+        slack = slack < own ? slack : own;
+        if ((uint64_t)source->index.count + slack + 1 <= 3ull * source->index.bucket_count)
         {
-            buckets *= 2;
+            valid = type_index_copy_slots(table, source);
         }
-        valid = type_index_rebuild(table, buckets, table->types.count);
+        else
+        {
+            uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
+            while (buckets * 3 < (uint64_t)table->types.count + slack + 1)
+            {
+                buckets *= 2;
+            }
+            valid = type_index_rebuild(table, buckets, table->types.count);
+        }
     }
     if (!valid)
     {
