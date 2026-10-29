@@ -34,7 +34,7 @@ static bool check_warning_option(uint32_t id, String8 option)
                    check_diagnostic_option(option, "-Wc99-designator") || check_diagnostic_option(option, "-Wc99-extensions") ||
                    check_diagnostic_option(option, "-Woverride-init") || check_diagnostic_option(option, "-WCL4");
     }
-    else if (id == CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION)
+    else if (id == CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION || id == CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA || id == CHECK_WARNING_ID_UNKNOWN_PRAGMA)
     {
         matches |= check_diagnostic_option(option, "-Wall");
     }

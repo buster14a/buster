@@ -249,7 +249,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     if (valid && check_input_auto_type(type))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
-        valid = type != 0;
+        valid = type != 0 && check_input_cleanup_deduced(reader, declaration, type);
     }
     if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
