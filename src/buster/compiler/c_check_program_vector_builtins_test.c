@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's generic vector builtins in the lowering (c_check_program_vector_builtins.c), against clang -O0's code of the
-// same source for znver5: shuffles, conversions, the elementwise functions and the reductions, called directly on
-// inputs from the call's argument, with every defined result folded into the program's hash (a shuffle's undefined
-// elements aren't). The programs run where the host has the features their rows take (AVX-512F, BW, CD, DQ, VL, VBMI,
+// same source for znver5: shuffles, conversions, the elementwise functions, the reductions, the nontemporal loads and
+// stores and the bit casts, called directly on inputs from the call's argument and in the forms clang's headers write the
+// floating intrinsics in, with every defined result folded into the program's hash (a shuffle's undefined elements
+// aren't). The programs run where the host has the features their rows take (AVX-512F, BW, CD, DQ, VL, VBMI,
 // VBMI2, BITALG and VPOPCNTDQ, by x86_target_native's CPUID and XCR0); elsewhere they compile and link, as clang's
 // builds do, and don't run. Include after c_check_program_x86_test.c, whose helpers' style it follows.
 
@@ -29,6 +30,14 @@ static const char check_test_vector_builtin_types[] =
     "static unsigned fold(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}\n"
     "#define FOLD(v) h=fold(h,&(v),sizeof(v))\n"
     "static void fill(void*p,unsigned long n,unsigned s){unsigned char*b=p;for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;b[i]=(unsigned char)(s>>16);}}\n";
+
+// The floating programs' own types, and their inputs of modest values: n floats (d 0) or doubles (d 1) between about
+// -338 and 338, or with `positive` between 0 and 676, whose products and truncations are defined and NaN-free.
+#define BUSTER_CHECK_TEST_FLOATING_TYPES \
+    "typedef float v8sf __attribute__((vector_size(32)));typedef float v16sf __attribute__((vector_size(64)));" \
+    "typedef double v2df __attribute__((vector_size(16)));typedef double v8df __attribute__((vector_size(64)));" \
+    "static void modest(void*p,unsigned long n,unsigned s,int d,int positive){for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;" \
+    "double v=((double)(int)((s>>8)&0xffff)-(positive?0.0:32768.0))/97.0;if(d)((double*)p)[i]=v;else((float*)p)[i]=(float)v;}}\n"
 
 static void check_test_program_vector_builtin_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
@@ -171,6 +180,142 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // The square roots and fused multiply-adds of floats and doubles at each width: the roots of random bits (NaNs
+            // among them, which both codes' instructions propagate alike), the products of modest values (whose NaNs the
+            // forms would choose among); and of scalars, as the intrinsics write them (an element's root or product
+            // stored back), with values live across.
+            "vector-floating-math",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            "int tested(int n){unsigned h=2166136261u;v4sf r4;v8sf r8;v16sf r16;v2df q2;v4df q4;v8df q8;"
+            "fill(&r4,16,n);fill(&r8,32,n+1);fill(&r16,64,n+2);fill(&q2,16,n+3);fill(&q4,32,n+4);fill(&q8,64,n+5);"
+            "v4sf s1=__builtin_elementwise_sqrt(r4);v8sf s2=__builtin_elementwise_sqrt(r8);v16sf s3=__builtin_elementwise_sqrt(r16);"
+            "v2df s4=__builtin_elementwise_sqrt(q2);v4df s5=__builtin_elementwise_sqrt(q4);v8df s6=__builtin_elementwise_sqrt(q8);"
+            "FOLD(s1);FOLD(s2);FOLD(s3);FOLD(s4);FOLD(s5);FOLD(s6);"
+            "v4sf a4,b4,c4;v8sf a8,b8,c8;v16sf a16,b16,c16;v2df d2,e2,f2;v4df d4,e4,f4;v8df d8,e8,f8;"
+            "modest(&a4,4,n,0,0);modest(&b4,4,n+1,0,0);modest(&c4,4,n+2,0,0);modest(&a8,8,n+3,0,0);modest(&b8,8,n+4,0,0);modest(&c8,8,n+5,0,0);"
+            "modest(&a16,16,n+6,0,0);modest(&b16,16,n+7,0,0);modest(&c16,16,n+8,0,0);modest(&d2,2,n+9,1,0);modest(&e2,2,n+10,1,0);modest(&f2,2,n+11,1,0);"
+            "modest(&d4,4,n+12,1,0);modest(&e4,4,n+13,1,0);modest(&f4,4,n+14,1,0);modest(&d8,8,n+15,1,0);modest(&e8,8,n+16,1,0);modest(&f8,8,n+17,1,0);"
+            "v4sf p1=__builtin_elementwise_fma(a4,b4,c4),p2=__builtin_elementwise_fma(a4,b4,-c4);v8sf p3=__builtin_elementwise_fma(a8,b8,c8);"
+            "v16sf p4=__builtin_elementwise_fma(a16,b16,c16);v2df p5=__builtin_elementwise_fma(d2,e2,f2);v4df p6=__builtin_elementwise_fma(-d4,e4,f4);"
+            "v8df p7=__builtin_elementwise_fma(d8,e8,f8);FOLD(p1);FOLD(p2);FOLD(p3);FOLD(p4);FOLD(p5);FOLD(p6);FOLD(p7);"
+            "float x=a4[1];double y=d2[1];float g=(float)n*0.5f;double k=(double)n*-0.25;"
+            "float t1=__builtin_elementwise_sqrt(x*x+g);double t2=__builtin_elementwise_sqrt(y*y+k*k);"
+            "float t3=__builtin_elementwise_fma(x,b4[2],c4[3]);double t4=__builtin_elementwise_fma(y,e2[0],-f2[1]);"
+            "a4[0]=__builtin_elementwise_sqrt(r4[0]);d2[0]=__builtin_elementwise_fma(d2[0],e2[0],f2[0]);"
+            "FOLD(t1);FOLD(t2);FOLD(t3);FOLD(t4);FOLD(a4);FOLD(d2);FOLD(g);FOLD(k);"
+            "return (int)h;}",
+        },
+        {
+            // __builtin_convertvector with floating elements, each pair at each width it has: from 32- and 64-bit integers
+            // of random bits, signed and unsigned, and from a shuffle's first elements as _mm_cvtepi32_pd writes it; to
+            // them, truncated, from modest values in their range; between floats and doubles, from half-precision and bf16
+            // elements to floats and from floats to half-precision ones, of random bits; and within a format, bf16's at each
+            // width too, of operands with effects.
+            "vector-floating-conversions",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            "typedef __fp16 v8hp __attribute__((vector_size(16)));typedef __fp16 v16hp __attribute__((vector_size(32)));"
+            "typedef _Float16 v8hf __attribute__((vector_size(16)));typedef __bf16 v8bf __attribute__((vector_size(16)));"
+            "typedef __bf16 v16bf __attribute__((vector_size(32)));typedef __bf16 v32bf __attribute__((vector_size(64)));\n"
+            "int tested(int n){unsigned h=2166136261u;v4ss i4;v8ss i8;v16ss i16;v4su u4;v8su u8;v16su u16;v2ds q2;v4ds q4;v8ds q8;v2du w2;v4du w4;v8du w8;"
+            "fill(&i4,16,n);fill(&i8,32,n+1);fill(&i16,64,n+2);fill(&u4,16,n+3);fill(&u8,32,n+4);fill(&u16,64,n+5);"
+            "fill(&q2,16,n+6);fill(&q4,32,n+7);fill(&q8,64,n+8);fill(&w2,16,n+9);fill(&w4,32,n+10);fill(&w8,64,n+11);"
+            "v4sf a1=__builtin_convertvector(i4,v4sf);v8sf a2=__builtin_convertvector(i8,v8sf);v16sf a3=__builtin_convertvector(i16,v16sf);"
+            "v4sf a4=__builtin_convertvector(u4,v4sf);v8sf a5=__builtin_convertvector(u8,v8sf);v16sf a6=__builtin_convertvector(u16,v16sf);"
+            "FOLD(a1);FOLD(a2);FOLD(a3);FOLD(a4);FOLD(a5);FOLD(a6);"
+            "v4df b1=__builtin_convertvector(i4,v4df);v8df b2=__builtin_convertvector(i8,v8df);v2df b3=__builtin_convertvector(__builtin_shufflevector(i4,i4,0,1),v2df);"
+            "v4df b4=__builtin_convertvector(u4,v4df);v8df b5=__builtin_convertvector(u8,v8df);v2df b6=__builtin_convertvector(__builtin_shufflevector(u4,u4,0,1),v2df);"
+            "FOLD(b1);FOLD(b2);FOLD(b3);FOLD(b4);FOLD(b5);FOLD(b6);"
+            "v4sf c1=__builtin_convertvector(q4,v4sf);v8sf c2=__builtin_convertvector(q8,v8sf);v4sf c3=__builtin_convertvector(w4,v4sf);"
+            "v8sf c4=__builtin_convertvector(w8,v8sf);v2df c5=__builtin_convertvector(q2,v2df);v4df c6=__builtin_convertvector(q4,v4df);"
+            "v8df c7=__builtin_convertvector(q8,v8df);v2df c8=__builtin_convertvector(w2,v2df);v4df c9=__builtin_convertvector(w4,v4df);"
+            "v8df c10=__builtin_convertvector(w8,v8df);FOLD(c1);FOLD(c2);FOLD(c3);FOLD(c4);FOLD(c5);FOLD(c6);FOLD(c7);FOLD(c8);FOLD(c9);FOLD(c10);"
+            "v4sf m4,o4;v8sf m8,o8;v16sf m16,o16;v2df n2,p2;v4df n4,p4;v8df n8,p8;modest(&m4,4,n,0,0);modest(&m8,8,n+1,0,0);modest(&m16,16,n+2,0,0);"
+            "modest(&o4,4,n+3,0,1);modest(&o8,8,n+4,0,1);modest(&o16,16,n+5,0,1);modest(&n2,2,n+6,1,0);modest(&n4,4,n+7,1,0);modest(&n8,8,n+8,1,0);"
+            "modest(&p2,2,n+9,1,1);modest(&p4,4,n+10,1,1);modest(&p8,8,n+11,1,1);"
+            "v4ss d1=__builtin_convertvector(m4,v4ss);v8ss d2=__builtin_convertvector(m8,v8ss);v16ss d3=__builtin_convertvector(m16,v16ss);"
+            "v4su d4=__builtin_convertvector(o4,v4su);v8su d5=__builtin_convertvector(o8,v8su);v16su d6=__builtin_convertvector(o16,v16su);"
+            "v4ds d7=__builtin_convertvector(m4,v4ds);v8ds d8=__builtin_convertvector(m8,v8ds);v2ds d9=__builtin_convertvector(__builtin_shufflevector(m4,m4,0,1),v2ds);"
+            "v4du d10=__builtin_convertvector(o4,v4du);v8du d11=__builtin_convertvector(o8,v8du);"
+            "FOLD(d1);FOLD(d2);FOLD(d3);FOLD(d4);FOLD(d5);FOLD(d6);FOLD(d7);FOLD(d8);FOLD(d9);FOLD(d10);FOLD(d11);"
+            "v4ss e1=__builtin_convertvector(n4,v4ss);v8ss e2=__builtin_convertvector(n8,v8ss);v4su e3=__builtin_convertvector(p4,v4su);"
+            "v8su e4=__builtin_convertvector(p8,v8su);v2ds e5=__builtin_convertvector(n2,v2ds);v4ds e6=__builtin_convertvector(n4,v4ds);"
+            "v8ds e7=__builtin_convertvector(n8,v8ds);v2du e8=__builtin_convertvector(p2,v2du);v4du e9=__builtin_convertvector(p4,v4du);"
+            "v8du e10=__builtin_convertvector(p8,v8du);FOLD(e1);FOLD(e2);FOLD(e3);FOLD(e4);FOLD(e5);FOLD(e6);FOLD(e7);FOLD(e8);FOLD(e9);FOLD(e10);"
+            "v4sf r4;v8sf r8;v16sf r16;v4df s4;v8df s8;fill(&r4,16,n+12);fill(&r8,32,n+13);fill(&r16,64,n+14);fill(&s4,32,n+15);fill(&s8,64,n+16);"
+            "v4df f1=__builtin_convertvector(r4,v4df);v8df f2=__builtin_convertvector(r8,v8df);v2df f3=__builtin_convertvector(__builtin_shufflevector(r4,r4,0,1),v2df);"
+            "v4sf f4=__builtin_convertvector(s4,v4sf);v8sf f5=__builtin_convertvector(s8,v8sf);v4sf f6=__builtin_convertvector(r4,v4sf);"
+            "FOLD(f1);FOLD(f2);FOLD(f3);FOLD(f4);FOLD(f5);FOLD(f6);"
+            "v8hp h8;v16hp h16;v8hf k8;v8bf g8;v16bf g16;fill(&h8,16,n+17);fill(&h16,32,n+18);fill(&k8,16,n+19);fill(&g8,16,n+20);fill(&g16,32,n+21);"
+            "v8sf j1=__builtin_convertvector(h8,v8sf);v16sf j2=__builtin_convertvector(h16,v16sf);"
+            "v4sf j3=__builtin_convertvector(__builtin_shufflevector(h8,h8,0,1,2,3),v4sf);v8sf j4=__builtin_convertvector(k8,v8sf);"
+            "v8hp j5=__builtin_convertvector(r8,v8hp);v16hp j6=__builtin_convertvector(r16,v16hp);v8sf j7=__builtin_convertvector(g8,v8sf);"
+            "v16sf j8=__builtin_convertvector(g16,v16sf);v4sf j9=__builtin_convertvector(__builtin_shufflevector(g8,g8,0,1,2,3),v4sf);"
+            "v8hp j10=__builtin_convertvector(k8,v8hp);FOLD(j1);FOLD(j2);FOLD(j3);FOLD(j4);FOLD(j5);FOLD(j6);FOLD(j7);FOLD(j8);FOLD(j9);FOLD(j10);"
+            "v32bf g32;fill(&g32,64,n+22);int calls=0;v8bf l1=__builtin_convertvector((calls++,g8),v8bf);"
+            "v16bf l2=__builtin_convertvector((calls+=2,g16),v16bf);v32bf l3=__builtin_convertvector((calls+=4,g32),v32bf);FOLD(l1);FOLD(l2);FOLD(l3);FOLD(calls);"
+            "return (int)h;}",
+        },
+        {
+            // Nontemporal stores of each width and element kind into aligned vectors beside ones they leave as they were,
+            // and nontemporal loads.
+            "vector-nontemporal",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            "int tested(int n){unsigned h=2166136261u;v4sf f4;v8sf f8;v16sf f16;v2df d2;v4df d4;v8df d8;v2ds q2;v4ds q4;v8ds q8;v16qs b16;"
+            "fill(&f4,16,n);fill(&f8,32,n+1);fill(&f16,64,n+2);fill(&d2,16,n+3);fill(&d4,32,n+4);fill(&d8,64,n+5);fill(&q2,16,n+6);fill(&q4,32,n+7);"
+            "fill(&q8,64,n+8);fill(&b16,16,n+9);v4sf o1[2];v8sf o2[2];v16sf o3[2];v2df o4[2];v4df o5[2];v8df o6[2];v2ds o7[2];v4ds o8[2];v8ds o9[2];v16qs o10[2];"
+            "fill(o1,32,n+10);fill(o2,64,n+11);fill(o3,128,n+12);fill(o4,32,n+13);fill(o5,64,n+14);fill(o6,128,n+15);fill(o7,32,n+16);fill(o8,64,n+17);"
+            "fill(o9,128,n+18);fill(o10,32,n+19);"
+            "__builtin_nontemporal_store(f4,&o1[1]);__builtin_nontemporal_store(f8,&o2[1]);__builtin_nontemporal_store(f16,&o3[0]);"
+            "__builtin_nontemporal_store(d2,&o4[1]);__builtin_nontemporal_store(d4,&o5[0]);__builtin_nontemporal_store(d8,&o6[1]);"
+            "__builtin_nontemporal_store(q2,&o7[0]);__builtin_nontemporal_store(q4,&o8[1]);__builtin_nontemporal_store(q8,&o9[1]);__builtin_nontemporal_store(b16,o10);"
+            "FOLD(o1);FOLD(o2);FOLD(o3);FOLD(o4);FOLD(o5);FOLD(o6);FOLD(o7);FOLD(o8);FOLD(o9);FOLD(o10);"
+            "v2ds l1=__builtin_nontemporal_load(&q2);v4ds l2=__builtin_nontemporal_load(&q4);v8ds l3=__builtin_nontemporal_load(&q8);"
+            "v4sf l4=__builtin_nontemporal_load(&f4);v8df l5=__builtin_nontemporal_load(&o6[1]);FOLD(l1);FOLD(l2);FOLD(l3);FOLD(l4);FOLD(l5);"
+            "return (int)h;}",
+        },
+        {
+            // __builtin_bit_cast between floats and unsigned ints and doubles and unsigned longs both ways, of run-time
+            // values, of a volatile one, and of constants (which the checker folds); between integers and a pointer's
+            // bits; and between vectors of other elements.
+            "bit-casts",
+            "int tested(int n){unsigned h=2166136261u;float f=(float)n*1.5f-2.25f;double d=(double)n*-3.75+1e10;unsigned u=(unsigned)n*2654435761u;"
+            "unsigned long long q=(unsigned long long)n*0x9e3779b97f4a7c15ull;"
+            "unsigned b1=__builtin_bit_cast(unsigned,f);float b2=__builtin_bit_cast(float,u);unsigned long long b3=__builtin_bit_cast(unsigned long long,d);"
+            "double b4=__builtin_bit_cast(double,q);int b5=__builtin_bit_cast(int,u);long b6=__builtin_bit_cast(long,(void*)&h)-(long)&h;"
+            "v4sf vf;fill(&vf,16,n);v4ss b7=__builtin_bit_cast(v4ss,vf);v16qs b8=__builtin_bit_cast(v16qs,b7);"
+            "float b9=__builtin_bit_cast(float,0x3f800000u);double b10=__builtin_bit_cast(double,0x400921fb54442d18ull);"
+            "volatile float vol=f;unsigned b11=__builtin_bit_cast(unsigned,vol);float b12=__builtin_bit_cast(float,b1+1);"
+            "FOLD(b1);FOLD(b2);FOLD(b3);FOLD(b4);FOLD(b5);FOLD(b6);FOLD(b7);FOLD(b8);FOLD(b9);FOLD(b10);FOLD(b11);FOLD(b12);"
+            "return (int)h;}",
+        },
+        {
+            // The intrinsics this batch's builtins make, written as clang 23's headers write them (the harness reads no
+            // system header): square roots and fused multiply-adds of first elements stored back and in a compound
+            // literal, a bf16 conversion's low half by a shuffle, a half-precision vector's cast then conversion, the
+            // conversions through a shuffle, the streams and the casts.
+            "floating-intrinsic-forms",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            "typedef __fp16 v8hp __attribute__((vector_size(16),aligned(16)));typedef __bf16 v8bf __attribute__((vector_size(16)));"
+            "static v4sf fnmsub_ss(v4sf a,v4sf b,v4sf c){a[0]=__builtin_elementwise_fma(a[0],-b[0],-c[0]);return a;}"
+            "static v2df sqrt_sd(v2df a,v2df b){return __extension__(v2df){__builtin_elementwise_sqrt(b[0]),a[1]};}"
+            "static v2df fmsub_pd(v2df a,v2df b,v2df c){return (v2df)__builtin_elementwise_fma((v2df)a,(v2df)b,-(v2df)c);}"
+            "static v8sf cvtph_ps(v2ds a){return (v8sf)__builtin_convertvector((v8hp)a,v8sf);}"
+            "static v4sf cvtpbh_ps(v8bf a){return (v4sf)__builtin_shufflevector((v8sf)__builtin_convertvector(a,v8sf),(v8sf)__builtin_convertvector(a,v8sf),0,1,2,3);}"
+            "static v2df cvtps_pd(v4sf a){return (v2df)__builtin_convertvector(__builtin_shufflevector((v4sf)a,(v4sf)a,0,1),v2df);}"
+            "static v4df cvtepu32_pd(v2ds a){return (v4df)__builtin_convertvector((v4su)a,v4df);}"
+            "static void stream_ps(void*p,v4sf a){typedef v4sf aligned_v4sf __attribute__((aligned(16)));__builtin_nontemporal_store((aligned_v4sf)a,(aligned_v4sf*)p);}"
+            "static v2ds stream_load_si128(const void*p){return (v2ds)__builtin_nontemporal_load((const v2ds*)p);}"
+            "static unsigned castf32_u32(float a){return __builtin_bit_cast(unsigned int,a);}"
+            "static double castu64_f64(unsigned long long a){return __builtin_bit_cast(double,a);}\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a,b,c;v2df d,e;v2ds k __attribute__((aligned(64)));v8bf g;"
+            "modest(&a,4,n,0,0);modest(&b,4,n+1,0,0);modest(&c,4,n+2,0,0);modest(&d,2,n+3,1,0);modest(&e,2,n+4,1,1);fill(&k,16,n+5);fill(&g,16,n+6);"
+            "v4sf r1=fnmsub_ss(a,b,c);v2df r2=sqrt_sd(d,e),r3=fmsub_pd(d,e,d);v8sf r4=cvtph_ps(k);v4sf r5=cvtpbh_ps(g);v2df r6=cvtps_pd(a);"
+            "v4df r7=cvtepu32_pd(k);FOLD(r1);FOLD(r2);FOLD(r3);FOLD(r4);FOLD(r5);FOLD(r6);FOLD(r7);"
+            "float st[4] __attribute__((aligned(16)));stream_ps(st,a);v2ds ld=stream_load_si128(&k);FOLD(st);FOLD(ld);"
+            "unsigned cf=castf32_u32(a[3]);double cd=castu64_f64(0x4000000000000000ull+(unsigned)n);FOLD(cf);FOLD(cd);"
+            "return (int)h;}",
+        },
+        {
             "vector-nondeterministic",
             "int tested(int n){unsigned h=2166136261u;v8ds a;fill(&a,64,n);v8ds z=__builtin_nondeterministic_value(a);for(int i=0;i<8;i++)z[i]=(long long)i*n;FOLD(z);"
             "int k=__builtin_nondeterministic_value(n);k=n+1;FOLD(k);"
@@ -213,7 +358,10 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         "typedef signed char v16qs __attribute__((vector_size(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
         "typedef short v8hs __attribute__((vector_size(16)));typedef int v4ss __attribute__((vector_size(16)));"
         "typedef unsigned v4su __attribute__((vector_size(16)));typedef float v4sf __attribute__((vector_size(16)));"
-        "typedef signed char v4qs __attribute__((vector_size(4)));";
+        "typedef signed char v4qs __attribute__((vector_size(4)));typedef float v8sf __attribute__((vector_size(32)));"
+        "typedef double v8df __attribute__((vector_size(64)));typedef __bf16 v8bf __attribute__((vector_size(16)));"
+        "typedef __fp16 v8hp __attribute__((vector_size(16)));typedef _Float16 v8hf __attribute__((vector_size(16)));"
+        "typedef float v4sfu __attribute__((vector_size(16),aligned(4)));typedef long long v4ds __attribute__((vector_size(32)));";
     // Each fixture's target, source, reason and initialized declarations.
     static const struct
     {
@@ -235,7 +383,21 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
           "(volatile v4qs){7,8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);return c[n&15];}",
           "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "znver5", "int tested(int n){v4ss a={n};v4sf c=__builtin_convertvector(a,v4sf);return (int)c[0];}", "vector conversions of floating elements", 2 },
+        { "znver5", "int tested(int n){v8hs a={(short)n};v8sf c=__builtin_convertvector(a,v8sf);return (int)c[0];}",
+          "vector conversions between 8- or 16-bit integers and floating elements", 2 },
+        { "znver5", "void tested(v8sf* p,v8bf* q){*q=__builtin_convertvector(*p,v8bf);}", "vector conversions to bf16 elements, or of bf16 ones to types other than float", 0 },
+        { "znver5", "void tested(v8hp* p,v8df* q){*q=__builtin_convertvector(*p,v8df);}",
+          "vector conversions between half-precision elements and types other than float without AVX512-FP16", 0 },
+        { "znver5", "void tested(v8bf* p,v4ss* q){*q=__builtin_convertvector(__builtin_shufflevector(*p,*p,0,1,2,3),v4ss);}",
+          "vector conversions to bf16 elements, or of bf16 ones to types other than float", 0 },
+        { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of half-precision elements without AVX512-FP16", 0 },
+        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements", 0 },
+        { "znver5", "void tested(v4sfu* p){v4sf v={1};__builtin_nontemporal_store(v,p);}", "nontemporal vector builtins at underaligned addresses", 1 },
+        { "znver5", "void tested(int* p,int v){__builtin_nontemporal_store(v,p);}", "nontemporal builtins of scalars", 0 },
+        { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
+        { "x86-64", "float tested(float x){return __builtin_elementwise_sqrt(x);}", "elementwise builtins of scalars without AVX-512F", 0 },
+        { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
+          "bit-cast builtins of types other than integers, pointers, floats, doubles and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
         { "znver5", "int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
           "vector leading zero counts of 8- and 16-bit elements", 2 },
@@ -290,6 +452,24 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
                                            "eligible-mwaitx", true, true, 0, 0, NULL, &zen);
         check_test_program_boundary_target(test, "unsigned long tested(int n){__builtin_ia32_pause();return __rdtsc()+__builtin_ia32_tzcnt_u64((unsigned long)n);}",
                                            "baseline-leaves", true, true, 0, 0, NULL, &baseline);
+    }
+    // The conversions of 64-bit integers take AVX-512DQ, which an AVX-512F and VL target may lack.
+    X86Target without_dq = { 0 };
+    const bool v4 = x86_target_parse("x86-64-v4", 9, &without_dq);
+    check_test_expect(test, v4, "the AVX-512DQ refusal's target");
+    if (v4)
+    {
+        const size_t length = strlen(types) + 200;
+        char* source = malloc(length);
+        check_test_expect(test, source != 0, "the AVX-512DQ refusal's source");
+        if (source != 0)
+        {
+            without_dq.features &= ~BUSTER_X86_FEATURE(AVX512DQ);
+            snprintf(source, length, "%s%s", types, "void tested(v4ds* p,v4sf* q){*q=__builtin_convertvector(*p,v4sf);}");
+            check_test_program_boundary_target(test, source, "vector-builtin-refusal", true, false, 0, 0,
+                                               "vector conversions between 64-bit integers and floating elements without AVX-512DQ", &without_dq);
+        }
+        free(source);
     }
 }
 
