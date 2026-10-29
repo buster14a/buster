@@ -3795,6 +3795,42 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "_Complex double d=i;cl from=(cl)d;cc narrow=(cc)l;int r=(int)l;_Bool truth=c4;FOLD(d);FOLD(from);FOLD(narrow);"
         "return (int)(h%1000003)+(a==b)+(u!=v)*2+(i==i)*4+truth*8+(r&15)*16+!c6*32;}",
         "complex-integers", clang);
+    // The complex types of __int128 and of _BitInts of up to 128 bits, which the usual arithmetic conversions make (#137):
+    // the same operations in Tier 0's 128-bit classes, with libgcc's __divti3 and __udivti3 in their quotients, and a
+    // _BitInt's parts kept extended from its width (a narrow one's computed in 32 bits); calls passing and returning
+    // them (in memory, and in a register for 4 bytes), va_arg, globals, compound assignments and conversions.
+    check_test_program_source(test,
+        "typedef __typeof__((_Complex char)0+(__int128)0) ci128;typedef __typeof__((_Complex char)0+(unsigned __int128)0) cu128;"
+        "typedef __typeof__((_Complex char)0+(_BitInt(100))0) cb100;typedef __typeof__((_Complex char)0+(unsigned _BitInt(65))0) cu65;"
+        "typedef __typeof__((_Complex char)0+(_BitInt(40))0) cb40;typedef __typeof__((_Complex char)0+(unsigned _BitInt(13))0) cu13;"
+        "static unsigned long fold(unsigned long h,unsigned __int128 r,unsigned __int128 i)"
+        "{return ((h^(unsigned long)r^(unsigned long)(r>>64)*7)*1099511628211ul)^((unsigned long)i*31u)^(unsigned long)(i>>64)*131u;}\n"
+        "#define FOLD(z) h=fold(h,(unsigned __int128)__real__ (z),(unsigned __int128)__imag__ (z))\n"
+        "#define FOLDD(z) h=fold(h,(unsigned __int128)(__int128)__real__ (z),(unsigned __int128)(__int128)__imag__ (z))\n"
+        "#define MAKE(t,z,r,i) t z;__real__ z=(r);__imag__ z=(i)\n"
+        "static ci128 mul(ci128 a,ci128 b){return a*b;}static cb100 quo(cb100 a,cb100 b){return a/b;}static cu13 twice(cu13 a){return a+a;}"
+        "static cu65 three(long x,long y,long z,cu65 a,cu65 b,cu65 c){return a+b+c+x+y+z;}"
+        "static ci128 sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);ci128 r=0;for(int i=0;i<n;i++){r+=__builtin_va_arg(ap,ci128);r*=2;}"
+        "__builtin_va_end(ap);return r;}"
+        "ci128 gi;static cb40 gb;"
+        "int tested(int n){unsigned long h=2166136261u;"
+        "MAKE(ci128,a,(__int128)n<<90,-(__int128)n*123456789);MAKE(ci128,b,(n&7)+1,(n&3)+1);"
+        "MAKE(cu128,u,(unsigned __int128)n<<100,~(unsigned __int128)0-n);MAKE(cu128,v,(n&7)+2,n&3);"
+        "MAKE(cb100,c,(_BitInt(100))n<<80,-(_BitInt(100))n*999);MAKE(cb100,d,(n&15)+1,(n&7)+1);"
+        "MAKE(cu65,e,(unsigned _BitInt(65))n<<60,(unsigned _BitInt(65))-n);MAKE(cu65,f,(n&3)+1,n&1);"
+        "MAKE(cb40,g,(_BitInt(40))n*100003,-(_BitInt(40))n*99);MAKE(cb40,k,(n&7)+3,(n&3)+1);"
+        "MAKE(cu13,p,n*700,8000-n);MAKE(cu13,q,(n&3)+1,n&1);"
+        "ci128 a1=a+b,a2=a-b,a3=a*b,a4=a/b,a5=-a,a6=~a,a7=mul(a,b);FOLD(a1);FOLD(a2);FOLD(a3);FOLD(a4);FOLD(a5);FOLD(a6);FOLD(a7);"
+        "cu128 u1=u*v,u2=u/v,u3=u-v;FOLD(u1);FOLD(u2);FOLD(u3);"
+        "cb100 c1=c*d,c2=quo(c,d),c3=c+n,c4=n-c;FOLD(c1);FOLD(c2);FOLD(c3);FOLD(c4);"
+        "cu65 e1=e*f,e2=e/f,e3=three(1,2,3,e,f,e);FOLD(e1);FOLD(e2);FOLD(e3);"
+        "cb40 g1=g*k,g2=g/k,g3=g*(cb40)3;FOLD(g1);FOLD(g2);FOLD(g3);"
+        "cu13 p1=p*q,p2=p/q,p3=twice(p),p4=~p;FOLD(p1);FOLD(p2);FOLD(p3);FOLD(p4);"
+        "ci128 ts=sum(3,a,b,a1);FOLD(ts);"
+        "gi+=b;gb*=k;FOLD(gi);FOLD(gb);a+=b;a*=2;a/=b;c-=d;FOLD(a);FOLD(c);"
+        "_Complex double dd=g;cb40 back=(cb40)c;ci128 widened=p;__int128 r=(__int128)a;_Bool truth=c2;FOLDD(dd);FOLD(back);FOLD(widened);"
+        "return (int)(h%1000003)+(a==b)+(u!=v)*2+(c==c)*4+truth*8+(int)(r&15)*16+!p4*32;}",
+        "complex-wide-integers", clang);
     // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
     // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
     check_test_program_source(test,
@@ -4085,12 +4121,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
-    // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types of
-    // __int128 (which the usual arithmetic conversions make), and complex types of the floating types other than float,
-    // double and long double (clang 23 has no _Float128 in C; __float128 is its spelling).
+    // GNU's complex integer types of __int128 and the complex _BitInts of up to 128 bits, which the usual arithmetic
+    // conversions make (#137), are lowered; the complex types check_lower_complex doesn't take are refused by what they
+    // need: a complex _BitInt past 128 bits, and complex types of the floating types other than float, double and long
+    // double (clang 23 has no _Float128 in C; __float128 is its spelling).
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, true, 0, 1);
-    check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, false, 0, 3,
-                                       "complex integer types of __int128 and _BitInt");
+    check_test_program_boundary(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, true, 0, 3);
+    check_test_program_boundary(test, "int tested(int n){_Complex char z=n;_BitInt(100) w=n;__typeof__(z+w) v=z*w;return __real__ v>1;}", "complex-bit-int-100", true, true,
+                                0, 3);
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex char z=n;_BitInt(129) w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-bit-int-129", true,
+                                       false, 0, 3, "_BitInt");
     // A promoted K&R parameter now converts from double to its declared float on entry.
     check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,

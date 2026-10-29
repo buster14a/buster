@@ -180,7 +180,13 @@ table. The kinds are:
   entry indices, each a statement's start or the count). Tier 0 reports each one's first record
   (`Tier0Code.label_records`); the front end defines the label's symbol there, after branch sizing, and an address of
   a label is a `GLOBAL_ADDRESS` of it. Each label is a target in the fusion's windows, reached with nothing on the
-  stacks.
+  stacks. A switch's jump table (#785) is a `JUMP_INDIRECT` that reaches only its own table's labels, which two
+  more optional columns say, `table_count` tables of them: `label_tables` gives each label its table (1 + t for
+  table t's, 0 for a label whose address the code takes, table t's labels after table t − 1's) and `table_jumps`
+  each table's `JUMP_INDIRECT`, its entry's index, in increasing order. Any other `JUMP_INDIRECT` is a `goto *`,
+  which reaches only the labels of no table. `tier0_validate` checks the columns in one pass over the tables and
+  one over the labels, by both of its paths; Tier 0's code is the same with them as without, taking every label for
+  a target of every `JUMP_INDIRECT` all the same.
 
 The producer lowers conditions to jumps, the short-circuit operators straight to their targets. Wherever control
 arrives at a target, the stacks hold the same values; `tier0_validate` checks that, as WebAssembly's validator does.

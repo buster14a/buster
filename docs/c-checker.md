@@ -1725,8 +1725,9 @@ What the lowering covers past scalars (#145's programs):
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
 - **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
-  and GNU's complex integer types of up to 64 bits (`_Complex char` to
-  `_Complex unsigned long long`), are
+  GNU's complex integer types (`_Complex char` to `_Complex unsigned
+  __int128`) and the complex `_BitInt`s of up to 128 bits that the usual
+  arithmetic conversions make, are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
   objects, the stream carries a value by its object's address, and copies,
@@ -1745,10 +1746,15 @@ What the lowering covers past scalars (#145's programs):
   values clang -O0's inline product and its NaN recovery give. A complex
   integer type's operation computes in its element's class, or in 32 bits for
   one of 8 or 16 (`check_lower_computed`), each part wrapped back to the
-  element's width, and its product and quotient are clang -O0's inline ones,
+  element's width (a `_BitInt`'s extended from it, as its values are, and so
+  are its parts loaded from memory, where another compiler's argument leaves
+  the bits past the width as they come), and its product and quotient are
+  clang -O0's inline ones,
   in the element's type whatever the operands' domains: (ac − bd) + (ad + bc)i,
   and ((ac + bd) / (cc + dd)) + ((bc − ad) / (cc + dd))i, each product and sum
-  wrapped before the division (`check_lower_complex_quotient`). `==` and `!=`
+  wrapped before the division (`check_lower_complex_quotient`; an `__int128`
+  part's, or a `_BitInt`'s of 65 to 128 bits, computes in Tier 0's 128-bit
+  classes, and its divisions are libgcc's `__divti3` and `__udivti3`). `==` and `!=`
   compare both parts; a value's truth is either part's; a conversion converts
   each part (to a real type the real part, to `_Bool` the truth); a compound
   assignment reads its destination in the calculation's type through its
@@ -1761,9 +1767,8 @@ What the lowering covers past scalars (#145's programs):
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
   The complex types it doesn't take are refused by what they need: the
-  complex integer types of `__int128` and of `_BitInt`s, which the usual
-  arithmetic conversions make ("complex integer types of __int128 and
-  _BitInt"), and the complex types of the other floating types, `_Complex
+  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
+  bits"), and the complex types of the other floating types, `_Complex
   _Float16` and `_Complex __float128` ("complex types other than _Complex
   float, double and long double"). A
   local of a type that no class holds is refused by what its type needs, as
@@ -1887,7 +1892,10 @@ What the lowering covers past scalars (#145's programs):
   difference from the lowest case's, unsigned, is past the last entry goes to
   the default or the switch's end, and any other to the table's address plus
   the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
-  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. Its labels and
+  that jump are the function's next table in Tier 0's columns
+  (`label_tables`, `table_jumps`, #785), so that the IR's `br_indirect` for it
+  goes to its own labels alone. The table is a
   `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
   label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
   record as it does `&&label`'s) with the entry's offset as its addend, as
@@ -1930,7 +1938,7 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: complex integer types of `__int128`,
+`error: unsupported: FEATURE`, naming the feature: `__float128` values,
 `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
