@@ -3,7 +3,8 @@
 //
 // Original instruction microbenchmarks for #181. Encoder records generate bounded W^X mappings. Twelve independent
 // chains, matched six-chain controls, two dependency paths, and mixes with six ADD/IMUL chains measure throughput
-// and possible contention. A mix can be dependency-limited; compare it with the matched six-chain observations.
+// and possible contention; the twelve chains again with a never-taken jo after each instruction measure whether the
+// pair fuses (one retired macro-op), as a flag-setting instruction and a conditional branch may. A mix can be dependency-limited; compare it with the matched six-chain observations.
 // PMCx0C1 is RETIRED MACRO-OPS, not executed micro-ops. Neither that counter nor a mixed result identifies a pipe.
 // Only measure-x86-zen5 requires a 9700X; construction/encoding tests never label another CPU's results as Zen 5.
 
@@ -27,6 +28,7 @@ typedef enum X86CostExperiment
     X86_COST_CHAIN_SOURCE,
     X86_COST_MIX_ADD,
     X86_COST_MIX_IMUL,
+    X86_COST_BRANCH,
     X86_COST_EXPERIMENT_COUNT,
 } X86CostExperiment;
 
@@ -116,6 +118,7 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
         }
         const uint32_t loop = count;
         const bool mix = experiment == X86_COST_MIX_ADD || experiment == X86_COST_MIX_IMUL;
+        const bool fused = experiment == X86_COST_BRANCH;
         const bool chain = experiment == X86_COST_CHAIN_DESTINATION || experiment == X86_COST_CHAIN_SOURCE;
         const bool source_path = experiment == X86_COST_CHAIN_SOURCE && x86_zen5_source_path(id);
         for (uint32_t i = 0; id != 0 && i < BUSTER_X86_COST_BLOCK; i += 1)
@@ -133,6 +136,12 @@ static bool x86_zen5_program(uint8_t id, X86CostExperiment experiment, X86CostPr
             records[count] = x86_zen5_fixture(id, destination, simple_index ? destination : source, source_path || simple_index);
             valid &= x86_zen5_id(&records[count]) == id;
             count += 1;
+            // A jo to the next instruction: the chains' values stay far from overflow (an imm8 of 3, or a step of one, a
+            // few million times), so it isn't taken.
+            if (fused)
+            {
+                records[count++] = (X86Instruction){ .form = X86_FORM_JO_REL8 };
+            }
             if (mix)
             {
                 const uint8_t blocker = registers[6 + i % 6];
@@ -353,7 +362,8 @@ static int run_x86_zen5_measure(int argc, char** argv)
     if (valid)
     {
         printf("# CPU=%s CPUID=%08x compiler=%s iterations=%lu passes=%lu block=%u\n", brand, signature, __clang_version__, iterations, passes, BUSTER_X86_COST_BLOCK);
-        printf("# cycles are core cycles; ops are retired macro-ops with the empty loop subtracted; mixes are cycles per target+blocker pair\n");
+        printf("# cycles are core cycles; ops are retired macro-ops with the empty loop subtracted; mixes are cycles per target+blocker pair, branch per\n");
+        printf("# instruction+jo pair, whose ops are 1 where the pair fuses\n");
         printf("case\texperiment\tcycles\tmin\tmax\tretired_ops\tinstructions\tcode_hash\n");
     }
     uint32_t matched = 0;
@@ -390,7 +400,7 @@ static int run_x86_zen5_measure(int argc, char** argv)
             }
             if (valid)
             {
-                static const char* const names[] = { "independent", "independent-six", "chain-destination", "chain-source", "mix-add", "mix-imul" };
+                static const char* const names[] = { "independent", "independent-six", "chain-destination", "chain-source", "mix-add", "mix-imul", "branch" };
                 const double denominator = (double)iterations * BUSTER_X86_COST_BLOCK;
                 for (uint32_t experiment = 0; experiment < X86_COST_EXPERIMENT_COUNT; experiment += 1)
                 {
