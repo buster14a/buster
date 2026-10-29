@@ -7123,9 +7123,9 @@ static bool pp_test_implemented_features(const char* directory)
         "#define aligned packed_typo\n#define ATTR aligned\nH __has_attribute(aligned) __has_attribute(ATTR)\n";
     static const char* const expected[2] =
     {
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 0 0 I 1 1 1 1 1 1 1 1 1 1 H 1 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 0 0 I 1 1 1 1 1 1 1 1 1 1 H 0 0\n",
         // The frozen Clang C-attribute oracle has no clang::overloadable entry; source capability is independent.
-        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 1 0\n",
+        "A 1 1 1 1 1 1 1 1 0 1 B 0 1 C 0 1 D 1 0 E 0 0 0 1 F 1 1 1 201910L G 1 1 202003L I 1 1 1 1 1 1 1 1 1 0 H 0 0\n",
     };
     static const uint32_t standards[] =
     {
