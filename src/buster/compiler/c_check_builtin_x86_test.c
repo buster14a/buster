@@ -602,73 +602,30 @@ static void check_builtin_x86_test_pages(CheckBuiltinX86Test* test, const TypeTa
 // independent invocation without that blanket suppression, otherwise the reachability diagnostic would vanish.
 static bool check_builtin_x86_test_clang_one(const char* clang, const char* path, uint32_t policy, bool* rejected, char diagnostics[4096])
 {
-    int descriptors[2];
-    bool result = pipe(descriptors) == 0;
-    if (result)
+    char* arguments[12];
+    uint32_t count = 0;
+    arguments[count++] = (char*)clang;
+    arguments[count++] = "-fsyntax-only";
+    arguments[count++] = "-std=gnu17";
+    arguments[count++] = "-fno-caret-diagnostics";
+    arguments[count++] = "-fno-color-diagnostics";
+    arguments[count++] = "-ferror-limit=0";
+    if (policy != 0)
     {
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            alarm(10);
-            close(descriptors[0]);
-            const int discarded = open("/dev/null", O_WRONLY);
-            if (discarded < 0 || dup2(discarded, 1) < 0 || dup2(descriptors[1], 2) < 0)
-            {
-                _exit(125);
-            }
-            close(discarded);
-            close(descriptors[1]);
-            char* arguments[12];
-            uint32_t count = 0;
-            arguments[count++] = (char*)clang;
-            arguments[count++] = "-fsyntax-only";
-            arguments[count++] = "-std=gnu17";
-            arguments[count++] = "-fno-caret-diagnostics";
-            arguments[count++] = "-fno-color-diagnostics";
-            arguments[count++] = "-ferror-limit=0";
-            if (policy != 0)
-            {
-                arguments[count++] = policy == 1 ? "-Wno-error=argument-outside-range" : "-Wno-argument-outside-range";
-            }
-            arguments[count++] = (char*)path;
-            arguments[count] = NULL;
-            execvp(clang, arguments);
-            _exit(127);
-        }
-        close(descriptors[1]);
-        size_t kept = 0;
-        char buffer[1024];
-        ssize_t bytes;
-        while (true)
-        {
-            bytes = read(descriptors[0], buffer, sizeof(buffer));
-            if (bytes > 0)
-            {
-                const size_t copied = (size_t)bytes < 4095 - kept ? (size_t)bytes : 4095 - kept;
-                memcpy(diagnostics + kept, buffer, copied);
-                kept += copied;
-            }
-            else if (bytes >= 0 || errno != EINTR)
-            {
-                break;
-            }
-        }
-        diagnostics[kept] = 0;
-        close(descriptors[0]);
-        int status = 0;
-        pid_t waited = -1;
-        if (child > 0)
-        {
-            do
-            {
-                waited = waitpid(child, &status, 0);
-            }
-            while (waited < 0 && errno == EINTR);
-        }
-        result = child > 0 && bytes == 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) <= 1;
-        *rejected = result && WEXITSTATUS(status) != 0;
+        arguments[count++] = policy == 1 ? "-Wno-error=argument-outside-range" : "-Wno-argument-outside-range";
     }
-    return result;
+    arguments[count++] = (char*)path;
+    arguments[count] = NULL;
+    OracleRun run = {
+        .purpose = "checker x86 range diagnostic oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, diagnostics, 4096);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
+    return ready;
 }
 
 #define BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef char C16 __attribute__((vector_size(16))); typedef double D2 __attribute__((vector_size(16))); typedef double D8 __attribute__((vector_size(64))); typedef float F16 __attribute__((vector_size(64))); typedef int I8 __attribute__((vector_size(32))); typedef int I16 __attribute__((vector_size(64)));\n"
@@ -748,6 +705,7 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
 
 static int run_check_builtin_x86_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinX86Test test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -781,5 +739,7 @@ static int run_check_builtin_x86_tests(int argc, char** argv)
         check_builtin_x86_test_clang(&test, clang);
     }
     printf("test-check-builtins-x86: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-x86");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }

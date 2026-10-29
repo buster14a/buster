@@ -2001,13 +2001,29 @@ mode: `use` takes an entry rather than run the tool and writes an entry for
 each run; `check` runs every one and writes it, and where the entry it would
 have taken, found before it runs, holds another result reports it as stale,
 which fails the run; anything else, or unset, keeps nothing (local runs). The
-9700X job's test step uses `use` on a push and a pull request's run, and
-`check` on the daily and dispatched runs, which then remove the entries no
+hosted native and baseline correctness jobs use `check` on every revision.
+Only after both succeed does Benchpress run native correctness: its persistent
+cache uses `use` on pushes and pull requests, and `check` on daily and
+dispatched runs. Thus reuse never replaces the triggering revision's independent
+hosted oracles. Check runs then remove the entries no
 test has written for two days, and the keys left without one. An entry is only
 as right as the run that wrote it: the daily check finds one a pull request's
 run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
 to, and a test prints them at its end (`oracle_cache_report`).
+
+The twelve standalone `test-check-builtins` commands (the base command and
+`-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
+`-atomic-rmw`, `-typed-overflow`, `-rounds`) run their cheap references freshly
+in `use`: native qualification found validation cost more than execution.
+`main_unit_check_builtins` applies this exact-name policy before dispatch and
+restores the prior mode after success, failure or argument rejection. It does
+not affect other commands or timed competitors. `check` is unchanged, so both
+hosted variants and daily/manual native runs still execute and validate these
+oracles independently. Backend capture/status/cache plumbing is retained for
+that path. An inactive scope prints no cache counters; the independent tools
+still execute. Assembler reuse remains separate, with its cold/check costs
+retained in #542's evidence rather than inferred from hit counts.
 
 The tool runs in a process group of its own: what it leaves running there is
 killed when it ends, and the whole group at its time limit
@@ -2037,6 +2053,22 @@ Its users:
   sources given the epoch's time for GCC's runs);
 - test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
   in `--self-test`, which turns the cache off.
+- the standalone checker-builtin commands, including their diagnostic-preserving
+  Clang boundaries (atomic/float warnings, vector constraints, x86 ranges and
+  atomic RMW). Each command fixes the epoch only when absent and restores that
+  ambient state on return. Existing parser-oracle calls therefore cache too;
+- the assembler's independent Clang/GCC assembly generation and C harness
+  object compiles, Clang's `.S` preprocessing, and GNU as's object oracles.
+  Test-authored assembly inputs receive the epoch's mtime for tools whose
+  `__TIMESTAMP__` ignores the epoch. Repeated fixtures have stable distinct
+  source paths to avoid churning one key's 32 variants.
+
+These adapters cache object/text bytes. Links and generated-program execution
+always run fresh, observing the current runtime. The cache does not store an
+artifact's executable permission, so an executable must not be a cached output.
+The standalone adapter preserves normal nonzero statuses and bounded diagnostic
+prefixes, but launcher, timeout, capture and stale-entry failures remain failures
+(`oracle_test_run`). Timed benchmark competitors are not routed through it.
 
 Each of these tests prints a line of what its runs did (`oracle_cache_report`).
 
