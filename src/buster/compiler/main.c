@@ -523,6 +523,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/interpreter_driver.c"
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
+#include "buster/compiler/ir_source_test.c"
+#include "buster/compiler/ir_source_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -1117,6 +1119,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
+    {
+        result = run_ir_source_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
+    {
+        result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {

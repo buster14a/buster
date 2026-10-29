@@ -1,0 +1,19 @@
+function (ptr, i64) -> ptr {
+  variadic call(8,4,2,0,ret(1,0,8,0,2,255,255))
+  result size=12 ret(1,0,8,0,2,255,255) passed=#0
+  passed #0 size=12 loc(1,7,6,0,0)
+  passed #1 size=0 loc(1,2,255,0,0)
+  passed #2 size=16 loc(2,255,255,0,0)
+  abi #0 call(16,4,0,0,ret(1,0,8,0,2,255,255)) passed=#2 result=12
+  slot $0 size=176 align=16 type=void flags=0x09
+  slot $1 size=0 align=16 type=void flags=0x11
+  slot $2 size=12 align=4 type=void flags=0x01
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = stack_addr.ptr $0
+  %3 = stack_addr.ptr $1
+  %4 = stack_addr.ptr $2
+  %5 = call.void @1(%0) fixed=(ptr) variadic=0 abi=#0 into=%4
+  %6 = ret.void %4
+}

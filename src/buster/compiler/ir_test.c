@@ -857,6 +857,208 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
     arena_pop_to(memory, mark);
 }
 
+// Labels and br_indirect (#131): an indirect branch's successors are the function's label blocks, one edge per distinct
+// block; every label of a function with one must have its block; a phi at a label lists the branch's block.
+static void ir_test_labels(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const IrSizes sizes = {
+        .instruction_count = 12,
+        .block_count = 3,
+        .extra_count = 2,
+        .constant_count = 3,
+        .parameter_count = 1,
+        .label_count = 3,
+    };
+    IrFunction function = {
+        0
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "label fixture allocation failed");
+    if (created)
+    {
+        // b0: p; t = p != 10 ? &&a : &&b; goto *t; b1 (labels 0 and 2): phi [10, b0]; return it; b2 (label 1): return 20.
+        function.result_type = IR_I32;
+        function.symbol_count = 4;
+        function.parameter_types[0] = IR_I32;
+        function.constants[0].low = 0;
+        function.constants[1].low = 10;
+        function.constants[2].low = 20;
+        function.block_offsets[0] = 0;
+        function.block_offsets[1] = 7;
+        function.block_offsets[2] = 9;
+        function.block_offsets[3] = 12;
+        function.labels[0] = 1;
+        function.labels[1] = 2;
+        function.labels[2] = 1;
+        function.extra[0] = 0;
+        function.extra[1] = 9;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_SYMBOL_ADDR, IR_PTR, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_ICMP, IR_I1, 0, 3, IR_NE);
+        ir_test_instruction(&function, 5, IR_SELECT, IR_PTR, 4, 1, 2);
+        ir_test_instruction(&function, 6, IR_BR_INDIRECT, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_PHI, IR_I32, 0, 1, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 9, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 10, IR_CONST, IR_I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        // The phi's value is b0's: move b1's constant there.
+        ir_test_instruction(&function, 3, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 9, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.extra[1] = 3;
+        ir_test_pair(tally, &function, scratch, 0, true, "an indirect branch to its labels rejected");
+        IrCfg cfg = {
+            0
+        };
+        const uint64_t cfg_mark = memory->length;
+        const bool built = ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK;
+        ir_test_expect(tally, built && cfg.edge_count == 2 && cfg.successor_offsets[1] == 2 && cfg.successors[0] == 1 && cfg.successors[1] == 2 &&
+                                  cfg.predecessor_offsets[2] == 1 && cfg.predecessors[0] == 0 && cfg.predecessors[1] == 0,
+                       "an indirect branch's successors aren't its distinct label blocks in label order");
+        arena_pop_to(memory, cfg_mark);
+        ir_test_printer(tally, &function, memory, scratch);
+        function.labels[1] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, false, "an indirect branch with a label of no block accepted");
+        function.labels[1] = 3;
+        ir_test_pair(tally, &function, scratch, 0, false, "a label past the blocks accepted");
+        function.labels[1] = 2;
+        function.type[5] = IR_I64;
+        ir_test_pair(tally, &function, scratch, 0, false, "an indirect branch through an integer accepted");
+        function.type[5] = IR_PTR;
+        function.b[7] = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "a label's phi without the indirect branch's block accepted");
+        function.b[7] = 1;
+        uint32_t* labels = function.labels;
+        function.labels = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "labels without their column accepted");
+        function.labels = labels;
+        // Without its indirect branch, a label may have no block: no jump can reach it.
+        ir_test_instruction(&function, 6, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_CONST, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        function.labels[0] = BUSTER_IR_NONE;
+        function.labels[2] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, true, "a label of no block in a function without br_indirect rejected");
+    }
+    arena_pop_to(memory, mark);
+}
+
+// By-value aggregates' ABI records and a variadic definition's anchors (#131): an aggregate argument and parameter are
+// pointers, an aggregate result a call writes where its c operand points (a use of it), and the anchors are untyped,
+// address-taken slots of their sizes, one of each, in a variadic definition.
+static void ir_test_aggregates(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const IrSizes sizes = {
+        .instruction_count = 7,
+        .block_count = 1,
+        .extra_count = 1,
+        .slot_count = 3,
+        .call_count = 1,
+        .call_type_count = 1,
+        .parameter_count = 2,
+        .abi_call_count = 1,
+        .passed_count = 3,
+    };
+    IrFunction function = {
+        0
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "aggregate fixture allocation failed");
+    if (created)
+    {
+        function.result_type = IR_PTR;
+        function.symbol_count = 2;
+        function.parameter_types[0] = IR_PTR;
+        function.parameter_types[1] = IR_I64;
+        function.parameter_passed = 1;
+        function.result_size = 12;
+        function.result_abi = (AbiReturn){ .kind = BUSTER_ABI_RESULT_REGISTERS, .part_bytes = 8 };
+        function.variadic = true;
+        function.incoming = (AbiCall){ .stack_bytes = 8, .stack_alignment_log2 = 4, .integer_registers = 2 };
+        function.passed[0] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS }, .size = 12 };
+        function.passed[1] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS } };
+        function.passed[2] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_STACK }, .size = 16 };
+        function.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = 16, .stack_alignment_log2 = 4 }, .passed = 2, .result_size = 12 };
+        function.calls[0] = (IrCall){ .argument_first = 0, .argument_count = 1, .type_first = 0, .parameter_count = 1, .result_type = IR_VOID, .abi = 1 };
+        function.call_types[0] = IR_PTR;
+        function.extra[0] = 0;
+        function.slots[0] = (IrSlot){ .size = BUSTER_ABI_SAVE_AREA_BYTES, .alignment = 16, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_REGISTER_SAVE_AREA };
+        function.slots[1] = (IrSlot){ .size = 0, .alignment = 16, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_OVERFLOW_AREA };
+        function.slots[2] = (IrSlot){ .size = 12, .alignment = 4, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function.block_offsets[1] = 7;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_STACK_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 5, IR_CALL, IR_VOID, 1, 0, 4);
+        ir_test_instruction(&function, 6, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_pair(tally, &function, scratch, 0, true, "a call of aggregates in a variadic definition rejected");
+        IrUses uses = {
+            0
+        };
+        const uint64_t uses_mark = memory->length;
+        const bool built = ir_build_uses(&function, memory, scratch, &uses) == IR_OK;
+        ir_test_expect(tally, built && uses.use_count == 3 && uses.offsets[4] == 1 && uses.offsets[5] == 3 && uses.uses[1].instruction == 5 && uses.uses[1].operand == 2 &&
+                                  uses.uses[2].instruction == 6 && uses.uses[0].instruction == 5 && uses.uses[0].operand == 3,
+                       "a call's aggregate destination isn't a use of operand c");
+        arena_pop_to(memory, uses_mark);
+        ir_test_printer(tally, &function, memory, scratch);
+        function.calls[0].abi = 2;
+        ir_test_pair(tally, &function, scratch, 0, false, "a call's ABI records past the table accepted");
+        function.calls[0].abi = 1;
+        function.abi_calls[0].passed = 3;
+        ir_test_pair(tally, &function, scratch, 0, false, "a call's argument records past the table accepted");
+        function.abi_calls[0].passed = 2;
+        function.c[5] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, false, "an aggregate result without its destination accepted");
+        function.c[5] = 1;
+        ir_test_pair(tally, &function, scratch, 0, false, "an aggregate result into an integer accepted");
+        function.c[5] = 4;
+        function.abi_calls[0].result_size = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "a destination for a call without an aggregate result accepted");
+        function.abi_calls[0].result_size = 12;
+        function.extra[0] = 1;
+        function.call_types[0] = IR_I64;
+        ir_test_pair(tally, &function, scratch, 0, false, "an aggregate argument that isn't a pointer accepted");
+        function.extra[0] = 0;
+        function.call_types[0] = IR_PTR;
+        function.parameter_passed = 3;
+        ir_test_pair(tally, &function, scratch, 0, false, "the parameters' records past the table accepted");
+        function.parameter_passed = 1;
+        function.passed[1].size = 8;
+        ir_test_pair(tally, &function, scratch, 0, false, "an aggregate parameter that isn't a pointer accepted");
+        function.passed[1].size = 0;
+        function.parameter_passed = 0;
+        ir_test_pair(tally, &function, scratch, 0, false, "an aggregate result without the function's records accepted");
+        function.parameter_passed = 1;
+        function.variadic = false;
+        ir_test_pair(tally, &function, scratch, 0, false, "anchors outside a variadic definition accepted");
+        function.variadic = true;
+        function.slots[0].size = BUSTER_ABI_SAVE_AREA_BYTES - 8;
+        ir_test_pair(tally, &function, scratch, 0, false, "a register save area of another size accepted");
+        function.slots[0].size = BUSTER_ABI_SAVE_AREA_BYTES;
+        function.slots[0].type = IR_I64;
+        ir_test_pair(tally, &function, scratch, 0, false, "a typed register save area accepted");
+        function.slots[0].type = IR_VOID;
+        function.slots[1].flags = BUSTER_IR_SLOT_OVERFLOW_AREA;
+        ir_test_pair(tally, &function, scratch, 0, false, "an overflow area that isn't address-taken accepted");
+        function.slots[1].flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_OVERFLOW_AREA | BUSTER_IR_SLOT_REGISTER_SAVE_AREA;
+        ir_test_pair(tally, &function, scratch, 0, false, "a slot that is both anchors accepted");
+        function.slots[1].flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_REGISTER_SAVE_AREA;
+        function.slots[1].size = BUSTER_ABI_SAVE_AREA_BYTES;
+        ir_test_pair(tally, &function, scratch, 0, false, "two register save areas accepted");
+        function.slots[1] = (IrSlot){ .size = 0, .alignment = 8, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_OVERFLOW_AREA };
+        ir_test_pair(tally, &function, scratch, 0, false, "an overflow area aligned below 16 accepted");
+        function.slots[1].alignment = 16;
+        ir_test_pair(tally, &function, scratch, 0, true, "the restored aggregate fixture rejected");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_types(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
@@ -1423,6 +1625,8 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_switch(&tally, &memory, &scratch);
             ir_test_switch_collision_family(&tally, &memory, &scratch);
             ir_test_calls_memory(&tally, &memory, &scratch);
+            ir_test_labels(&tally, &memory, &scratch);
+            ir_test_aggregates(&tally, &memory, &scratch);
             ir_test_types(&tally, &memory, &scratch);
             ir_test_guards(&tally, &memory, &scratch);
             ir_test_dominance_tails(&tally, &memory, &scratch);
