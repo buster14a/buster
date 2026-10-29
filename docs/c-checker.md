@@ -1765,6 +1765,16 @@ What the lowering covers past scalars (#145's programs):
     immediate's predicate as clang's code for AVX-512 has them: VPCMP's or
     VPCMPU's opmask by the same predicate in its own numbering, then VPMOVM2's
     vector of it;
+  - XOP's own instructions, which clang's code has for every target: VFRCZ's
+    fractions (UNARY), the horizontal sums and differences of adjacent
+    elements into wider ones (`vphaddbw` to `vphaddudq`, `vphsubbw`,
+    `vphsubwd`, `vphsubdq`), the shifts by a vector of counts (`vpshab` to
+    `vpshlq`, BINARY's `swap`: the source in ModRM.rm and the counts in
+    VEX.vvvv, W0's forms, as LLVM emits them), and the multiply-accumulates
+    and VPPERM, whose third vector is the /is4 register (BLENDV's). No host of
+    the tests runs XOP, so `test-x86-intrinsics` compares the compiler's code
+    of their 42 intrinsics with clang -O0's, instruction by instruction
+    (below);
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -2631,6 +2641,62 @@ or fixtures were imported. `test-checker-driver` runs the original probes throug
 both checker schedules and, with `--executable`, both production command routes;
 it compares warning decisions, complete messages and presumed line/column pairs
 with Clang, and covers guarded classifier/interval tails and allocation failure.
+
+### Intrinsics no host runs (`test-x86-intrinsics`)
+
+```sh
+./build/compiler test-x86-intrinsics [--clang PATH] [--march CPU] [--executable PATH] [--cases FILE] [--print NAME] [--keep]
+```
+
+The executable programs check a builtin's lowering by running it, which XOP's
+instructions can't be: no host of the tests has XOP (Zen 5 has none).
+`test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
+code of their intrinsics with clang -O0's instead, as the values each
+instruction computes:
+
+- A source includes `<x86intrin.h>` and `<immintrin.h>` and takes each case's
+  address, so that each compiler compiles the case's `always_inline` definition
+  out of line, as `--lower-all` of `main.c` lowers the headers' definitions:
+  clang with `-O0 -march=znver5 -c` (`--march` names another CPU), this
+  executable (or `--executable`'s) by both paths, whose objects must be the
+  same bytes.
+- Each case's function in each object is decoded (`x86_64_disassembler.c`)
+  and followed from its entry. Every general register's, vector register's,
+  opmask's and stack byte's value is an expression of the arguments' bytes:
+  the argument registers (`g0` to `g5`, `v0` to `v7`) and stack slots (`s0`
+  on) at the entry, constants (the object's data, which relocations name), and
+  a node for each instruction that isn't a move, of its form (VEX's and EVEX's
+  encodings of one instruction are one), its immediate and its operands'
+  values, a masked one's a select of its mask, its value and what it keeps.
+  What an instruction reads and writes is its form's effects in
+  `x86_semantics.c`; a form without them fails the case and is listed. Moves,
+  pushes, pops and stack slots carry values, and the trace follows jumps in a
+  function and calls of the object's other functions (the compiler's code calls
+  the definitions clang inlines).
+- A case's result (its return register's bytes of the intrinsic's type) and
+  its stores through pointers must be the same expressions in both objects.
+- Controls: intrinsics that the executable programs run already, unmasked,
+  merged and zeroed (`_mm_add_epi32`, `_mm256_dpbusd_avx_epi32` and their masked
+  forms), and two XOP compares, whose code is AVX-512's, must agree too, and so
+  must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
+  a result stored through a pointer; and one intrinsic called with its two
+  operands in each order must give different expressions in each object.
+- The cases: the intrinsics of XOP's own instructions, 42 of them: VFRCZ's
+  fractions, the horizontal sums and differences, the multiply-accumulates,
+  VPPERM and the shifts by vectors of counts.
+
+The comparison is of the instructions' data flow, not of their meaning: code
+that computes the same values with other instructions differs, and a case would
+then need another check. Rules broken on purpose, a shift's source and counts
+swapped, a saturating multiply-accumulate for a wrapping one, an unsigned
+horizontal sum for a signed one and a packed fraction for a scalar one, each
+make their own case differ and no other.
+
+`--cases FILE` takes other cases, a line each: `X`, `Y` or `Z` for a vector
+result of 16, 32 or 64 bytes, `I` or `L` for an integer of 4 or 8, `V` for
+none, then the intrinsic's name. `--print NAME` prints each object's trace of a
+case, every record it followed with the value it made. The files are removed
+unless `--keep` or a failure.
 
 ## The constraint catalogue
 

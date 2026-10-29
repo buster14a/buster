@@ -706,7 +706,13 @@ Mutations of the tables, each built and run once, are caught. Among them:
   - the opmask registers: kmov (to and from general registers, memory and each
     other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck and kshiftl;
   - BMI's andn, bextr, bzhi, pdep and pext (their VEX forms), paddd (SSE2's,
-    the vector check's) and prefetchit0 and prefetchit1.
+    the vector check's) and prefetchit0 and prefetchit1;
+  - AMD's XOP (#136): vfrczps, vfrczpd, vfrczss and vfrczsd (whose scalar
+    forms zero the rest of the register), the shifts and rotates by a vector
+    of counts (vprot, vpshl and vpsha in b, w, d and q, both encodings) and
+    vprot by an immediate, the horizontal sums and differences into wider
+    elements (vphaddbw to vphaddudq, vphsubbw, vphsubwd and vphsubdq), the
+    multiply-accumulates (vpmacs and vpmadcs) and vpperm.
 
 The other VEX and EVEX forms are uncovered, and so are mulx (whose rdx the rows
 can't name, as Tier 0's rows refuse it), v4fmaddps (a register block), APX's
@@ -719,6 +725,9 @@ AVX512-FP16's forms, an extension the table doesn't classify, nor the VEX forms
 of AVX-IFMA and AVX-NE-CONVERT (vpmadd52luq's and vcvtneps2bf16's), features it
 has no bit for. Their rows follow their EVEX and single-precision twins' by
 rule, unexecuted. AVX512VP2INTERSECT's and AVX-VNNI's run on the 9700X alone.
+XOP's run on no host the tests have (Zen 5 has none), nor does the table
+classify them: `test-x86-intrinsics` compares the compiler's code of their
+intrinsics with clang's instead (`x86_intrinsics_test.c`).
 
 ## Adding a form
 
