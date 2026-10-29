@@ -15,11 +15,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 2
-      - name: Apply the reviewed patch to the pinned base on this scratch branch only
+      - name: Apply the reviewed patch to the pinned files on this scratch branch only
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
+          test "$(git hash-object src/buster/compiler/c_checker_driver.c)" = 98a555840be182141620f19bcb848ef34306e335
+          test "$(git hash-object src/buster/compiler/c_checker_driver_test.c)" = f06be7d05cff2f3de94f24b240ddc9f3bc20690c
           cat > "$RUNNER_TEMP/pic.patch" <<'PATCH'
           diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
           --- a/src/buster/compiler/c_checker_driver.c
@@ -49,7 +50,7 @@ jobs:
           diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
           --- a/src/buster/compiler/c_checker_driver_test.c
           +++ b/src/buster/compiler/c_checker_driver_test.c
-          @@ -1,3 +1,6 @@
+          @@ -2000,3 +2000,6 @@
           +#include "c_check_pic_driver_test.c"
           +
            // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
@@ -57,8 +58,8 @@ jobs:
            {
           +    check_test_driver_pic(test, executable, directory);
           PATCH
-          git apply --recount --check "$RUNNER_TEMP/pic.patch"
-          git apply --recount "$RUNNER_TEMP/pic.patch"
+          git apply --recount --unidiff-zero --check "$RUNNER_TEMP/pic.patch"
+          git apply --recount --unidiff-zero "$RUNNER_TEMP/pic.patch"
           git diff --check
           git add src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_driver_test.c
           git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'Apply PIC driver rejection and register regressions'
