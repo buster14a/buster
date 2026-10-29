@@ -1974,6 +1974,14 @@ static void check_test_driver_identification(CheckTest* test, const char* execut
                           "information actions take precedence over implicit assembly compilation");
         free(text);
     }
+    char missing_assembly[256];
+    snprintf(missing_assembly, sizeof(missing_assembly), "%s/missing.s", directory);
+    char* const assembly_operand[] = { compiler, "-c", "-o", "--version", missing_assembly, NULL };
+    text = NULL;
+    const int operand_status = made ? check_test_driver_spawn_stream(assembly_operand, &text, true) : -1;
+    check_test_expect(test, operand_status != 0 && text != NULL && text[0] == 0,
+                      "an assembly output named --version does not select compiler identification");
+    free(text);
     unlink(object);
     unlink(source);
 }
