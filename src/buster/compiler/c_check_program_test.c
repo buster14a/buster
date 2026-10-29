@@ -3859,7 +3859,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // _BitInts past 128 bits (#137): frame objects of their 64-bit limbs, of 129 to 2,100 bits (whose copies past 256
     // bytes call memmove), signed and unsigned: every operation a limb at a time, libgcc's __mulbitint3 and
     // __divmodbitint4 for products, quotients and remainders, shifts by constant and variable counts of other types (a
-    // _BitInt's past 128 bits among them), compares of the top limbs signed or not, conversions to and from the
+    // _BitInt's past 128 bits among them), compares of the top limbs signed or not, counts of shifts of narrower values, conversions to and from the
     // integers of every width, _Bool and the floating types (libgcc's __floatbitint* and __fix*bitint), between widths,
     // compound assignments (of real and complex floating values too, computed in their types and converted back),
     // increments, zero-initialized globals, members and arrays, and calls passing and returning them in memory, va_arg
@@ -3902,6 +3902,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "S200 fa=b;fa+=2.5;fa*=1.5f;fa-=(long double)n*1e30L;fa/=-3.0;U256 fu=(U256)v;fu+=(__float128)n*1e40;fu*=(__float128)0.5;S200 fr=(fa-=0.25);\n"
         "FOLD(fa,200);FOLD(fu,256);FOLD(fr,200);S200 fz=b;fz+=1.5+2.0i;fz*=2.0-1.0i;U256 fv=(U256)v;fv-=(_Complex long double)(1e30L+3.0iL);\n"
         "FOLD(fz,200);FOLD(fv,256);\n"
+        "int sh=7<<(S200)(n&15);unsigned long shl=(unsigned long)(n+3);shl<<=(U2100)(n&31);unsigned _BitInt(100) shb=(unsigned _BitInt(100))(n+3)<<(S256)(n&63);\n"
+        "unsigned __int128 shq=(unsigned __int128)~0u>>(U129)(n&127);h+=(unsigned long)sh*3+shl*5;FOLD(shb,100);h=fold(h,&shq,16,128);\n"
         "int k=5;k+=b;k/=7;long m2=3;m2-=w;m2=(long)(m2%1000);_Bool flag=0;flag|=(_Bool)(w!=0);h+=(unsigned long)k*7+(unsigned long)m2*11+flag;\n"
         "FOLD(add(a,b),200);FOLD(mix(n,p,2.5,-7,p+1,'x'),129);FOLD(sum(3,w,x,w),256);\n"
         "struct P sp={'q',a,{p,p+3}};struct P rp=pass(sp,n);FOLD(rp.v,200);FOLD(rp.w[1],129);U129 arr[3]={p,p*2,p*3};FOLD(arr[n&1?1:2],129);\n"

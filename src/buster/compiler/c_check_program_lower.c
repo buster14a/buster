@@ -4919,12 +4919,18 @@ static void check_lower_operation(CheckLowerWriter* writer, uint8_t kind, uint8_
 }
 
 // A shift's count, which Tier 0 takes of a class I8 to U64: a 128-bit one converted to U64 after it (a count of 128 or
-// more is undefined, so its low 64 bits keep every defined one), as an instruction pushed before the count's operand.
+// more is undefined, so its low 64 bits keep every defined one), and a _BitInt's past 128 bits, its limbs' address, its
+// low limb loaded, for the same reason; as an instruction pushed before the count's operand.
 static void check_lower_count(CheckLowerWriter* writer, uint8_t kind, TypeId count)
 {
-    if ((kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR) && check_lower_wide(writer, count))
+    const bool shift = kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR;
+    if (shift && check_lower_wide(writer, count))
     {
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else if (shift && check_lower_limb_value(writer, count))
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
     }
 }
 
