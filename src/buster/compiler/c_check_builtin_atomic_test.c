@@ -623,30 +623,17 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
 
 static bool check_builtin_atomic_test_warning_oracle(const char* clang, const char* path, const char* warning, bool* rejected)
 {
-    // parse_test_clang deliberately passes -w. Clang suppresses warnings even after -Werror there, so use a
-    // separate direct syntax-only child for this diagnostic check rather than report a falsely passing oracle.
+    // Keep diagnostic policy exact: parse_test_clang supplies -w and cannot serve this oracle.
     char* arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", (char*)warning, (char*)path, NULL };
-    posix_spawn_file_actions_t actions;
-    bool ready = posix_spawn_file_actions_init(&actions) == 0;
-    if (ready)
-    {
-        ready = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0 &&
-                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0;
-        pid_t child = -1;
-        ready = ready && posix_spawnp(&child, clang, &actions, NULL, arguments, environ) == 0;
-        if (ready)
-        {
-            int status = 0;
-            pid_t waited;
-            do
-            {
-                waited = waitpid(child, &status, 0);
-            } while (waited < 0 && errno == EINTR);
-            ready = waited == child && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
-            *rejected = ready && WEXITSTATUS(status) == 1;
-        }
-        posix_spawn_file_actions_destroy(&actions);
-    }
+    OracleRun run = {
+        .purpose = "checker atomic warning oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, 0, 0);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
     return ready;
 }
 
@@ -870,6 +857,7 @@ static void check_builtin_atomic_test_c11(CheckBuiltinAtomicTest* test, TypeTabl
 
 static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinAtomicTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -905,5 +893,7 @@ static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char
         check_builtin_atomic_test_pointer_oracle(&test, clang);
     }
     printf("test-check-builtins-atomic: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-atomic");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }

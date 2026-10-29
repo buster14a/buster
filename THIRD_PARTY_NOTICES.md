@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The canonical foreign-name permutation and its original C/assembly/property
+fixtures in `foreign_order.c` and `foreign_order_test.c` (#734) use the project
+default terms. The radix kernel follows this project's original
+`c_bindings_sort` count/place/fill design. System C compilers, the ELF loader
+and linkers are external test tools; no external implementation or corpus
+fixture is incorporated.
+
 The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
 (`c_check_program_atomic.c`) and the added semantic, native and static-data
 fixtures (#671) are original project material under the default terms. Exact
