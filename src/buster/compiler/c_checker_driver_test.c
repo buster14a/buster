@@ -2928,10 +2928,12 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
     }
 }
 
-// The lines of `text` that hold an error, each from its path's end on (`path` itself cut), joined in their order.
-static void check_test_driver_error_lines(const char* text, const char* path, char* lines, size_t capacity)
+// The lines of `text` that hold an error, each from its path's end on (`path` itself cut), joined in their order. Returns
+// false if one had no room in `capacity`.
+static bool check_test_driver_error_lines(const char* text, const char* path, char* lines, size_t capacity)
 {
     size_t used = 0;
+    bool room = true;
     lines[0] = 0;
     for (const char* at = text != NULL ? text : ""; *at != 0;)
     {
@@ -2940,6 +2942,7 @@ static void check_test_driver_error_lines(const char* text, const char* path, ch
         const char* error = memmem(at, length, ": error: ", 9);
         const size_t path_length = strlen(path);
         const bool own = length > path_length && memcmp(at, path, path_length) == 0;
+        room &= error == NULL || used + length + 2 < capacity;
         if (error != NULL && used + length + 2 < capacity)
         {
             const size_t skip = own ? path_length : 0;
@@ -2950,6 +2953,7 @@ static void check_test_driver_error_lines(const char* text, const char* path, ch
         }
         at = end != NULL ? end + 1 : at + length;
     }
+    return room;
 }
 
 // #775: every error of the code-generation check, in order, must be clang -c's, which reports them all (without
@@ -2986,7 +2990,6 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
     {
         char source[192];
         char object[192];
-        char description[2048];
         snprintf(source, sizeof(source), "%s/target-feature-errors-%u.c", directory, i);
         snprintf(object, sizeof(object), "%s/target-feature-errors-%u.o", directory, i);
         const bool written = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
@@ -2997,13 +3000,14 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         char* ours_text = NULL;
         const int theirs_status = written ? check_test_driver_spawn(theirs_arguments, &theirs_text) : -1;
         const int ours_status = written ? check_test_driver_spawn(ours_arguments, &ours_text) : -1;
-        char theirs[1024];
-        char ours[1024];
-        check_test_driver_error_lines(theirs_text, source, theirs, sizeof(theirs));
-        check_test_driver_error_lines(ours_text, source, ours, sizeof(ours));
-        snprintf(description, sizeof(description), "%s: -c's errors are clang -c's (status %d and %d)\n-c's:\n%sclang's:\n%s", fixtures[i].name, ours_status,
-                 theirs_status, ours, theirs);
-        check_test_expect(test, written && theirs_status == 1 && ours_status == 1 && theirs[0] != 0 && strcmp(ours, theirs) == 0, description);
+        static char theirs[16384];
+        static char ours[16384];
+        static char description[2 * 16384 + 512];
+        const bool theirs_whole = check_test_driver_error_lines(theirs_text, source, theirs, sizeof(theirs));
+        const bool ours_whole = check_test_driver_error_lines(ours_text, source, ours, sizeof(ours));
+        snprintf(description, sizeof(description), "%s: -c's errors are clang -c's, every line of both read (status %d and %d)\n-c's:\n%sclang's:\n%s",
+                 fixtures[i].name, ours_status, theirs_status, ours, theirs);
+        check_test_expect(test, written && theirs_whole && ours_whole && theirs_status == 1 && ours_status == 1 && theirs[0] != 0 && strcmp(ours, theirs) == 0, description);
         free(theirs_text);
         free(ours_text);
         unlink(object);
