@@ -5181,7 +5181,8 @@ static uint8_t x86_legacy_map(const X86FormDescription* form)
 // The encoder's state that its initialization writes (these properties, and the templates below): main.c's units share
 // it, as they share lane.c's thread context, the driver's unit's, since a command's code runs in more than one of them
 // (main.c): test-ir-source's emission encodes in the checker's unit, and its IR adapter's tier0_validate reads the forms'
-// templates in the backend's (#784). A unit of its own, a benchmark's, has its own.
+// templates in the backend's (#784). A unit of its own, a benchmark's, has its own. x86_semantics.c's tables take the
+// same linkage.
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 #define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
 #elif defined(BUSTER_UNIT)
