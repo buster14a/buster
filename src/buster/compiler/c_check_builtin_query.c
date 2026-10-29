@@ -257,7 +257,9 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
 {
     *output = (CheckBuiltinQueryResult){ 0 };
     const bool constant = input->id == CBUILTIN_CONSTANT_P;
-    const bool object_size = input->id == CBUILTIN_OBJECT_SIZE;
+    // Dynamic queries reuse certified static bounds where available, otherwise the documented unknown sentinel.
+    // No dynamic allocation/VLA extent is inferred from a pointer's type or from an unevaluated side effect.
+    const bool object_size = input->id == CBUILTIN_OBJECT_SIZE || input->id == CBUILTIN_DYNAMIC_OBJECT_SIZE;
     const uint32_t expected = constant ? 1 : 2;
     if (!constant && !object_size)
     {
