@@ -942,7 +942,8 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
     return valid;
 }
 
-// Removes the build's directory and forgets what it held: run after the last program of a section.
+// Removes the build's directory and forgets what it held: run after the last program of a section, and once the
+// run's sections are done (run_checker_tests), so that no mode leaves the directory behind.
 static void check_test_program_build_release(void)
 {
     CheckTestProgramBuild* build = &check_test_program_build;
