@@ -829,7 +829,7 @@ static void asm_test_code(AsmTest* test)
     asm_test_code_pair(test, "  # a comment, %eax\n\n", 0, "inline code: a comment alone");
     // The newly admitted processor-state instructions, each a record.
     asm_test_code_pair(test, "cpuid\nxgetbv\nxchgq %rbx,%rsi\nfnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\npcmpeqd %xmm1,%xmm2\n"
-                             "bswapl %eax\nbswapq %r9", 12,
+                             "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
                        "inline code: processor-state instructions");
     // Symbols the source doesn't define: references by name, a call's preemptible, the records marked.
     const AsmCode symbols = asm_test_code_pair(test, "call external\n\tmovq data+8(%rip), %rax\n\tmovl $sym+4, %eax", 3, "inline code: references");
@@ -1392,7 +1392,8 @@ static int run_assembler_tests(int count, char** arguments)
                 // The processor-state instructions C's inline assembly reaches (#147).
                 asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"
                                        "fnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\n"
-                                       "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n", directory, X86_ARCH_V3);
+                                       "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n"
+                                       "fxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)\nfxsave (%r12,%rcx,4)\nfxrstor64 (%r13)\n", directory, X86_ARCH_V3);
                 // And naked functions' (#147): SSE2's movq, the x87's loads and stores, the string instructions, the flags,
                 // and AVX-512's 64-bit element moves.
                 asm_test_oracle(&test, ".text\nnaked: movq 56(%r12),%xmm0\nmovq %xmm1,160(%r12)\nmovq %rax,%xmm2\nmovq %xmm3,%rcx\nmovq %xmm4,%xmm5\n"
