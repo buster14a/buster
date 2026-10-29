@@ -1216,6 +1216,79 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     CheckLiteral hexadecimal = { 0 };
     check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch, &hexadecimal);
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
+    // Bit-precise constants (#768): C23's wb and WB, alone or with u or U before or after them, in each radix and with
+    // digit separators, as the widths and values clang 23 gives them (each checked there by _Generic), a width past 128
+    // bits and a value past them (UINT32_MAX), which the reader refuses by name; and the spellings C23 doesn't have,
+    // with the imaginary one, which clang takes as a _Complex _BitInt it doesn't let a program spell and GCC refuses.
+    const struct
+    {
+        const char* spelling;
+        uint32_t width;
+        bool is_unsigned;
+        uint64_t high;
+        uint64_t low;
+    } bit_precise[] =
+    {
+        { "0wb", 2, false, 0, 0 },
+        { "1wb", 2, false, 0, 1 },
+        { "2WB", 3, false, 0, 2 },
+        { "0uwb", 1, true, 0, 0 },
+        { "1Uwb", 1, true, 0, 1 },
+        { "5uWB", 3, true, 0, 5 },
+        { "5wbu", 3, true, 0, 5 },
+        { "5WBU", 3, true, 0, 5 },
+        { "0777wb", 10, false, 0, 511 },
+        { "0b1010'1010wb", 9, false, 0, 170 },
+        { "0x7fff'ffff'ffff'ffffwb", 64, false, 0, INT64_MAX },
+        { "0x8000000000000000wb", 65, false, 0, UINT64_C(0x8000000000000000) },
+        { "0xffffffffffffffffuwb", 64, true, 0, UINT64_MAX },
+        { "18446744073709551616wb", 66, false, 1, 0 },
+        { "0x1'0000'0000'0000'0000uwb", 65, true, 1, 0 },
+        { "0x7fffffffffffffffffffffffffffffffwb", 128, false, INT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffuwb", 128, true, UINT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffwb", 129, false, UINT64_MAX, UINT64_MAX },
+        { "340282366920938463463374607431768211456uwb", UINT32_MAX, true, 0, 0 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)bit_precise[i].spelling, (uint32_t)strlen(bit_precise[i].spelling), scratch, &literal);
+        const unsigned __int128 value = (unsigned __int128)bit_precise[i].high << 64 | bit_precise[i].low;
+        char description[160];
+        snprintf(description, sizeof(description), "%s is a bit-precise constant of %u bits with clang's value", bit_precise[i].spelling, bit_precise[i].width);
+        check_test_expect(test, literal.valid && literal.type == 0 && literal.bit_width == bit_precise[i].width && literal.bit_unsigned == bit_precise[i].is_unsigned &&
+                                (bit_precise[i].width == UINT32_MAX || ((unsigned __int128)literal.high << 64 | literal.integer) == value) && !literal.imaginary &&
+                                scratch->length == mark,
+                          description);
+    }
+    const char* invalid_bit_precise[] =
+    {
+        "5wB",
+        "5Wb",
+        "5uwbu",
+        "5UwbU",
+        "5wbl",
+        "5lwb",
+        "5llwb",
+        "5wbll",
+        "5wbwb",
+        "5wbi",
+        "5iwb",
+        "5w",
+        "5b",
+        "5uw",
+        "0b2wb",
+        "09wb",
+        "5'wb",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)invalid_bit_precise[i], (uint32_t)strlen(invalid_bit_precise[i]), scratch, &literal);
+        char description[128];
+        snprintf(description, sizeof(description), "%s is no constant C23 has, as clang has it", invalid_bit_precise[i]);
+        check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark, description);
+    }
 }
 
 static __attribute__((noinline)) void check_test_action_oracles(CheckTest* test, const char* clang)
@@ -2039,6 +2112,8 @@ struct CheckSourceFixture
     bool undecided;
     // The type table's room, for a fixture larger than check_test_types_open's; null for that.
     const TypeCapacity* capacity;
+    // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
+    double* check_seconds;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -2135,7 +2210,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         lines[p] = outcome.line;
         if (!rejected[p])
         {
+            struct timespec reader_start;
+            struct timespec reader_stop;
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_start);
+            }
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_stop);
+                *fixture->check_seconds += (double)(reader_stop.tv_sec - reader_start.tv_sec) + (double)(reader_stop.tv_nsec - reader_start.tv_nsec) * 1e-9;
+            }
             if (adapted || input[p].diagnostic_graph)
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
@@ -2161,7 +2247,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 const CheckInputReport* report = &input[p].reports[i];
                 const uint32_t source = check_diagnostic_input_report_source(&input[p], &parsers[p], report);
                 first = source < first ? source : first;
-                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED;
+                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED || report->message == CHECK_INPUT_WIDE_LITERAL;
             }
             if (adapted)
             {
@@ -2169,7 +2255,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     .scalar = p == 0,
                     .verify = true
                 };
+                struct timespec start;
+                struct timespec stop;
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &start);
+                }
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &stop);
+                    *fixture->check_seconds += (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9;
+                }
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
@@ -3391,6 +3488,41 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // C23's bit-precise constants (#768): their types and values, in each radix, with digit separators and in each
+            // order and case of their suffixes, past 64 bits too.
+            "bit-precise constants",
+            "_Static_assert(_Generic(0wb, _BitInt(2): 1, default: 0) && _Generic(1wb, _BitInt(2): 1, default: 0) && _Generic(2WB, _BitInt(3): 1, default: 0), \"s\");\n"
+            "_Static_assert(_Generic(0uwb, unsigned _BitInt(1): 1, default: 0) && _Generic(5Uwb, unsigned _BitInt(3): 1, default: 0), \"u\");\n"
+            "_Static_assert(_Generic(5wbU, unsigned _BitInt(3): 1, default: 0) && _Generic(5WBu, unsigned _BitInt(3): 1, default: 0) && 5uWB == 5, \"o\");\n"
+            "_Static_assert(_Generic(0777wb, _BitInt(10): 1, default: 0) && _Generic(0b1010'1010wb, _BitInt(9): 1, default: 0) && 0777wb == 511, \"r\");\n"
+            "_Static_assert(_Generic(0x8000'0000'0000'0000wb, _BitInt(65): 1, default: 0) && _Generic(0xffffffffffffffffuwb, unsigned _BitInt(64): 1, default: 0), \"x\");\n"
+            "_Static_assert(_Generic(18446744073709551616wb, _BitInt(66): 1, default: 0) && 18446744073709551616wb == (_BitInt(66))1 << 64, \"w\");\n"
+            "_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffuwb, unsigned _BitInt(128): 1, default: 0) &&\n"
+            "               0xffffffffffffffffffffffffffffffffuwb == (unsigned _BitInt(128))-1, \"m\");\n"
+            "_Static_assert(_Generic(0x7fffffffffffffffffffffffffffffffwb, _BitInt(128): 1, default: 0) && -1wb < 0 && _Generic(-1wb, _BitInt(2): 1, default: 0), \"n\");\n"
+            "unsigned _BitInt(100) a = 0xf'ffff'ffff'ffff'ffff'ffff'ffffuwb;\nint f(void) { return (int)(a >> 90) + (int)0x1ffffffffffffffffuwb; }\n",
+            false,
+            false,
+            false,
+            2023
+        },
+        {
+            "a bit-precise constant past 128 bits refused",
+            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n",
+            true,
+            true,
+            false,
+            2023
+        },
+        {
+            "a bit-precise suffix of mixed case",
+            "int a;\n_BitInt(8) b = 5wB;\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
             "no_builtin on definitions",
             "__attribute__((no_builtin(\"memset\"))) void f(void) {}\n__attribute__((no_builtin)) void g(void) {}\n__attribute__((no_builtin(\"memset\", \"memcpy\"))) void h(void) {}\n__attribute__((no_builtin(\"not_a_builtin\"))) void k(void) {}\nint x __attribute__((no_builtin(\"memset\")));\n",
             false,
@@ -3521,6 +3653,47 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(2147483648)\n while (n--) s += 1; return s; }\n",
             true,
             false
+        },
+        {
+            // #830's review: a bit-precise pack value's low 64 bits alone made 0x10000000000000001uwb an alignment of 1, and
+            // one past 128 bits wrapped to its low bits. clang ignores both, with its alignment warning, and takes small ones.
+            "a pack pragma's bit-precise values: small ones apply, past 64 and past 128 bits ignored",
+            "#pragma pack(push, 8uwb)\nstruct A { char c; double d; };\n#pragma pack(pop)\n"
+            "#pragma pack(push, 2wb)\nstruct B { char c; int i; };\n#pragma pack(pop)\n"
+            "#pragma pack(4)\n#pragma pack(0x10000000000000001uwb)\nstruct C { char c; double d; };\n"
+            "#pragma pack(0x1000000000000000000000000000000001uwb)\nstruct D { char c; double d; };\n#pragma pack()\n"
+            "_Static_assert(sizeof(struct A) == 16 && sizeof(struct B) == 6, \"small values apply\");\n"
+            "_Static_assert(sizeof(struct C) == 12 && sizeof(struct D) == 12, \"wide values leave pack(4)\");\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            // #830's review: a bit-precise count is its value, accepted where it is an int's and refused past 64 bits and
+            // past 128 bits, whatever its low bits.
+            "a loop hint's bit-precise counts accepted",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(4uwb) interleave_count(2wb)\n while (n--) s += 1; return s; }\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 64 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0x10000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 128 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count(0x1000000000000000000000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
         },
         {
             "a loop hint's floating count refused",
@@ -4378,19 +4551,15 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
                     .name = name,
                     .source = (const char*)text.base,
                     .capacity = &capacity,
+                    .check_seconds = timing ? &seconds[c - 1] : NULL,
                 };
-                struct timespec start;
-                struct timespec stop;
-                clock_gettime(CLOCK_MONOTONIC, &start);
                 check_test_source(test, &fixture, path, &outcome);
-                clock_gettime(CLOCK_MONOTONIC, &stop);
-                seconds[timing ? c - 1 : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : seconds[0];
             }
             unlink(path);
             arena_release(&text);
         }
         char description[200];
-        snprintf(description, sizeof(description), "%s: %u checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
+        snprintf(description, sizeof(description), "%s: %u read and checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
                  timed[form] / 10, seconds[0]);
         check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
         printf("test-checker: %s\n", description);
@@ -4800,6 +4969,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
+        // The program harness's build directory, which the sections' programs share: removed after the last of them,
+        // whichever sections ran.
+        check_test_program_build_release();
         check_test_types_close(&types);
     }
     oracle_cache_report(oracle, "test-checker");

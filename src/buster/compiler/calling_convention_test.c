@@ -2554,6 +2554,15 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         L,
         L,
+        // 216: long x6, struct aligned(16) {long}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        aligned16,
+        L,
     };
     const AbiTestLocation expected[] = {
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
@@ -2769,13 +2778,14 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
-        // 194: the hidden result in rdi; the struct an i64 at stack 0 and the following long at 8.
+        // 194: the hidden result in rdi; the struct an i64 at stack 0, its low eightbyte alone (LOW), and the following long
+        // at 8.
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, BUSTER_ABI_FLAG_LOW, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
         // 201: as 151.
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
@@ -2795,6 +2805,15 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        // 216: clang's count at 0, a copy of the struct, its 16 bytes in a slot of its own (not LOW), the long at 16.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 16 },
     };
     const uint32_t counts[] = {
         7,
@@ -2830,6 +2849,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
+        8,
     };
     const uint32_t named[] = {
         7,
@@ -2865,6 +2885,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
+        8,
     };
     const TypeId results[] = {
         BUSTER_TYPE_VOID,
@@ -2900,8 +2921,10 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         bools1024,
         BUSTER_TYPE_VOID,
         bits513,
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
+        0,
         0,
         0,
         0,
@@ -3673,9 +3696,12 @@ struct AbiTestWorld
     // A clang world without _Atomics of types of no size, the roots of every LARGER type, so that the levels don't make
     // every record wait for its members (abi_classify_levels' `all`) and only their own waits keep them right.
     bool rootless;
-    // A world of what this compiler's C passes (#137): integers of up to 64 bits, enums, pointers, float, double, and
-    // the records and aligned typedefs made of them; our side of its cross-check is C that this compiler compiles.
+    // A world of what this compiler's C passes (#137, abi_test_compiled_passes), and the records and aligned typedefs made
+    // of it; our side of its cross-check is C that this compiler compiles.
     bool compiled;
+    // A compiled world for x86-64-v4, whose C passes vectors too: those of 16, 32 and 64 bytes the producer takes (#717),
+    // which need AVX-512F and AVX-512VL.
+    bool vectors;
 };
 
 static void abi_test_world_add(AbiTestWorld* world, TypeId type)
@@ -3931,6 +3957,63 @@ static uint32_t abi_test_world_directed(AbiTestWorld* world, TypeId* directed)
     return count;
 }
 
+// The record a compiled clang world's directed signatures pass (#137): a union of 16 bytes whose high eightbyte is padding,
+// an int beside an empty struct aligned to 16, which clang passes as its low eightbyte alone, an i64, once the uncounted
+// nullptr_t before it leaves clang's count a general register that LLVM has used: in one 8-byte slot, the next argument's
+// after it (a stack copy of 16 bytes would run into that slot). Returns how many it made into `directed`.
+static uint32_t abi_test_world_directed_compiled(AbiTestWorld* world, TypeId* directed)
+{
+    TypeTable* table = &world->types.test.table;
+    uint32_t count = 0;
+    TypeMember none[1];
+    const TypeId empty = type_tag(table, BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
+    if (empty != 0 && type_complete_record(table, empty, none, 0, (TypeRecordAttributes){ 0 }))
+    {
+        type_test_world_completed(&world->types, empty);
+        const TypeId aligned = type_aligned(table, empty, 4);
+        TypeMember members[2] = {
+            type_test_member(type_test_new_name(&world->types), BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+            type_test_member(type_test_new_name(&world->types), aligned, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        const TypeId record = aligned != 0 ? type_tag(table, BUSTER_TYPE_KIND_UNION, type_test_new_name(&world->types)) : 0;
+        if (record != 0 && type_complete_record(table, record, members, 2, (TypeRecordAttributes){ 0 }))
+        {
+            type_test_world_completed(&world->types, record);
+            abi_test_world_add(world, record);
+            directed[count] = record;
+            count += 1;
+        }
+    }
+    table->last_error = TYPE_ERROR_NONE;
+    return count;
+}
+
+// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), and its integer and floating depths
+// (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS), within which a compiled world's calls with
+// memory-class values keep (abi_test_cross_signatures). tier0_test.c, which main.c includes after tier0.c and this file,
+// checks them.
+#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
+#define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
+#define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
+
+// Whether a compiled world makes an _Atomic of `base`: an integer of up to 8 bytes (not a _BitInt, which clang doesn't
+// make atomic), an enum, a pointer, a float or a double, a struct or a union, which this compiler's C loads and stores
+// atomically (#720: inline at 1, 2, 4, 8 and 16 bytes aligned to them, through libatomic otherwise). The signatures pass
+// them as the record runs do: themselves, as named arguments and results, records holding them and aligned typedefs of
+// them.
+static bool abi_test_compiled_atomic(const TypeTable* table, TypeId base)
+{
+    const uint32_t resolved = abi_resolved_index(table, base);
+    const uint8_t kind = table->types.kind[resolved];
+    const uint8_t code = table->types.code[resolved];
+    const uint64_t size = table->types.size[resolved];
+    const bool integer = kind == BUSTER_TYPE_KIND_INTEGER && size <= 8 && code != BUSTER_TYPE_CODE_BOOL;
+    const bool floating = kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_DOUBLE);
+    const bool record = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && size != 0;
+    return (integer || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER || floating || record) &&
+           type_alignment_log2(table, base) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
+}
+
 static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t count)
 {
     uint64_t random = seed;
@@ -3947,9 +4030,12 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool valid = type_is_valid(table, builtin);
         const bool complex_floating = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
                                       code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE;
+        // GNU's complex integer types, those of __int128 too (in clang's worlds here: the types' random terms make them in
+        // GCC's, both spelled through the usual arithmetic conversions, as clang can't spell them otherwise).
+        const bool complex_integer = code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
                                                              builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
-                                                             complex_floating));
+                                                             builtin == BUSTER_TYPE_FLOAT128 || complex_floating || complex_integer));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -3982,10 +4068,26 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         200,
         256,
     };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths) && !world->compiled; i += 1)
+    // (A compiled world's of up to 128 bits, which the producer lowers in the classes of 8 to 64 bits (#534) and in the
+    // 128-bit ones.)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths) && (!world->compiled || widths[i] <= 128); i += 1)
     {
         abi_test_world_add(world, type_bit_int(table, widths[i], false));
         abi_test_world_add(world, type_bit_int(table, widths[i], true));
+    }
+    // A compiled clang world's complex _BitInts, which the usual arithmetic conversions make (#137): clang spells each as
+    // the type of a _Complex char and its element (type_test_write_types), which a width past char's keeps.
+    const uint32_t complex_widths[] = {
+        13,
+        40,
+        65,
+        100,
+        128,
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(complex_widths) && world->compiled && !world->gcc; i += 1)
+    {
+        abi_test_world_add(world, type_complex(table, type_bit_int(table, complex_widths[i], false)));
+        abi_test_world_add(world, type_complex(table, type_bit_int(table, complex_widths[i], true)));
     }
     const TypeId elements[] = {
         BUSTER_TYPE_CHAR,
@@ -3998,10 +4100,11 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         BUSTER_TYPE_FLOAT16,
         BUSTER_TYPE_INT128,
     };
-    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements) && !world->compiled; e += 1)
+    // (A vector compiled world's of 16, 32 and 64 bytes, the producer's VECTOR values.)
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements) && (!world->compiled || world->vectors); e += 1)
     {
         const bool floating = type_kind(table, elements[e]) == BUSTER_TYPE_KIND_FLOATING;
-        for (uint64_t bytes = 2; bytes <= 64; bytes *= 2)
+        for (uint64_t bytes = world->compiled ? 16 : 2; bytes <= 64; bytes *= 2)
         {
             const bool gcc_divergent = (floating && bytes <= 4) || (elements[e] == BUSTER_TYPE_INT128 && bytes == 16);
             if (bytes >= type_size(table, elements[e]) && !(world->gcc && gcc_divergent))
@@ -4009,6 +4112,25 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
                 abi_test_world_add(world, type_vector_size(table, elements[e], bytes));
                 table->last_error = TYPE_ERROR_NONE;
             }
+        }
+    }
+    if (!world->gcc && world->vectors)
+    {
+        // clang's extended vectors of 3 elements, 16 bytes, and of lengths that aren't a power of two, of 32 and 64 bytes.
+        const uint32_t extended[][2] = {
+            { BUSTER_TYPE_FLOAT, 3 },
+            { BUSTER_TYPE_INT, 3 },
+            { BUSTER_TYPE_FLOAT, 5 },
+            { BUSTER_TYPE_FLOAT, 9 },
+            { BUSTER_TYPE_DOUBLE, 3 },
+            { BUSTER_TYPE_DOUBLE, 5 },
+            { BUSTER_TYPE_LONG, 3 },
+            { BUSTER_TYPE_SHORT, 9 },
+            { BUSTER_TYPE_CHAR, 17 },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(extended); i += 1)
+        {
+            abi_test_world_add(world, type_vector(table, extended[i][0], extended[i][1], true));
         }
     }
     if (!world->gcc && !world->compiled)
@@ -4132,17 +4254,18 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             abi_test_world_add(world, world->gcc && gcc_divergent ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
             table->last_error = TYPE_ERROR_NONE;
         }
-        else if (pick < 13 && !world->gcc && !world->compiled)
+        else if (pick < 13 && !world->gcc)
         {
             // Of a type of no size too, whose LLVM type is larger (LARGER: _Atomic(struct { __int128 x[0]; }) is 16 bytes
             // to LLVM), and of an ext_vector_type, which LLVM may split into its elements (UNSUPPORTED: an _Atomic <5 x
-            // i8> is five i8s, a general register each).
+            // i8> is five i8s, a general register each); in a compiled world, of what abi_test_compiled_atomic takes.
             const TypeId base = abi_test_world_pick(world, &random, true);
             const bool root = table->types.size[abi_resolved_index(table, base)] == 0;
-            abi_test_world_add(world, world->rootless && root ? 0 : type_atomic(table, type_unqualified(base)));
+            const bool refused = (world->rootless && root) || (world->compiled && !abi_test_compiled_atomic(table, base));
+            abi_test_world_add(world, refused ? 0 : type_atomic(table, type_unqualified(base)));
             table->last_error = TYPE_ERROR_NONE;
         }
-        else if (pick < 14 || world->compiled)
+        else if (pick < 14 || (world->compiled && !world->vectors))
         {
             abi_test_world_add(world, type_pointer(table, abi_test_world_pick(world, &random, false)));
         }
@@ -4475,26 +4598,55 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
            kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && !half;
 }
 
-// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2; tier0_test.c, which main.c includes
-// after tier0.c and this file, checks it).
-#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
+// Whether a value of `type` has one of Tier 0's memory classes in this compiler's C: a long double's (F80, complex long
+// double's parts too), a 128-bit integer's or a _BitInt's of 65 to 128 bits (I128 and U128, a complex one's parts too) or
+// a vector's (VECTOR).
+static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
+{
+    const uint32_t resolved = abi_resolved_index(table, type);
+    const uint8_t kind = table->types.kind[resolved];
+    const uint8_t code = table->types.code[resolved];
+    const uint32_t element = kind == BUSTER_TYPE_KIND_COMPLEX ? abi_resolved_index(table, table->types.base[resolved]) : 0;
+    const uint8_t element_kind = table->types.kind[element];
+    const bool wide_complex = element != 0 && (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[element] == 16;
+    return (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
+           ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[resolved] == 16) ||
+           (kind == BUSTER_TYPE_KIND_COMPLEX && code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE) || wide_complex || kind == BUSTER_TYPE_KIND_VECTOR ||
+           kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+}
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, a long double, a 128-bit integer, a complex float, double or long
-// double, a struct or a union, at any alignment the world makes (a value aligned past 8 bytes is an object of its own, and
-// past 16 one in a realigned frame).
+// to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
+// float, double or long double, a complex integer (GNU's, of __int128 too) and a complex _BitInt of up to 128 bits,
+// __float128 (an aggregate's value in its C, whose operations are libgcc's), a struct or a union, and a vector of 16, 32
+// or 64 bytes of integers or floating values of
+// up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
+// aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
     const uint8_t code = table->types.code[resolved];
-    const bool scalar = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] <= 8) || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER ||
+    const uint64_t size = table->types.size[resolved];
+    const bool integer = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size <= 8;
+    const bool scalar = integer || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_NULLPTR ||
                         (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_DOUBLE));
+    const uint32_t element = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? abi_resolved_index(table, table->types.base[resolved]) : 0;
+    const uint8_t element_kind = table->types.kind[element];
+    const bool vector = element != 0 && (size == 16 || size == 32 || size == 64) && table->types.size[element] <= 8 && table->types.code[element] != BUSTER_TYPE_CODE_BOOL &&
+                        (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING);
+    const uint32_t complex_element = kind == BUSTER_TYPE_KIND_COMPLEX ? abi_resolved_index(table, table->types.base[resolved]) : 0;
+    const bool complex_bit_int = complex_element != 0 && table->types.kind[complex_element] == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[complex_element] <= 128;
     const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
-                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
-                      complex || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return (scalar || wide) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
+                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE ||
+                                                              (code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_UINT128) ||
+                                                              complex_bit_int);
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_LONG_DOUBLE || code == BUSTER_TYPE_CODE_FLOAT128)) ||
+                      ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
+                      kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    // An _Atomic the world made (abi_test_compiled_atomic), behind an aligned typedef or in a record.
+    const bool atomic = kind == BUSTER_TYPE_KIND_ATOMIC;
+    return (scalar || wide || atomic) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -4775,12 +4927,10 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 #define BUSTER_ABI_TEST_MAX_INSTRUCTIONS 1024
 // The runs: clang's, then GCC's, each at 16-, 32- and 64-byte vectors.
 #define BUSTER_ABI_TEST_CROSS_WIDTHS 3
-// clang's and GCC's runs at each width, then a compiled world's with each, at 16 bytes, then the extension runs.
-#define BUSTER_ABI_TEST_CROSS_RUNS (2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 4)
-// Tier 0's integer and floating depths (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS; tier0_test.c,
-// which main.c includes after tier0.c and this file, checks them), which a compiled world's calls keep within.
-#define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
-#define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
+// clang's and GCC's runs at each width, then a compiled world's with each, at 16 bytes and at 64 (x86-64-v4, whose C
+// passes vectors), then the extension runs.
+#define BUSTER_ABI_TEST_CROSS_COMPILED 4
+#define BUSTER_ABI_TEST_CROSS_RUNS (2 * BUSTER_ABI_TEST_CROSS_WIDTHS + BUSTER_ABI_TEST_CROSS_COMPILED + 2)
 
 typedef struct AbiTestFillItem AbiTestFillItem;
 struct AbiTestFillItem
@@ -4879,10 +5029,18 @@ static uint64_t abi_test_llvm_bytes(const TypeTable* table, TypeId type)
 //     that fills its bytes, of narrow _BitInts or of long doubles: abi_test_packed_bits).
 //   - HOLDS_UNION_PACKS: a union that holds such a vector. As the union's LLVM type, which takes its most aligned member
 //     (lowerUnion), the vector makes clang's copies of the union lose the other members' bits past its own.
+//   - HOLDS_NARROW_COMPLEX: a complex char or short, GCC's CQImode and CHImode.
+//   - HOLDS_NARROW_COMPLEX_ARRAY: an array of a type that holds one. GCC's classify_argument classifies an array member by
+//     its first element and repeats that element's classes, and a CQImode or CHImode element that crosses an eightbyte
+//     gives the next one X86_64_INTEGERSI_CLASS, of which construct_container passes 4 bytes (SImode) once the record
+//     is 16 bytes, losing the later elements' bytes past them: struct { char c[6]; _Complex short s[2]; } aligned to 4
+//     passes s[1]'s imaginary part in neither GCC's call nor GCC's callee.
 // Worked out in passes over the table until one changes nothing; 0 without the memory.
 #define BUSTER_ABI_TEST_HOLDS_QUAD 1u
 #define BUSTER_ABI_TEST_HOLDS_PACKS 2u
 #define BUSTER_ABI_TEST_HOLDS_UNION_PACKS 4u
+#define BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX 8u
+#define BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY 16u
 
 static uint8_t* abi_test_holds(const TypeTable* table)
 {
@@ -4906,9 +5064,18 @@ static uint8_t* abi_test_holds(const TypeTable* table)
                 const uint64_t llvm_bits = bits == 1 ? (count < 8 ? 8 : count) : count * bits;
                 value |= bits != 0 && llvm_bits < table->types.size[index] * 8 ? BUSTER_ABI_TEST_HOLDS_PACKS : 0;
             }
+            else if (kind == BUSTER_TYPE_KIND_COMPLEX)
+            {
+                const uint8_t code = table->types.code[index];
+                value |= code >= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_CHAR && code <= BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_USHORT ?
+                             BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX : 0;
+            }
             else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
             {
-                value |= holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+                const uint8_t base_holds = holds[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
+                const bool array = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+                value |= base_holds;
+                value |= array && (base_holds & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX) != 0 ? BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY : 0;
             }
             else if ((kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && type_is_complete(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT))
             {
@@ -5320,7 +5487,8 @@ static uint64_t abi_test_round(uint64_t value, uint64_t alignment)
     return (value + alignment - 1) / alignment * alignment;
 }
 
-// What clang passes of a value in registers: no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
+// What clang passes of a value in registers (or an eightbyte at a time in 8-byte slots: a STACK location's HIGH or LOW
+// eightbyte): no byte of an eightbyte that is NO_CLASS, padding or the part of a scalar
 // past the eightbyte it starts in, which clang classifies by its start alone (an 8-byte enum at offset 4 of a record
 // passes its low half); and of an SSE eightbyte, only its type's bytes (GetSSETypeAtOffset over its LLVM type, as
 // abi_sse_part reads the module's layout), but for a low one GetX86_64ByValArgumentPair widens to 8 bytes, as it does
@@ -5428,7 +5596,8 @@ static uint32_t abi_test_va_disagreement(const AbiTestCross* cross, uint32_t n, 
 // Signatures over `types`, their bytes, and their locations (abi_assign's): first one per `directed` record,
 // (nullptr_t, long x4, the record, long), where clang's count of general registers runs ahead of LLVM's (the uncounted
 // nullptr_t takes rdi) and the record finds two counted and one left (a split, or one i128 on the stack and the long
-// in r9); then random ones.
+// in r9), or in a compiled world (nullptr_t, long x5, the record, long), where the record finds one counted and none left
+// (abi_test_world_directed_compiled); then random ones.
 static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, uint32_t type_count, const TypeId* unnamed_types, uint32_t unnamed_count,
                                       const TypeId* directed, uint32_t directed_count, uint64_t* random, AbiTestFillItem* stack)
 {
@@ -5442,7 +5611,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         const bool directed_one = n < directed_count;
         const uint64_t shape = type_test_below(random, 16);
         const uint32_t random_named = (uint32_t)(shape < 10 ? type_test_below(random, 6) : shape < 15 ? 4 + type_test_below(random, 10) : 12 + type_test_below(random, 10));
-        const uint32_t named = directed_one ? 7 : random_named;
+        const uint32_t directed_at = cross->compiled ? 6 : 5;
+        const uint32_t named = directed_one ? directed_at + 2 : random_named;
         const uint32_t unnamed = !directed_one && unnamed_count != 0 && type_test_below(random, 4) == 0 ? (uint32_t)type_test_below(random, 7) : 0;
         const bool variadic = !directed_one && (unnamed != 0 || (unnamed_count != 0 && type_test_below(random, 16) == 0));
         signature->result = directed_one || type_test_below(random, 5) == 0 ? BUSTER_TYPE_VOID : types[type_test_below(random, type_count)];
@@ -5455,29 +5625,46 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->count = named + unnamed;
         signature->named = named;
         signature->variadic = variadic;
-        uint32_t offset = 0;
-        // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
-        // value on the integer one, as a 128-bit integer's; 14 integer ones in a frame realigned for an object or an
-        // argument aligned past 16 bytes, whose rbp is the table's last), and copies its aggregates through each stack's
-        // first free register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or
-        // a function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under
-        // them when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an
-        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit
-        // both).
-        uint32_t depths[2] = { 0, 0 };
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
             TypeId type = a < named ? types[type_test_below(random, type_count)] : unnamed_types[type_test_below(random, unnamed_count)];
-            type = directed_one ? (a == 0 ? BUSTER_TYPE_NULLPTR : a == 5 ? directed[n] : BUSTER_TYPE_LONG) : type;
+            type = directed_one ? (a == 0 ? BUSTER_TYPE_NULLPTR : a == directed_at ? directed[n] : BUSTER_TYPE_LONG) : type;
             for (uint32_t attempt = 0; cross->gcc && variadic && a < named && attempt < 64 && abi_test_gcc_variadic_differs(cross->abi, type); attempt += 1)
             {
                 type = types[type_test_below(random, type_count)];
             }
             type = cross->gcc && variadic && a < named && abi_test_gcc_variadic_differs(cross->abi, type) ? BUSTER_TYPE_LONG : type;
-            const TypeId stripped = type_strip_aligned(table, type);
+            cross->arguments[argument + a] = type;
+        }
+        // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's value
+        // on the integer one, as a 128-bit integer's; 14 integer ones in a frame realigned for an object or an argument
+        // aligned past 16 bytes, whose rbp is the table's last), and past them it takes values to its frame's deep slots
+        // (#136, #712), but not in a function with memory-class values (a long double, a 128-bit integer or a vector), whose
+        // slots its depths index. Our caller's `r = c_callee(...)` may hold r's address under them when the result is a
+        // struct, a union, a long double or a 128-bit integer. So in a compiled world's signature with such a value, an
+        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both). A
+        // _BitInt of 65 to 127 bits, whose value extends from its width as it loads (the convention leaves the bits past it
+        // unspecified) through shifts of 128 bits whose count takes the depth above it, takes one depth more than a 128-bit
+        // integer: it is never the last of the 12. An _Atomic, or an aligned typedef of one, loads atomically as it passes,
+        // an exchange of 16 bytes in rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which take up to four
+        // depths more (on the 7940HS a 16-byte one follows 8 integer values at most, in a frame realigned for an argument
+        // aligned to 32, under a struct result's address): it is never past the 8th.
+        bool memory = cross->compiled && abi_test_tier0_memory(table, signature->result);
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            memory = memory || (cross->compiled && abi_test_tier0_memory(table, cross->arguments[argument + a]));
+        }
+        uint32_t depths[2] = { 0, 0 };
+        uint32_t offset = 0;
+        for (uint32_t a = 0; a < signature->count; a += 1)
+        {
+            const TypeId stripped = type_strip_aligned(table, cross->arguments[argument + a]);
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
-            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3);
-            type = cross->compiled && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : type;
+            const uint64_t width = type_kind(table, stripped) == BUSTER_TYPE_KIND_BIT_INT ? type_integer_width(table, stripped) : 0;
+            const uint32_t extends = width > 64 && width < 128 ? 1 : 0;
+            const uint32_t atomic = type_kind(table, stripped) == BUSTER_TYPE_KIND_ATOMIC ? 4 : 0;
+            const bool full = depths[floating] >= (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3 - extends - atomic);
+            const TypeId type = memory && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : cross->arguments[argument + a];
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;
             cross->offsets[argument + a] = offset;
@@ -5620,7 +5807,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             {
                 const uint32_t i = signature->first + a;
                 const uint8_t kind = cross->locations[i].kind;
-                if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT)
+                const bool eightbyte = kind == BUSTER_ABI_LOCATION_STACK && (cross->locations[i].flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0;
+                if (kind == BUSTER_ABI_LOCATION_REGISTERS || kind == BUSTER_ABI_LOCATION_SPLIT || eightbyte)
                 {
                     abi_test_mask_unpassed(cross->abi, table, cross->arguments[i], cross->data_mask + cross->data_begin[n] + cross->offsets[i], !cross->gcc);
                 }
@@ -5770,6 +5958,11 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
         abi_test_hex(text, cross->result_mask + results, signature->result_bytes);
         type_test_format(text, "};\n_Alignas(64) unsigned char abi_capture_%u[%u];\n_Alignas(64) unsigned char abi_result_%u[%u];\n", n, signature->data_bytes, n,
                          signature->result_bytes);
+        if (cross->compiled)
+        {
+            // Our compiled callee's named parameters after it wrote them back from the data (abi_test_write_ours).
+            type_test_format(text, "_Alignas(64) unsigned char abi_rewritten_%u[%u];\n", n, signature->data_bytes);
+        }
         type_test_format(text, "void* abi_result_pointer_%u;\nunsigned char abi_al_%u;\n", n, n);
         // The C callee, which our caller calls.
         type_test_format(text, "%sc_callee_%u", result, n);
@@ -5857,6 +6050,12 @@ static void abi_test_write_c(AbiTestCross* cross, TypeTestText* text, bool* vari
             type_test_format(text, "    abi_check(abi_capture_%u + %u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"B\");\n", n, offset, n, offset, n,
                              offset, a, n, a);
         }
+        for (uint32_t a = 0; cross->compiled && a < signature->named; a += 1)
+        {
+            const uint32_t offset = cross->offsets[signature->first + a];
+            type_test_format(text, "    abi_check(abi_rewritten_%u + %u, abi_args_%u + %u, abi_mask_args_%u + %u, sizeof(a%u), %u, %u, \"B rewritten\");\n", n, offset, n,
+                             offset, n, offset, a, n, a);
+        }
         if (abi_test_variadic(signature) && !cross->compiled)
         {
             const uint8_t expected = cross->calls[n].vector_registers;
@@ -5905,14 +6104,26 @@ static void abi_test_write_ours(AbiTestCross* cross, TypeTestText* text)
         const char* result = abi_test_c_name(world, signature->result);
         const bool has_result = signature->result != BUSTER_TYPE_VOID;
         type_test_format(text, "\nextern unsigned char abi_args_%u[];\nextern unsigned char abi_ret_%u[];\n", n, n);
-        type_test_format(text, "extern unsigned char abi_capture_%u[];\nextern unsigned char abi_result_%u[];\n%sc_callee_%u", n, n, result, n);
+        type_test_format(text, "extern unsigned char abi_capture_%u[];\nextern unsigned char abi_rewritten_%u[];\nextern unsigned char abi_result_%u[];\n%sc_callee_%u", n, n,
+                         n, result, n);
         abi_test_parameters(cross, text, n, false);
         type_test_format(text, ";\n%sbuster_callee_%u", result, n);
         abi_test_parameters(cross, text, n, true);
         type_test_format(text, "\n{\n");
+        // Each named parameter's bytes as it arrived (its incoming copy's, which the C caller checks against the data), then
+        // each written back from the data, the last first, and its bytes again into abi_rewritten: one kept in a home
+        // shorter than its object would overwrite the homes after it, which that second capture shows.
         for (uint32_t a = 0; a < signature->named; a += 1)
         {
             type_test_format(text, "    memcpy(abi_capture_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
+        }
+        for (uint32_t a = signature->named; a != 0; a -= 1)
+        {
+            type_test_format(text, "    memcpy(&a%u, abi_args_%u + %u, sizeof(a%u));\n", a - 1, n, cross->offsets[signature->first + a - 1], a - 1);
+        }
+        for (uint32_t a = 0; a < signature->named; a += 1)
+        {
+            type_test_format(text, "    memcpy(abi_rewritten_%u + %u, &a%u, sizeof(a%u));\n", n, cross->offsets[signature->first + a], a, a);
         }
         if (abi_test_variadic(signature))
         {
@@ -6194,9 +6405,11 @@ static void abi_test_emit_caller(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         const AbiLocation location = locations[a];
         const TypeId type = cross->arguments[signature->first + a];
         const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
-        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0)
         {
-            abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + 8);
+            // One eightbyte in its slot: the high one alone, or the low one alone of a larger value.
+            const uint32_t eightbyte = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+            abi_test_rip(code, X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, symbols.args, offsets[a] + eightbyte);
             abi_test_add(code, link_program_memory(X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, X86_REGISTER_RSP, (int32_t)location.stack_offset));
         }
         else if (location.kind == BUSTER_ABI_LOCATION_STACK)
@@ -6295,10 +6508,11 @@ static void abi_test_emit_callee(AbiTestCross* cross, uint32_t n, AbiTestSymbols
         const TypeId type = cross->arguments[signature->first + a];
         const uint32_t count = abi_test_parts(cross->abi, table, type, location, parts);
         const int32_t slot = (int32_t)location.stack_offset + 8;
-        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0)
+        if (location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0)
         {
+            const uint32_t eightbyte = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
             abi_test_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSP, slot));
-            abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + 8);
+            abi_test_rip(code, X86_FORM_MOV_RM64_R64, X86_REGISTER_RAX, symbols.capture, offsets[a] + eightbyte);
         }
         else if (location.kind == BUSTER_ABI_LOCATION_STACK)
         {
@@ -6498,19 +6712,21 @@ static int abi_test_compile(char* const* arguments, const char* object, const ch
 }
 
 // Run `index` (clang's at 16-, 32- and 64-byte vectors, then GCC's, then a compiled world's against clang and against
-// GCC, at 16 bytes, then the extension runs with signed and with unsigned char), not started.
+// GCC, at 16 bytes, then at 64, then the extension runs with signed and with unsigned char), not started.
 static AbiTestCrossRun abi_test_cross_run(uint32_t index)
 {
-    const bool extension = index >= 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 2;
-    const bool char_unsigned = index == 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 3;
-    const bool compiled = index >= 2 * BUSTER_ABI_TEST_CROSS_WIDTHS;
-    const bool gcc = !extension && (compiled ? index == 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 1 : index >= BUSTER_ABI_TEST_CROSS_WIDTHS);
+    const uint32_t first_compiled = 2 * BUSTER_ABI_TEST_CROSS_WIDTHS;
+    const bool extension = index >= first_compiled + BUSTER_ABI_TEST_CROSS_COMPILED;
+    const bool char_unsigned = index == first_compiled + BUSTER_ABI_TEST_CROSS_COMPILED + 1;
+    const bool compiled = index >= first_compiled;
+    const bool gcc = !extension && (compiled ? (index - first_compiled) % 2 == 1 : index >= BUSTER_ABI_TEST_CROSS_WIDTHS);
+    const uint32_t compiled_bytes = index >= first_compiled + 2 ? 64u : 16u;
     const AbiTestCrossRun run = {
         .name = extension ? (char_unsigned ? "extension, unsigned char" : "extension, signed char") :
                 compiled ? (gcc ? "compiled gcc" : "compiled clang") : gcc ? "gcc" : "clang",
         .file = extension ? (char_unsigned ? "extension_unsigned" : "extension_signed") :
                 compiled ? (gcc ? "compiled_gcc" : "compiled_clang") : gcc ? "gcc" : "clang",
-        .vector_bytes = compiled ? 16u : 16u << (index % BUSTER_ABI_TEST_CROSS_WIDTHS),
+        .vector_bytes = compiled ? compiled_bytes : 16u << (index % BUSTER_ABI_TEST_CROSS_WIDTHS),
         .gcc = gcc,
         .compiled = compiled,
         .extension = extension,
@@ -6537,10 +6753,12 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     {
         world.gcc = gcc;
         world.compiled = compiled;
+        world.vectors = compiled && vector_bytes == 64;
         abi_test_world_build(&world, seed, 600);
-        // GCC's worlds have neither nullptr_t nor packing, and compiled ones neither nullptr_t nor the directed records.
+        // GCC's worlds have neither nullptr_t nor packing, and compiled ones not the directed records, whose runs of
+        // bit-fields past 64 bits the producer refuses, but a directed record of their own.
         TypeId directed[BUSTER_ABI_TEST_DIRECTED];
-        const uint32_t directed_count = gcc || compiled ? 0 : abi_test_world_directed(&world, directed);
+        const uint32_t directed_count = gcc ? 0 : compiled ? abi_test_world_directed_compiled(&world, directed) : abi_test_world_directed(&world, directed);
         type_test_spell_world(&world.types);
         // GCC has no __fp16 on x86-64, nor a spelling of _Complex __float128, and it passes a _Complex __bf16 in two
         // SSE registers but counts one, as neither its va_arg nor clang reads it (nothing in its world is made of these).
@@ -6586,7 +6804,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             uint32_t type_count = 0;
             uint32_t unnamed_count = 0;
             // nullptr_t, which the world doesn't spell, as clang's C can.
-            if (!gcc && !compiled)
+            if (!gcc)
             {
                 types[type_count] = BUSTER_TYPE_NULLPTR;
                 type_count += 1;
@@ -6596,7 +6814,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
                 const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
                 const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
-                const bool atomic_result = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
                 const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE);
                 // GCC passes a LOW_GENERAL type's low eightbyte in a vector register, as the psABI says.
                 const bool low_general = (abi.pass[index] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
@@ -6616,7 +6833,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const bool odd_vector_record = (resolved_kind == BUSTER_TYPE_KIND_STRUCT || resolved_kind == BUSTER_TYPE_KIND_UNION) &&
                                                (abi.pass[index] & BUSTER_ABI_PASS_VECTOR) != 0 && resolved_size != 16 && resolved_size != 32 && resolved_size != 64;
                 // clang's atomic loads of an _Atomic vector of bools crash its instruction selection (an aligned typedef
-                // of one's too, which the check above lets through).
+                // of one's too).
                 const uint32_t atomic_value = resolved_kind == BUSTER_TYPE_KIND_ATOMIC ? abi_resolved_index(table, table->types.base[abi_resolved_index(table, type)]) : 0;
                 const bool atomic_bits = atomic_value != 0 && table->types.kind[atomic_value] == BUSTER_TYPE_KIND_EXT_VECTOR &&
                                          abi_test_packed_bits(table, atomic_value) == 1;
@@ -6624,8 +6841,13 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // fewer bits than its bytes (abi_test_holds).
                 const bool quad_pair = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_QUAD) != 0 && classes == BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE);
                 const bool union_packs = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_UNION_PACKS) != 0;
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
-                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && (!compiled || abi_test_compiled_passes(table, type)))
+                // GCC classifies an array by its first element alone: a complex char or short element that crosses an
+                // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
+                // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
+                const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !gcc_differs &&
+                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
+                    (!compiled || abi_test_compiled_passes(table, type)))
                 {
                     types[type_count] = type;
                     type_count += 1;
@@ -6668,6 +6890,8 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             result = result && text.valid && type_test_write_file(source, &text) && oracle_epoch_file(source);
             abi_test_expect(tally, result, "cross-check", "the C file can't be written");
             bool written = false;
+            // Both sides' target: x86-64, -v3 or -v4 for 16-, 32- or 64-byte vectors.
+            const char* march = vector_bytes == 16 ? "-march=x86-64" : vector_bytes == 32 ? "-march=x86-64-v3" : "-march=x86-64-v4";
             if (result && compiled)
             {
                 // Our side's C, compiled by this compiler into an object, the vector paths' records checked as they go.
@@ -6681,6 +6905,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                     (char*)buster,
                     "--verify",
                     "-std=gnu23",
+                    (char*)march,
                     "-w",
                     "-c",
                     "-o",
@@ -6702,6 +6927,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                         "--verify",
                         "--scalar",
                         "-std=gnu23",
+                        (char*)march,
                         "-w",
                         "-c",
                         "-o",
@@ -6727,7 +6953,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             }
             if (written)
             {
-                const char* march = vector_bytes == 16 ? "-march=x86-64" : vector_bytes == 32 ? "-march=x86-64-v3" : "-march=x86-64-v4";
                 // The C side compiled through the oracle cache (abi_test_compile), then linked with ours.
                 char* compile[] = {
                     (char*)compiler,
@@ -7328,7 +7553,7 @@ static void abi_test_cross_finish(AbiTestTally* tally, AbiTestCrossRun run, cons
     }
 }
 
-// The ten runs are independent, each with a world and files of its own, and each takes about its compiler's time, so
+// The twelve runs are independent, each with a world and files of its own, and each takes about its compiler's time, so
 // they run at once, a child process each. The parent prints each one's output and adds its tally in the runs' order, so
 // the lines and counts are those of the runs one after another; a run that fails keeps its files.
 static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clang, const char* gcc, const char* buster, bool keep)
@@ -7420,8 +7645,8 @@ static bool abi_test_cross_standard_descriptors(uint32_t closed)
     return same;
 }
 
-// Verify that all ten runs reached the failing compiler, then remove only their known files in this test's private
-// TMPDIR. A setup failure also exits 1, but cannot leave all 40 files. The ordinary cross-check keeps its failed runs.
+// Verify that all twelve runs reached the failing compiler, then remove only their known files in this test's private
+// TMPDIR. A setup failure also exits 1, but cannot leave all 48 files. The ordinary cross-check keeps its failed runs.
 static bool abi_test_cross_descriptor_files(const char* temporary)
 {
     DIR* root = opendir(temporary);
@@ -7520,7 +7745,7 @@ static bool abi_test_cross_descriptors(void)
             char detail[128];
             snprintf(detail, sizeof(detail), "closed mask %u: the failing compiler must exit 1 and leave the standard descriptors unchanged", closed);
             abi_test_expect(&tally, waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 1, "cross-check descriptors", detail);
-            abi_test_expect(&tally, abi_test_cross_descriptor_files(directory), "cross-check descriptors", "all ten failed runs must retain their files");
+            abi_test_expect(&tally, abi_test_cross_descriptor_files(directory), "cross-check descriptors", "all twelve failed runs must retain their files");
         }
         for (rlim_t descriptors = 3; descriptors <= 4; descriptors += 1)
         {

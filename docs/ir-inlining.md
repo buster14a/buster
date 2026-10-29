@@ -37,10 +37,15 @@ IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output,
 The metadata producer is responsible for marking a definition
 `BUSTER_IR_INLINE_INTERNAL` only when its binding is fixed within the unit.
 External-linkage definitions, unknown symbols, indirect calls, noinline
-definitions and variadic definitions remain calls. Unknown flag bits are
-errors. Every known direct call's result type, fixed parameter types/count
-and variadic status must agree with its table entry, even when expansion is
-disabled. The existing verifier checks actual argument types and counts.
+definitions and variadic definitions remain calls, and so do calls with ABI
+records (#131's `IrCall.abi`: a call that passes or returns an aggregate by
+value). Unknown flag bits are errors. Every known direct call's variadic
+status, and every other one's result type and fixed parameter types/count, must
+agree with its table entry, even when expansion is disabled. A call with ABI
+records has the convention's shape instead, which only its records give: its
+callee takes a hidden pointer as parameter 0, or returns its result's bytes'
+address to a void call, so its result and parameters' IR types aren't its
+callee's. The existing verifier checks actual argument types and counts.
 
 The table is a shared symbol namespace, so cloned `IR_SYMBOL_ADDR` operations
 retain their symbol IDs. No symbol renumbering, ABI change or linker binding
@@ -77,9 +82,10 @@ tests are original. Tarjan traversal is linear in its graph; symbol lookup,
 IR verification and body rewriting are additional work.
 
 A candidate's rewritten body must have exactly one block ending in `IR_RET`,
-no slot rows, and no remaining calls, phis, stack addresses or other
-terminators. A typed return adds a `COPY`; a void return disappears. Each
-`IR_PARAM` maps directly to the already evaluated actual argument. All other
+no slot rows, labels or ABI records of its own, and no remaining calls, phis,
+stack addresses or other terminators. A typed return adds a `COPY`; a void
+return disappears. Each `IR_PARAM` maps directly to the already evaluated
+actual argument. All other
 operations, including faulting arithmetic, memory accesses and volatile
 annotations, remain in their original order. This scope does not splice
 callee CFGs, clone stack-object lifetimes or expand recursive/variadic calls.
@@ -117,10 +123,13 @@ unchanged; contiguous block offsets reflect the new instruction counts.
 
 The four byte columns and three operand columns retain their shared IR
 meanings. Constant/address rows from each expanded body are appended with
-rebased indices. Existing caller slots and signature rows are copied. Every
-remaining call occurrence receives a fresh descriptor, argument slice and
-fixed-type slice. Phi slices remap value IDs while preserving predecessor
-IDs. Switch slices preserve caller constant IDs and target block IDs.
+rebased indices. Existing caller slots and signature rows are copied, and so
+are its labels (its blocks don't change), its ABI records and its incoming
+frame. Every remaining call occurrence receives a fresh descriptor, argument
+slice and fixed-type slice, with its index into the ABI records, and an
+aggregate result's destination (operand `c`) remapped like any value. Phi
+slices remap value IDs while preserving predecessor IDs. Switch slices
+preserve caller constant IDs and target block IDs.
 Rebuilding each occurrence matters because valid source `extra` slices can
 overlap while serving different roles.
 
@@ -137,10 +146,10 @@ The result also retains an audit CSR indexed by original function:
 `decisions`. Call-node IDs belong to the original bodies. A missing callee
 is `UINT32_MAX`; ineligible calls generally retain unknown cost
 `UINT32_MAX`. Decisions are authoritative and distinguish disabled,
-indirect, unknown symbol, external, noinline, variadic, recursive,
-unsupported body, cost threshold and growth budget cases. `components` and
-`recursive` describe the original graph. Counts report input/output
-instructions and selected original call sites.
+indirect, unknown symbol, external, noinline, variadic, recursive, ABI records
+(`IR_INLINE_ABI`), unsupported body, cost threshold and growth budget cases.
+`components` and `recursive` describe the original graph. Counts report
+input/output instructions and selected original call sites.
 
 `retained_bytes` is the exact output-arena length increase. `scratch_bytes`
 is the greatest retained scratch length observed at this pass's phase
@@ -159,14 +168,28 @@ claiming the complete data-parallel or throughput acceptance of #139.
 name and currently accepts none. `./build/compiler test-ir-inline` runs it,
 and the 9700X job's test step runs that command with the other optimizer tests.
 
-Local optimized runs pass **92,521 checks**, including **5,904 independent
+Local optimized runs pass **92,932 checks**, including **6,160 independent
 interpreter executions** before and after rewriting (59,741 checks, with
 ASan/UBSan too, before the side-table growth case below).
-The interpreter executes calls using an explicit frame stack. Tests cover
-nested arithmetic through I128, all typed identity returns through F80 and
-pointers, empty void calls, caller diamonds/switches/loop phis, overlapping
-side-table roles, retained calls, volatile effects and fault order. Separate
-transitive-closure tests check 64 call graphs, while guarded pages cover
+The interpreter executes calls using an explicit frame stack, and a call with
+ABI records by its records: an aggregate argument's bytes (which its callees
+only read), and an aggregate result's bytes, which a stub writes where `c`
+points, a callee of the unit returns the address of (`IrFunction.result_size`),
+or takes `c` for, as its hidden pointer. Tests cover nested arithmetic through
+I128, all typed identity returns through F80 and pointers, empty void calls,
+caller diamonds/switches/loop phis, overlapping side-table roles, retained
+calls, volatile effects and fault order. A caller
+keeps three calls with ABI records (#783) between two expanded ones, which
+renumber every later value: to a callee that returns 12 bytes in registers and
+takes a 16-byte aggregate, to one that returns 24 bytes through a hidden
+pointer and takes the first's result, and to a stub, which takes the second's.
+Each destination must follow the renumbering, the records must stay the
+caller's and the callees', and the unit must run as it did. Dropping the
+destination's remap, either table's copy, or the rule that keeps these calls
+apart from the signature check (which refused the whole unit as a type error)
+each fails the test. A variadic call of the registers callee, which isn't
+variadic, is refused at the call, as a call of another variadic status always is. Separate transitive-closure tests check 64 call graphs,
+while guarded pages cover
 empty and partial unsigned cost batches through 65 entries. Disabled mode,
 exact thresholds, growth budgets (32,769 calls whose constant rows would
 pass 2²⁰ among them), malformed metadata and many arena-failure

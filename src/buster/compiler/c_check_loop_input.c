@@ -118,7 +118,9 @@ struct CheckLoopHints
 };
 
 // A count's literal at `source`: 1 for a valid one, 0 for one this can't read (not a literal), 3 for clang's error. A
-// `#pragma clang loop` count must be positive (`zero` says whether 0 is one).
+// `#pragma clang loop` count must be positive (`zero` says whether 0 is one) and an int's: a bit-precise constant's (#768)
+// past 64 bits is too large whatever its low bits (CheckLiteral.high), and so is one past 128 bits, whose 128 bits wrapped
+// (CheckLiteral.bit_width).
 static uint8_t check_input_loop_count(CheckInputReader* reader, uint32_t source, bool zero, uint32_t* value)
 {
     const PPTokens* output = &reader->pp->output;
@@ -148,7 +150,8 @@ static uint8_t check_input_loop_count(CheckInputReader* reader, uint32_t source,
         reader->scratch->length = mark;
         result = 1;
     }
-    if (result == 1 && (!literal.valid || literal.real || literal.imaginary || (literal.integer == 0 && !zero) || literal.integer > INT32_MAX))
+    if (result == 1 && (!literal.valid || literal.real || literal.imaginary || (literal.integer == 0 && !zero) || literal.integer > INT32_MAX ||
+                        literal.high != 0 || literal.bit_width > 128))
     {
         result = 3;
     }

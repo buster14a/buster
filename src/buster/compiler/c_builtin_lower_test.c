@@ -4,8 +4,9 @@
 // Runtime builtin recipes against Clang's actual builtin operations, independently of c_builtin.c's fold kernels.
 // Every recipe is appended by both paths, validated, compiled by both Tier 0 paths and executed in a child. Overflow
 // tests cover every ordinary 8/16/32/64 signed/unsigned and _Bool input/destination combination, wrapped bytes and
-// untouched surrounding bytes, and 128-bit operands and destinations (__int128's) mixed with 64-bit operands and
-// narrower destinations. Guard-page tests exercise exact output tails and transactional capacity failures.
+// untouched surrounding bytes, _BitInt destinations narrower than their class, and 128-bit operands and destinations
+// (__int128's) mixed with 64-bit operands and narrower destinations. Guard-page tests exercise exact output tails and
+// transactional capacity failures.
 // This tests a typed-stream consumer; it does not claim source checking or C-to-Tier-1 integration.
 
 #include <stdio.h>
@@ -194,6 +195,94 @@ static bool cbuiltin_lower_test_same_code(const Tier0Code* a, const Tier0Code* b
     return result;
 }
 
+// A _BitInt destination narrower than its slot class (2 to 63 bits, but 8, 16 and 32): clang's builtin into an object of
+// the type, whose bytes (`*size` of them, its class's) hold the value extended from its width, as clang stores it.
+#define BUSTER_CBUILTIN_LOWER_TEST_BITS(T) do { \
+    T destination; \
+    if (id == CBUILTIN_ADD_OVERFLOW) { overflow = __builtin_add_overflow(a, b, &destination); } \
+    else if (id == CBUILTIN_SUB_OVERFLOW) { overflow = __builtin_sub_overflow(a, b, &destination); } \
+    else { overflow = __builtin_mul_overflow(a, b, &destination); } \
+    memcpy(bytes, &destination, sizeof(destination)); \
+    *size = (uint32_t)sizeof(destination); \
+} while (0)
+#define BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(N) case N: \
+    if ((type & BUSTER_CBUILTIN_SIGNED) != 0) { BUSTER_CBUILTIN_LOWER_TEST_BITS(_BitInt(N)); } \
+    else { BUSTER_CBUILTIN_LOWER_TEST_BITS(unsigned _BitInt(N)); } \
+    break;
+
+static __attribute__((noinline)) uint32_t cbuiltin_lower_test_bit_overflow(CBuiltinId id, __int128 a, __int128 b, uint32_t type, uint8_t bytes[8], uint32_t* size)
+{
+    uint32_t overflow = 0;
+    *size = 0;
+    switch (type & ~BUSTER_CBUILTIN_SIGNED)
+    {
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(2)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(3)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(4)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(5)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(6)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(7)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(9)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(10)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(11)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(12)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(13)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(14)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(15)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(17)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(18)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(19)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(20)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(21)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(22)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(23)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(24)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(25)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(26)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(27)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(28)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(29)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(30)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(31)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(33)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(34)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(35)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(36)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(37)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(38)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(39)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(40)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(41)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(42)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(43)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(44)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(45)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(46)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(47)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(48)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(49)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(50)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(51)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(52)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(53)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(54)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(55)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(56)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(57)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(58)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(59)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(60)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(61)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(62)
+        BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH(63)
+        default: break;
+    }
+    return overflow;
+}
+
+#undef BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH
+#undef BUSTER_CBUILTIN_LOWER_TEST_BITS
+
 static void cbuiltin_lower_test_case(CBuiltinLowerTestTally* tally, Arena* arena, CBuiltinLowerCall call, uint64_t* state)
 {
     tally->a_type = call.a_type;
@@ -313,9 +402,22 @@ static void cbuiltin_lower_test_case(CBuiltinLowerTestTally* tally, Arena* arena
         uint64_t expected;
         if (overflow)
         {
-            uint64_t stored = 0;
-            expected = cbuiltin_lower_test_overflow(call.id, cbuiltin_lower_test_integer(a[i], call.a_type), cbuiltin_lower_test_integer(b[i], call.b_type), call.result_type, &stored);
-            memcpy(expected_bytes + 8, &stored, ((call.result_type & ~BUSTER_CBUILTIN_SIGNED) + 7) / 8);
+            const __int128 left = cbuiltin_lower_test_integer(a[i], call.a_type);
+            const __int128 right = cbuiltin_lower_test_integer(b[i], call.b_type);
+            if (cbuiltin_lower_type_whole(call.result_type))
+            {
+                uint64_t stored = 0;
+                expected = cbuiltin_lower_test_overflow(call.id, left, right, call.result_type, &stored);
+                memcpy(expected_bytes + 8, &stored, ((call.result_type & ~BUSTER_CBUILTIN_SIGNED) + 7) / 8);
+            }
+            else
+            {
+                uint8_t stored[8] = { 0 };
+                uint32_t size = 0;
+                expected = cbuiltin_lower_test_bit_overflow(call.id, left, right, call.result_type, stored, &size);
+                cbuiltin_lower_test_expect(tally, size == tier0_class_bytes(cbuiltin_lower_type_class(call.result_type)), "_BitInt destination size", call.id, i);
+                memcpy(expected_bytes + 8, stored, size);
+            }
         }
         else
         {
@@ -933,6 +1035,47 @@ static int run_builtin_lower_tests(int argc, char** argv)
                             .a_type = types[at],
                             .b_type = types[bt],
                             .result_type = types[rt],
+                        };
+                        cbuiltin_lower_test_case(&tally, &arena, call, &state);
+                    }
+                }
+            }
+        }
+        // _BitInt destinations narrower than their slot class, from 64- and 32-bit operands.
+        const uint32_t bit_operands[3] = { 64, 64 | BUSTER_CBUILTIN_SIGNED, 32 | BUSTER_CBUILTIN_SIGNED };
+        const uint32_t bit_results[13] =
+        {
+            2,
+            3 | BUSTER_CBUILTIN_SIGNED,
+            5,
+            7 | BUSTER_CBUILTIN_SIGNED,
+            9 | BUSTER_CBUILTIN_SIGNED,
+            13,
+            17 | BUSTER_CBUILTIN_SIGNED,
+            20,
+            31 | BUSTER_CBUILTIN_SIGNED,
+            33,
+            40 | BUSTER_CBUILTIN_SIGNED,
+            63,
+            63 | BUSTER_CBUILTIN_SIGNED,
+        };
+        for (uint32_t id = CBUILTIN_ADD_OVERFLOW; id <= CBUILTIN_MUL_OVERFLOW; id += 1)
+        {
+            for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(bit_operands); at += 1)
+            {
+                for (uint32_t bt = 0; bt < BUSTER_ARRAY_LENGTH(bit_operands); bt += 1)
+                {
+                    for (uint32_t rt = 0; rt < BUSTER_ARRAY_LENGTH(bit_results); rt += 1)
+                    {
+                        const CBuiltinLowerCall call =
+                        {
+                            .id = (CBuiltinId)id,
+                            .a = 0,
+                            .b = 1,
+                            .destination = 2,
+                            .a_type = bit_operands[at],
+                            .b_type = bit_operands[bt],
+                            .result_type = bit_results[rt],
                         };
                         cbuiltin_lower_test_case(&tally, &arena, call, &state);
                     }
