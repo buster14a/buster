@@ -190,6 +190,10 @@ struct CheckProgram
     // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
     uint64_t* attribute_keys;
     uint32_t attribute_key_count;
+    // The host's features (predefines_host_of), where check_program_targets read them: they are the CPU's, which
+    // -march=native reads, and code generation's check of target features takes them from here.
+    PredefinesHost host;
+    bool host_read;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -278,15 +282,27 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
     }
 }
 
-// Whether a declaration's `attributes` hold GNU's naked attribute (CheckProgram.object_naked).
-static bool check_program_attribute_naked(const CheckInputAttributes* attributes)
+// The attributes of a declaration that the static objects' pass reads (check_program_static_object), as bits.
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED 1u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE 4u
+
+// Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
+// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and an
+// always_inline or flatten one (#775, CheckProgram.attribute_keys).
+static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
-    bool naked = false;
+    uint32_t bits = 0;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
-        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        const CheckInputAttributeKind kind = attribute->kind;
+        const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
+                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
+                             kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE : 0;
+        bits |= attribute->ignored ? 0 : bit;
     }
-    return naked;
+    return bits;
 }
 
 // The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
@@ -308,32 +324,11 @@ struct CheckProgramTargetEvents
     bool room;
 };
 
-// Whether a declaration's `attributes` hold a target or target_clones attribute (CheckProgramTargetEvents).
-static bool check_program_attribute_target(const CheckInputAttributes* attributes)
-{
-    bool target = false;
-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-    {
-        const CheckInputAttribute* attribute = &attributes->records[i];
-        target |= (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES) && !attribute->ignored;
-    }
-    return target;
-}
-
-// Whether a declaration's `attributes` hold an always_inline or flatten attribute (CheckProgramTargetEvents).
-static bool check_program_attribute_inline(const CheckInputAttributes* attributes)
-{
-    bool inline_attribute = false;
-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-    {
-        const CheckInputAttribute* attribute = &attributes->records[i];
-        inline_attribute |= (attribute->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || attribute->kind == CHECK_ATTRIBUTE_FLATTEN) && !attribute->ignored;
-    }
-    return inline_attribute;
-}
-
-// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling.
-static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
+// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling. It and
+// check_program_attribute_keys stay out of line: few declarations reach them, and inlined, they changed how clang
+// compiled the passes around them, so that -c of sqlite3.c, which has no target attribute, ran about 400,000 more
+// instructions, 0.03% (#775).
+__attribute__((noinline)) static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
 {
     if (events->room && *count == *capacity)
     {
@@ -2077,8 +2072,8 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
 
 // A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
 // declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
-// function's declaration with a target or target_clones attribute (`events`). Returns whether the column had room, `room`
-// again unless making it failed.
+// function's declaration with a target or target_clones attribute, or an always_inline or flatten one (`events`), all
+// found by one pass over its attributes. Returns whether the column had room, `room` again unless making it failed.
 static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
 {
     const CheckInput* input = program->input;
@@ -2088,15 +2083,17 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     {
         program->object_declarations[object] = token;
         needed[object] |= input->defined[token] || input->tentative[token];
-        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_target(input->attributes[token]))
+        const uint32_t attributes = input->attributes[token] != 0 ? check_program_attribute_bits(input->attributes[token]) : 0;
+        const uint32_t function_attributes = attributes != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION ? attributes : 0;
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0)
         {
             check_program_target_event(events, object, token);
         }
-        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_inline(input->attributes[token]))
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE) != 0)
         {
             check_program_event_push(events, &events->inline_keys, &events->inline_count, &events->inline_capacity, object, token);
         }
-        if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
             if (program->object_naked == 0 && room)
             {
@@ -2196,8 +2193,6 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
     // The strings of the targets made so far, in their order.
     String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
     valid = valid && (count == 0 || texts != 0);
-    PredefinesHost host = { 0 };
-    bool host_read = false;
     uint32_t last_target = UINT32_MAX;
     // The last string read and how predefines_target_attribute takes it: a header's functions share theirs, so most
     // attributes are the one before.
@@ -2267,14 +2262,14 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
             {
                 program->targets = program->targets == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Target, count) : program->targets;
                 valid = program->targets != 0;
-                if (valid && !host_read)
+                if (valid && !program->host_read)
                 {
-                    host = predefines_host_of(options->predefines);
-                    host_read = true;
+                    program->host = predefines_host_of(options->predefines);
+                    program->host_read = true;
                 }
                 if (valid)
                 {
-                    program->targets[found] = predefines_function_target(options->predefines, &host, program->target, applied->text.pointer,
+                    program->targets[found] = predefines_function_target(options->predefines, &program->host, program->target, applied->text.pointer,
                                                                          (uint32_t)applied->text.length, cpu);
                     texts[found] = applied->text;
                     program->target_count += 1;
@@ -2305,7 +2300,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 // so each object's are still in token order) and then the always_inline and flatten ones, sorted stably by object with
 // the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it can lack a
 // feature by clang's rule. Returns false if there was no room.
-static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+__attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
     const uint64_t total = (uint64_t)events->count + events->inline_count;
     bool valid = events->room && total <= UINT32_MAX;

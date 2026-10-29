@@ -73,7 +73,19 @@ struct CheckTargetFeatureCached
     bool valid;
 };
 
-// The functions' feature maps: the unit's, and those of the attribute strings resolved so far.
+// The walk's filter's answers for callees of a function without a target or flatten attribute of its own, the usual
+// caller, whose answer depends on the callee alone: by object, as a body calls few functions, an intrinsic many times.
+#define BUSTER_CHECK_TARGET_FEATURE_CALLEES 64
+
+typedef struct CheckTargetFeatureCallee CheckTargetFeatureCallee;
+struct CheckTargetFeatureCallee
+{
+    // The callee's object, or 0 for none.
+    uint32_t object;
+    bool fails;
+};
+
+// The functions' feature maps: the unit's, and those of the attribute strings resolved so far; and the filter's answers.
 typedef struct CheckTargetFeatureMaps CheckTargetFeatureMaps;
 struct CheckTargetFeatureMaps
 {
@@ -81,6 +93,7 @@ struct CheckTargetFeatureMaps
     PredefinesHost host;
     PredefinesFeatures unit;
     CheckTargetFeatureCached cache[BUSTER_CHECK_TARGET_FEATURE_CACHE];
+    CheckTargetFeatureCallee callees[BUSTER_CHECK_TARGET_FEATURE_CALLEES];
 };
 
 // `object`'s attributes from its declarations before token `limit` (CheckProgram.attribute_keys: each object's target
@@ -305,7 +318,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
     {
         const CheckInput* input = program->input;
         const uint64_t mark = scratch->length;
-        CheckTargetFeatureMaps maps = { .options = options, .host = predefines_host_of(options) };
+        CheckTargetFeatureMaps maps = { .options = options, .host = program->host_read ? program->host : predefines_host_of(options) };
         maps.unit = predefines_apply(options, &maps.host, maps.host.cpu, 0, 0);
         // The objects with a key: a callee without one has no attribute, which only a flatten caller checks.
         const uint64_t words = ((uint64_t)program->object_count + 63) / 64;
@@ -313,11 +326,15 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
         valid = attributed != 0;
         if (valid)
         {
+            // The keys and their counts in locals: the stores into the bitset could otherwise be the program's fields.
+            const uint64_t* keys = program->attribute_keys;
+            const uint32_t key_count = program->attribute_key_count;
+            const uint32_t object_count = program->object_count;
             memset(attributed, 0, words * sizeof(uint64_t));
-            for (uint32_t k = 0; k < program->attribute_key_count; k += 1)
+            for (uint32_t k = 0; k < key_count; k += 1)
             {
-                const uint32_t object = (uint32_t)(program->attribute_keys[k] >> 32);
-                attributed[object / 64] |= object < program->object_count ? 1ull << (object % 64) : 0;
+                const uint32_t object = (uint32_t)(keys[k] >> 32);
+                attributed[object / 64] |= object < object_count ? 1ull << (object % 64) : 0;
             }
         }
         const uint64_t items = (uint64_t)input->graph.count + program->control_count;
@@ -337,17 +354,29 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                 PredefinesFeatures caller_map = maps.unit;
                 if (external == (deferred == 0))
                 {
-                    caller = check_target_feature_attributes(program, body->object, body->declaration + 1);
+                    const bool keyed_caller = body->object < program->object_count && ((attributed[body->object / 64] >> (body->object % 64)) & 1) != 0;
+                    caller = keyed_caller ? check_target_feature_attributes(program, body->object, body->declaration + 1) : (CheckTargetFeatureAttributes){ 0 };
                     caller_map = check_target_feature_map(&maps, &caller);
                     // A callee without an attribute of its own fails a flatten caller whose attribute lacks a unit's feature.
                     candidate = caller.flatten && caller.targeted && !caller.versions && check_target_feature_lacked(maps.unit, caller_map, 0) >= 0;
+                    const bool plain = !caller.targeted && !caller.flatten;
                     for (uint32_t r = 0; !candidate && r < body->reference_count; r += 1)
                     {
                         const uint32_t object = program->references[body->reference_first + r];
                         const bool keyed = object < program->object_count && ((attributed[object / 64] >> (object % 64)) & 1) != 0;
-                        const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
-                                                                            (CheckTargetFeatureAttributes){ 0 };
-                        candidate = check_target_feature_fails(&maps, &caller, caller_map, &callee);
+                        CheckTargetFeatureCallee* answer = maps.callees + object % BUSTER_CHECK_TARGET_FEATURE_CALLEES;
+                        if (keyed && plain && answer->object == object)
+                        {
+                            candidate = answer->fails;
+                        }
+                        else
+                        {
+                            const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
+                                                                                (CheckTargetFeatureAttributes){ 0 };
+                            candidate = check_target_feature_fails(&maps, &caller, caller_map, &callee);
+                            answer->object = keyed && plain ? object : answer->object;
+                            answer->fails = keyed && plain ? candidate : answer->fails;
+                        }
                     }
                 }
                 if (candidate && walk.seen == 0)
