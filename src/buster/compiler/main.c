@@ -419,6 +419,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_rounds_helper_test.c"
 #include "buster/compiler/c_builtin_math_helpers.c"
 #include "buster/compiler/c_builtin_math_helpers_test.c"
+#include "buster/compiler/c_builtin_x86_helpers.c"
 #include "buster/compiler/tier0_variadic_frame_test.c"
 #include "buster/compiler/unwind_tier0_test.c"
 #include "buster/compiler/unwind_test.c"
