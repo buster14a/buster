@@ -329,6 +329,9 @@ struct CheckInput
     // path, and on the vector path those they act at, which the tests require to be fewer.
     uint32_t resolve_visits;
     uint32_t expression_visits;
+    // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
+    uint32_t sizeof_queries;
+    uint64_t sizeof_query_tokens;
     // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts.
     // Each top-level declaration keeps its original safe prefix; independent declarations retain their full graph.
     uint32_t* diagnostic_limits;
@@ -558,6 +561,9 @@ struct CheckInputReader
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
+    // Post-binding operand types, not type-name queries: graph operands and their constraints stay intact.
+    TypeId* sizeof_types;
+    bool sizeof_capture;
     CheckInputSpecifierJob** specifier_jobs;
     CheckInputSpecifierJob** specifier_finishes;
     uint32_t specifier_owner;
@@ -5044,9 +5050,12 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     return result;
 }
 
+#include "c_check_sizeof_input.c"
+
 // The walk over the tokens in postorder that builds the expression graph. The vector path skips the tokens it doesn't
 // act at, whose first values their classes wrote (check_input_expression_classes), and tests the sparse columns only
 // of tokens their classes say have an entry; the scalar path, its twin, visits every token and tests every column.
+
 static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -5523,14 +5532,10 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         if (op == CHECK_OP_SIZEOF && supported)
         {
-            TypeId requested = reader->query_types[token];
+            TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
             if (requested == 0)
             {
-                CheckValue value = { 0 };
-                if (check_input_evaluate_cached(reader, token + 1, reader->ends[token] + 1, &value))
-                {
-                    requested = value.type;
-                }
+                requested = check_input_sizeof_operand(reader, token);
             }
             if (check_input_vla_runtime_size(reader->types, requested))
             {
@@ -5538,10 +5543,10 @@ static void check_input_expressions(CheckInputReader* reader)
                 op = CHECK_OP_COUNT;
                 supported = node != BUSTER_CHECK_NONE;
             }
-            else
+            else if (reader->sizeof_types[token] == 0)
             {
-                // Resolving the operand's type may fold its arithmetic and record source warnings. The sizeof
-                // action checks that type but does not evaluate those operations; independent bounds stay live.
+                // Preparation coalesces known unevaluated spans. A failed/unsupported operand retains the old
+                // fallback and its warning handling; the graph still owns the semantic constraint diagnostics.
                 check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
             }
         }
@@ -6495,6 +6500,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(selection_type_ends, uint32_t) \
     X(selection_types, TypeId) \
     X(constant_present, uint32_t) \
+    X(sizeof_types, TypeId) \
     X(builtins, uint16_t) \
     X(builtin_type_ends, uint32_t) \
     X(vararg_calls, uint32_t) \
@@ -6872,6 +6878,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_constant_contexts(&reader);
                 if (check_input_region_initialize(&reader))
                 {
+                    if (counts.size_queries != 0)
+                    {
+                        check_input_sizeof_prepare(&reader);
+                    }
                     check_input_expressions(&reader);
                 }
                 if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
