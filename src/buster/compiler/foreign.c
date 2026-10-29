@@ -449,6 +449,9 @@ struct ForeignTable
 typedef struct ForeignNames ForeignNames;
 struct ForeignNames
 {
+    // Canonical publication order: low 32 bits are a name ID, high 32 bits its first symbol's ordinal. Ordinary
+    // object records precede library-only records. IDs themselves remain the hash partitions' lookup handles.
+    uint64_t* order;
     const uint8_t** bytes;
     uint32_t* length;
     uint64_t* hash;
@@ -3203,6 +3206,7 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
         ForeignNames* columns = &foreign->names;
         Arena* arena = &foreign->arena;
         columns->count = (uint32_t)names;
+        columns->order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, names + 1);
         columns->bytes = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, names + 1);
         columns->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
         columns->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, names + 1);
@@ -3215,7 +3219,7 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
         columns->common_alignment = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
         columns->visibility = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
         columns->flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
-        const bool pushed = names < UINT32_MAX && columns->bytes != 0 && columns->length != 0 && columns->hash != 0 && columns->resolution != 0 && columns->symbol != 0 &&
+        const bool pushed = names < UINT32_MAX && columns->order != 0 && columns->bytes != 0 && columns->length != 0 && columns->hash != 0 && columns->resolution != 0 && columns->symbol != 0 &&
                             columns->library != 0 && columns->definitions != 0 && columns->second != 0 && columns->common_size != 0 && columns->common_alignment != 0 &&
                             columns->visibility != 0 && columns->flags != 0;
         if (!pushed)
@@ -3324,6 +3328,9 @@ static void foreign_groups(Foreign* foreign, ForeignLane* lane)
 typedef struct ForeignWinner ForeignWinner;
 struct ForeignWinner
 {
+    // The first regular symbol, else the first library reference: class in bit 32, checked global ordinal + 1
+    // below it. Zero is unset. foreign_parse rejects a total >= UINT32_MAX before any record reaches this pass.
+    uint64_t first;
     uint64_t strong_position;
     uint64_t common_position;
     uint64_t weak_position;
@@ -3342,6 +3349,8 @@ static void foreign_win(ForeignWinner* winner, const Foreign* foreign, const For
 {
     const uint32_t at = record->item;
     const uint32_t symbol = round->first_symbol + at;
+    const uint64_t first = ((uint64_t)((record->tag & BUSTER_FOREIGN_TAG_LIBRARY) != 0) << 32) | ((uint64_t)symbol + 1);
+    winner->first = winner->first == 0 || first < winner->first ? first : winner->first;
     const uint32_t object = record->tag >> BUSTER_FOREIGN_TAG_OBJECT_SHIFT;
     const uint64_t position = foreign->positions[object];
     const uint32_t section = record->section;
@@ -3391,6 +3400,8 @@ static void foreign_win(ForeignWinner* winner, const Foreign* foreign, const For
     }
 }
 
+#include "buster/compiler/foreign_order.c"
+
 static void foreign_winners(Foreign* foreign, ForeignLane* lane)
 {
     uint64_t start = foreign_now();
@@ -3437,6 +3448,8 @@ static void foreign_winners(Foreign* foreign, ForeignLane* lane)
                 ForeignEntry* entry = &table->entries[e];
                 const ForeignWinner* winner = &winners[e];
                 const uint32_t id = table->name_base + e;
+                // Until foreign_name_order runs after the join, this column holds the first-record keys by ID.
+                names->order[id] = winner->first;
                 ForeignResolution resolution = FOREIGN_RESOLUTION_UNDEFINED;
                 uint32_t symbol = 0;
                 uint32_t library = 0;
@@ -3471,6 +3484,11 @@ static void foreign_winners(Foreign* foreign, ForeignLane* lane)
             }
         }
         scratch_end(scratch);
+    }
+    lane_sync();
+    if (lane_index() == 0 && !foreign_failed(foreign) && !foreign_name_order(names, &lane->arena, foreign->path))
+    {
+        foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
     }
     start = foreign_time(lane, FOREIGN_PHASE_WINNERS, start);
     (void)start;

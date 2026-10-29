@@ -699,16 +699,29 @@ struct CheckLanesTestFailure
     CheckProgramStatus status;
 };
 
-// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt past 128 bits),
-// Tier 0's refusal (values past its depth tables in a function with long double values), and fine bodies around them.
-// Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever it is.
+// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt past 128 bits), Tier
+// 0's refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
+// BUSTER_TIER0_MAX_DEPTH, where it takes the values past its depth tables, #780), and fine bodies around them.
+// Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever
+// it is.
+#define BUSTER_CHECK_LANES_TEST_OPEN16 "a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + ("
+#define BUSTER_CHECK_LANES_TEST_CLOSE16 "))))))))))))))))"
+#define BUSTER_CHECK_LANES_TEST_OPEN80                                                                                      \
+    BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 \
+        BUSTER_CHECK_LANES_TEST_OPEN16
+#define BUSTER_CHECK_LANES_TEST_CLOSE80                                                                                         \
+    BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 \
+        BUSTER_CHECK_LANES_TEST_CLOSE16
+#define BUSTER_CHECK_LANES_TEST_DEEP                                                                                            \
+    "    return " BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 "a" BUSTER_CHECK_LANES_TEST_CLOSE80 \
+        BUSTER_CHECK_LANES_TEST_CLOSE80 BUSTER_CHECK_LANES_TEST_CLOSE80 ";\n}\n"
 static const CheckLanesTestFailure check_lanes_test_failures[] = {
     {
         "lowering after Tier 0",
         "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
         "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
@@ -720,7 +733,7 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int main(void) { return fine0(1) + deep(2) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
@@ -738,7 +751,7 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3); }\n",
         CHECK_PROGRAM_UNSUPPORTED,

@@ -322,7 +322,9 @@ jobs:
         shell: bash
     env:
       BUSTER_HOST_ARCH: znver5
-      BUSTER_ORACLE_CACHE: check
+      # Hosted correctness independently checks both variants of this exact revision before this job can start.
+      # The persistent native cache reuses ordinary runs; daily/manual runs execute and check every oracle again.
+      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
       - name: Verify benchmark host
