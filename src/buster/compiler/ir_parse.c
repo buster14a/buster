@@ -684,6 +684,26 @@ static void ir_parse_instruction(IrParseState* state)
                 row.c = ir_parse_id(state, 'b');
             } break;
             case IR_SWITCH: ir_parse_switch(state, &row); break;
+            case IR_BR_INDIRECT:
+            {
+                // Its labels, a jump table's (#785), when it lists them: [#k, ...].
+                row.a = ir_parse_id(state, '%');
+                if (!ir_parse_end_line(state))
+                {
+                    ir_parse_expect(state, '[');
+                    row.b = state->extra.count;
+                    row.c = 0;
+                    bool more = true;
+                    while (state->result.error == IR_PARSE_OK && more)
+                    {
+                        const uint32_t label = ir_parse_id(state, '#');
+                        ir_parse_append(state, &state->extra, &label);
+                        row.c += 1;
+                        more = ir_parse_take(state, ',');
+                    }
+                    ir_parse_expect(state, ']');
+                }
+            } break;
             case IR_RET:
             {
                 if (!ir_parse_end_line(state))

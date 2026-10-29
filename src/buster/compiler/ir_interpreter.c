@@ -974,10 +974,16 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 case IR_BR_INDIRECT:
                 {
-                    // An address of one of this function's labels (ir_interpreter_symbol_address), or undefined.
+                    // An address of one of this function's labels (ir_interpreter_symbol_address), of its list's if it
+                    // lists them (a jump table's, #785), or undefined.
                     const uint64_t offset = av.low - (uintptr_t)function->labels;
                     const uint64_t label = offset / sizeof(uint32_t);
-                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count ?
+                    bool listed = b == BUSTER_IR_NONE;
+                    for (uint32_t k = 0; !listed && k < c; k += 1)
+                    {
+                        listed = function->extra[b + k] == label;
+                    }
+                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count && listed ?
                                         ir_interpreter_enter_block(frame, function->labels[label], frame->block, options, &result.steps) : INTERPRETER_UNDEFINED;
                     break;
                 }

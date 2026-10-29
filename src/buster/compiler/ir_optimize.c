@@ -882,7 +882,8 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
     }
     else if (op == IR_BR_INDIRECT)
     {
-        // It may go to any label: no address it holds is known to be one label's rather than another's.
+        // It may go to any of its labels (its list's, a jump table's, or every label): no address it holds is known to be
+        // one label's rather than another's.
         all = true;
     }
     else if (op == IR_CBR || op == IR_SWITCH)
@@ -1385,6 +1386,10 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
                         {
                             sizes.extra_count += 1 + (uint64_t)f->c[i] * 2;
                         }
+                        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                        {
+                            sizes.extra_count += f->c[i];
+                        }
                     }
                 }
             }
@@ -1537,6 +1542,15 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
                                     {
                                         candidate.extra[extra++] = f->extra[f->b[i] + 1 + entry * 2];
                                         candidate.extra[extra++] = blocks[threads[f->extra[f->b[i] + 2 + entry * 2]]];
+                                    }
+                                }
+                                else if (op == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                                {
+                                    // Its labels' list: label indices, which the rewrite keeps (their blocks move).
+                                    candidate.b[out] = extra;
+                                    for (uint32_t entry = 0; entry < f->c[i]; entry += 1)
+                                    {
+                                        candidate.extra[extra++] = f->extra[f->b[i] + entry];
                                     }
                                 }
                             }

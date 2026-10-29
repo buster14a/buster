@@ -945,6 +945,98 @@ static void ir_test_labels(IrTestTally* tally, Arena* memory, Arena* scratch)
     arena_pop_to(memory, mark);
 }
 
+// A jump table's br_indirect (#785), which lists its labels: b0 goes to label 0 (b1, returning 10) or label 1 (b2, 20),
+// never to label 2 (b3), which is no successor of it. Its list's breaks, each refused: past extra, of none, a label past
+// the labels or without a block, a count without a list; and an unlisted label may have no block.
+static void ir_test_label_lists(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const IrSizes sizes = {
+        .instruction_count = 13,
+        .block_count = 4,
+        .extra_count = 2,
+        .constant_count = 4,
+        .parameter_count = 1,
+        .label_count = 3,
+    };
+    IrFunction function = {
+        0
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "label list fixture allocation failed");
+    if (created)
+    {
+        function.result_type = IR_I32;
+        function.symbol_count = 4;
+        function.parameter_types[0] = IR_I32;
+        function.constants[0].low = 0;
+        function.constants[1].low = 10;
+        function.constants[2].low = 20;
+        function.constants[3].low = 30;
+        const uint32_t offsets[] = { 0, 7, 9, 11, 13 };
+        memcpy(function.block_offsets, offsets, sizeof(offsets));
+        function.labels[0] = 1;
+        function.labels[1] = 2;
+        function.labels[2] = 3;
+        function.extra[0] = 0;
+        function.extra[1] = 1;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_SYMBOL_ADDR, IR_PTR, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 4, IR_ICMP, IR_I1, 0, 3, IR_NE);
+        ir_test_instruction(&function, 5, IR_SELECT, IR_PTR, 4, 1, 2);
+        ir_test_instruction(&function, 6, IR_BR_INDIRECT, IR_VOID, 5, 0, 2);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            ir_test_instruction(&function, 7 + 2 * r, IR_CONST, IR_I32, 1 + r, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, 8 + 2 * r, IR_RET, IR_VOID, 7 + 2 * r, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_test_pair(tally, &function, scratch, 0, true, "a jump table's br_indirect of its listed labels rejected");
+        IrCfg cfg = {
+            0
+        };
+        const uint64_t cfg_mark = memory->length;
+        const bool built = ir_build_cfg(&function, memory, scratch, &cfg) == IR_OK;
+        ir_test_expect(tally, built && cfg.edge_count == 2 && cfg.successor_offsets[1] == 2 && cfg.successors[0] == 1 && cfg.successors[1] == 2 && cfg.predecessor_offsets[4] - cfg.predecessor_offsets[3] == 0,
+                       "a listed br_indirect's successors aren't its labels' blocks alone");
+        arena_pop_to(memory, cfg_mark);
+        ir_test_printer(tally, &function, memory, scratch);
+        // An unlisted label may have no block: the jump can't reach it.
+        function.labels[2] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, true, "an unlisted label of no block beside a listed br_indirect rejected");
+        function.labels[2] = 3;
+        const uint32_t breaks[][2] = {
+            { 1, 2 },
+            { 0, 0 },
+            { 0, 3 },
+            { BUSTER_IR_NONE, 2 },
+        };
+        const char* const messages[] = {
+            "a br_indirect's list past extra accepted",
+            "a br_indirect's empty list accepted",
+            "a br_indirect's list past extra by its count accepted",
+            "a br_indirect's count without its list accepted",
+        };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(breaks); k += 1)
+        {
+            function.b[6] = breaks[k][0];
+            function.c[6] = breaks[k][1];
+            ir_test_pair(tally, &function, scratch, 0, false, messages[k]);
+        }
+        function.b[6] = 0;
+        function.c[6] = 2;
+        function.extra[1] = 3;
+        ir_test_pair(tally, &function, scratch, 0, false, "a br_indirect's listed label past the labels accepted");
+        function.extra[1] = 1;
+        function.labels[1] = BUSTER_IR_NONE;
+        ir_test_pair(tally, &function, scratch, 0, false, "a br_indirect's listed label without a block accepted");
+        function.labels[1] = 2;
+        ir_test_pair(tally, &function, scratch, 0, true, "the label list fixture rejected after its breaks");
+    }
+    arena_pop_to(memory, mark);
+}
+
 // By-value aggregates' ABI records and a variadic definition's anchors (#131): an aggregate argument and parameter are
 // pointers, an aggregate result a call writes where its c operand points (a use of it), and the anchors are untyped,
 // address-taken slots of their sizes, one of each, in a variadic definition.
@@ -1630,6 +1722,7 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_switch_collision_family(&tally, &memory, &scratch);
             ir_test_calls_memory(&tally, &memory, &scratch);
             ir_test_labels(&tally, &memory, &scratch);
+            ir_test_label_lists(&tally, &memory, &scratch);
             ir_test_aggregates(&tally, &memory, &scratch);
             ir_test_types(&tally, &memory, &scratch);
             ir_test_simd(&tally, &memory, &scratch);

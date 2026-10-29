@@ -313,6 +313,10 @@ static IrError ssa_ir_layout(SsaIrWork* work)
                 {
                     work->sizes.extra_count += (uint64_t)f->c[i] * 2 + 1;
                 }
+                else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                {
+                    work->sizes.extra_count += f->c[i];
+                }
             }
         }
         for (uint32_t block = 0; block < f->block_count; block += 1)
@@ -517,6 +521,15 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
                         {
                             f->extra[extra++] = input->extra[input->b[i] + p * 2 + 1];
                             f->extra[extra++] = work->blocks[input->extra[input->b[i] + p * 2 + 2]];
+                        }
+                    }
+                    else if (op == IR_BR_INDIRECT && input->b[i] != BUSTER_IR_NONE)
+                    {
+                        // Its labels' list, label indices, which promotion keeps.
+                        f->b[instruction] = extra;
+                        for (uint32_t p = 0; p < input->c[i]; p += 1)
+                        {
+                            f->extra[extra++] = input->extra[input->b[i] + p];
                         }
                     }
                     instruction += 1;
