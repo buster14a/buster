@@ -119,8 +119,10 @@ The requirement table is explicit. It covers the current Tier 0 templates and
 generated deferred/ABI/frame records, including scalar SSE compares, XMM integer
 moves and exchanges; baseline locked arithmetic/bit/atomic operations; x87
 arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
-SSE4 operations; scalar AVX moves, arithmetic and conversions; and the FMA
-families in VEX and EVEX. `FISTTP` requires SSE3 even though its encoding uses
+SSE4 operations; scalar AVX moves, arithmetic and conversions; the FMA
+families in VEX and EVEX; and Tier 0's vector values' 128- and 256-bit
+`vmovdqu64` moves and `vpxord` (AVX512F and AVX512VL, #221: their slots' moves
+through zmm16, and its zeroing). `FISTTP` requires SSE3 even though its encoding uses
 x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that

@@ -301,7 +301,8 @@ designs and the compilers already built this way.
   selector/corpus acceptance still pending for #180.
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
-  AVX-512 and scalar paths and shared form matching in `x86_match.c`.
+  AVX-512 and scalar paths and shared form matching in `x86_match.c`, whose
+  value immediates follow #221's rule (`x86_immediate_encodes`).
   `./build/compiler assemble -o output.o input.s` uses it through the existing
   executable. `test-assembler --cross-check` compares both paths and GNU as,
   and links/runs fixtures; `benchmark-assembler [--external]` reports phases,
@@ -911,14 +912,17 @@ designs and the compilers already built this way.
   - each covered form's effects (`x86_effects`): its operands' reads and
     writes by encoding role (tied ones both), its fixed registers, what a
     narrower write does to the rest of a register, its flags read, defined
-    and left undefined, its memory, control, faults and MXCSR, and how its
-    immediate's bits become a value. An uncovered form gets a conservative
-    record, and a call has only its architectural effects (its callee's
-    clobbers are #137's);
+    and left undefined, its memory, control, faults and MXCSR, the x87's
+    state and control word, and how its immediate's bits become a value.
+    Every form Tier 0's emitter writes is covered (its x87, `shld`/`shrd`
+    and AVX forms among them), but the front end's X86 rows' (any VEX or
+    EVEX form). An uncovered form gets a conservative record, and a call has
+    only its architectural effects (its callee's clobbers are #137's);
   - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
     and `x86_immediate_value`): a selector's value against a field's bits;
   - each record's resources read and written, its operands resolved
-    (`x86_instructions_effects`, AVX-512, and its scalar twin);
+    (`x86_instructions_effects`, AVX-512, which leaves the rare records, the
+    x87's, vzeroupper's and a vvvv operand's, to its scalar twin);
   - value-preserving form choice for an operation with an immediate
     (`x86_choice_row`, `x86_choose_forms`, AVX-512, its scalar twin
     `x86_choose_forms_scalar`, and `x86_choice_instruction`): the
@@ -927,6 +931,13 @@ designs and the compilers already built this way.
     only where the live flags allow, which initialization works out from the
     effects.
 
+  Its consumers read it rather than keep copies of its rules: Tier 0 chooses
+  its immediates' forms by it (its emitter's computed constants by
+  `x86_immediate_encodes`), Tier 1's selector by its rows, the scheduler and
+  the unwind analyzer by the resolved effects, and the assembler's matcher
+  (`x86_match.c`) takes value immediates by `x86_immediate_encodes`: so
+  `main.c` includes `x86_semantics.c` before it, and `x86_match_initialize`
+  needs `x86_semantics_initialize` first (`x86_semantics_initialized`).
   `x86_semantics_test.c` holds its tests (`main.c` includes it after the
   assembler's, taking the encoder tests' printer and branch sizing tests'
   runner; `./build/compiler test-x86-semantics` runs them) and
@@ -2432,20 +2443,25 @@ report completeness and matching workload identities are checked.
 ## x86 semantics tests
 
 `./build/compiler test-x86-semantics [--seed N] [--runs N] [--cross-check]
-[--keep]` (about 0.2 s on the 9700X) checks `x86_semantics.c`. The processor is
+[--keep]` (about 0.3 s on the 9700X) checks `x86_semantics.c`. The processor is
 the oracle: a harness runs records in the test's process, loading every
-general register, the flags and ZMM0 to ZMM15 from a state, then storing them
-back. Memory operands are RIP-relative into a data page, RSP is its own stack,
-and a fault names the record. The checks:
+general register, the flags, ZMM0 to ZMM15 and the x87's state (FXRSTOR64 of a
+random one, every exception masked; the C code's saved around the run) from a
+state, then storing them back. Memory operands are RIP-relative into a data
+page, RSP is its own stack, and a fault names the record. The checks:
 
 - the effects table: every covered form but those that branch or trap, from
   `--runs` random states (12), with register and memory operands in turn.
   Each run checks that:
   - what the form doesn't write stays as it was: registers, vector registers
-    to bit 511, flags, and the memory around its operand and below the stack;
-  - a narrower write keeps or zeroes the rest as its record says;
+    to bit 511, flags, the x87's state and control word, and the memory around
+    its operand and below the stack;
+  - a narrower write keeps or zeroes the rest as its record says (a VEX or
+    EVEX one zeroes it to bit 511), and vzeroupper zeroes ZMM0 to ZMM15 above
+    bit 127;
   - defined flags and results don't change when everything it doesn't read
-    changes, every register compared whole (vector ones to bit 511);
+    changes, every register compared whole (vector ones to bit 511, the x87's
+    state too);
   - a destination that only merges doesn't read the bytes it defines;
   - every write shows a change in some run: one that no run showed gets up
     to 256 more runs, with register operands, and one that never shows is
@@ -2464,7 +2480,9 @@ and a fault names the record. The checks:
     shifts' CL, partial writes and 32-bit zero extension, inc's CF, the SSE
     merges and legacy SSE's upper lanes;
   - a call's architectural effects, register and memory operands, zero
-    idioms, shift counts;
+    idioms (vpxord's of its sources), shift counts (shld's and shrd's), the
+    x87's state and control word, vzeroupper, a masked EVEX record (every
+    resource) and AVX moves;
   - the substitutions' legality for every set of live flags;
   - uncovered forms, which must get the conservative record;
 - the immediate's contract on every covered form with an immediate and about
@@ -2486,14 +2504,26 @@ and a fault names the record. The checks:
 - #180's check: every row's forms allowed at the baseline target
   (`x86_target_forms`), every chosen record valid there
   (`x86_target_validate`);
-- `x86_match.c`'s immediate ranges against the shared rule on the forms the
-  assembler's syntax supports. It refuses the unsigned spellings of sign-extended
-  patterns, which the shared rule takes; those are counted, not failed.
+- `x86_match.c`'s immediates against the shared rule on the forms the
+  assembler's syntax supports with a value immediate: its scalar rule
+  (`x86_match_immediate`) and its vector path's intervals (`x86_match_range`)
+  must take exactly the values `x86_immediate_encodes` takes, the unsigned
+  spellings of sign-extended patterns among them (`add eax, 0xffffffff` is an
+  imm8's −1), and no `__int128` past the width; and every form it reads as
+  sign-extending must be such a form.
 
 `--cross-check` also prints every chosen record with the encoder tests'
 printer: GNU as must assemble them to the chosen forms' bytes. `--keep` leaves
 its directory under `$TMPDIR` (or `/tmp`). The 9700X job's test step runs it
 with `--cross-check`.
+
+Its consumers' tests check them against it: `test-tier0` that every record Tier 0
+emits but an X86 entry's has a covered form, `test-assembler --cross-check` the
+matcher's value immediates against GNU as (the unsigned spellings among them),
+and test-checker's folds section (`c_check_program_folds_test.c`) where Tier 0
+folds loads, from its records' resolved effects: a volatile object read as often
+as the source reads it, a load through a pointer kept on its side of a store, an
+atomic increment's write locked.
 
 ## x86 semantics benchmark
 
@@ -5496,7 +5526,10 @@ the convention's, among them), and a function of value parameters in one
 register or outside the convention's. Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
-`branch_sizing_validate`. Each program is then sized, encoded, loaded into
+`branch_sizing_validate`, and every record but an X86 entry's must have a form
+`x86_semantics.c` covers (#221: what the effects' consumers need of Tier 0's
+code), here and in the x87, 128-bit, vector and deep checks below. Each program
+is then sized, encoded, loaded into
 fresh pages and run in a child process on eight inputs (stopped by an alarm
 after 10 s), and its result and every global's bytes must equal what the test's
 interpreter of the typed stream gives (the interpreter converts floating values
@@ -5601,23 +5634,29 @@ files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|scalar|sizing|encode|validate|validate-scalar] [--after-scalar MS]`
-(about 4 s) generates programs
+vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+[--after-scalar MS]` (about 4 s) generates programs
 until their functions hold `--entries` typed entries (262,144), checks that both
 of Tier 0's paths give every function the same code, then reports 21-pass
 medians, per typed entry and per record, of `tier0_compile`,
 `tier0_compile_scalar`, `size_branches` on their records, `x86_encode` of the
-sized records, and `tier0_validate` and `tier0_validate_scalar` (#569):
-nanoseconds, cycles, instructions, IPC and the throttle
-(PMCx1A0's umask 0x08, #199), with the share of entries deferred and the
-functions the validation's vector path takes alone. `--only` runs
-one variant alone, and `--after-scalar MS` runs the scalar twin for MS ms before
-each pass of the vector path and of the validation. Run it under the 9700X's lock with `taskset -c 2`.
+sized records, `tier0_validate` and `tier0_validate_scalar` (#569), and the
+immediates' form choice on each function's own requests as Tier 0 makes them
+(`x86_choose_forms` and `x86_choose_forms_scalar`, #221, from
+`Tier0Function.choice_requests`, which copies them into the code: read from
+there, colder than in `tier0_compile`'s own call): nanoseconds, cycles,
+instructions, IPC and the throttle (PMCx1A0's umask 0x08, #199), with the share
+of entries deferred, the functions the validation's vector path takes alone,
+and the choice's requests (per entry, the share whose form it kept, gave another
+encoding of the instruction or another instruction, and the bytes it saved
+against each template's imm32 form). `--only` runs one variant alone, and
+`--after-scalar MS` runs the scalar twin for MS ms before each pass of the vector
+path, of the validation and of the choice. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
 `./build/compiler benchmark-backend-source [--only
-vector|scalar|sizing|encode|validate|validate-scalar]
+vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted, outside the time;

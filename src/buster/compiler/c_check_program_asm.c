@@ -752,6 +752,10 @@ static const X86MatchIndex* check_asm_matches(Arena* scratch)
         {
             x86_encoder_initialize();
         }
+        if (!x86_semantics_initialized)
+        {
+            x86_semantics_initialize();
+        }
         x86_match_initialize(index, &everything);
     }
     return index;

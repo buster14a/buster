@@ -821,7 +821,10 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   instruction of unknown effects.
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
-  and `dec`.
+  and `dec`. The records the emitter writes with a constant it computes (the frame's reservation and release, its
+  realignment, `ALLOCA`'s rounding, a vector constant's words) take their imm8 or imm32 by `x86_immediate_encodes`, the
+  same rule (#221). Every form the emitter writes has `x86_semantics.c`'s effects, which `test-tier0` checks on every
+  record it compiles but the X86 entries'.
 
 ## The two paths
 
@@ -1517,6 +1520,13 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
 - The vector path takes 62.6 cycles per entry alone, and 63.5 after 200 ms of the scalar path.
 - Real code costs less per entry than the generator's (79.6 cycles there): it makes fewer records per entry.
 - The three stages take about 5.3 ms for the file, 41 to 42 cycles for each of its 706,237 output tokens.
+- **The immediates' choice** (#221, `--only choose`, from the requests `Tier0Function.choice_requests` copies; the
+  9700X at `cff7bc98`, three processes, [record](https://github.com/buster14a/buster-performance/tree/a74e2a6ee49e31ea9f948f597ecefc9c02f3e835/docs/measurements/x86-semantics-221-2026-10-28)): 71,198 requests, 0.179 per entry, at 1.74 to 1.88 cycles per entry (10 per
+  request, a function's 27 at a time) and 3.32 instructions, 1.50 after 200 ms of its scalar twin, which takes 7.70.
+  3.3% of the requests kept their template's form, 44.0% took another encoding of the instruction and 52.7% another
+  instruction; their records' 450,190 bytes became 234,542, 15% of the code the functions would make with each
+  template's widest form. The vector path's 152.82 instructions per entry against main's 152.43 are the frame's
+  immediates through `x86_immediate_encodes` (the shared rule's calls in each prologue and epilogue).
 
 **Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
 9700X, each run alone under its lock and pinned to CPU 2):
@@ -1602,8 +1612,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   for real functions.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
-  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a
-  function with long double code, whose x87 forms `x86_semantics.c` has no rows for yet.
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It refused every
+  function with long double code too, whose x87 forms `x86_semantics.c` had no rows for until #221 covered them.
 
 ## Boundary audit #298
 
