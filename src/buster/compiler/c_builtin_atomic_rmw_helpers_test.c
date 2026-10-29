@@ -280,7 +280,8 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
 #undef BUSTER_CBUILTIN_RMW_TEST_ORACLE
 #pragma clang diagnostic pop
 
-static uint64_t cbuiltin_atomic_rmw_test_invoke(const CBuiltinAtomicRmwTestCase* item, uint32_t path, uint32_t variant, volatile void* object, void* expected, uint64_t expected_value, uint64_t value, bool weak, int order, int failure)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) uint64_t cbuiltin_atomic_rmw_test_invoke(const CBuiltinAtomicRmwTestCase* item, uint32_t path, uint32_t variant, volatile void* object, void* expected, uint64_t expected_value, uint64_t value, bool weak, int order, int failure)
 {
     uint64_t arguments[5] = { value, (uint64_t)order, 0, 0, 0 };
     if ((item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_CAS) != 0)
