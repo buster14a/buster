@@ -4800,6 +4800,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
+        // The program harness's build directory, which the sections' programs share: removed after the last of them,
+        // whichever sections ran.
+        check_test_program_build_release();
         check_test_types_close(&types);
     }
     oracle_cache_report(oracle, "test-checker");
