@@ -67,6 +67,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
     }
@@ -244,6 +245,8 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
     }
     return check_driver_publication_position(publication_parser, pp, boundary, publication_parser == parser ? publication_end : pp->output.count);
 }
+
+#include "c_check_warning_render.c"
 
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
@@ -1896,6 +1899,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         }
                         uint32_t promoted_token = BUSTER_CHECK_NONE;
                         bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
+                        promoted |= check_driver_warning_promoted(&pp, &input, &input.warning_events, repairing ? &repair : NULL);
+                        promoted |= check_driver_warning_promoted(&pp, &input, &stream.warning_events, repairing ? &repair : NULL);
                         uint32_t promoted_source = BUSTER_CHECK_NONE;
                         const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                         const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
@@ -1925,7 +1930,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         }
                         if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, &stream, repairing ? &repair : NULL,
                                                   original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
-                                                  excess_tokens, excess_count, quiet, &scratch))
+                                                  excess_tokens, excess_count, quiet, &scratch) ||
+                            !check_driver_warning_events_at(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, &scratch) ||
+                            !check_driver_warning_events_at(checking, &pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, &scratch))
                         {
                             fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                             ready = false;
@@ -2036,7 +2043,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                 else
                 {
                     if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, NULL, repairing ? &repair : NULL,
-                                              original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch))
+                                              original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch) ||
+                        !check_driver_warning_events_at(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, &scratch))
                     {
                         fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                     }

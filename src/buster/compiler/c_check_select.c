@@ -194,7 +194,7 @@ static bool check_input_selections(CheckInputReader* reader)
                 if (selected)
                 {
                     reader->selected_tokens[close] = root;
-                    check_input_constant_fold_warning(reader, first, separator, &control, true);
+                    check_input_constant_fold_warning(reader, first, separator, &control, true, first);
                     check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
                 }
             }

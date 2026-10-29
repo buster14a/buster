@@ -528,6 +528,7 @@ __builtin_ia32_packusdw512
 __builtin_ia32_packuswb128
 __builtin_ia32_packuswb256
 __builtin_ia32_packuswb512
+__builtin_ia32_palignr128
 __builtin_ia32_pause
 __builtin_ia32_pavgb128
 __builtin_ia32_pavgb256
@@ -707,7 +708,10 @@ __builtin_ia32_psadbw512
 __builtin_ia32_pshufb128
 __builtin_ia32_pshufb256
 __builtin_ia32_pshufb512
+__builtin_ia32_pshufd
 __builtin_ia32_pshufd512
+__builtin_ia32_pshufhw
+__builtin_ia32_pshuflw
 __builtin_ia32_psignb128
 __builtin_ia32_psignb256
 __builtin_ia32_psignd128
@@ -775,6 +779,7 @@ __builtin_ia32_psrld512
 __builtin_ia32_psrldi128
 __builtin_ia32_psrldi256
 __builtin_ia32_psrldi512
+__builtin_ia32_psrldqi128_byteshift
 __builtin_ia32_psrlq128
 __builtin_ia32_psrlq256
 __builtin_ia32_psrlq512
@@ -932,6 +937,7 @@ __builtin_ia32_sha256msg2
 __builtin_ia32_sha256rnds2
 __builtin_ia32_shuf_i32x4
 __builtin_ia32_shuf_i64x2
+__builtin_ia32_shufps
 __builtin_ia32_slwpcb
 __builtin_ia32_sqrtsd_round_mask
 __builtin_ia32_sqrtsh_round_mask
@@ -1206,7 +1212,9 @@ __builtin_ia32_vdpphps512
 __builtin_ia32_vec_ext_v16qi
 __builtin_ia32_vec_ext_v4di
 __builtin_ia32_vec_ext_v4si
+__builtin_ia32_vec_ext_v8hi
 __builtin_ia32_vec_set_v4si
+__builtin_ia32_vec_set_v8hi
 __builtin_ia32_vextractf128_pd256
 __builtin_ia32_vextractf128_ps256
 __builtin_ia32_vextractf128_si256
