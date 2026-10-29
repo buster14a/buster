@@ -2511,6 +2511,11 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* output = 0;
     bool markers = false;
     const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
+    // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
+    const char* unsupported_pic = parsed && (emit_object || link) ?
+        (options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
+         options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -2563,6 +2568,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+    }
+    else if (unsupported_pic != NULL)
+    {
+        fprintf(stderr, "error: unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)\n", unsupported_pic);
     }
     else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
     {
