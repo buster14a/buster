@@ -71,9 +71,16 @@ typedef enum CheckStage
     CHECK_STAGE_OBJECT_BUILD,
     // object_write_file.
     CHECK_STAGE_OBJECT_WRITE,
-    // The direct path after its emission: binding, the static data, and the executable's write.
+    // The direct path's runtime: its snapshot opened (runtime_open), the libraries -l names imported, and the link's
+    // memory reserved, before the emission (with several source files, before the units' merge).
+    CHECK_STAGE_RUNTIME,
+    // The direct path after its emission: binding's end (bind_end), link_check, the dynamic inputs and the symbol table's
+    // selection.
     CHECK_STAGE_EXECUTABLE,
-    // The arenas', the parser's, the preprocessor's and the intern table's release.
+    // The direct path's write (executable_write, on its lanes), and its errors' report.
+    CHECK_STAGE_WRITE,
+    // The arenas', the parser's, the preprocessor's and the intern table's release; and the direct path's link's memory
+    // and runtime.
     CHECK_STAGE_RELEASE,
     CHECK_STAGE_COUNT,
 } CheckStage;
@@ -102,7 +109,9 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_PUBLISH_DATA] = "publish-data",
     [CHECK_STAGE_OBJECT_BUILD] = "object-build",
     [CHECK_STAGE_OBJECT_WRITE] = "object-write",
+    [CHECK_STAGE_RUNTIME] = "runtime",
     [CHECK_STAGE_EXECUTABLE] = "executable",
+    [CHECK_STAGE_WRITE] = "write",
     [CHECK_STAGE_RELEASE] = "release",
 };
 

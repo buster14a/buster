@@ -1277,7 +1277,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
+        check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's.
         const bool emitted = !valid || (units != NULL ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                         check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
@@ -1431,6 +1431,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 selected[symbols.count++] = s;
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
         if (valid)
         {
             CheckDriverWrite write = {
@@ -1470,6 +1471,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 fprintf(stderr, "error: can't link %s (executable error %u)\n", output_path, (uint32_t)error);
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_WRITE);
         if (again && cached)
         {
             snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
@@ -1484,6 +1486,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             runtime_libraries_release(&named);
         }
         runtime_release(&runtime);
+        check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     }
     return valid;
 }
@@ -1939,7 +1942,6 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             result = check_driver_executable(&selected.program, &selected.data, checking, pp, &types, output != 0 ? output : "a.out", scalar, verify,
                                                              source_rows, unwind_tables, command->libraries, lanes, scratch, stage_clock, NULL, 0) ? 0 : 1;
-                            check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
                         }
                         else
                         {

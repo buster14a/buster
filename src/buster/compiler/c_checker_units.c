@@ -904,6 +904,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 arena_release(&lane->scratch);
                 arena_release(&lane->arena);
             }
+            check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
             if (result == 0 && command->link)
             {
                 // The executable is written on the units' lanes.
@@ -912,7 +913,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                                                             command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
                                                             stage_clock, units, count);
                 result = linked ? 0 : 1;
-                check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
             }
             for (uint32_t l = 0; l < active; l += 1)
             {
