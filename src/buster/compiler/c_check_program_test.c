@@ -2077,6 +2077,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_x86_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
+#include "c_check_program_half_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2798,6 +2799,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_x86(test, clang);
     check_test_program_vector_builtins(test, clang);
     check_test_program_fp16(test, clang);
+    check_test_program_halves(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);

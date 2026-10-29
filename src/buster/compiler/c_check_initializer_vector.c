@@ -141,7 +141,7 @@ static bool check_init_scalar_bytes(const TypeTable* types, const CheckValue* va
     }
     else if (valid)
     {
-        valid = type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE;
+        valid = type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(type) != CHECK_HALF_NONE;
         if (valid)
         {
             const long double rounded = check_action_round_float(type, value->floating);
@@ -166,6 +166,11 @@ static CheckValue check_init_bytes_scalar(const TypeTable* types, TypeId type, c
     {
         result.constant_kind = CHECK_CONSTANT_INTEGER;
         result.integer = check_init_bytes_integer(bytes, (uint32_t)size) & check_action_mask(width);
+    }
+    else if (check_action_half_format(type) != CHECK_HALF_NONE)
+    {
+        result.constant_kind = CHECK_CONSTANT_FLOATING;
+        result.floating = check_action_half_value(check_action_half_format(type), (uint16_t)check_init_bytes_integer(bytes, 2));
     }
     else if (type == BUSTER_TYPE_FLOAT)
     {
