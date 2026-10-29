@@ -1145,6 +1145,10 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
             failed_node = check.instruction;
         }
+        else if (ir_function_has_simd(function))
+        {
+            error = TIER1_SELECT_ERROR_UNSUPPORTED;
+        }
     }
     uint32_t* blocks = 0;
     uint32_t* uses = 0;

@@ -81,7 +81,11 @@ tables. `arena_bytes` reports the entire allocation charged to the arena, includ
 alignment gaps. It is not just the sum of payload widths.
 
 Types are `void`, `i1`, `i8`, `i16`, `i32`, `i64`, `i128`, `f32`, `f64`, `f80`
-and `ptr`. Signedness is in operations such as `sdiv` / `udiv` and `sext` /
+and `ptr`, plus first-class `v4i32`, `v8i32`, `v16i32` vectors and `m8`, `m16`,
+`m32`, `m64` masks. The [SIMD contract](ir-simd.md) records their exact lane,
+predication, sparse-constant and unsupported-consumer rules. Result admission
+uses bounded 32-bit type sets; all old scalar IDs remain unchanged.
+Signedness is in operations such as `sdiv` / `udiv` and `sext` /
 `zext`, rather than duplicated in integer type IDs. Aggregates remain in memory.
 Integer arithmetic wraps at the result width. Division and shift validity are
 the language/lowering pass's responsibility; the structural verifier does not
@@ -95,6 +99,9 @@ column comparisons deterministic.
 | Operations | Operand contract |
 | --- | --- |
 | `const` | `a` indexes a two-u64 bit-pattern constant; `b,c` absent |
+| `vconst` | `a` indexes a sparse eight-u64 vector constant; `b,c` absent |
+| `vcmp` | `a,b` have the same vector shape; `c` is an integer predicate; result is m8 or m16 for that shape |
+| `vselect` | `a` has the shape's mask type; `b,c` match the vector result; inactive lanes take `c` |
 | `undef` | No operands; an unspecified value of its result type |
 | `param` | `a` indexes `parameter_types` |
 | Unary / conversion | `a` is the source value |
@@ -659,13 +666,18 @@ shared lock, with the 9700X job's build (`BUSTER_DEBUG_INFO=0`) of `dc8adc81`
 | `promote` (`ssa_ir_promote`) | 159.40 | 882.69 | 2,535.19 | 2.87 |
 | `promote-scalar` | 150.85 | 835.80 | 2,285.41 | 2.73 |
 
-Lowering the unit's 396,872 typed entries thus takes about 19 ms, 26 ns per
-source token, and after 200 ms of scalar work before each sample `lower` takes
-46.92 ns per entry, the same. The vector path is 6% faster than its twin here:
-the emission, which both share, is most of the work. Promotion is #134's: its
-vector path is 6% slower than its scalar twin on these functions, and runs under
-Zen 5's power cap (#199), 31.2 dispatch slots per instruction throttled against
-the twin's 13.9.
+Lowering the unit's 396,872 typed entries thus takes about 19 ms, 26 ns per source
+token, and after 200 ms of scalar work before each sample `lower` takes 46.92 ns
+per entry, the same. The vector path is 6% faster than its twin here: the
+emission, which both share, is most of the work. Promotion is #134's: its vector
+path is 6% slower than its scalar twin on these functions, and runs under Zen 5's
+power cap (#199), 31.2 dispatch slots per instruction throttled against the twin's
+13.9. Since #787 a function of more than 16,384 (block, slot) cells takes the
+scalar constructor (`BUSTER_SSA_IR_VECTOR_CELLS`, docs/ssa.md): on the 9700X
+`promote` then takes 148.6 ns per entry against 160.5 (−7.4%, and −7.7% after
+scalar work), under its twin's 151.1, with 2,208 instructions per entry against
+2,535 and 13.4 throttled dispatch slots per instruction against 31.5 ([the
+record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
 
 Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
 instructions but 0.0004% and writes the same object. The checker's unit compiled

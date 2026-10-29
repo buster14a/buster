@@ -164,6 +164,70 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // Builtins of vectors of 4 and 8 bytes (MMX's __m64, and the narrow vectors of the intrinsics'
+            // conversions), whose bytes past them are zero in their registers: shuffles of them, into them and out of
+            // them; a shuffle of a conversion into one with a second vector of side effects, a volatile one's or a
+            // nonconstant one's, which a 2-byte vector's narrow row refuses; conversions between their integers, and
+            // between 8- or 16-bit integers and floats or doubles through 32-bit ones, of values in the result's range
+            // (fractions truncated); the elementwise functions; the reductions, which read their bytes alone (a zero
+            // lane past them would change a minimum, an and or a product); nontemporal stores of integers and loads
+            // (clang's code stores one of floats with SSE4A's MOVNTSD, which x86-sse4a-clzero runs where the host has
+            // it); and bit casts between them and integers, floats and doubles, at run time and folded.
+            "vector-narrow-builtins",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            "typedef unsigned char v4qu __attribute__((vector_size(4)));typedef unsigned char v8qu __attribute__((vector_size(8)));"
+            "typedef unsigned short v4hu __attribute__((vector_size(8)));typedef float v2sf __attribute__((vector_size(8)));"
+            "typedef unsigned v2su __attribute__((vector_size(8)));\n"
+            "int tested(int n){unsigned h=2166136261u;v4qs b4;v8qs b8;v4qu c4;v8qu c8;v2hs w2;v4hs w4;v4hu u4;v2ss d2;v2su e2;v16qs b16;v8hs w8;v4ss d4;"
+            "fill(&b4,4,n);fill(&b8,8,n+1);fill(&c4,4,n+2);fill(&c8,8,n+3);fill(&w2,4,n+4);fill(&w4,8,n+5);fill(&u4,8,n+6);fill(&d2,8,n+7);fill(&e2,8,n+8);"
+            "fill(&b16,16,n+9);fill(&w8,16,n+10);fill(&d4,16,n+11);"
+            "v16qs s1=__builtin_shufflevector(b8,b8,0,8,1,9,2,10,3,11,4,12,5,13,6,14,7,15);v8qs s2=__builtin_shufflevector(b8,(v8qs){0},0,8,1,9,2,10,3,11);"
+            "v4hs s3=__builtin_shufflevector(w4,w4,3,2,1,0);v8qs s4=__builtin_shufflevector(b4,b4,0,1,2,3,4,5,6,7);v4qs s5=__builtin_shufflevector(b16,b16,15,0,7,8);"
+            "v2ss s6=__builtin_shufflevector(d4,d4,3,1);v4ss s7=__builtin_shufflevector(d2,(v2ss){0},0,1,2,3);v8hs s8=__builtin_shufflevector(w4,w4,0,1,2,3,4,5,6,7);"
+            "FOLD(s1);FOLD(s2);FOLD(s3);FOLD(s4);FOLD(s5);FOLD(s6);FOLD(s7);FOLD(s8);"
+            "int calls=0;v16qs s9=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),(v4qs){(calls++,7),8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);"
+            "volatile v4qs vol={1,2,3,(signed char)n};v16qs s10=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),vol,0,1,2,3,4,5,6,7,7,6,5,4,3,2,1,0);"
+            "v16qs s11=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),(v4qs){(signed char)n},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);"
+            "FOLD(s9);FOLD(s10);FOLD(s11);FOLD(calls);"
+            "v4ss i1=__builtin_convertvector(b4,v4ss);v8hs i2=__builtin_convertvector(b8,v8hs);v4hu i3=__builtin_convertvector(c4,v4hu);"
+            "v4qs i4=__builtin_convertvector(d4,v4qs);v4qu i5=__builtin_convertvector(w4,v4qu);v2ds i6=__builtin_convertvector(d2,v2ds);"
+            "v2ss i7=__builtin_convertvector((v2ds){n,-n},v2ss);v8qs i8=__builtin_convertvector(w8,v8qs);v2hs i9=__builtin_convertvector(d2,v2hs);"
+            "v4hs i10=__builtin_convertvector(b4,v4hs);FOLD(i1);FOLD(i2);FOLD(i3);FOLD(i4);FOLD(i5);FOLD(i6);FOLD(i7);FOLD(i8);FOLD(i9);FOLD(i10);"
+            "v4sf f1=__builtin_convertvector(b4,v4sf);v8sf f2=__builtin_convertvector(b8,v8sf);v16sf f3=__builtin_convertvector(b16,v16sf);"
+            "v4sf f4=__builtin_convertvector(c4,v4sf);v8sf f5=__builtin_convertvector(w8,v8sf);v4sf f6=__builtin_convertvector(u4,v4sf);"
+            "v2df f7=__builtin_convertvector(w2,v2df);v4df f8=__builtin_convertvector(b4,v4df);v8df f9=__builtin_convertvector(w8,v8df);"
+            "v2sf f10=__builtin_convertvector(w2,v2sf);v8df f11=__builtin_convertvector(c8,v8df);v4df f12=__builtin_convertvector(u4,v4df);"
+            "FOLD(f1);FOLD(f2);FOLD(f3);FOLD(f4);FOLD(f5);FOLD(f6);FOLD(f7);FOLD(f8);FOLD(f9);FOLD(f10);FOLD(f11);FOLD(f12);"
+            "v4qs g1=__builtin_convertvector(f1*0.5f,v4qs);v8qs g2=__builtin_convertvector(f2*0.75f,v8qs);v16qs g3=__builtin_convertvector(f3-0.5f,v16qs);"
+            "v4qu g4=__builtin_convertvector(f4+0.5f,v4qu);v8hs g5=__builtin_convertvector(f5*0.5f,v8hs);v4hu g6=__builtin_convertvector(f6+0.25f,v4hu);"
+            "v2hs g7=__builtin_convertvector(f7*0.5,v2hs);v4qs g8=__builtin_convertvector(f8*-0.5,v4qs);v8hs g9=__builtin_convertvector(f9*0.25,v8hs);"
+            "v2hs g10=__builtin_convertvector(f10*0.5f,v2hs);v8qu g11=__builtin_convertvector(f11+0.75,v8qu);v4hu g12=__builtin_convertvector(f12,v4hu);"
+            "FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);FOLD(g5);FOLD(g6);FOLD(g7);FOLD(g8);FOLD(g9);FOLD(g10);FOLD(g11);FOLD(g12);"
+            "v8qs m1=__builtin_elementwise_max(b8,(v8qs){1,-1,2,-2,3,-3,4,-4});v4qu m2=__builtin_elementwise_add_sat(c4,c4);v4hs m3=__builtin_elementwise_abs(w4);"
+            "v2ss m4=__builtin_elementwise_min(d2,(v2ss){n,-n});v2su m5=__builtin_elementwise_popcount(e2);"
+            "v8qu m6=__builtin_elementwise_sub_sat(c8,(v8qu){100,100,100,100,7,7,7,7});v2ss m7=__builtin_elementwise_clzg(d2|1);"
+            "v2sf m8=__builtin_elementwise_sqrt(f10);v2sf m9=__builtin_elementwise_fma(f10,f10,(v2sf){1.5f,-2.0f});v4qs m10=__builtin_elementwise_abs(b4);"
+            "v2hs m11=__builtin_elementwise_sub_sat(w2,(v2hs){(short)n,-1});"
+            "FOLD(m1);FOLD(m2);FOLD(m3);FOLD(m4);FOLD(m5);FOLD(m6);FOLD(m7);FOLD(m8);FOLD(m9);FOLD(m10);FOLD(m11);"
+            "int r1[]={__builtin_reduce_add(d2),__builtin_reduce_and(d2),__builtin_reduce_max(d2),__builtin_reduce_mul(d2),__builtin_reduce_min(d2|1)};"
+            "signed char r2[]={__builtin_reduce_add(b8),__builtin_reduce_min(b8),__builtin_reduce_and(b4),__builtin_reduce_max(b4),__builtin_reduce_or(b4)};"
+            "short r3[]={__builtin_reduce_add(w4),__builtin_reduce_min(w2),__builtin_reduce_mul(w4),__builtin_reduce_and(w2)};"
+            "unsigned char r4[]={__builtin_reduce_min(c8),__builtin_reduce_and(c4),__builtin_reduce_max(c4)};unsigned short r5=__builtin_reduce_min(u4);"
+            "FOLD(r1);FOLD(r2);FOLD(r3);FOLD(r4);FOLD(r5);"
+            "v8qs nt8[2];v4qs nt4[2];v2sf ntf[2];v2ss nti[2];fill(nt8,16,n+12);fill(nt4,8,n+13);fill(ntf,16,n+14);fill(nti,16,n+15);"
+            "__builtin_nontemporal_store(b8,&nt8[1]);__builtin_nontemporal_store(b4,&nt4[0]);__builtin_nontemporal_store(d2,nti);"
+            "v8qs l1=__builtin_nontemporal_load(&nt8[0]);v2sf l2=__builtin_nontemporal_load(&ntf[1]);v4qs l3=__builtin_nontemporal_load(&nt4[1]);"
+            "FOLD(nt8);FOLD(nt4);FOLD(nti);FOLD(l1);FOLD(l2);FOLD(l3);"
+            "long long bc1=__builtin_bit_cast(long long,b8);v4qs bc2=__builtin_bit_cast(v4qs,n*7);v2sf bc3=__builtin_bit_cast(v2sf,d2);"
+            "v8qs bc4=__builtin_bit_cast(v8qs,f10);double bc5=__builtin_bit_cast(double,b8);v4hs bc6=__builtin_bit_cast(v4hs,(double)n*1.25);"
+            "float bc7=__builtin_bit_cast(float,b4);v4qs bc8=__builtin_bit_cast(v4qs,(float)n*0.5f);unsigned bc9=__builtin_bit_cast(unsigned,c4);"
+            "v4qs bc10=__builtin_bit_cast(v4qs,0x01020304);v2ss bc11=__builtin_bit_cast(v2ss,0x0102030405060708ll);"
+            "long long bc12=__builtin_bit_cast(long long,(v8qs){1,2,3,4,5,6,7,8});"
+            "v4ss bc13=__builtin_bit_cast(v4ss,(v16qs){1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,(signed char)200});"
+            "FOLD(bc1);FOLD(bc2);FOLD(bc3);FOLD(bc4);FOLD(bc5);FOLD(bc6);FOLD(bc7);FOLD(bc8);FOLD(bc9);FOLD(bc10);FOLD(bc11);FOLD(bc12);FOLD(bc13);"
+            "return (int)h;}",
+        },
+        {
             // The leaves (c_builtin_x86_helpers.c): rdtsc's counts in order, pause, xgetbv's XCR0, the trailing zeros' counts
             // of 0 and of others at each width, at run time; and the hints, whose operands are a value and nothing.
             "x86-leaves",
@@ -358,7 +422,8 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         "typedef signed char v16qs __attribute__((vector_size(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
         "typedef short v8hs __attribute__((vector_size(16)));typedef int v4ss __attribute__((vector_size(16)));"
         "typedef unsigned v4su __attribute__((vector_size(16)));typedef float v4sf __attribute__((vector_size(16)));"
-        "typedef signed char v4qs __attribute__((vector_size(4)));typedef float v8sf __attribute__((vector_size(32)));"
+        "typedef signed char v2qs __attribute__((vector_size(2)));typedef float v8sf __attribute__((vector_size(32)));"
+        "typedef long long v2ds __attribute__((vector_size(16)));typedef signed char v8qs __attribute__((vector_size(8)));"
         "typedef double v8df __attribute__((vector_size(64)));typedef __bf16 v8bf __attribute__((vector_size(16)));"
         "typedef __fp16 v8hp __attribute__((vector_size(16)));typedef _Float16 v8hf __attribute__((vector_size(16)));"
         "typedef float v4sfu __attribute__((vector_size(16),aligned(4)));typedef long long v4ds __attribute__((vector_size(32)));";
@@ -374,17 +439,19 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64", "unsigned long tested(int n){return __builtin_ia32_xgetbv((unsigned)n);}", "xgetbv without XSAVE", 0 },
         { "x86-64", "int x;int tested(int n){__builtin_ia32_monitorx(&x,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0, 1 },
         { "x86-64", "int tested(int n){__builtin_ia32_mwaitx(0,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0 },
-        { "znver5", "int calls;int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
-          "(v4qs){(calls++,7),8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);return calls+c[n&15];}",
+        { "znver5", "int calls;int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),"
+          "(v2qs){(calls++,7),8},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return calls+c[n&15];}",
           "narrow vector shuffle operands with nonconstant values or side effects", 2, 1 },
-        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
-          "(v4qs){(n++,7),8,9,10},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return n+c[0];}",
+        { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),"
+          "(v2qs){(n++,7),8},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return n+c[0];}",
           "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),"
-          "(volatile v4qs){7,8,9,10},0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7);return c[n&15];}",
+        { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),"
+          "(volatile v2qs){7,8},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return c[n&15];}",
           "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "znver5", "int tested(int n){v8hs a={(short)n};v8sf c=__builtin_convertvector(a,v8sf);return (int)c[0];}",
-          "vector conversions between 8- or 16-bit integers and floating elements", 2 },
+        { "znver5", "void tested(v8qs* p,v8hf* q){*q=__builtin_convertvector(*p,v8hf);}",
+          "vector conversions between half-precision elements and 8-bit integers, or bf16 elements and 8- or 16-bit integers", 0 },
+        { "znver5", "void tested(v8hs* p,v8bf* q){*q=__builtin_convertvector(*p,v8bf);}",
+          "vector conversions between half-precision elements and 8-bit integers, or bf16 elements and 8- or 16-bit integers", 0 },
         { "znver5", "void tested(v8sf* p,v8bf* q){*q=__builtin_convertvector(*p,v8bf);}", "vector conversions to bf16 elements, or of bf16 ones to types other than float", 0 },
         { "znver5", "void tested(v8hp* p,v8df* q){*q=__builtin_convertvector(*p,v8df);}",
           "vector conversions between half-precision elements and types other than float without AVX512-FP16", 0 },
@@ -410,8 +477,8 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements", 3 },
-        { "znver5", "int tested(int n){return ((v4qs){(signed char)n,1,2,3})[1];}", "vector types of other than 16, 32 or 64 bytes", 0 },
-        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),(v4qs){(signed char)n},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);"
+        { "znver5", "int tested(int n){return ((v2qs){(signed char)n,1})[1];}", "vector types of other than 4, 8, 16, 32 or 64 bytes", 0 },
+        { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
         { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
           "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },

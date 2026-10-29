@@ -699,7 +699,7 @@ struct CheckLanesTestFailure
     CheckProgramStatus status;
 };
 
-// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt past 128 bits), Tier
+// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a bit-field of a _BitInt past 128 bits), Tier
 // 0's refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
 // BUSTER_TIER0_MAX_DEPTH, where it takes the values past its depth tables, #780), and fine bodies around them.
 // Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever
@@ -723,14 +723,14 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "int deep(int a)\n{\n    g = 1.0L;\n"
         BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
-        "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
+        "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
     {
         "lowering before Tier 0",
         "long double g;\n"
-        "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
+        "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
         BUSTER_CHECK_LANES_TEST_DEEP
@@ -740,9 +740,9 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
     {
         "two lowering refusals",
         "int fine0(int a) { return a + 1; }\n"
-        "int refused0(int a) { _BitInt(200) x = a; return (int)x; }\n"
+        "int refused0(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int fine1(int a) { return a * 2; }\n"
-        "int refused1(int a) { _BitInt(300) y = a; return (int)y; }\n"
+        "int refused1(int a) { struct { unsigned _BitInt(300) y : 250; } v; v.y = a; return (int)v.y; }\n"
         "int main(void) { return fine0(1) + refused0(2) + fine1(3) + refused1(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },

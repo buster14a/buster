@@ -1535,6 +1535,185 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
     }
 }
 
+// ir_operand's order (#786): its table of a mask's places against the loop it replaced, and on a function of every kind
+// of operand (a and b, a compare's, a select's three, a store's, an address's optional index, a call's 18 arguments, an
+// indirect call's callee and arguments, a branch's condition, a phi's incoming values and a return's value), each
+// instruction's operands against their enumeration from its own fields: the operation's a, b and c where it reads them,
+// then a phi's incoming values in their blocks or a call's arguments.
+static void ir_test_operand_order(IrTestTally* tally, Arena* memory, Arena* scratch)
+{
+    for (uint32_t mask = 0; mask < 8; mask += 1)
+    {
+        uint32_t bits = mask;
+        for (uint32_t n = 0; bits != 0; n += 1)
+        {
+            ir_test_expect(tally, ir_operand_positions[mask][n] == (uint32_t)__builtin_ctz(bits), "an operand mask's place is wrong");
+            bits &= bits - 1;
+        }
+    }
+    const uint64_t mark = memory->length;
+    const IrSizes sizes = {
+        .instruction_count = 16,
+        .block_count = 3,
+        .extra_count = 24,
+        .slot_count = 1,
+        .address_count = 1,
+        .call_count = 2,
+        .call_type_count = 20,
+        .parameter_count = 2,
+    };
+    IrFunction function = {
+        0
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, created, "operand order fixture allocation failed");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.symbol_count = 2;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.block_offsets[1] = 12;
+        function.block_offsets[2] = 14;
+        function.block_offsets[3] = 16;
+        function.slots[0] = (IrSlot){
+            .size = 8,
+            .alignment = 8,
+            .type = IR_I64,
+            .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN,
+        };
+        function.addresses[0] = (IrAddress){
+            .offset = 0,
+            .scale = 8,
+        };
+        function.calls[0] = (IrCall){
+            .argument_first = 0,
+            .argument_count = 18,
+            .type_first = 0,
+            .parameter_count = 18,
+            .result_type = IR_I64,
+        };
+        function.calls[1] = (IrCall){
+            .argument_first = 18,
+            .argument_count = 2,
+            .type_first = 18,
+            .parameter_count = 2,
+            .result_type = IR_I64,
+        };
+        for (uint32_t argument = 0; argument < 18; argument += 1)
+        {
+            function.extra[argument] = argument % 3;
+        }
+        for (uint32_t type = 0; type < 20; type += 1)
+        {
+            function.call_types[type] = IR_I64;
+        }
+        function.extra[18] = 9;
+        function.extra[19] = 4;
+        // The phi's incoming values: 10 from block 0 and 12 from block 1.
+        function.extra[20] = 0;
+        function.extra[21] = 10;
+        function.extra[22] = 1;
+        function.extra[23] = 12;
+        ir_test_instruction(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 2, IR_ADD, IR_I64, 0, 1, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 3, IR_ICMP, IR_I1, 0, 2, IR_EQ);
+        ir_test_instruction(&function, 4, IR_SELECT, IR_I64, 3, 1, 2);
+        ir_test_instruction(&function, 5, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 6, IR_STORE, IR_VOID, 5, 4, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 7, IR_SYMBOL_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 8, IR_ADDRESS, IR_PTR, 5, 2, 0);
+        ir_test_instruction(&function, 9, IR_CALL, IR_I64, 1, 0, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 10, IR_CALL_INDIRECT, IR_I64, 7, 1, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 11, IR_CBR, IR_VOID, 3, 1, 2);
+        ir_test_instruction(&function, 12, IR_ADD, IR_I64, 9, 10, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 13, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 14, IR_PHI, IR_I64, 20, 2, BUSTER_IR_NONE);
+        ir_test_instruction(&function, 15, IR_RET, IR_VOID, 14, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        // Block 0 dominates blocks 1 and 2, and neither of those the other.
+        const uint32_t enter[] = {
+            0,
+            1,
+            2
+        };
+        const uint32_t leave[] = {
+            3,
+            2,
+            3
+        };
+        const IrDominance dominance = {
+            .enter = enter,
+            .leave = leave,
+            .block_count = 3,
+        };
+        ir_test_pair(tally, &function, scratch, 0, true, "operand order fixture rejected");
+        ir_test_pair(tally, &function, scratch, &dominance, true, "operand order fixture rejected with its dominance");
+        // A block no instruction is in, which every operand but a phi's must carry through.
+        const uint32_t use_block = 7;
+        uint32_t operands = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            uint32_t values[24] = {
+                0
+            };
+            uint32_t positions[24] = {
+                0
+            };
+            uint32_t blocks[24] = {
+                0
+            };
+            uint32_t expected = 0;
+            const uint32_t op = function.op[i];
+            const uint32_t fields[3] = {
+                function.a[i],
+                function.b[i],
+                function.c[i],
+            };
+            for (uint32_t p = 0; p < 3; p += 1)
+            {
+                if ((ir_operand_table[op] & (1u << p)) != 0 || ((ir_optional_table[op] & (1u << p)) != 0 && fields[p] != BUSTER_IR_NONE))
+                {
+                    values[expected] = fields[p];
+                    positions[expected] = p;
+                    blocks[expected] = use_block;
+                    expected += 1;
+                }
+            }
+            if (op == IR_PHI)
+            {
+                for (uint32_t q = 0; q < function.b[i]; q += 1)
+                {
+                    values[expected] = function.extra[function.a[i] + q * 2 + 1];
+                    positions[expected] = 3 + q;
+                    blocks[expected] = function.extra[function.a[i] + q * 2];
+                    expected += 1;
+                }
+            }
+            else if (op == IR_CALL || op == IR_CALL_INDIRECT)
+            {
+                const IrCall call = function.calls[function.b[i]];
+                for (uint32_t q = 0; q < call.argument_count; q += 1)
+                {
+                    values[expected] = function.extra[call.argument_first + q];
+                    positions[expected] = 3 + q;
+                    blocks[expected] = use_block;
+                    expected += 1;
+                }
+            }
+            ir_test_expect(tally, ir_operand_count(&function, i) == expected, "an instruction's operands were counted wrong");
+            for (uint32_t p = 0; p < expected; p += 1)
+            {
+                const IrOperand operand = ir_operand(&function, i, p, use_block);
+                ir_test_expect(tally, operand.value == values[p] && operand.position == positions[p] && operand.block == blocks[p], "an instruction's operands came out of order");
+            }
+            operands += expected;
+        }
+        ir_test_expect(tally, operands == 38, "operand order fixture didn't reach every operand");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_generated(IrTestTally* tally, Arena* memory, Arena* scratch, uint64_t count)
 {
     uint64_t state = tally->seed != 0 ? tally->seed : 1;
@@ -1671,6 +1850,10 @@ static void ir_test_switch_collision_family(IrTestTally* tally, Arena* memory, A
     arena_pop_to(memory, mark);
 }
 
+#include "ir_simd_model_test.c"
+#include "ir_simd_execute.c"
+#include "ir_simd_test.c"
+
 static int run_ir_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -1721,8 +1904,13 @@ static int run_ir_tests(int argc, char** argv)
             ir_test_label_lists(&tally, &memory, &scratch);
             ir_test_aggregates(&tally, &memory, &scratch);
             ir_test_types(&tally, &memory, &scratch);
+            ir_test_simd(&tally, &memory, &scratch);
+            const IrSimdModelTest model = ir_simd_model_test(stderr);
+            tally.checks += model.checks;
+            tally.failures += model.failures;
             ir_test_guards(&tally, &memory, &scratch);
             ir_test_dominance_tails(&tally, &memory, &scratch);
+            ir_test_operand_order(&tally, &memory, &scratch);
             ir_test_generated(&tally, &memory, &scratch, count);
             bool preserved = scratch.length == 19;
             for (uint32_t byte = 0; byte < 19; byte += 1)

@@ -633,10 +633,10 @@ static __attribute__((unused)) IrReduceStatus ir_reduce(const IrFunction* source
         {
             status = IR_REDUCE_RESOURCE;
         }
-        // ir_reduce_copy and ir_rebuild carry no labels, ABI records or variadic frame: such a function is invalid
-        // input here, never reduced without them.
+        // Scalar-only copies carry no vector payloads, labels, ABI records or variadic frame: refuse the whole
+        // function before a copy can drop them, including an unused vector-constant pool.
         bool supported = vector.error == IR_OK && scalar.error == IR_OK && source->block_count != 0 && source->result_type <= IR_PTR &&
-                         ir_rebuild_plain(source);
+                         !ir_function_has_simd(source) && ir_rebuild_plain(source);
         for (uint32_t i = 0; supported && i < source->instruction_count; i += 1)
         {
             supported = ir_rebuild_values(source->op[i]) != BUSTER_IR_NONE && source->type[i] <= IR_PTR;

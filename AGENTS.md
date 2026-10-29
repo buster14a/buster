@@ -5511,10 +5511,12 @@ and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Four compiled runs
 (#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
 this compiler on our side: a world of what its C passes (integers to 64 bits,
-`_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
-`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
+`_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
+and `unsigned __int128`, enums, pointers,
+`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types
+(and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
-`_BitInt`s to 128 bits, `__float128`, in clang's `_Atomic`s of those
+`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of those
 scalars and records (themselves, records holding them and aligned typedefs of
 them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
 AVX-512, and the
@@ -5748,10 +5750,13 @@ take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes 
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads
-whole, its upper bytes zero; and `--count` random programs of vector, integer and
-float statements, masked stores and dropped vectors over the rows (operands and
-results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
-operands, a row of no records), constants, frame objects of each width, DUP,
+whole, its upper bytes zero; and `--count` random programs of vector (of 4, 8,
+16, 32 and 64 bytes, those of 4 and 8 through XMM forms that read them with
+their upper bytes zero), integer and float statements, masked stores and
+dropped vectors over the rows (operands and results on both stacks, masks,
+scratch registers, `/is4`, memory and VSIB operands, a row of no records, moves
+between general registers and vectors of 4 and 8 bytes), constants, frame
+objects of each width, DUP,
 STORE's kept value and `?:`, under live values on both stacks, every output
 byte against the check's stack machine. Its coverage must reach every VECTOR
 kind at each width it has, every row and both arms. Then the `validation`
