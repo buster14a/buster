@@ -14,19 +14,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/issue-821-a.patch "$RUNNER_TEMP/a.patch"
-          cp .github/issue-821-b.patch "$RUNNER_TEMP/b.patch"
+          cp .github/issue-821-*.patch "$RUNNER_TEMP/"
           cp src/buster/compiler/c_check_mangle.c "$RUNNER_TEMP/c_check_mangle.c"
           cp src/buster/compiler/c_check_program_overload_test.c "$RUNNER_TEMP/c_check_program_overload_test.c"
           git fetch origin 1a9955ab5c3cb85d6ef6e346f1ab422abc995384 --depth=1
           git checkout --detach 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
-          git apply --index "$RUNNER_TEMP/a.patch" "$RUNNER_TEMP/b.patch"
+          git apply --index "$RUNNER_TEMP/issue-821-a.patch" "$RUNNER_TEMP/issue-821-b.patch"
           cp "$RUNNER_TEMP/c_check_mangle.c" "$RUNNER_TEMP/c_check_program_overload_test.c" src/buster/compiler/
           git add src/buster/compiler/c_check_mangle.c src/buster/compiler/c_check_program_overload_test.c
+          git apply --index "$RUNNER_TEMP/issue-821-c.patch"
           git diff --cached --check
           git diff --cached --stat
       - name: Install the repository's pinned hosted toolchain
-        run: tools/ci/setup-hosted.sh
+        run: bash tools/ci/setup-hosted.sh
       - name: Build baseline compiler
         shell: bash
         run: set -euo pipefail; BUSTER_DEBUG_INFO=0 BUSTER_HOST_ARCH=x86-64 ./build.sh 2>&1 | tee "$RUNNER_TEMP/build.log"

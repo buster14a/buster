@@ -1,0 +1,29 @@
+--- a/src/buster/compiler/c_check_mangle.c
++++ b/src/buster/compiler/c_check_mangle.c
+@@ -27,6 +27,7 @@
+     const TypeTable* types;
+     Arena* output;
+     bool scalar;
++    bool internal;
+     // Built only when a selected signature contains a named tag. Local/anonymous tags need lexical ABI names that
+     // the type table alone cannot supply; never confuse one with a file-scope tag of the same spelling.
+     uint8_t* global_tags;
+@@ -355,7 +356,7 @@
+     {
+         const uint32_t length = intern_length(source->identifiers, identifier);
+         writer.status = length == 0 ? CHECK_MANGLE_INVALID : CHECK_MANGLE_OK;
+-        check_mangle_text(&writer, "_Z");
++        check_mangle_text(&writer, source->internal ? "_ZL" : "_Z");
+         check_mangle_number(&writer, length, 10);
+         check_mangle_bytes(&writer, intern_bytes(source->identifiers, identifier), length);
+         check_mangle_parameters(&writer, type_strip_aligned(types, function), true);
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1342,6 +1342,7 @@
+             {
+                 mangle_scratch = scratch_begin(scratch);
+             }
++            mangling.internal = program->input->linkage[candidate->declaration] == 1;
+             const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+                                                                mangle_scratch.arena, &symbol_names[symbol]);
+             valid = status == CHECK_MANGLE_OK;
