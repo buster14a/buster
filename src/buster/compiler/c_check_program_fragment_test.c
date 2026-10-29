@@ -79,7 +79,6 @@ static void check_test_program_fragments(CheckTest* test, TypeTable* types, uint
         for (uint32_t shape = 0; shape < 5; shape += 1)
         {
             const TypeId integer = integers[(count + shape) % BUSTER_ARRAY_LENGTH(integers)];
-            const uint8_t integer_class = type_classes[type_index(integer)];
             const bool selected = shape < 2 || (shape < 4 && count % 2 != 0) || (shape == 4 && count == 7);
             for (uint32_t mode = 0; selected && mode < (shape == 4 ? 7u : 1u); mode += 1)
             {
@@ -187,6 +186,7 @@ static void check_test_program_fragments(CheckTest* test, TypeTable* types, uint
                             }
                             else
                             {
+                                const uint8_t integer_class = type_classes[type_index(integer)];
                                 bool literal = writers[path].count == initial + entries && writers[path].expression_nodes == count && writers[path].batch_nodes == count;
                                 uint32_t entry = initial;
                                 uint32_t last_leaf = 0;
