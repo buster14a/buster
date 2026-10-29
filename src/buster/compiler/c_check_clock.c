@@ -71,9 +71,16 @@ typedef enum CheckStage
     CHECK_STAGE_OBJECT_BUILD,
     // object_write_file.
     CHECK_STAGE_OBJECT_WRITE,
-    // The direct path after its emission: binding, the static data, and the executable's write.
+    // The direct path's runtime: its snapshot opened (runtime_open), the libraries -l names imported, and the link's
+    // memory reserved, before the emission (with several source files, before the units' merge).
+    CHECK_STAGE_RUNTIME,
+    // The direct path after its emission: binding's end (bind_end), link_check, the dynamic inputs and the symbol table's
+    // selection.
     CHECK_STAGE_EXECUTABLE,
-    // The arenas', the parser's, the preprocessor's and the intern table's release.
+    // The direct path's write (executable_write, on its lanes), and its errors' report.
+    CHECK_STAGE_WRITE,
+    // The arenas', the parser's, the preprocessor's and the intern table's release; and the direct path's link's memory
+    // and runtime.
     CHECK_STAGE_RELEASE,
     CHECK_STAGE_COUNT,
 } CheckStage;
@@ -102,7 +109,9 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_PUBLISH_DATA] = "publish-data",
     [CHECK_STAGE_OBJECT_BUILD] = "object-build",
     [CHECK_STAGE_OBJECT_WRITE] = "object-write",
+    [CHECK_STAGE_RUNTIME] = "runtime",
     [CHECK_STAGE_EXECUTABLE] = "executable",
+    [CHECK_STAGE_WRITE] = "write",
     [CHECK_STAGE_RELEASE] = "release",
 };
 
@@ -112,6 +121,12 @@ static const char* const check_clock_phase_names[] = { "preprocess.read", "prepr
                                                        "preprocess.main-loop" };
 
 #define BUSTER_CHECK_CLOCK_PHASES (sizeof(check_clock_phase_names) / sizeof(check_clock_phase_names[0]))
+
+// The direct path's write's phases (executable_write's, EXECUTABLE_PHASES of them, in their order), which the report
+// gives as `time-write` lines after the stages: what the `write` stage's time went to, on the writer's lane 0 (#778).
+static const char* const check_clock_write_names[] = { "count", "layout", "symbols", "dynamic", "open", "chunks", "finish" };
+
+#define BUSTER_CHECK_CLOCK_WRITE_PHASES (sizeof(check_clock_write_names) / sizeof(check_clock_write_names[0]))
 
 typedef struct CheckClock CheckClock;
 struct CheckClock
@@ -129,6 +144,9 @@ struct CheckClock
     uint64_t stage_system_us[CHECK_STAGE_COUNT];
     uint64_t stage_minor_faults[CHECK_STAGE_COUNT];
     uint64_t stage_peak_kb[CHECK_STAGE_COUNT];
+    // The write's phases' nanoseconds, from executable_write's result, when it wrote.
+    bool wrote;
+    uint64_t write_nanoseconds[BUSTER_CHECK_CLOCK_WRITE_PHASES];
 };
 
 // The process's system time in microseconds, minor faults and peak resident set in KB, or zeros.
@@ -218,6 +236,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         }
     }
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
+    for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
+    }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
     struct rusage usage = { 0 };
     if (getrusage(RUSAGE_SELF, &usage) == 0)

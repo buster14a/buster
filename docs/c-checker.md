@@ -1362,6 +1362,54 @@ What the lowering covers past scalars (#145's programs):
   of a `long double`, in st0) returns its bytes' address too. Those larger than
   64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
   stack aligned to it at the call, which realigns the caller's frame.
+- **Transparent unions (#147).** An argument, a parameter and `va_arg`'s type
+  that is a transparent union passes as the union's first member, as clang's
+  code classifies it (`useFirstFieldIfTransparentUnion`; a result keeps the
+  union's own classes): `check_lower_passed_as` gives `abi_assign` and
+  `abi_va_arg` the member, and a parameter's frame object takes the union's
+  bytes from where the member arrives. A first member of an integer, a pointer,
+  an enum or `_Bool` passes as a value of its class, extended as its type is (a
+  `short`'s sign-extended, as clang's `signext`); a struct, a union, an array,
+  a 128-bit integer or an `_Atomic` one passes as the union's bytes, as an
+  aggregate of the member's type does (`check_lower_transparent_class`). The
+  value comes from the union's object, or from the member a conversion to the
+  union selects (`BUSTER_CHECK_CONVERT_TRANSPARENT_UNION`, which the lowering
+  refused before), whose value starts the union's bytes, every member having
+  the first's size (`check_lower_transparent_value`): an integer's or a
+  pointer's bits as the first member's class, a struct's, a union's or a
+  complex value's from its address, and any other's (a floating value's, a
+  wide one's) through a temporary. So a union of a struct of two floats and a
+  struct of two ints passes in xmm0, where its own classes would take a general
+  register, and glibc's
+  socket calls (`bind`, `connect`, `accept`, `getsockname`, `sendto`,
+  `recvfrom` and the rest) take `__SOCKADDR_ARG` and `__CONST_SOCKADDR_ARG`
+  with `_GNU_SOURCE`. Two cases are refused by name. A union sized or aligned
+  otherwise than its first member, by an `aligned` or `packed` attribute of its
+  own: clang's code takes its registers from the member and its stack slot
+  from the union (`getIndirectResult`). And a union made transparent, by a
+  later declaration's attribute, after a function definition or a static
+  object's initializer that names a function, whose first member passes
+  otherwise than the union does (its registers, its stack or its extension):
+  clang's code classifies a function's type where it first meets it, which an
+  object's initializer does where clang's code emits the object, and keeps
+  that for the type's every use (`check_lower_transparent_late`; clang 23.1.4
+  passes `void f(union U)` as the union in a call after the attribute when a
+  definition before it met the type, or an initializer such as
+  `void (*p)(union U) = f;`). The lowering takes the earliest such place in the
+  unit (`check_lower_first_classification`, the first body or an earlier
+  initializer that names any function), the first time a lane asks, which
+  only such a union makes it do. So a union only made transparent inside a
+  body, or after a static object's initializer, which clang's code emits only
+  once a function uses the object, or after one that names a function of
+  another type, is refused so too, though clang's code would pass it as its
+  member. `test-checker`'s programs
+  (`c_check_program_transparent_test.c`) run each kind of member value, union
+  values, unnamed arguments and `va_arg`, in registers and on the stack,
+  against clang -O0's build of the same source, calling the harness's clang
+  functions and called by them through pointers, with the registers a
+  `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
+  `test-checker-driver` links and runs glibc's socket calls with `_GNU_SOURCE`
+  by both paths against clang's build (`c_check_transparent_driver_test.c`).
 - **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
   aggregate-returning body's control graph removes unreachable transfers
   without renumbering labels. A reachable implicit return supplies an address
