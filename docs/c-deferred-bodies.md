@@ -927,7 +927,7 @@ others: #764, below.
 ### The rare columns' huge pages (#764)
 
 The campaigns below, their trees and their logs are in
-[#764's record](https://github.com/buster14a/buster-performance/tree/7f469bd8deb897910c53025518485c882caf24c4/docs/measurements/deferred-rare-columns-764-2026-10-29).
+[#764's record](https://github.com/buster14a/buster-performance/tree/cc514098c9ad2ad809cb1b8ef82f3c365991375a/docs/measurements/deferred-rare-columns-764-2026-10-29).
 The race's time is the kernel's, clearing fresh memory. On the 9700X a first
 write into a fresh 2 MB region takes 82 µs from the allocator's free lists,
 and clearing runs at about 26 GB/s however many threads share it: two, four
