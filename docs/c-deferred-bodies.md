@@ -25,8 +25,8 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
 3. **The lanes.** The reader runs one lane, and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (1,024), and one more per
-   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (4) of the top level's
+   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (1,280), and one more per
+   `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (3) of the top level's
    tokens, of the bodies' tokens beyond their critical path: the larger of the
    largest body, which the first lane reads itself, and twice the second
    largest, which a woken lane reads at about half the first lane's speed. It
@@ -96,6 +96,19 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    address space's lock. A state's reading after its first finds its pages in
    place, and a lane's copy is then a copy alone; a process's first reading
    still faults in every page its lanes' copies take.
+
+   The bodies' walks write their entries of the reader's token columns into
+   `check_input_run`'s arena of rare columns (#572), which every reading
+   reserves anew, in huge pages past its scope stacks. Where the rule gives
+   the bodies more than one lane, that arena is base pages throughout
+   (`check_input_sparse_arena`, #764): lanes that write a 2 MB region of it
+   that has no page yet, or the huge zero page where the top level's walk read
+   it, each allocate and clear a huge page for it, of which the kernel maps
+   one, and how often they meet there depends on their timing ("The rare
+   columns' huge pages", below). The reader works out the rule's lanes from
+   the parser's tree before its top level's walk (`CheckDeferred.planned`),
+   and `check_deferred_bodies` works them out again from the top level's
+   cuts. A reading on one lane keeps the huge pages, as source order does.
 4. **A body** (`check_deferred_body`). The lane sets its reader to what source
    order's is at the body's opening, the position checks:
    - each name the body and its parameters spell, once (a stamp per name),
@@ -299,10 +312,20 @@ passes every checker test.
   default), on 8 lanes through each resolution: the three paths must still
   be alike, and the reader must merge it as before. A
   merged unit's bodies must run on the rule's lanes (`CheckDeferred.active`),
-  in as many parts as a group of them cuts (`CheckDeferred.parts`), its reader
+  which the reader must have planned before its top level's walk
+  (`CheckDeferred.planned`), in as many parts as a group of them cuts
+  (`CheckDeferred.parts`), its reader
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
   and its bodies' tokens that pay for a lane (`CheckDeferred.lane_tokens`) be
-  the rule's, worked out again from the unit's tokens outside its bodies. Each
+  the rule's, worked out again from the unit's tokens outside its bodies. Its
+  arena of rare columns must be base pages throughout exactly where those
+  lanes are more than one, and source order's never
+  (`CheckInput.rare_columns_shared`, #764); `check_input_sparse_arena`'s
+  mappings are checked apart, by the kernel's advice for them (`nh` and `hg`
+  in `/proc/self/smaps`) at their ends and on both sides of the prefix, with
+  capacities of a byte, of an arena's 64 KB of base pages and a byte more,
+  and of three huge pages and 17 bytes, none of them committed until written.
+  Each
   of the issue's cases runs again on 8 lanes by the reader's own rule, which
   reads most of them on one. The rule's fixtures are functions of empty
   statements whose bodies have known tokens, in units of the tokens that pay
@@ -625,8 +648,9 @@ different sizes ([the corrected record](https://github.com/buster14a/buster-perf
   then in all of them.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
-(1,024) and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` (4) of the top
-level's tokens (`CheckDeferred.lane_tokens`), of the bodies' tokens beyond
+(1,280; 1,024 before #764) and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS`
+(3; 4 before #764) of the top level's tokens (`CheckDeferred.lane_tokens`), of
+the bodies' tokens beyond
 their critical path, the larger of the largest body's and twice the second
 largest's: the first lane reads the largest body at full speed, and a woken
 lane the second at about half. On the grid of every lane count from 1 to 4
@@ -648,7 +672,9 @@ eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
 rule puts 38 units within one percentage point of their best and forgoes
 10.7 points, where #448's rule puts 19 and forgoes 107.4. Campaign A4, the same
 grid after #697's item 2, keeps the rule's constants ("A lane's copy at a first
-reading (#697)", below).
+reading (#697)", below). Campaign A5, after #764 put the rare columns of a
+reading on more than one lane in base pages, fits them again: 1,280 tokens and
+a third of the top level's ("The rare columns' huge pages (#764)", below).
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -896,7 +922,101 @@ with base-page arenas, which runs into it too, and at a state's later readings,
 whose lanes reach their walks at once, they run into it in every round. In base
 pages that arena takes the race away but costs source order's reader, whose
 arena it is, up to 6.6% on the record's units, where it saves up to 4.2% on
-others: #764.
+others: #764, below.
+
+### The rare columns' huge pages (#764)
+
+The campaigns below, their trees and their logs are in
+[#764's record](https://github.com/buster14a/buster-performance/tree/7f469bd8deb897910c53025518485c882caf24c4/docs/measurements/deferred-rare-columns-764-2026-10-29).
+The race's time is the kernel's, clearing fresh memory. On the 9700X a first
+write into a fresh 2 MB region takes 82 µs from the allocator's free lists,
+and clearing runs at about 26 GB/s however many threads share it: two, four
+and eight threads that write regions of their own at once take 153, 311 and
+651 µs each. Threads that write one region at once each allocate and clear a
+page, of which the kernel maps one. A cycles profile at a fixed period
+(`perf record -c 200003`, whose samples count cycles) has main's woken lanes,
+in eight-lane readings of `b16x77.c` whose walks raced (76 ns/token), spend
+180 Mcycles in `clear_page_erms` over 24 readings, against 6 with the token
+columns in base pages. A process of main's whose eight-lane walks raced (65
+ns/token) took 57 ms more of CPU (`task-clock`) than one of the committed
+columns' below (23 ns/token), whose walks took 65 ms less in all. Item 2's
+record sampled at a frequency, and found the clears too few to account for
+the walks.
+
+Campaign D1 read diag9's six units, `00200.c` and `sqlite3.c` on eight lanes
+with every lane, five rounds, by five trees: main; the arena in base pages
+throughout for every deferred reading (#791's first head); its token columns
+alone in base pages, for every deferred reading and only where more than one
+lane reads; and the columns committed on the calling thread before the lanes
+(`MADV_POPULATE_WRITE`). Main's eight-lane walks of `b16x77.c` took 24.5 to
+53.4 ns/token over the rounds, and of `l16x38f384.c` 21.6 to 34.2; base pages
+kept every unit's within 3.2. Base pages throughout read the bodies fastest of
+the base-page trees: on eight lanes, `sqlite3.c` 5.7% faster than main,
+`b16x77.c` 18.4% and `l16x38f384.c` 14.5%, and `h16x19.c`, `h16x10.c` and
+`00200.c` (two bodies) 3.9 to 6.2% slower, where a lane's faults of 4 KB
+pages, and the merge's pass and the phases after it, which read every token's
+entries, cost more than the huge pages' clears. The columns alone in base
+pages read every unit slower than base pages throughout. The committed
+columns' walks were the fastest, but the phases after the merge then read
+committed zero pages where they had read the huge zero page, which costs no
+memory traffic: `sqlite3.c` read 4.8% slower than main. On one lane, where
+nothing races, base pages read five of the eight units 2.6 to 6.2% slower,
+and `sqlite3.c`, `b16x77.c` and `l16x38f384.c` 3.5 to 7.2% faster: the arena
+keeps its huge pages there, as source order's does.
+
+Campaign A5 read A2's 43 units five rounds, this change (`3b87d0c9`) on 2, 3,
+4 and 8 lanes with every lane and, on 8, beside the base-page control (#791's
+first head, base pages at every deferred reading) and main. The eight-lane
+walks' spread over the rounds is a median of 1.40 ns/token over the units and
+at most 4.94, where the control's is 1.12 and 5.68 and main's 1.33 and 37.79,
+over 5 on twelve units. Against main, the change reads the units on eight
+lanes 1.7% slower (the median; 22.0% faster to 9.5% slower), from the racing
+units' gains to the losses of units of few or short bodies, which the rule
+reads on one lane, and on one lane 0.4% slower (2.2% faster to 3.3% slower),
+the same pages as main's. At a state's later readings (`--warm`, campaign W5,
+diag9's units and `sqlite3.c` on eight lanes, five rounds), whose woken lanes
+reach their walks at once, main's walks raced in every round, 52 to 69
+ns/token on four of the units, and the change's took 12 to 33 there: it read
+them 12 to 28% faster than main, `sqlite3.c` 5.3%, and `h16x10.c`, on which
+main didn't race, 9.2% slower. On `sqlite3.c` by the rule, eight lanes, six
+processes (campaign S5), the change reads 5.1% faster than main and 10.4%
+faster than source order, where main reads 5.6% faster: its lanes' walks take
+20.1 ns/token in all against 27.2, its lanes' span 1.0 less, and its top
+level, merge and later phases 2.2 less. Source order, whose arena keeps its
+huge pages, reads A2's units 0.5% slower than main by the median (0.8% faster
+to 2.2% slower) and `sqlite3.c` 0.8% faster, in processes whose every reading
+is on one lane (campaign SO5, five rounds). The two builds run the same code
+there: their processes' user instructions differ by 0.002 to 0.005%, the
+plan's sums over the bodies among them, and their cycles by 0.5 to 0.7%, the
+builds' placement (campaign SOI, three processes of each on four of the
+units). In A5's processes, beside readings in base pages, source order reads
+1.1% slower, since its huge pages then come from the free lists rather than
+from a huge-page reading's just freed.
+
+A second lane's first touches of base pages cost more than of huge pages, and
+more with a larger top level. On A5's grid the rule's constants, 1,024 tokens
+and a quarter of the top level's, forgo 49.4 points and read the worst unit
+4.8% slower on its two lanes than on one; 1,280 tokens and a third forgo 45.3
+and read the worst unit 2.1% slower, and do better than 1,024 and a quarter in
+four of the five rounds, so they replace them. They read every c-testsuite
+program on one lane, `00204.c` too (2,282 tokens beyond its critical path,
+5.4% faster on two lanes than on one). A sharper fit, 64 tokens and half the
+top level's, forgoes 40.7 points, but 128 and a half forgo 52.3: the
+difference is two lanes for `00204.c` and for `00213.c`, of 460 tokens.
+
+By each build's rule (campaign B5, A2's 43 units, five rounds), the change
+reads the units 0.6% slower than main by the median, from 22.9% faster to
+8.6% slower. Twelve read more than 1% faster, `sqlite3.c` by 4.6%: their
+lanes no longer race, and their top level's walk no longer clears a huge page
+for each 2 MB region it writes (up to 5.4 ns/token faster). Twelve are within
+1%, all but one on one lane in both. Nineteen read more than 1% slower:
+fourteen units of two to eight lanes whose lanes didn't race in main, by 1.7
+to 8.6%; four that the refitted rule reads on one lane where main's read them
+on two (`00204.c` 5.3% slower); and `00213.c`, on one lane in both. On the
+fourteen, in base pages, the merge's pass and the phases after it read the
+arena's untouched pages a 4 KB fault at a time where main's read the huge
+zero page, 0.6 and 0.9 ns/token more (the medians), and the lanes' span takes
+0.9 more, as much on the five whose lanes the refit leaves as they were.
 
 ## One-lane pinning removed (#450)
 
@@ -963,45 +1083,18 @@ A lane still copies the top level's type table, whose withdrawals a body's
 walk makes in place (step 4), and at a process's first reading the position
 checks fault in the lane's event columns as they write the proxies: on eight
 lanes, `sqlite3.c`'s position checks take 6.5 ns/token in all, against main's
-5.4 with each lane's copy of the top level's events. The lanes' walks write
-into the checker's rare columns' huge pages, which they race to clear (#764):
-a fix that keeps source order's huge pages would call for the rule to be fitted
-again, and would let a state's later readings, whose lanes run into the race in
-every round, have a rule of their own (#697's item 3), once a caller reads
-several units with one state.
+5.4 with each lane's copy of the top level's events. Where more than one lane
+reads the bodies, the checker's rare columns are base pages (#764), which the
+lanes fault in 4 KB at a time and the merge's pass and the phases after it
+read a fault at a time where nothing wrote them: units whose lanes didn't race
+for huge pages read up to 8.6% slower than main by the rule. Huge pages that
+the lanes don't race for (each 2 MB region faulted by the first lane to write
+it, the others waiting for it), or a pass that reads only the blocks the walks
+wrote (above), would take that back. With the race gone, a state's later
+readings can have a rule of their own (#697's item 3), fitted on a grid like
+campaign W5's, once a caller reads several units with one state.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
 test corpus is copied into this change.
 
-## The shared sparse arena's pages (#764)
-
-`check_input_run` reserves its rare token columns and binding table afresh
-for every reading, independently of the deferred state's reusable arenas.
-`check_input_sparse_arena` gives this mapping base pages throughout when
-the reader will revisit bodies on deferred lanes. The policy is selected
-before either the top level or a body touches it, not after a huge zero
-page might already have been installed. It is the same on one or many
-lanes and on a state's first or later reading.
-
-Source order keeps its existing small prefix (the scope stacks and enum
-values) and huge-page tail. This includes a deferred reading's fallback
-and the lazy path that never revisits its skipped bodies: the policy
-tests the deferred reader, not merely the deferred-token mask. No new
-pre-touch pass, per-token branch, lane synchronization or merge copy is
-introduced. Existing vector and scalar walks are unchanged.
-
-`test-checker-deferred` checks the allocator's Linux `nh`/`hg` mapping
-flags at the beginning, both sides of the small-prefix boundary and the
-last byte. It covers repeated fresh mappings, sub-page and non-page-sized
-capacities, minimum-prefix clamping, initially uncommitted demand-zero
-storage, writable endpoints, release and refused capacities. The existing
-deferred fixture suite compares source order with one, two, three and
-eight lanes, delayed/held lanes and reused or poisoned states.
-
-This removes eligibility for competing transparent-huge-page allocations
-in this mapping where Linux accepts the arena's page-size advice. It is
-not by itself the performance acceptance for #764: five-round walk
-spreads on diag9 and A2's 43 units, source-order timings including SQLite,
-and a cold lane-rule refit on A2 are still required on the locked 9700X.
-The lane-rule constants are deliberately unchanged until that refit.
