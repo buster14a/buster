@@ -1001,37 +1001,70 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
 // A run of the driver's `arguments` (run_check_command's) in a child whose address space may grow `limit` bytes past
 // `base` (this process's), in `directory` and with its standard error into `capture`: its exit status (-1 if it didn't
 // report), how far past `base` its address space grew, and whether it left the address space and the descriptors as
-// they were. The child writes them to `shared`, a page both see.
+// they were. The child writes them to `shared`, a page both see. With `warm`, run in the parent before its baseline is
+// frozen, through this same command/observation frame; the caller restores the parent's limits, directory and stderr.
+// Keep the frame out of line so a direct warmup cannot use a shallower call path than the measured child.
 typedef struct CheckUnitsTestProbe CheckUnitsTestProbe;
 struct CheckUnitsTestProbe
 {
     int status;
     uint64_t peak;
+    uint64_t before_size;
+    uint64_t after_command_size;
+    uint64_t after_size;
+    uint64_t before_stack;
+    uint64_t after_stack;
+    uint64_t before_data;
+    uint64_t after_data;
+    int before_descriptor;
+    int after_descriptor;
     bool clean;
 };
 
-static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
-                                                  CheckUnitsTestProbe* shared)
+static __attribute__((noinline)) CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
+                                                                         bool warm, CheckUnitsTestProbe* shared)
 {
     *shared = (CheckUnitsTestProbe){ .status = -1 };
     fflush(stdout);
     fflush(stderr);
-    const pid_t child = fork();
+    const pid_t child = warm ? 0 : fork();
     if (child == 0)
     {
-        const struct rlimit core = { 0 };
+        struct rlimit core = { 0 };
         struct rlimit space;
         bool limited = getrlimit(RLIMIT_AS, &space) == 0 && base + limit <= space.rlim_max;
+        // A child can drop its hard core limit; the parent must keep it so the saved limit can be restored.
+        if (warm)
+        {
+            limited = limited && getrlimit(RLIMIT_CORE, &core) == 0;
+            core.rlim_cur = 0;
+        }
         space.rlim_cur = base + limit;
         limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
-        alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        if (!warm)
+        {
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        }
         const int before = parse_test_lowest_descriptor();
+        // These observations can themselves change stack use; keep the whole-process cleanup equality unchanged.
+        shared->before_stack = parse_test_status_bytes("VmStk:");
+        shared->before_data = parse_test_status_bytes("VmData:");
+        shared->before_size = parse_test_status_bytes("VmSize:");
         const int status = limited ? run_check_command(count, arguments, true) : -1;
+        shared->after_command_size = parse_test_status_bytes("VmSize:");
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
-        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        shared->after_size = parse_test_status_bytes("VmSize:");
+        shared->after_stack = parse_test_status_bytes("VmStk:");
+        shared->after_data = parse_test_status_bytes("VmData:");
+        shared->before_descriptor = before;
+        shared->after_descriptor = after;
+        shared->clean = shared->after_size == base && after == before;
         shared->status = status;
-        _exit(0);
+        if (!warm)
+        {
+            _exit(0);
+        }
     }
     int child_status = 0;
     pid_t waited = child;
@@ -1039,13 +1072,14 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
     {
     }
     CheckUnitsTestProbe result = *shared;
-    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    result.status = warm || (child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0) ? result.status : -1;
     return result;
 }
 
 // Every reservation and mapping of two units' -c by one lane failed in turn (see the file's comment), in a directory of
-// its own under `directory`. The command runs once in this process first, as the children's runs do, so that what only
-// a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's already.
+// its own under `directory`. The command and observations run once through the probe in this process first, so that
+// what only a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's
+// already. The parent baseline is frozen only after that same-frame warmup and restoration of the parent's state.
 static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
 {
     static const char header[] = "int limits_square(int value);\n";
@@ -1072,7 +1106,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     // The jobserver's tokens, which MAKEFLAGS would give the run, aren't what this checks.
     const char* makeflags = getenv("MAKEFLAGS");
     char* saved_makeflags = makeflags != NULL ? strdup(makeflags) : NULL;
-    unsetenv("MAKEFLAGS");
+    // Leave the environment untouched if its value could not be saved; do not run an unisolated warmup.
+    const bool isolated_makeflags = (makeflags == NULL || saved_makeflags != NULL) && unsetenv("MAKEFLAGS") == 0;
     char* arguments[] = { "--lanes", "1", "-c", "caller.c", "callee.c", NULL };
     const int count = (int)BUSTER_ARRAY_LENGTH(arguments) - 1;
     char text[1024];
@@ -1080,14 +1115,20 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     int status = -1;
     const int saved_directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     const int saved_errors = dup(2);
-    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && chdir(limits) == 0)
+    struct rlimit saved_space = { 0 };
+    struct rlimit saved_core = { 0 };
+    const bool saved_limits = getrlimit(RLIMIT_AS, &saved_space) == 0 && getrlimit(RLIMIT_CORE, &saved_core) == 0;
+    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && saved_limits && isolated_makeflags)
     {
-        if (dup2(capture, 2) == 2)
-        {
-            status = run_check_command(count, arguments, true);
-            dup2(saved_errors, 2);
-        }
-        status = fchdir(saved_directory) == 0 ? status : -1;
+        const uint64_t warm_base = parse_test_status_bytes("VmSize:");
+        const CheckUnitsTestProbe warmed = warm_base != 0 ? check_units_test_probe(arguments, count, limits, capture, warm_base, 1ull << 46, true, shared) :
+                                                         (CheckUnitsTestProbe){ .status = -1 };
+        // Attempt every restoration even if an earlier one failed. The warmup must not calibrate over a leaked descriptor.
+        const bool restored_space = setrlimit(RLIMIT_AS, &saved_space) == 0;
+        const bool restored_core = setrlimit(RLIMIT_CORE, &saved_core) == 0;
+        const bool restored_errors = dup2(saved_errors, 2) == 2;
+        const bool restored_directory = fchdir(saved_directory) == 0;
+        status = restored_space && restored_core && restored_errors && restored_directory && warmed.before_descriptor == warmed.after_descriptor ? warmed.status : -1;
         parse_test_read_capture(capture, text, sizeof(text));
     }
     if (saved_errors >= 0)
@@ -1110,11 +1151,17 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     }
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t base = parse_test_status_bytes("VmSize:");
-    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, shared) : (CheckUnitsTestProbe){ 0 };
+    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, false, shared) : (CheckUnitsTestProbe){ 0 };
     parse_test_read_capture(capture, text, sizeof(text));
     char detail[1400];
-    snprintf(detail, sizeof(detail), "status %d, peak %llu, %s, printed \"%s\"", whole.status, (unsigned long long)whole.peak,
+    snprintf(detail, sizeof(detail), "status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+             whole.status, (unsigned long long)whole.peak, (unsigned long long)whole.before_size, (unsigned long long)whole.after_size,
+             (unsigned long long)base, whole.before_descriptor, whole.after_descriptor,
              whole.clean ? "clean" : "left memory or a descriptor behind", text);
+    fprintf(stderr, "  reservations' baseline: %s\n", detail);
+    fprintf(stderr, "  reservations' baseline observations: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+            (unsigned long long)whole.after_command_size, (unsigned long long)whole.before_stack, (unsigned long long)whole.after_stack,
+            (unsigned long long)whole.before_data, (unsigned long long)whole.after_data);
     bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
                     rename(objects[1], wholes[1]) == 0;
     check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
@@ -1130,15 +1177,23 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
         const uint64_t limit = peak - page;
         unlink(objects[0]);
         unlink(objects[1]);
-        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, shared);
+        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, false, shared);
         parse_test_read_capture(capture, text, sizeof(text));
         const bool failed = probe.status == 1 && strstr(text, "error: ") != NULL;
         const bool fallen_back = probe.status == 0 && text[0] == 0 && check_test_driver_same_files(objects[0], wholes[0]) &&
                                  check_test_driver_same_files(objects[1], wholes[1]);
         released = (failed || fallen_back) && probe.peak <= limit && probe.clean;
-        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, %s, printed \"%s\"", (unsigned long long)limit, probe.status,
-                 (unsigned long long)probe.peak, probe.clean ? "clean" : "left memory or a descriptor behind", text);
+        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+                 (unsigned long long)limit, probe.status, (unsigned long long)probe.peak, (unsigned long long)probe.before_size,
+                 (unsigned long long)probe.after_size, (unsigned long long)base, probe.before_descriptor, probe.after_descriptor,
+                 probe.clean ? "clean" : "left memory or a descriptor behind", text);
         check_units_test_expect(tally, released, "a run whose reservation failed says why or writes the same objects, and releases what it reserved", detail);
+        if (!released)
+        {
+            fprintf(stderr, "  reservations' observations with %llu bytes: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+                    (unsigned long long)limit, (unsigned long long)probe.after_command_size, (unsigned long long)probe.before_stack,
+                    (unsigned long long)probe.after_stack, (unsigned long long)probe.before_data, (unsigned long long)probe.after_data);
+        }
         // A lane's setup that failed fails both units, with its message.
         setups += strstr(text, "can't reserve the lane's memory") != NULL;
         fallbacks += fallen_back;
@@ -1148,7 +1203,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     check_units_test_expect(tally, !released || (peak == 0 && setups != 0), "every reservation failed in turn, a lane's setup's among them", limits);
     if (saved_makeflags != NULL)
     {
-        setenv("MAKEFLAGS", saved_makeflags, 1);
+        const bool restored_makeflags = setenv("MAKEFLAGS", saved_makeflags, 1) == 0;
+        check_units_test_expect(tally, restored_makeflags, "restore the reservations' caller's MAKEFLAGS", limits);
         free(saved_makeflags);
     }
     if (shared != MAP_FAILED)

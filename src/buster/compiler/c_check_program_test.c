@@ -774,6 +774,7 @@ static const char check_test_program_harness[] =
     "void terminal_probe(void) __attribute__((weak));\n"
     "int external_data=17; int external_helper(int n){return n*3;}\n"
     "int external_apply(int(*function)(int),int n){return function(n);}\n"
+    "int external_unnamed_apply(long(*function)(int,double,int,double,long),int n){return (int)function(17,1.25,n,7.5,29);}\n"
     "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
     "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
     "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
@@ -2123,6 +2124,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 }
 
 #include "c_check_program_select_test.c"
+#include "c_check_program_overload_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
@@ -2134,6 +2136,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_transparent_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
+#include "c_check_program_parameters_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2817,6 +2820,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "double magnitude=__builtin_fabs((double)(n%97));local=n%13;"
         "return b[0]+(int)__builtin_popcount((unsigned)n)+__builtin_expect(out,0)+old+value+other+overflow+picked+constant+(int)magnitude+seed+local;}",
         "implemented-feature-query-native", clang);
+    check_test_program_unnamed_parameters(test, clang);
     // A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
     check_test_program_source(test,
         "#if __has_attribute(packed) && __has_attribute(__packed__)\n"
@@ -2868,6 +2872,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_refused(test);
     check_test_program_type_facts(test);
     check_test_program_selection(test, clang);
+    check_test_program_overloads(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
