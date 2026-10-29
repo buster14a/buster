@@ -419,6 +419,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_rounds_helper_test.c"
 #include "buster/compiler/c_builtin_math_helpers.c"
 #include "buster/compiler/c_builtin_math_helpers_test.c"
+#include "buster/compiler/c_builtin_x86_helpers.c"
 #include "buster/compiler/tier0_variadic_frame_test.c"
 #include "buster/compiler/unwind_tier0_test.c"
 #include "buster/compiler/unwind_test.c"
@@ -536,6 +537,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
+#include "buster/compiler/ir_metamorphic.c"
 
 // Selected effective uses feed liveness, allocation and the bounded native function consumer.
 #include "buster/compiler/tier1_select.c"
@@ -1275,6 +1277,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-optimize") == 0)
     {
         result = run_ir_optimize_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-metamorphic") == 0)
+    {
+        result = run_ir_metamorphic_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-gvn") == 0)
     {

@@ -6,9 +6,10 @@
 // constants, as clang -O0's code computes it. A builtin's row is its family's with the rule's form, from a table by
 // name; the families are those this compiler's own main.c reaches first. Each form is a VEX or EVEX one that names its
 // operands in its fields alone, of AVX-512F and AVX-512VL, which the lowering requires of a function with vectors, and
-// of the features the rule names past them. A builtin the table doesn't name is refused by name, and so is one whose
-// instruction names fixed registers (rdtsc, xgetbv, monitorx and mwaitx) or has a legacy encoding (pause, tzcnt), which
-// no row takes. Included by c_check_program_lower.c after c_check_program_vectors.c.
+// of the features the rule names past them. A builtin the table doesn't name is refused by name. One whose instruction
+// names fixed registers (rdtsc, xgetbv, monitorx and mwaitx) or has a legacy encoding (pause, tzcnt), which no row takes,
+// is a call of a per-unit leaf instead (c_builtin_x86_helpers.c). Included by c_check_program_lower.c after
+// c_check_program_vectors.c.
 
 typedef enum CheckX86LowerFamily
 {
@@ -78,6 +79,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_BLENDV,
     // (vector a, vector b, mask m): VPSHUFBITQMB's mask under m.
     CHECK_X86_LOWER_MASK_BINARY,
+    // (element* p, vector a, mask m): VPMOV's truncation of a's elements, each stored at its place at p where m's bit is
+    // set (the form's memory destination); a's lanes are the mask's.
+    CHECK_X86_LOWER_TRUNCATE_STORE,
 } CheckX86LowerFamily;
 
 #define BUSTER_CHECK_X86_NO_IMMEDIATE 0xffu
@@ -267,6 +271,13 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqb512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQB_XM64_Z, 16, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqd512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQD_YM256_Z, 32, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqw512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQW_XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDB_XM128_Z, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdw512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDW_YM256_Z, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQB_XM64_Z, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqd512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQD_YM256_Z, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqw512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQW_XM128_Z, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovwb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVWB_YM256_Z, 0,
+                                BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovwb512_mask", CHECK_X86_LOWER_TRUNCATE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVWB_YM256_Z, 32,
                                 BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovuswb512_mask", CHECK_X86_LOWER_TRUNCATE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVUSWB_YM256_Z, 32,
@@ -434,7 +445,8 @@ static bool check_x86_lower_family_masks(uint8_t family)
     case CHECK_X86_LOWER_TRUNCATE:
     case CHECK_X86_LOWER_GATHER:
     case CHECK_X86_LOWER_SCATTER:
-    case CHECK_X86_LOWER_MASK_BINARY: result = true; break;
+    case CHECK_X86_LOWER_MASK_BINARY:
+    case CHECK_X86_LOWER_TRUNCATE_STORE: result = true; break;
     default: break;
     }
     return result;
@@ -586,7 +598,10 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
                 row->records[r].immediate = 1;
                 r += 1;
             }
-            row->records[r] = check_x86_lower_record(rule->form, index >= lane ? v1 : v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+            // VPEXTRW's form takes the general register in reg and the vector in rm; the others' the other way round.
+            const uint8_t vector = index >= lane ? v1 : v0;
+            row->records[r] = rule->form == X86_FORM_VPEXTRW_R32_X_IMM8_EVEX ? check_x86_lower_record(rule->form, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, vector) :
+                                                                                 check_x86_lower_record(rule->form, vector, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
             row->records[r].immediate = (int32_t)(index & (lane - 1));
             row->record_count = (uint8_t)(r + 1);
             row->operand_count = 1;
@@ -674,7 +689,7 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
             row->operand_bytes[1] = rule->bytes;
             row->operand_classes[2] = mask_class;
         }
-        else if (rule->family == CHECK_X86_LOWER_COMPRESS_STORE)
+        else if (rule->family == CHECK_X86_LOWER_COMPRESS_STORE || rule->family == CHECK_X86_LOWER_TRUNCATE_STORE)
         {
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(2));
             row->records[1] = (X86Instruction){ .form = rule->form, .reg = v1, .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = 1 };
