@@ -15,8 +15,12 @@
 // checked program or emission refuses a feature by name, is left out with the reason, as -c refuses it; any other
 // failure of the file fails the command. So does a function either lowering refuses, that the paths lower apart, or
 // that either promotion refuses: the report names each, with the first one's error. --print NAME prints the IR of the
-// function of that name, as lowered and as promoted. It is a test outside the compile path, with no vector path of its
-// own.
+// function of that name, as lowered and as promoted. Before the files, the first is prepared again in a child whose
+// address space can't grow by the preparation's arena, which must fail it as the memory's, touching nothing it couldn't
+// allocate (ir_source_exhausted). It is a test outside the compile path, with no vector path of its own.
+
+#include <sys/resource.h>
+#include <sys/wait.h>
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
 // whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
@@ -91,7 +95,8 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     Preprocessor* pp = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Preprocessor, 1);
     Parser* parser = BUSTER_ARENA_PUSH_ARRAY(&option_arena, Parser, 1);
     char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)option_count + 2);
-    bool valid = identifiers != 0 && pp != 0 && parser != 0 && own != 0;
+    const bool allocated = identifiers != 0 && pp != 0 && parser != 0 && own != 0;
+    bool valid = allocated;
     for (uint32_t i = 0; valid && i < option_count; i += 1)
     {
         own[i] = options[i];
@@ -113,10 +118,11 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     CheckDataPrepared data = { 0 };
     CheckProgram program = { 0 };
     bool prepared = accepted && check_data_prepare(&data, &path.input, &path.stream, &path.initializers, &path.types, parser->options.scalar, &path.output_arena, &path.scratch);
+    // The intern table as allocated (pp_initialize keeps it as pp->table): nothing here reads pp unless it was.
     const CheckProgramOptions program_options = {
         .initializers = &path.initializers,
         .asms = &path.asms,
-        .identifiers = pp->table,
+        .identifiers = identifiers,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };
@@ -127,7 +133,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     const bool chosen = prepared && bytes.base != 0 &&
                         check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
-    const bool emitted = chosen && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, lowered, &bytes,
+    const bool emitted = chosen && check_program_emit(&code, &selected.program, parser, identifiers, selected.data.capacity, false, lowered, &bytes,
                                                       &path.scratch, NULL, NULL, false, false);
     const bool refused = chosen && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     uint8_t* defined = 0;
@@ -162,7 +168,11 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
                         (chosen && !emitted && !refused) || (emitted && !named);
     result->status = failed ? IR_SOURCE_FAILED : named ? IR_SOURCE_PREPARED : IR_SOURCE_LEFT_OUT;
-    if (!valid)
+    if (!allocated)
+    {
+        snprintf(result->reason, sizeof(result->reason), "memory ran out for its preprocessor and parser");
+    }
+    else if (!valid)
     {
         snprintf(result->reason, sizeof(result->reason), "its options couldn't be read");
     }
@@ -319,6 +329,42 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
     totals->bytes += bytes;
 }
 
+// The preparation with no room for its state (#845's review): in a child whose address space can't grow by its arena,
+// `file` must fail as IR_SOURCE_FAILED with the memory's reason, touching none of the objects it couldn't allocate.
+// Whether it did, as the child's status.
+static bool ir_source_exhausted(const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena)
+{
+    bool refused = false;
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        long pages = 0;
+        FILE* statm = fopen("/proc/self/statm", "r");
+        const bool sized = statm != 0 && fscanf(statm, "%ld", &pages) == 1;
+        if (statm != 0)
+        {
+            fclose(statm);
+        }
+        struct rlimit bound = { 0 };
+        bool limited = sized && getrlimit(RLIMIT_AS, &bound) == 0;
+        // The mappings it has and 4 MB more, short of the 16 MB the preparation reserves first.
+        bound.rlim_cur = (rlim_t)pages * (rlim_t)sysconf(_SC_PAGESIZE) + (UINT64_C(4) << 20);
+        limited = limited && bound.rlim_cur <= bound.rlim_max && setrlimit(RLIMIT_AS, &bound) == 0;
+        IrSourceFile prepared = { 0 };
+        if (limited)
+        {
+            ir_source_prepare(&prepared, file, options, option_count, lowered, arena);
+        }
+        _exit(limited && prepared.status == IR_SOURCE_FAILED && strstr(prepared.reason, "memory") != 0 ? 0 : 1);
+    }
+    else if (child > 0)
+    {
+        int status = 0;
+        refused = waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    return refused;
+}
+
 static int run_ir_source_tests(int count, char** arguments)
 {
     const char* print = 0;
@@ -359,6 +405,11 @@ static int run_ir_source_tests(int count, char** arguments)
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
     valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0;
     IrSourceTotals totals = { 0 };
+    const bool exhausted = valid && ir_source_exhausted(files[0], options, option_count, &lowered, &arena);
+    if (valid)
+    {
+        printf("ir-source: a preparation without memory for its state %s\n", exhausted ? "fails, as it should" : "doesn't fail as it should");
+    }
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         IrSourceFile file;
@@ -398,5 +449,5 @@ static int run_ir_source_tests(int count, char** arguments)
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
+    return valid && exhausted && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
 }
