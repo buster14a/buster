@@ -667,6 +667,169 @@ static void ir_interpreter_test_aligned(IrInterpreterTestTally* tally, Arena* me
     arena_pop_to(memory, mark);
 }
 
+// A native of six longs in registers and two on the stack, whose eightbytes the stack slots' arguments are.
+static __attribute__((noinline)) int64_t ir_interpreter_abi_slots(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t x, int64_t y)
+{
+    const uint64_t registers = (uint64_t)a + (uint64_t)b + (uint64_t)c + (uint64_t)d + (uint64_t)e + (uint64_t)f;
+    return (int64_t)(registers * 1000003u + (uint64_t)x * 31u + (uint64_t)y);
+}
+
+// An aggregate's part alone in an 8-byte slot of its STACK location (#833's review: the convention's eightbyte at a time,
+// #765): HIGH its high eightbyte, LOW its low one. A native of six register longs and two stack ones takes a 16-byte
+// object's chosen eightbyte in its first stack slot and the following long in its second, and so does an interpreted
+// variadic definition's overflow area, read back; a part's slot alone is defined (a 16-byte read of it is undefined), as
+// its bytes are (an object whose high eightbyte alone was written, passed HIGH); and both flags, or HIGH on an 8-byte
+// object, are refused before the native runs.
+static void ir_interpreter_test_eightbytes(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    IrFunction native_caller = { 0 };
+    IrFunction reader = { 0 };
+    IrFunction reader_caller = { 0 };
+    IrFunction wide = { 0 };
+    IrFunction wide_caller = { 0 };
+    IrFunction high_caller = { 0 };
+    IrInterpreterAbiBuilder n;
+    IrInterpreterAbiBuilder r;
+    IrInterpreterAbiBuilder c;
+    IrInterpreterAbiBuilder w;
+    IrInterpreterAbiBuilder d;
+    IrInterpreterAbiBuilder h;
+    const IrSizes anchored = { .slot_count = 2, .parameter_count = 1 };
+    bool created = ir_interpreter_abi_create(memory, &native_caller, (IrSizes){ .slot_count = 1, .extra_count = 8, .call_count = 1, .call_type_count = 8, .abi_call_count = 1, .passed_count = 8 }, IR_I64, &n);
+    created = created && ir_interpreter_abi_create(memory, &reader, anchored, IR_VOID, &r);
+    created = created && ir_interpreter_abi_create(memory, &reader_caller, (IrSizes){ .slot_count = 1, .extra_count = 3, .call_count = 1, .call_type_count = 3, .abi_call_count = 1, .passed_count = 3 }, IR_VOID, &c);
+    created = created && ir_interpreter_abi_create(memory, &wide, anchored, IR_VOID, &w);
+    created = created && ir_interpreter_abi_create(memory, &wide_caller, (IrSizes){ .slot_count = 1, .extra_count = 2, .call_count = 1, .call_type_count = 2, .abi_call_count = 1, .passed_count = 2 }, IR_VOID, &d);
+    created = created && ir_interpreter_abi_create(memory, &high_caller, (IrSizes){ .slot_count = 1, .extra_count = 3, .call_count = 1, .call_type_count = 3, .abi_call_count = 1, .passed_count = 3 }, IR_VOID, &h);
+    ir_interpreter_test_expect(tally, created, "eightbytes fixture allocation");
+    if (created)
+    {
+        const uint64_t words[2] = { UINT64_C(0x1111111111111111), UINT64_C(0x3333333333333333) };
+        const uint8_t registers[6] = { BUSTER_ABI_RDI, BUSTER_ABI_RSI, BUSTER_ABI_RDX, BUSTER_ABI_RCX, BUSTER_ABI_R8, BUSTER_ABI_R9 };
+        native_caller.slots[0] = ir_interpreter_abi_slot(16, 0);
+        native_caller.abi_calls[0] = (IrAbiCall){
+            .call = { .stack_bytes = 16, .stack_alignment_log2 = 4, .integer_registers = 6, .result = ir_interpreter_abi_return(BUSTER_ABI_RESULT_REGISTERS, 8, BUSTER_ABI_RAX, BUSTER_IR_INTERPRETER_ABI_NONE) },
+            .passed = 0,
+        };
+        uint32_t arguments[8];
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            native_caller.passed[k] = (IrPassed){ .location = ir_interpreter_abi_registers(registers[k], BUSTER_IR_INTERPRETER_ABI_NONE) };
+            arguments[k] = ir_interpreter_abi_constant(&n, IR_I64, k + 1, 0);
+        }
+        native_caller.passed[6] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 16 };
+        native_caller.passed[7] = (IrPassed){ .location = ir_interpreter_abi_stack(8) };
+        const uint32_t object = ir_interpreter_abi_emit(&n, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&n, object, 0, ir_interpreter_abi_constant(&n, IR_I64, words[0], 0));
+        ir_interpreter_abi_store(&n, object, 8, ir_interpreter_abi_constant(&n, IR_I64, words[1], 0));
+        arguments[6] = object;
+        arguments[7] = ir_interpreter_abi_constant(&n, IR_I64, 7, 0);
+        const uint32_t sum = ir_interpreter_abi_call(&n, 0, 80, arguments, 8, 8, 0, IR_I64, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&n, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&n);
+
+        const AbiCall incoming = { .stack_alignment_log2 = 4, .integer_registers = 1 };
+        IrFunction* definitions[] = { &reader, &wide };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            definitions[k]->parameter_types[0] = IR_PTR;
+            definitions[k]->variadic = true;
+            definitions[k]->incoming = incoming;
+            definitions[k]->slots[0] = ir_interpreter_abi_slot(BUSTER_ABI_SAVE_AREA_BYTES, BUSTER_IR_SLOT_REGISTER_SAVE_AREA);
+            definitions[k]->slots[1] = ir_interpreter_abi_slot(0, BUSTER_IR_SLOT_OVERFLOW_AREA);
+        }
+        const uint32_t out = ir_interpreter_abi_emit(&r, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t overflow = ir_interpreter_abi_emit(&r, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&r, out, 0, ir_interpreter_abi_load(&r, IR_I64, overflow, 0));
+        ir_interpreter_abi_store(&r, out, 8, ir_interpreter_abi_load(&r, IR_I64, overflow, 8));
+        ir_interpreter_abi_emit(&r, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&r);
+        reader_caller.slots[0] = ir_interpreter_abi_slot(16, 0);
+        reader_caller.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = 16, .stack_alignment_log2 = 4, .integer_registers = 1 }, .passed = 0 };
+        reader_caller.passed[0] = (IrPassed){ .location = ir_interpreter_abi_registers(BUSTER_ABI_RDI, BUSTER_IR_INTERPRETER_ABI_NONE) };
+        reader_caller.passed[1] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 16 };
+        reader_caller.passed[2] = (IrPassed){ .location = ir_interpreter_abi_stack(8) };
+        const uint32_t into = ir_interpreter_abi_emit(&c, IR_SYMBOL_ADDR, IR_PTR, 40, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t unnamed = ir_interpreter_abi_emit(&c, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&c, unnamed, 0, ir_interpreter_abi_constant(&c, IR_I64, words[0], 0));
+        ir_interpreter_abi_store(&c, unnamed, 8, ir_interpreter_abi_constant(&c, IR_I64, words[1], 0));
+        const uint32_t reader_arguments[] = { into, unnamed, ir_interpreter_abi_constant(&c, IR_I64, 7, 0) };
+        ir_interpreter_abi_call(&c, 0, 81, reader_arguments, 3, 1, 0, IR_VOID, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&c, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&c);
+
+        // The part's slot alone is defined: 16 bytes read at it take the 8 no argument wrote.
+        const uint32_t wide_out = ir_interpreter_abi_emit(&w, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t wide_overflow = ir_interpreter_abi_emit(&w, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&w, wide_out, 0, ir_interpreter_abi_load(&w, IR_I128, wide_overflow, 0));
+        ir_interpreter_abi_emit(&w, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&w);
+        wide_caller.slots[0] = ir_interpreter_abi_slot(16, 0);
+        wide_caller.abi_calls[0] = (IrAbiCall){ .call = { .stack_bytes = 16, .stack_alignment_log2 = 4, .integer_registers = 1 }, .passed = 0 };
+        wide_caller.passed[0] = reader_caller.passed[0];
+        wide_caller.passed[1] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 16 };
+        const uint32_t wide_into = ir_interpreter_abi_emit(&d, IR_SYMBOL_ADDR, IR_PTR, 40, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t wide_unnamed = ir_interpreter_abi_emit(&d, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&d, wide_unnamed, 0, ir_interpreter_abi_constant(&d, IR_I64, words[0], 0));
+        ir_interpreter_abi_store(&d, wide_unnamed, 8, ir_interpreter_abi_constant(&d, IR_I64, words[1], 0));
+        const uint32_t wide_arguments[] = { wide_into, wide_unnamed };
+        ir_interpreter_abi_call(&d, 0, 82, wide_arguments, 2, 1, 0, IR_VOID, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&d, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&d);
+        // An object whose high eightbyte alone was written, passed HIGH: its slot takes that eightbyte's definedness.
+        high_caller.slots[0] = ir_interpreter_abi_slot(16, 0);
+        high_caller.abi_calls[0] = reader_caller.abi_calls[0];
+        high_caller.passed[0] = reader_caller.passed[0];
+        high_caller.passed[1] = (IrPassed){ .location = ir_interpreter_abi_stack(0), .size = 16 };
+        high_caller.passed[1].location.flags = BUSTER_ABI_FLAG_HIGH;
+        high_caller.passed[2] = reader_caller.passed[2];
+        const uint32_t high_into = ir_interpreter_abi_emit(&h, IR_SYMBOL_ADDR, IR_PTR, 40, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t high_unnamed = ir_interpreter_abi_emit(&h, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_store(&h, high_unnamed, 8, ir_interpreter_abi_constant(&h, IR_I64, words[1], 0));
+        const uint32_t high_arguments[] = { high_into, high_unnamed, ir_interpreter_abi_constant(&h, IR_I64, 7, 0) };
+        ir_interpreter_abi_call(&h, 0, 81, high_arguments, 3, 1, 0, IR_VOID, 1, BUSTER_IR_NONE);
+        ir_interpreter_abi_emit(&h, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_abi_finish(&h);
+
+        uint64_t bytes[2] = { 0 };
+        const InterpreterBinding binding = { .symbol = 40, .bytes = (uint8_t*)bytes, .size = sizeof(bytes), .writable = true };
+        const InterpreterNativeBinding natives[] = { { .symbol = 80, .address = (void*)&ir_interpreter_abi_slots } };
+        const IrInterpreterFunction functions[] = {
+            { .symbol = 81, .function = &reader },
+            { .symbol = 82, .function = &wide },
+            { .symbol = 83, .function = &native_caller },
+            { .symbol = 84, .function = &reader_caller },
+            { .symbol = 85, .function = &wide_caller },
+            { .symbol = 86, .function = &high_caller },
+        };
+        const IrInterpreterProgram program = { .functions = functions, .function_count = 6, .bindings = &binding, .binding_count = 1, .natives = natives, .native_count = 1 };
+        const uint8_t flags[2] = { BUSTER_ABI_FLAG_HIGH, BUSTER_ABI_FLAG_LOW };
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            const uint64_t part = words[k == 0 ? 1 : 0];
+            native_caller.passed[6].location.flags = flags[k];
+            ir_interpreter_test_run(tally, &program, 83, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = (uint64_t)ir_interpreter_abi_slots(1, 2, 3, 4, 5, 6, (int64_t)part, 7) },
+                                    "a native takes an aggregate's HIGH or LOW eightbyte alone in its stack slot, the following long after it");
+            reader_caller.passed[1].location.flags = flags[k];
+            memset(bytes, 0, sizeof(bytes));
+            ir_interpreter_test_run(tally, &program, 84, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ 0 }, "a variadic call's HIGH or LOW eightbyte alone in its overflow slot");
+            ir_interpreter_test_expect(tally, bytes[0] == part && bytes[1] == 7, "the overflow area's slots hold the chosen eightbyte and the following long");
+            wide_caller.passed[1].location.flags = flags[k];
+            ir_interpreter_test_run(tally, &program, 85, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){ 0 }, "the bytes past a part's slot, which no argument wrote, are undefined");
+        }
+        memset(bytes, 0, sizeof(bytes));
+        ir_interpreter_test_run(tally, &program, 86, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ 0 }, "a HIGH part's slot defined as the object's high eightbyte is, its low one never written");
+        ir_interpreter_test_expect(tally, bytes[0] == words[1] && bytes[1] == 7, "the high eightbyte written alone reaches its slot");
+        native_caller.passed[6].location.flags = BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW;
+        ir_interpreter_test_run(tally, &program, 83, 0, 0, 0, execution, INTERPRETER_NATIVE, (InterpreterValue){ 0 }, "a stack part both HIGH and LOW, refused before the native runs");
+        native_caller.passed[6].location.flags = BUSTER_ABI_FLAG_HIGH;
+        native_caller.passed[6].size = 8;
+        ir_interpreter_test_run(tally, &program, 83, 0, 0, 0, execution, INTERPRETER_NATIVE, (InterpreterValue){ 0 }, "the high eightbyte of an object of 8 bytes, refused");
+    }
+    arena_pop_to(memory, mark);
+}
+
 typedef struct IrInterpreterAbiPair IrInterpreterAbiPair;
 struct IrInterpreterAbiPair
 {

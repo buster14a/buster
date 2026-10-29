@@ -206,11 +206,15 @@ is refused.
 A native called with records gets each argument where its location says (its
 registers, its stack slot, a `SPLIT`'s two, nothing for `IGNORE`), an aggregate's
 eightbytes from its bytes, a hidden pointer in rdi and `al` the records' vector
-count. An aggregate result comes from rax, rdx, xmm0's and xmm1's low eightbytes and
-st0's ten bytes, or through the hidden pointer, and its destination's bytes are then
-defined. What the bridge can't place is `INTERPRETER_NATIVE`, before the call: a
-register no argument goes in, a part past its location's registers (a vector
-register's upper half, as an `SSEUP` part takes), an argument area aligned past 16
+count. A `STACK` location flagged `HIGH` or `LOW` holds one eightbyte alone in its
+8-byte slot, the aggregate's high or low one (the convention's eightbyte at a time,
+#765), with that eightbyte's definedness; a variadic definition's overflow area
+takes it so too. An aggregate result comes from rax, rdx, xmm0's and xmm1's low
+eightbytes and st0's ten bytes, or through the hidden pointer, and its
+destination's bytes are then defined. What the bridge can't place is
+`INTERPRETER_NATIVE`, before the call: a register no argument goes in, a part past
+its location's registers (a vector register's upper half, as an `SSEUP` part takes),
+a stack part both `HIGH` and `LOW` or with no bytes, an argument area aligned past 16
 or larger than 4096 bytes, and a result in st1 or in parts of other sizes.
 
 `test-ir-interpreter` checks each against values worked out in C: calls with
@@ -220,7 +224,10 @@ room smaller than its result; a variadic definition reading back eighteen unname
 scalars from its anchors, and another two unnamed structs placed by records; an
 unnamed struct aligned to 32, read as `va_arg` reads it, and a named one aligned to
 128 whose callee's copy keeps that alignment, each from frames at every 16 bytes of
-128 in the arena, and calls aligned past 2^30; and six
+128 in the arena, and calls aligned past 2^30; a 16-byte object's high or low
+eightbyte alone in a stack slot before a following long, taken by a native of plain
+longs and by a variadic definition's overflow area, with its definedness, and both
+flags, refused; and six
 natives clang compiled, which take and return structs in general and vector
 registers, on the stack, through a hidden pointer and in st0, against calls of them
 from C, with what the bridge refuses. `test-ir-lowering` runs Tier 0's generated

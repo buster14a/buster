@@ -181,10 +181,17 @@ static bool interpreter_native_put(const InterpreterNativeArea* area, AbiLocatio
     bool result = location.kind == BUSTER_ABI_LOCATION_IGNORE;
     if (location.kind == BUSTER_ABI_LOCATION_STACK)
     {
-        result = location.stack_offset <= area->stack_capacity && size <= area->stack_capacity - location.stack_offset;
+        // The whole value at its offset; or a part alone in its 8-byte slot (an eightbyte at a time, #765), the value's
+        // high eightbyte (HIGH) or its low one (LOW), the other one not passed.
+        const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+        const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+        const uint64_t first = high ? 8 : 0;
+        const uint64_t take = !high && !low ? size : first < size ? (size - first < 8 ? size - first : 8) : 0;
+        result = !(high && low) && take != 0 && location.stack_offset <= area->stack_capacity && take <= area->stack_capacity - location.stack_offset;
         if (result)
         {
-            interpreter_native_store(area->stack + location.stack_offset, area->stack_defined == 0 ? 0 : area->stack_defined + location.stack_offset, bytes, defined, size);
+            interpreter_native_store(area->stack + location.stack_offset, area->stack_defined == 0 ? 0 : area->stack_defined + location.stack_offset, bytes + first,
+                                     defined == 0 ? 0 : defined + first, take);
         }
     }
     else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT)

@@ -794,6 +794,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_records(&tally, &memory, &execution);
             ir_interpreter_test_variadic(&tally, &memory, &execution);
             ir_interpreter_test_aligned(&tally, &memory, &execution);
+            ir_interpreter_test_eightbytes(&tally, &memory, &execution);
             ir_interpreter_test_native_records(&tally, &memory, &execution);
             ir_interpreter_test_memory(&tally, &memory, &execution);
             ir_interpreter_test_mappings(&tally, &memory, &execution);
