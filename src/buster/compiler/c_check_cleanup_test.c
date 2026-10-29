@@ -75,6 +75,12 @@ static __attribute__((noinline)) void check_test_cleanup_sources(CheckTest* test
         { .name = "cleanup of a variable-length array", .source = "void f(int (*p)[]);\nvoid g(int n) { int a[n] __attribute__((cleanup(f))); }\n" },
         { .name = "cleanup's function named like its variable", .source = "void a(int *p);\nvoid g(void) { int a __attribute__((cleanup(a))); }\n" },
         { .name = "cleanups of a specifier's declarators", .source = "void f(int *p);\nvoid g(void) { __attribute__((cleanup(f))) int a, b; }\n" },
+        // A function declarator among them ignores the specifier's cleanups, which the variables still have (#745's
+        // review): the argument's type, the argument count and the last of several.
+        { .name = "a specifier's cleanup on a function and a variable", .source = "void f(int *p);\nvoid g(void) { __attribute__((cleanup(f))) int h(void), a; }\n" },
+        { .name = "a specifier's cleanup of another pointee after a function", .source = "void f(long *p);\nvoid g(void) {\n__attribute__((cleanup(f))) int h(void), a;\n}\n", .rejected = true },
+        { .name = "a specifier's cleanup of two arguments after a function", .source = "void f(int *p);\nvoid g(void) {\n__attribute__((cleanup(f, f))) int h(void), a;\n}\n", .rejected = true },
+        { .name = "the last of a specifier's cleanups after a function", .source = "void f(int *p);\nvoid k(long *p);\nvoid g(void) {\n__attribute__((cleanup(f), cleanup(k))) int h(void), a;\n}\n", .rejected = true },
         { .name = "the last of two cleanups", .source = "void f(int *p);\nvoid h(long *p);\nvoid g(void) { int a __attribute__((cleanup(h), cleanup(f))); }\n" },
         { .name = "cleanup in a for statement", .source = "void f(int *p);\nvoid g(void) { for (int a __attribute__((cleanup(f))) = 0; a < 3; a++) { } }\n" },
         { .name = "cleanup in a statement expression", .source = "void f(int *p);\nint g(int n) { return ({ int a __attribute__((cleanup(f))) = n; a; }); }\n" },
@@ -161,6 +167,13 @@ static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* tes
     check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
         "int tested(int n){trace=0;int r;{__attribute__((cleanup(note))) int note=n,other=n+1;r=note+other;}return r^(int)trace;}",
         "cleanup-shared-specifier-binding", clang);
+    // A function declarator before, after and among a specifier's variables ignores the specifier's cleanups, which the
+    // variables still have (#745's review): the last of two, and beside a declarator's own.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "int tested(int n){trace=0;int r=0;{__attribute__((cleanup(note))) int function(void),value=n;r+=value;}"
+        "{__attribute__((cleanup(bump),cleanup(note))) int other(void),w=n+1;r+=w;}{__attribute__((cleanup(note))) int v=n+2,again(void);r+=v;}"
+        "{__attribute__((cleanup(note))) int x=n+3,y __attribute__((cleanup(bump)))=n+4,z=n+5;r+=x+y+z;}return (int)trace^r;}",
+        "cleanup-shared-specifier-functions", clang);
     check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
         "int tested(int n){trace=0;int r=0;{int a __attribute__((cleanup(note)))=n;int b __attribute__((cleanup(note)))=n+1;"
         "{int c __attribute__((cleanup(note)))=n+2;r+=c;}__attribute__((cleanup(note))) int d=n+3,e=n+4;int f __attribute__((cleanup(note)));"

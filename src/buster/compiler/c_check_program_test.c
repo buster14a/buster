@@ -2597,6 +2597,27 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "acc=acc*43+(unsigned long)mv+(unsigned long)(mv>>64)*3+(unsigned long)(mw>>16)*5+(unsigned long)s*7+(unsigned long)(s>>64)*11;"
         "return (int)(acc%1000003)+sw*7+(a<f)*2+(u>=(U127)n)*4+(mv==0)*8+!p*16;}",
         "bit-int-128-bit-classes", clang);
+    // Folded constants of 65 to 127 bits, which the checker gives as their width's bits: extended from the width, so that
+    // a negative one's conversion to a 128-bit integer and its compare read its value.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "int tested(int n){__int128 y=(_BitInt(100))-5;unsigned __int128 u=(unsigned _BitInt(100))-5;__int128 w=(_BitInt(127))-1;"
+        "__int128 v=(_BitInt(65))-0x123456789abcdefLL;int c=((_BitInt(100))-5<n)+((_BitInt(72))-9>(_BitInt(72))n)*2;"
+        "return (int)((y+n)%1000003)+(int)((u>>64)%1009)*3+(w==-1)*7+(int)(((v>>32)*n)%1009)*11+c*13;}",
+        "bit-int-128-bit-negative-constants", clang);
+    // C23's bit-precise constants (#768): each one's type, by _Generic, a weight of its own, and their values past 64 bits
+    // at run time (without digit separators, which C17 doesn't lex: the source fixture "bit-precise constants" has them).
+    check_test_program_source(test,
+        "#define B(x,t,w) _Generic((x),t:(w),default:0)\n"
+        "int tested(int n){int t=B(0wb,_BitInt(2),1)+B(1wb,_BitInt(2),2)+B(2WB,_BitInt(3),4)+B(0uwb,unsigned _BitInt(1),8)+B(5uWB,unsigned _BitInt(3),16)+"
+        "B(5wbu,unsigned _BitInt(3),32)+B(-1wb,_BitInt(2),64)+B(0777wb,_BitInt(10),128)+B(0b10101010wb,_BitInt(9),256)+"
+        "B(0x7fffffffffffffffwb,_BitInt(64),512)+B(0x8000000000000000wb,_BitInt(65),1024)+B(0xffffffffffffffffuwb,unsigned _BitInt(64),2048)+"
+        "B(0x10000000000000000uwb,unsigned _BitInt(65),4096)+B(18446744073709551616wb,_BitInt(66),8192)+"
+        "B(0x7fffffffffffffffffffffffffffffffwb,_BitInt(128),16384)+B(0xffffffffffffffffffffffffffffffffuwb,unsigned _BitInt(128),32768);"
+        "unsigned _BitInt(100) a=0xfffffffffffffffffffffffffuwb;a-=(unsigned _BitInt(100))n;_BitInt(128) b=0x7fffffffffffffffffffffffffffffffwb;b-=n;"
+        "unsigned _BitInt(65) c=0x1ffffffffffffffffuwb>>n;_BitInt(66) d=18446744073709551616wb*n-0x123456789abcdef01wb;"
+        "return t^(int)(a%1000003)^(int)(b%1000033)*3^(int)(c%1000037)*5^(int)(d%1000039)*7;}",
+        "bit-precise-constants", clang);
 }
 
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
@@ -2717,6 +2738,18 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_batch(test);
     check_test_program_many_arguments(test, clang);
     check_test_program_many_aggregate_returns(test, clang);
+    // A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
+    check_test_program_source(test,
+        "#if __has_attribute(packed) && __has_attribute(__packed__)\n"
+        "#define PACKED __attribute__((packed))\n#else\n#define PACKED\n#endif\n"
+        "#if __has_c_attribute(gnu::packed)\n#define CPACKED [[gnu::packed]]\n#else\n#define CPACKED\n#endif\n"
+        "struct PACKED A{char c;int i;short s;};struct CPACKED B{char c;int i;};"
+        "enum PACKED E{X=1,Y=2};"
+        "_Static_assert(sizeof(struct A)==7 && _Alignof(struct A)==1,\"GNU packed query\");"
+        "_Static_assert(sizeof(struct B)==5 && _Alignof(struct B)==1,\"scoped packed query\");"
+        "_Static_assert(sizeof(enum E)==1,\"packed enum\");"
+        "int tested(int n){struct A a={1,n,3};struct B b={2,n};return sizeof(a)*100+sizeof(b)*10+sizeof(enum E)+a.i+b.i;}",
+        "packed-attribute-feature-query", clang);
     check_test_program_source(test,
         "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
         "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
@@ -3739,6 +3772,115 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "cd local=(cd){0};local=2.0i*2.0i;cd folded=(1.0+2.0i)*(3.0-1.0i);"
         "return (int)(foldz(ga)^foldz(garr[0])*3^foldz(garr[1])*5^foldf(gf)*7^foldl(gl)*11^foldz(counter)*13^foldz(local)*17^foldz(folded)*19);}",
         "complex-static-data-and-constants", clang);
+    // GNU's complex integer types (#137), each from _Complex signed char to _Complex unsigned long long: sums, differences,
+    // products (ac - bd, ad + bc), quotients by clang's formula ((ac + bd) / (cc + dd), a real operand's imaginary part 0,
+    // wrapped to the element's width before the division), negation, the conjugate, equality and truth, in 8 and 16 bits
+    // as clang computes them; compound assignments, conversions to and from the scalar and floating complex types,
+    // globals, and calls passing and returning them, va_arg among them.
+    check_test_program_source(test,
+        "typedef _Complex signed char cc;typedef _Complex unsigned char cuc;typedef _Complex short cs;typedef _Complex unsigned short cus;"
+        "typedef _Complex int ci;typedef _Complex unsigned cu;typedef _Complex long cl;typedef _Complex unsigned long long cull;"
+        "static unsigned long fold(unsigned long h,long r,long i){return ((h^(unsigned long)r)*1099511628211ul)^((unsigned long)i*31u);}\n"
+        "#define FOLD(z) h=fold(h,(long)__real__ (z),(long)__imag__ (z))\n"
+        "#define MAKE(t,z,r,i) t z;__real__ z=(r);__imag__ z=(i)\n"
+        "static ci mul(ci a,ci b){return a*b;}static cl quo(cl a,cl b){return a/b;}static cc twice(cc a){return a+a;}"
+        "static cus seven(cus a,cus b,cus c,cus d,cus e,cus f,cus g){return a+b+c+d+e+f+g;}static cull wide(cull a,cull b){return a*b-a;}"
+        "static ci sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);ci r=0;for(int i=0;i<n;i++){r+=__builtin_va_arg(ap,ci);r*=2;}"
+        "__builtin_va_end(ap);return r;}"
+        "ci gi;static cl gl;"
+        "int tested(int n){unsigned long h=2166136261u;"
+        "MAKE(cc,a,n*13,n-100);MAKE(cc,b,(n&3)+1,n&1);MAKE(cuc,u,n*29,200-n);MAKE(cuc,v,(n&3)+2,n&1);"
+        "MAKE(cs,s,n*1000,-n*999);MAKE(cs,t,(n&3)+1,(n&7)+1);MAKE(cus,w,n*4000u,65000u-n);MAKE(cus,x,(n&7)+1,n&3);"
+        "MAKE(ci,i,n*123456,-n*654321);MAKE(ci,j,n-9,(n&7)+2);MAKE(cu,p,n*3000000000u,~0u-n);MAKE(cu,q,(n&7)+1,n&3);"
+        "MAKE(cl,l,(long)n*(1L<<40),-(long)n*12345);MAKE(cl,m,n+11,(n&15)+3);"
+        "MAKE(cull,y,(unsigned long long)n<<50,~0ull/(n+5));MAKE(cull,z,(n&7)+1,n&3);"
+        "cc c1=a+b,c2=a-b,c3=a*b,c4=a/b,c5=-a,c6=~a;FOLD(c1);FOLD(c2);FOLD(c3);FOLD(c4);FOLD(c5);FOLD(c6);"
+        "cuc u1=u*v,u2=u/v,u3=u-v;FOLD(u1);FOLD(u2);FOLD(u3);"
+        "cs s1=s*t,s2=s/t;ci s3=s+n,s4=s/3;FOLD(s1);FOLD(s2);FOLD(s3);FOLD(s4);"
+        "cus w1=w*x,w2=w/x;cu w3=w*7u;FOLD(w1);FOLD(w2);FOLD(w3);"
+        "ci i1=mul(i,j),i2=i/j,i3=100/j,i4=i*n,i5=n-i;FOLD(i1);FOLD(i2);FOLD(i3);FOLD(i4);FOLD(i5);"
+        "cu p1=p*q,p2=p/q,p3=~p;FOLD(p1);FOLD(p2);FOLD(p3);"
+        "cl l1=quo(l,m),l2=l*m,l3=l-m*n;FOLD(l1);FOLD(l2);FOLD(l3);"
+        "cull y1=wide(y,z),y2=y/z;FOLD(y1);FOLD(y2);"
+        "cc ta=twice(a);cus tw=seven(w,x,w,x,w,x,w);ci ts=sum(3,i,j,i1);FOLD(ta);FOLD(tw);FOLD(ts);"
+        "gi+=j;gl*=m;FOLD(gi);FOLD(gl);i+=j;i*=2;i/=j;s-=t;w*=x;FOLD(i);FOLD(s);FOLD(w);"
+        "_Complex double d=i;cl from=(cl)d;cc narrow=(cc)l;int r=(int)l;_Bool truth=c4;FOLD(d);FOLD(from);FOLD(narrow);"
+        "return (int)(h%1000003)+(a==b)+(u!=v)*2+(i==i)*4+truth*8+(r&15)*16+!c6*32;}",
+        "complex-integers", clang);
+    // The complex types of __int128 and of _BitInts of up to 128 bits, which the usual arithmetic conversions make (#137):
+    // the same operations in Tier 0's 128-bit classes, with libgcc's __divti3 and __udivti3 in their quotients, and a
+    // _BitInt's parts kept extended from its width (a narrow one's computed in 32 bits); calls passing and returning
+    // them (in memory, and in a register for 4 bytes), va_arg, globals, compound assignments and conversions.
+    check_test_program_source(test,
+        "typedef __typeof__((_Complex char)0+(__int128)0) ci128;typedef __typeof__((_Complex char)0+(unsigned __int128)0) cu128;"
+        "typedef __typeof__((_Complex char)0+(_BitInt(100))0) cb100;typedef __typeof__((_Complex char)0+(unsigned _BitInt(65))0) cu65;"
+        "typedef __typeof__((_Complex char)0+(_BitInt(40))0) cb40;typedef __typeof__((_Complex char)0+(unsigned _BitInt(13))0) cu13;"
+        "static unsigned long fold(unsigned long h,unsigned __int128 r,unsigned __int128 i)"
+        "{return ((h^(unsigned long)r^(unsigned long)(r>>64)*7)*1099511628211ul)^((unsigned long)i*31u)^(unsigned long)(i>>64)*131u;}\n"
+        "#define FOLD(z) h=fold(h,(unsigned __int128)__real__ (z),(unsigned __int128)__imag__ (z))\n"
+        "#define FOLDD(z) h=fold(h,(unsigned __int128)(__int128)__real__ (z),(unsigned __int128)(__int128)__imag__ (z))\n"
+        "#define MAKE(t,z,r,i) t z;__real__ z=(r);__imag__ z=(i)\n"
+        "static ci128 mul(ci128 a,ci128 b){return a*b;}static cb100 quo(cb100 a,cb100 b){return a/b;}static cu13 twice(cu13 a){return a+a;}"
+        "static cu65 three(long x,long y,long z,cu65 a,cu65 b,cu65 c){return a+b+c+x+y+z;}"
+        "static ci128 sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);ci128 r=0;for(int i=0;i<n;i++){r+=__builtin_va_arg(ap,ci128);r*=2;}"
+        "__builtin_va_end(ap);return r;}"
+        "ci128 gi;static cb40 gb;"
+        "int tested(int n){unsigned long h=2166136261u;"
+        "MAKE(ci128,a,(__int128)n<<90,-(__int128)n*123456789);MAKE(ci128,b,(n&7)+1,(n&3)+1);"
+        "MAKE(cu128,u,(unsigned __int128)n<<100,~(unsigned __int128)0-n);MAKE(cu128,v,(n&7)+2,n&3);"
+        "MAKE(cb100,c,(_BitInt(100))n<<80,-(_BitInt(100))n*999);MAKE(cb100,d,(n&15)+1,(n&7)+1);"
+        "MAKE(cu65,e,(unsigned _BitInt(65))n<<60,(unsigned _BitInt(65))-n);MAKE(cu65,f,(n&3)+1,n&1);"
+        "MAKE(cb40,g,(_BitInt(40))n*100003,-(_BitInt(40))n*99);MAKE(cb40,k,(n&7)+3,(n&3)+1);"
+        "MAKE(cu13,p,n*700,8000-n);MAKE(cu13,q,(n&3)+1,n&1);"
+        "ci128 a1=a+b,a2=a-b,a3=a*b,a4=a/b,a5=-a,a6=~a,a7=mul(a,b);FOLD(a1);FOLD(a2);FOLD(a3);FOLD(a4);FOLD(a5);FOLD(a6);FOLD(a7);"
+        "cu128 u1=u*v,u2=u/v,u3=u-v;FOLD(u1);FOLD(u2);FOLD(u3);"
+        "cb100 c1=c*d,c2=quo(c,d),c3=c+n,c4=n-c;FOLD(c1);FOLD(c2);FOLD(c3);FOLD(c4);"
+        "cu65 e1=e*f,e2=e/f,e3=three(1,2,3,e,f,e);FOLD(e1);FOLD(e2);FOLD(e3);"
+        "cb40 g1=g*k,g2=g/k,g3=g*(cb40)3;FOLD(g1);FOLD(g2);FOLD(g3);"
+        "cu13 p1=p*q,p2=p/q,p3=twice(p),p4=~p;FOLD(p1);FOLD(p2);FOLD(p3);FOLD(p4);"
+        "ci128 ts=sum(3,a,b,a1);FOLD(ts);"
+        "gi+=b;gb*=k;FOLD(gi);FOLD(gb);a+=b;a*=2;a/=b;c-=d;FOLD(a);FOLD(c);"
+        "_Complex double dd=g;cb40 back=(cb40)c;ci128 widened=p;__int128 r=(__int128)a;_Bool truth=c2;FOLDD(dd);FOLD(back);FOLD(widened);"
+        "return (int)(h%1000003)+(a==b)+(u!=v)*2+(c==c)*4+truth*8+(int)(r&15)*16+!p4*32;}",
+        "complex-wide-integers", clang);
+    // __float128 (#137): a frame object of its 16 bytes, passed and returned as SSE, SSEUP in a vector register (va_arg
+    // too), its sums, differences, products and quotients libgcc's __addtf3 ... __divtf3, its comparisons libgcc's against
+    // 0 (a NaN's too), its negation a copy's sign bit, its truth __netf2's, and its conversions libgcc's, to and from
+    // float, double and long double and the integers of every width (through int to unsigned __int128, the _BitInts and
+    // _Bool among them); a global, and compound assignments of a __float128 and of real destinations.
+    check_test_program_source(test,
+        "typedef __float128 Q;"
+        "static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}\n"
+        "#define FOLD(q) h=fold(h,(q))\n"
+        "static Q add(Q a,Q b){return a+b;}static Q mix(int n,double d,Q a,long double e,Q b){return a*b-d+(Q)n/(Q)e;}Q gq;"
+        "static Q sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);Q r=0;for(int i=0;i<n;i++)r+=__builtin_va_arg(ap,Q);__builtin_va_end(ap);return r;}"
+        "int tested(int n){unsigned long h=2166136261u;Q a=n,b=3,c=a/b,m=c<0?-c:c;FOLD(c);FOLD(add(a,b));FOLD(-c);FOLD(mix(n,0.5,a,3.0L,b));"
+        "int cmp=(a<b)+(a<=b)*2+(a>b)*4+(a>=b)*8+(a==b)*16+(a!=b)*32+!a*64;"
+        "Q z=0,nan=z/z;cmp=cmp*131+(nan==nan)+(nan!=nan)*2+(nan<b)*4+(_Bool)nan*8+(nan>=b)*16;"
+        "double d=c;float f=c;long double ld=c;long l=c*1000;unsigned long ul=m*1e18;__int128 i128=c*(Q)1e30;unsigned u=m*100;signed char sc=c*10;_Bool bo=c;"
+        "unsigned _BitInt(40) b40=m*1e11;_BitInt(100) b100=-c*(Q)1e25;"
+        "Q fromu=(unsigned)n*4000000000u,froml=-(long)n*(1L<<40),fromi128=(__int128)n*((__int128)1<<100),fromu128=(unsigned __int128)n<<127;"
+        "Q fromf=1.5f*n,fromld=2.25L*n,fromb=(_Bool)n,fromb40=(unsigned _BitInt(40))n<<35,fromc=(char)n;"
+        "FOLD(fromu);FOLD(froml);FOLD(fromi128);FOLD(fromu128);FOLD(fromf);FOLD(fromld);FOLD(fromb);FOLD(fromb40);FOLD(fromc);"
+        "gq+=c;gq*=2;FOLD(gq);double dd=1.0;dd+=c;int ii=7;ii*=c+1;FOLD(sum(3,a,b,c));if(c)h+=3;"
+        "unsigned long du;__builtin_memcpy(&du,&d,8);unsigned fu;__builtin_memcpy(&fu,&f,4);unsigned long lu;__builtin_memcpy(&lu,&ld,8);"
+        "return (int)(h%1000003)^cmp^(int)(du%1000033)^(int)(fu%1000037)^(int)(lu%1000039)^(int)l^(int)(ul%1000081)^(int)(i128%1000099)^(int)u^sc^bo^"
+        "(int)(b40%1009)^(int)(b100%1013)^ii^(int)(dd*1e6);}",
+        "float128", clang);
+    // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
+    // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
+    // refused and the other was an address of 0.
+    check_test_program_source(test,
+        "typedef __float128 Q;static int calls;\n"
+        "static Q next(Q q){calls++;return q+1;}\n"
+        "static unsigned long bits(Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return w[0]^w[1]*3;}\n"
+        "static unsigned long pass(Q a,Q b){return bits(a)*5+bits(b);}\n"
+        "static Q imag_of(Q q){return __imag__ q;}\n"
+        "static Q imag_effect(Q q){return __imag__ next(q);}\n"
+        "int tested(int n){Q q=n-0.5;Q z=__imag__ q,e=__imag__ next(q);\n"
+        "unsigned long h=bits(imag_of(q))+bits(imag_effect(q))*7+pass(__imag__ q,__imag__ next(q))*11+bits(z)*13+bits(e)*17+(unsigned long)calls;\n"
+        "return (int)(h%1000003)+(z==0)*2+(e==0)*4+(__imag__ next(q)<1)*8;}\n",
+        "float128-imaginary", clang);
     // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
     // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
     check_test_program_source(test,
@@ -4029,12 +4171,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
-    // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
-    // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
-    // C; __float128 is its spelling).
-    check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, false, 0, 1, "complex integer types");
+    // GNU's complex integer types of __int128 and the complex _BitInts of up to 128 bits, which the usual arithmetic
+    // conversions make (#137), are lowered; the complex types check_lower_complex doesn't take are refused by what they
+    // need: a complex _BitInt past 128 bits, and complex types of the floating types other than float, double and long
+    // double (clang 23 has no _Float128 in C; __float128 is its spelling).
+    check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, true, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, true, 0, 3);
+    check_test_program_boundary(test, "int tested(int n){_Complex char z=n;_BitInt(100) w=n;__typeof__(z+w) v=z*w;return __real__ v>1;}", "complex-bit-int-100", true, true,
+                                0, 3);
+    check_test_program_boundary_reason(test, "int tested(int n){_Complex char z=n;_BitInt(129) w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-bit-int-129", true,
+                                       false, 0, 3, "_BitInt");
     // A promoted K&R parameter now converts from double to its declared float on entry.
     check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
+    check_test_program_boundary(test, "__float128 g;int tested(int n){__float128 x=n;g=x*x;return g>1;}", "float128-lowering", true, true, 1, 1);
+    check_test_program_boundary_reason(test, "int tested(int n){__float128 x=n;x++;return x>1;}", "float128-increment", true, false, 0, 1,
+                                       "increments of __float128 values");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
