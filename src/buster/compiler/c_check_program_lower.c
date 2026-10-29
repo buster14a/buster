@@ -2940,6 +2940,41 @@ static void check_lower_quad_call(CheckLowerWriter* writer, CheckLowerRuntime ru
     }
 }
 
+// A folded __float128 constant: a frame object of its 16 bytes, whose address it leaves, the value converted from the
+// checker's long double exactly. The checker folds none of __float128's arithmetic (check_action_float_supported), but
+// gives a real value's __imag__ as a constant zero of its type (c_check_complex.c), which comes here.
+static void check_lower_quad_constant(CheckLowerWriter* writer, const CheckValue* value)
+{
+    const uint32_t result = check_lower_quad_object(writer);
+    const __float128 quad = (__float128)value->floating;
+    uint64_t halves[2];
+    memcpy(halves, &quad, sizeof(halves));
+    for (uint32_t half = 0; half < 2; half += 1)
+    {
+        check_lower_complex_place(writer, result, half, 8);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, halves[half]);
+        check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
+}
+
+// A frame object of zeros of `type`, an aggregate's (a __float128's, a _BitInt's past 128 bits), its zeros written now:
+// a real value's imaginary part, whose address is its value.
+static uint32_t check_lower_aggregate_zero(CheckLowerWriter* writer, TypeId type)
+{
+    const TypeTable* types = writer->program->types;
+    const uint64_t size = type_size(types, type);
+    const uint32_t zero = check_lower_object(writer, size, type_alignment_log2(types, type));
+    for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += 8)
+    {
+        check_lower_complex_place(writer, zero, 0, 0);
+        check_lower_offset(writer, offset);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    return zero;
+}
+
 // `op` (ADD, SUBTRACT, MULTIPLY, DIVIDE or NEGATIVE, or LESS to NOT_EQUAL) of the __float128 values whose addresses
 // temporaries `a` and `b` hold (`a` alone for NEGATIVE): an arithmetic result into a frame object of its own, whose
 // address it leaves, or a comparison's I32, libgcc's int against 0 as clang tests it (unordered operands make each false
@@ -4336,6 +4371,11 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
     else if (check_lower_limb_value(writer, value->type))
     {
         check_lower_limb_constant(writer, value);
+    }
+    else if (value->constant_kind == CHECK_CONSTANT_FLOATING && check_lower_aggregate(writer, value->type))
+    {
+        // A __float128's, the one aggregate whose value the checker folds to a floating constant.
+        check_lower_quad_constant(writer, value);
     }
     else if (class == BUSTER_TYPED_CLASS_F80 && value->constant_kind != CHECK_CONSTANT_FLOATING)
     {
@@ -6917,7 +6957,17 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (!complex)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_CONST, class, 0);
+            // A real value's imaginary part: zero, after the value, evaluated and discarded; an aggregate's (a __float128's,
+            // a _BitInt's past 128 bits) a frame object of zeros, whose address is its value (check_lower_aggregate_zero),
+            // not an address of 0.
+            if (aggregate)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, check_lower_aggregate_zero(writer, value->type));
+            }
+            else
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, class, 0);
+            }
             check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
         }
         else if (stream->values[a].category == CHECK_LVALUE || check_lower_complex(writer, input_type))

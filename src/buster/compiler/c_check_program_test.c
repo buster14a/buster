@@ -3842,6 +3842,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return (int)(h%1000003)^cmp^(int)(du%1000033)^(int)(fu%1000037)^(int)(lu%1000039)^(int)l^(int)(ul%1000081)^(int)(i128%1000099)^(int)u^sc^bo^"
         "(int)(b40%1009)^(int)(b100%1013)^ii^(int)(dd*1e6);}",
         "float128", clang);
+    // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
+    // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
+    // refused and the other was an address of 0.
+    check_test_program_source(test,
+        "typedef __float128 Q;static int calls;\n"
+        "static Q next(Q q){calls++;return q+1;}\n"
+        "static unsigned long bits(Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return w[0]^w[1]*3;}\n"
+        "static unsigned long pass(Q a,Q b){return bits(a)*5+bits(b);}\n"
+        "static Q imag_of(Q q){return __imag__ q;}\n"
+        "static Q imag_effect(Q q){return __imag__ next(q);}\n"
+        "int tested(int n){Q q=n-0.5;Q z=__imag__ q,e=__imag__ next(q);\n"
+        "unsigned long h=bits(imag_of(q))+bits(imag_effect(q))*7+pass(__imag__ q,__imag__ next(q))*11+bits(z)*13+bits(e)*17+(unsigned long)calls;\n"
+        "return (int)(h%1000003)+(z==0)*2+(e==0)*4+(__imag__ next(q)<1)*8;}\n",
+        "float128-imaginary", clang);
     // _BitInts past 128 bits (#137): frame objects of their 64-bit limbs, of 129 to 2,100 bits (whose copies past 256 bytes
     // call memmove), signed and unsigned: every operation a limb at a time, libgcc's __mulbitint3 and __divmodbitint4 for
     // products, quotients and remainders, shifts by constant and variable counts of other types (a _BitInt's past 128 bits
