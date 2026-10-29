@@ -1,0 +1,65 @@
+name: Prepare issue 811 patch
+on:
+  push:
+    branches: [chatgpt/issue-811-prepare]
+    paths: [.github/workflows/issue-811-prepare.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository_id == '1421805693' && github.ref == 'refs/heads/chatgpt/issue-811-prepare'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      - name: Apply the reviewed patch to the pinned base on this scratch branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = 1a9955ab5c3cb85d6ef6e346f1ab422abc995384
+          cat > "$RUNNER_TEMP/pic.patch" <<'PATCH'
+          diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+          --- a/src/buster/compiler/c_checker_driver.c
+          +++ b/src/buster/compiler/c_checker_driver.c
+          @@ -2520,6 +2520,11 @@
+               bool markers = false;
+               const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+          +    // The parser already resolves the last PIC/PIE option. Tier 0 cannot yet emit shared-library-safe symbol and TLS
+          +    // accesses (#811), so refuse code generation before any unit or output is opened; non-emitting actions keep PIC.
+          +    const char* unsupported_pic = parsed && (emit_object || link) ?
+          +        (options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
+          +         options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
+               options.semantic_pragmas = true;
+               options.timing = time_stages;
+               CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
+          @@ -2590,6 +2595,10 @@
+          -    else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
+          +    else if (unsupported_pic != NULL)
+          +    {
+          +        fprintf(stderr, "error: unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)\n", unsupported_pic);
+          +    }
+          +    else if (invalid_pack != NULL || short_enums != NULL || (has_pack_value ? packed_value : packed_bare) != NULL)
+               {
+                   const char* unsupported = invalid_pack != NULL ? invalid_pack : short_enums != NULL ? short_enums : has_pack_value ? packed_value : packed_bare;
+                   fprintf(stderr, "error: unsupported option '%s' (the checker does not implement its ABI layout)\n", unsupported);
+               }
+          diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+          --- a/src/buster/compiler/c_checker_driver_test.c
+          +++ b/src/buster/compiler/c_checker_driver_test.c
+          @@ -1,3 +1,6 @@
+          +#include "c_check_pic_driver_test.c"
+          +
+           // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
+           static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
+           {
+          +    check_test_driver_pic(test, executable, directory);
+          PATCH
+          git apply --recount --check "$RUNNER_TEMP/pic.patch"
+          git apply --recount "$RUNNER_TEMP/pic.patch"
+          git diff --check
+          git add src/buster/compiler/c_checker_driver.c src/buster/compiler/c_checker_driver_test.c
+          git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'Apply PIC driver rejection and register regressions'
+          git push origin HEAD:refs/heads/chatgpt/issue-811-prepare
