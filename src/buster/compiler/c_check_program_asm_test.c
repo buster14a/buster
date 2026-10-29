@@ -226,13 +226,23 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-naked-intel-avx512", clang, wide_native);
     // Vectors in vector registers' constraints in templates of no instructions, main.c's compiler barriers (c_lexer.c's
     // and x86_64_encoder.c's `__asm__("" : "+v"(x))`): a `+` operand keeps its value, an output through a call's pointer
-    // is evaluated once, and an input's value is evaluated and dropped; for x86-64-v4, run where the host has its features.
+    // is evaluated once, and an input's value is evaluated once and dropped, a call's that returns a vector and one loaded
+    // through a call's pointer in a statement of no outputs, both calls counting their evaluations (#773's review); for
+    // x86-64-v4, run where the host has its features.
     X86Target vectors = { 0 };
     const bool vectors_parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &vectors);
     check_test_expect(test, vectors_parsed, "the vector barriers' target, x86-64-v4");
     static const char asm_vector_types[] =
         "typedef long long v8di __attribute__((vector_size(64)));typedef int v8si __attribute__((vector_size(32)));"
         "typedef float v4sf __attribute__((vector_size(16)));";
+    static const char asm_vector_program[] =
+        "int count;int inputs;v8di saved[3];static v8di* next(void){count+=1;return &saved[count%3];}"
+        "static v8di twice(v8di x){inputs+=1;return x+x;}static v8di* held(void){inputs+=10;return &saved[2];}"
+        "int tested(int n){v8di a={n,n+1,n+2,n+3,n+4,n+5,n+6,n+7};__asm__(\"\" : \"+v\"(a));v8si b={n*2,1,2,3,4,5,6,7};"
+        "__asm__ volatile(\"\" : \"+x\"(b) : \"v\"(twice(a)));__asm__ volatile(\"\" : : \"x\"(*held()));"
+        "v4sf c={1.5f,(float)n,2.5f,3.5f};__asm__(\"# no instructions\" : \"+v\"(c) : : \"memory\");"
+        "saved[1]=a;__asm__(\"\" : \"+v\"(*next()));long long s=0;for(int i=0;i<8;i++)s+=a[i]*(i+1)+saved[1][i]+b[i];"
+        "return (int)(s+(long long)c[1]*5+count*7+inputs*11);}";
     if (vectors_parsed)
     {
         const bool vectors_native = (native.features & vectors.features) == vectors.features;
@@ -240,13 +250,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         {
             printf("  asm-vector-barriers: native execution skipped (the host lacks x86-64-v4's features or their saved state)\n");
         }
-        char source[1024];
-        snprintf(source, sizeof(source), "%s%s", asm_vector_types,
-                 "int count;v8di saved[3];static v8di* next(void){count+=1;return &saved[count%3];}"
-                 "int tested(int n){v8di a={n,n+1,n+2,n+3,n+4,n+5,n+6,n+7};__asm__(\"\" : \"+v\"(a));v8si b={n*2,1,2,3,4,5,6,7};"
-                 "__asm__ volatile(\"\" : \"+x\"(b) : \"v\"(a+a));v4sf c={1.5f,(float)n,2.5f,3.5f};__asm__(\"# no instructions\" : \"+v\"(c) : : \"memory\");"
-                 "saved[1]=a;__asm__(\"\" : \"+v\"(*next()));long long s=0;for(int i=0;i<8;i++)s+=a[i]*(i+1)+saved[1][i]+b[i];"
-                 "return (int)(s+(long long)c[1]*5+count*7);}");
+        char source[2048];
+        const int length = snprintf(source, sizeof(source), "%s%s", asm_vector_types, asm_vector_program);
+        check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "the vector barriers' source fits its buffer");
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64-v4";
         check_test_program_source_native_limits(test, source, "asm-vector-barriers", clang, false, -1, 0, &vectors, vectors_native);
