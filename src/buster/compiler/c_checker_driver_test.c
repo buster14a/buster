@@ -1957,6 +1957,12 @@ static void check_test_driver_identification(CheckTest* test, const char* execut
     check_test_expect(test, preprocessed == 0 && text != NULL && strstr(text, "int value = 42;") != NULL,
                       "-pipe is accepted in preprocessing mode");
     free(text);
+    char* const command[] = { compiler, "parallel", "--version", NULL };
+    text = NULL;
+    const int command_status = check_test_driver_spawn(command, &text);
+    check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "named commands take precedence over compiler identification");
+    free(text);
     unlink(object);
     unlink(source);
 }

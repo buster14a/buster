@@ -648,16 +648,24 @@ static bool main_information(int count, char** arguments, int* status)
         else
         {
             const PredefinesOptions options = { .target = target };
-            uint32_t vendor_length = 0;
-            const char* vendor = predefines_target_vendor(&options, &vendor_length);
-            const char* architecture = target != NULL ? target : "x86_64";
-            const int architecture_length = target != NULL ? (int)(strchr(target, '-') - target) : 6;
-            if (!machine)
+            const size_t length = strlen(target != NULL ? target : BUSTER_CLANG_DEFAULT_TARGET);
+            char* triple = length <= SIZE_MAX - 32 ? malloc(length + 32) : NULL;
+            if (triple == NULL)
             {
-                printf("buster (development build)\nTarget: ");
+                fprintf(stderr, "error: cannot allocate target triple\n");
+                *status = 1;
             }
-            printf("%.*s-%.*s-linux-gnu\n", architecture_length, architecture, (int)vendor_length, vendor);
-            *status = 0;
+            else
+            {
+                predefines_target_triple(&options, triple, length + 32);
+                if (!machine)
+                {
+                    printf("buster (development build)\nTarget: ");
+                }
+                printf("%s\n", triple);
+                free(triple);
+                *status = 0;
+            }
         }
     }
     return found;
