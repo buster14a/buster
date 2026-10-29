@@ -857,7 +857,13 @@ kind, which the loader checks: the other kind's file at its name is stale.
   whole, and two compilers rebuilding it at once write identical files, the
   last rename winning, so no lock is needed. A snapshot that can't be written
   (a directory at its path, a cache directory that can't be made) doesn't fail
-  the link, which goes on with the imported runtime.
+  the link, which goes on with the imported runtime. For the environment-selected
+  cache, the absolute `XDG_CACHE_HOME` or `HOME` must already be a directory.
+  The default creates `.cache` below an existing `HOME` if needed, and creates
+  `buster` inside the selected cache root. It does not create the selected root
+  or its ancestors; if they are unavailable, the runtime is imported without a
+  snapshot. Explicit cache paths passed to `runtime_open` retain recursive
+  directory creation.
 
 On the 9700X (`benchmark-snapshot`, one CPU, medians of 41 runs, on tmpfs; on
 btrfs, the cache directory's file system there, within 0.4 µs but for the

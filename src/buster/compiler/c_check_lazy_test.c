@@ -249,6 +249,11 @@ static __attribute__((noinline)) void check_test_lazy(CheckTest* test)
     {
         { "empty unit", "", 0, 0, true, true },
         { "unused erroneous system body", "# 1 \"header.h\" 1 3\nstatic int dead(void){return missing;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
+        { "ordinary K&R declaration-list body", "int f(a)int a;{return a;}\n", 0, 1, true, true },
+        { "grouped K&R declaration-list body", "int (f(a))int a;{return a;}\n", 0, 1, true, true },
+        { "prototype before K&R definition", "int f(int);int f(a)int a;{return a;}\n", 0, 1, true, true },
+        { "unused erroneous K&R system body", "# 1 \"header.h\" 1 3\nstatic int dead(a)int a;{return missing;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true },
+        { "referenced K&R system body", "# 1 \"header.h\" 1 3\nstatic int used(a)int a;{return a+1;}static int dead(b)int b;{return missing;}\n# 1 \"user.c\" 2\nint entry(void){return used(2);}\n", 2, 3, false, true },
         { "ordinary body is always checked", "static int dead(void){return missing;} int entry(void){return 0;}", 0, 2, false, false },
         { "used system body is checked", "# 1 \"header.h\" 1 3\nstatic int used_body(void){return missing;}\n# 1 \"user.c\" 2\nint entry(void){return used_body();}\n", 0, 2, false, false },
         { "dead header cycle", "# 1 \"header.h\" 1 3\nstatic int b(void); static int a(void){return b();} static int b(void){return a();}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 3, 3, true, true },

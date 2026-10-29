@@ -26,7 +26,8 @@ struct IrTypedPlan
     uint32_t maximum_spill_depth;
     // The depth slots' bytes and alignment: 16 for a function with values of the memory classes, else 8.
     uint32_t spill_bytes;
-    // The JUMP_INDIRECT entries, which all go through the function's one dispatch block (the emitter's last).
+    // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
+    // block (the emitter's last); a jump table's goes to its table's labels from its own block.
     uint32_t indirect;
     uint32_t error_entry;
     const char* error;
@@ -134,6 +135,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 
         uint32_t depth = 0;
         bool reachable = true;
+        uint32_t table = 0;
         plan.spill_bytes = 8;
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -227,16 +229,24 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     reachable = false;
                     break;
                 case BUSTER_TYPED_JUMP_INDIRECT:
-                    // At statement level: the address popped. Every indirect jump goes to the dispatch block, which
-                    // arrives at every label with the stacks empty, once.
+                {
+                    // At statement level: the address popped. A jump table's jump arrives at its table's labels with the
+                    // stacks empty, and every goto * goes to the dispatch block, which arrives at the labels of no table
+                    // so, once (table_jumps is in entry order: `table` its next).
                     depth -= 1;
-                    for (uint32_t k = 0; ok && plan.indirect == 0 && k < input->label_count; k += 1)
+                    const bool tabled = table < input->table_count && input->table_jumps[table] == i;
+                    for (uint32_t k = 0; ok && (tabled || plan.indirect == 0) && k < input->label_count; k += 1)
                     {
-                        ok = ir_typed_plan_arrive(&plan, scratch, plan.entry_blocks[input->label_entries[k]], stack, depth, i);
+                        const uint32_t owner = input->table_count != 0 ? input->label_tables[k] : 0;
+                        if (owner == (tabled ? table + 1 : 0))
+                        {
+                            ok = ir_typed_plan_arrive(&plan, scratch, plan.entry_blocks[input->label_entries[k]], stack, depth, i);
+                        }
                     }
-                    plan.indirect += 1;
+                    plan.indirect += tabled ? 0 : 1;
+                    table += tabled ? 1 : 0;
                     reachable = false;
-                    break;
+                } break;
                 default:
                     // Every remaining kind is a binary arithmetic/compare.
                     depth -= 1;
@@ -277,9 +287,10 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 //    fallthrough must either emit an explicit undef return under an agreed
 //    contract or diagnose unsupported; never silently map void fallthrough to
 //    UNREACHABLE.
-// 6. An indirect jump stores its address in the dispatch slot and branches to
-//    the dispatch block, the last, which loads it and is the function's one
-//    br_indirect, so that its CFG has an edge per jump and per label.
+// 6. A goto * stores its address in the dispatch slot and branches to the
+//    dispatch block, the last, which loads it and is the br_indirect of every
+//    label no jump table has, so that its CFG has an edge per jump and per
+//    label. A jump table's jump is a br_indirect of its own table's labels.
 // 7. Verify the IR and build compact CFG arrays after construction. #134 can
 //    promote both ordinary local slots and the expression-depth slots later.
 
@@ -660,6 +671,26 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     // The result object's slot address is its local's preheader instruction.
     return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor,
                          object != 0 ? object - 1 : BUSTER_IR_NONE, 0);
+}
+
+// A br_indirect's labels (#785), into extra: jump table t's for `owner` 1 + t, or with 0 those of no table; the count. A
+// function without tables lists none, its br_indirect taking every label.
+static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSink* sink, const Tier0Function* input, uint32_t owner)
+{
+    uint32_t count = 0;
+    for (uint32_t k = 0; input->table_count != 0 && k < input->label_count; k += 1)
+    {
+        if (input->label_tables[k] == owner)
+        {
+            if (sink->output != 0)
+            {
+                sink->output->extra[sink->sizes.extra_count] = k;
+            }
+            sink->sizes.extra_count += 1;
+            count += 1;
+        }
+    }
+    return count;
 }
 
 // Expose the existing count/fill output contracts before the compiler makes inlining decisions. All construction

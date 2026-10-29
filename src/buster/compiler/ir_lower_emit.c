@@ -129,6 +129,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
     }
     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 
+    // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
+    uint32_t table = 0;
     for (uint32_t b = 0; b < plan->block_count; b += 1)
     {
         if (output != 0)
@@ -315,12 +317,25 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             }
             case BUSTER_TYPED_JUMP_INDIRECT:
-                // A label's address (U64), at statement level (nothing else on the stack to spill), to the dispatch block.
+            {
+                // A label's address (U64), at statement level (nothing else on the stack to spill): a jump table's to a
+                // br_indirect of its table's labels, a goto *'s to the dispatch block.
                 depth -= 1;
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, dispatch_slot, stack[depth], BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
-                ir_typed_emit(&sink, IR_BR, IR_VOID, dispatch_block, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                if (table < input->table_count && input->table_jumps[table] == i)
+                {
+                    const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                    const uint32_t labels = (uint32_t)sink.sizes.extra_count;
+                    table += 1;
+                    const uint32_t listed = ir_typed_labels(&sink, input, table);
+                    ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, labels, listed, 0);
+                }
+                else
+                {
+                    ir_typed_emit(&sink, IR_STORE, IR_VOID, dispatch_slot, stack[depth], BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+                    ir_typed_emit(&sink, IR_BR, IR_VOID, dispatch_block, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                }
                 terminated = true;
-                break;
+            } break;
             default:
             {
                 const uint32_t right = stack[depth - 1];
@@ -373,9 +388,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         {
             output->block_offsets[dispatch_block] = (uint32_t)sink.sizes.instruction_count;
         }
+        // The goto *s' labels: those of no jump table, or every label in a function without tables (or whose goto *s have
+        // no label of their own to go to, which no jump of C's reaches).
         const uint32_t loaded = ir_typed_emit(&sink, IR_LOAD, IR_I64, dispatch_slot, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
         const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, loaded, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t labels = (uint32_t)sink.sizes.extra_count;
+        const uint32_t listed = ir_typed_labels(&sink, input, 0);
+        ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, listed != 0 ? labels : BUSTER_IR_NONE, listed != 0 ? listed : BUSTER_IR_NONE, 0);
     }
     if (output != 0)
     {
