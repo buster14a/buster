@@ -1422,7 +1422,24 @@ What the lowering covers past scalars (#145's programs):
     as clang's code does), the scalar ones (`loadss128_mask` and the others,
     which clang lowers as the vector's masked load or store under the mask's
     low bits) and the expanding loads;
-  - the floating compresses and expands, into a vector and into memory.
+  - the floating compresses and expands, into a vector and into memory;
+  - the SSE and AVX-512 operations of two vectors: the packs, averages,
+    multiplies, signs and horizontal sums and differences, the permutes by a
+    vector, the variable shifts and the shifts by an XMM register's count, the
+    AES rounds, GF(2^8)'s products, BF16's conversions, max and min, and the
+    SSE compares by the predicates their names spell (VEX's VCMP into
+    vectors);
+  - one vector's conversions and approximations, and the scalar ones of its
+    first element (VRCPSS, VRSQRTSS); FMA's addsub, VPERMT2's and the BF16 and
+    IFMA products; the blends by a vector's signs;
+  - operations into w under a mask, of one vector (MASK_UNARY: every
+    conversion's pair of widths, VGETEXP, VRCP14 and VRSQRT14) and of two
+    (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's).
+
+  A rounding control, a builtin's last immediate (CheckX86LowerRounding),
+  picks the rule's form for 4 (`_MM_FROUND_CUR_DIRECTION`), its form that
+  suppresses exceptions for 8 and 12, and its form of embedded rounding in the
+  low bits' direction for 8 to 11, as clang's code does.
 
   A function with an X86
   entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an

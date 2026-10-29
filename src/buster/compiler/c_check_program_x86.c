@@ -85,7 +85,27 @@ typedef enum CheckX86LowerFamily
     // (element* p, vector a, mask m): VPMOV's truncation of a's elements, each stored at its place at p where m's bit is
     // set (the form's memory destination); a's lanes are the mask's.
     CHECK_X86_LOWER_TRUNCATE_STORE,
+    // (vector a[, int immediate], vector w, mask m): the form's operation of a (rm) into w (reg) under m, of `other` bytes
+    // where they aren't a's (a conversion's); `element` is a's bytes per lane of the mask, which are a's bytes over it
+    // (VRCP14PS, VGETEXPPS, VCVTPD2DQ, VGETMANTPS).
+    CHECK_X86_LOWER_MASK_UNARY,
+    // (vector a, vector b[, int immediate], vector w, mask m): the form's operation of a (vvvv) and b (rm) into w (reg)
+    // under m, b of `other` bytes where they aren't a's (VSCALEFPS, VRCP14SS, VMAXSD, VCVTSD2SS).
+    CHECK_X86_LOWER_MASK_MERGE,
+    // (vector a): the form's dest, a, a: a scalar operation of a's first element, the others a's (VRCPSS, VRSQRTSS).
+    CHECK_X86_LOWER_UNARY_SCALAR,
 } CheckX86LowerFamily;
+
+// A rule's rounding control, the builtin's last argument (an immediate): none, the exceptions' suppression (SAE: 8 or 12,
+// _MM_FROUND_NO_EXC, take the rule's round_form) or embedded rounding (ER: 8 to 11, _MM_FROUND_NO_EXC with a direction
+// in the low bits, take round_form with that rounding); 4, _MM_FROUND_CUR_DIRECTION, takes the rule's form either way.
+// clang refuses other values.
+typedef enum CheckX86LowerRounding
+{
+    CHECK_X86_ROUND_NONE,
+    CHECK_X86_ROUND_SAE,
+    CHECK_X86_ROUND_ER,
+} CheckX86LowerRounding;
 
 #define BUSTER_CHECK_X86_NO_IMMEDIATE 0xffu
 
@@ -110,6 +130,11 @@ struct CheckX86LowerRule
     bool zero_test;
     // Its features past AVX-512F and AVX-512VL.
     uint64_t features;
+    // The form its rounding control picks (CheckX86LowerRounding), and that control's kind.
+    uint16_t round_form;
+    uint8_t rounding;
+    // BINARY's immediate where its form has one and the builtin none: the SSE compares' predicates.
+    uint8_t fixed;
 };
 
 #define BUSTER_CHECK_X86_BW BUSTER_X86_FEATURE(AVX512BW)
@@ -120,6 +145,34 @@ struct CheckX86LowerRule
     { name, sizeof(name) - 1, family, element, bytes, false, swap, immediate, form, other, false, features },
 #define BUSTER_CHECK_X86_RULE_MASK(name, family, bytes, form, zero_test, features) \
     { name, sizeof(name) - 1, family, 1, bytes, false, false, family == CHECK_X86_LOWER_KSHIFT ? 1 : BUSTER_CHECK_X86_NO_IMMEDIATE, form, 0, zero_test, features },
+// A rule of one width in short: its name past "__builtin_ia32_", its family's and its forms' names past their prefixes,
+// with another vector's bytes (and `swap`), and with a rounding control (its last argument) and the form it picks.
+#define BUSTER_CHECK_X86_ONE(name, family, element, bytes, form, features) \
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_" name, CHECK_X86_LOWER_##family, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form, features)
+#define BUSTER_CHECK_X86_ONE_OTHER(name, family, element, bytes, swap, form, other, features) \
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_" name, CHECK_X86_LOWER_##family, element, bytes, swap, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form, other, \
+                                features)
+#define BUSTER_CHECK_X86_ROUNDED(name, family, element, bytes, form, other, features, round_form, rounding) \
+    { "__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_##family, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
+      X86_FORM_##form, other, false, features, X86_FORM_##round_form, CHECK_X86_ROUND_##rounding, 0 },
+// A BINARY rule whose form's immediate is `fixed`.
+#define BUSTER_CHECK_X86_RULE_FIXED(name, element, bytes, form, fixed, features) \
+    { name, sizeof(name) - 1, CHECK_X86_LOWER_BINARY, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, form, 0, false, features, 0, 0, fixed },
+// A family of an SSE builtin's name at 16 bytes, which has no width in it, and of its name "256" at 32: `x` and `y` are
+// its forms' suffixes.
+#define BUSTER_CHECK_X86_SSE(name, family, element, swap, form, x, y, features) \
+    BUSTER_CHECK_X86_RULE(name, family, element, 16, false, swap, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form##_##x, features) \
+    BUSTER_CHECK_X86_RULE(name "256", family, element, 32, false, swap, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form##_##y, features)
+// The SSE compares of a kind (ps, pd, ss or sd) by each predicate their names spell, VCMP's of that predicate.
+#define BUSTER_CHECK_X86_PREDICATES(kind, element, form) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpeq" kind, element, 16, X86_FORM_##form, 0, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmplt" kind, element, 16, X86_FORM_##form, 1, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmple" kind, element, 16, X86_FORM_##form, 2, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpunord" kind, element, 16, X86_FORM_##form, 3, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpneq" kind, element, 16, X86_FORM_##form, 4, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpnlt" kind, element, 16, X86_FORM_##form, 5, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpnle" kind, element, 16, X86_FORM_##form, 6, 0) \
+    BUSTER_CHECK_X86_RULE_FIXED("__builtin_ia32_cmpord" kind, element, 16, X86_FORM_##form, 7, 0)
 // The masked families at 16, 32 and 64 bytes, of each element size.
 #define BUSTER_CHECK_X86_WIDTHS(prefix, suffix, family, element, is_signed, immediate) \
     BUSTER_CHECK_X86_RULE(prefix "128" suffix, family, element, 16, is_signed, false, immediate, 0, 0) \
@@ -409,6 +462,277 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
                           BUSTER_X86_FEATURE(AVX2))
     // An element of 64 bits of a 256-bit vector: its lane extracted first where it is past the low one.
     BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v4di", CHECK_X86_LOWER_EXTRACT, 8, 32, false, false, 1, X86_FORM_VPEXTRQ_RM64_X_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    // Two vectors' operations, the form's dest, a, b (or with `swap` dest, b, a: VPERMPS's and VPERMPD's indices first).
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_packssdw", VPACKSSDW, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_packsswb", VPACKSSWB, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_packuswb", VPACKUSWB, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pavgb", VPAVGB, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pavgw", VPAVGW, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pmuldq", VPMULDQ, false, 0)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pmulhrsw", VPMULHRSW, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pmulhuw", VPMULHUW, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_BINARIES("__builtin_ia32_pmulhw", VPMULHW, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("pmuludq128", BINARY, 4, 16, VPMULUDQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("pmuludq256", BINARY, 4, 32, VPMULUDQ_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psadbw128", BINARY, 1, 16, VPSADBW_X_X_XM128_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psadbw256", BINARY, 1, 32, VPSADBW_Y_Y_YM256_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("vpmultishiftqb128", BINARY, 1, 16, VPMULTISHIFTQB_X_X_XM128, BUSTER_X86_FEATURE(AVX512VBMI))
+    BUSTER_CHECK_X86_ONE("vpmultishiftqb256", BINARY, 1, 32, VPMULTISHIFTQB_Y_Y_YM256, BUSTER_X86_FEATURE(AVX512VBMI))
+    BUSTER_CHECK_X86_ONE("psravq128", BINARY, 8, 16, VPSRAVQ_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("psravq256", BINARY, 8, 32, VPSRAVQ_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("psllv16hi", BINARY, 2, 32, VPSLLVW_Y_Y_YM256, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psllv32hi", BINARY, 2, 64, VPSLLVW_Z_Z_ZM512, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrav16hi", BINARY, 2, 32, VPSRAVW_Y_Y_YM256, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrav32hi", BINARY, 2, 64, VPSRAVW_Z_Z_ZM512, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrlv16hi", BINARY, 2, 32, VPSRLVW_Y_Y_YM256, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrlv32hi", BINARY, 2, 64, VPSRLVW_Z_Z_ZM512, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psllv4di", BINARY, 8, 32, VPSLLVQ_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psllv8si", BINARY, 4, 32, VPSLLVD_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrav8si", BINARY, 4, 32, VPSRAVD_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrlv4di", BINARY, 8, 32, VPSRLVQ_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrlv8si", BINARY, 4, 32, VPSRLVD_Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("vgf2p8mulb_v32qi", BINARY, 1, 32, VGF2P8MULB_Y_Y_YM256_EVEX, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_ONE("vgf2p8mulb_v64qi", BINARY, 1, 64, VGF2P8MULB_Z_Z_ZM512, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_ONE("psllv8hi", BINARY, 2, 16, VPSLLVW_X_X_XM128, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrav8hi", BINARY, 2, 16, VPSRAVW_X_X_XM128, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrlv8hi", BINARY, 2, 16, VPSRLVW_X_X_XM128, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psllv2di", BINARY, 8, 16, VPSLLVQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psllv4si", BINARY, 4, 16, VPSLLVD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrav4si", BINARY, 4, 16, VPSRAVD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrlv2di", BINARY, 8, 16, VPSRLVQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("psrlv4si", BINARY, 4, 16, VPSRLVD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("vgf2p8mulb_v16qi", BINARY, 1, 16, VGF2P8MULB_X_X_XM128_EVEX, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_ONE("aesdec128", BINARY, 1, 16, VAESDEC_X_X_XM128_EVEX, BUSTER_X86_FEATURE(AES) | BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesdec256", BINARY, 1, 32, VAESDEC_Y_Y_YM256_EVEX, BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesdec512", BINARY, 1, 64, VAESDEC_Z_Z_ZM512, BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesdeclast128", BINARY, 1, 16, VAESDECLAST_X_X_XM128_EVEX, BUSTER_X86_FEATURE(AES) | BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesdeclast256", BINARY, 1, 32, VAESDECLAST_Y_Y_YM256_EVEX, BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesdeclast512", BINARY, 1, 64, VAESDECLAST_Z_Z_ZM512, BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_ONE("aesenclast256", BINARY, 1, 32, VAESENCLAST_Y_Y_YM256_EVEX, BUSTER_X86_FEATURE(VAES))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_cvtne2ps2bf16_", CHECK_X86_LOWER_BINARY, 4, false, VCVTNE2PS2BF16, X_X_XM128, Y_Y_YM256, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ONE_OTHER("permvardf256", BINARY, 8, 32, true, VPERMPD_Y_Y_YM256, 0, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("permvardf512", BINARY, 8, 64, true, VPERMPD_Z_Z_ZM512, 0, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("permvarsf256", BINARY, 4, 32, true, VPERMPS_Y_Y_YM256_EVEX, 0, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("permvarsf512", BINARY, 4, 64, true, VPERMPS_Z_Z_ZM512, 0, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("permvardi256", BINARY, 8, 32, true, VPERMQ_Y_Y_YM256, 0, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_vpermilvarpd", CHECK_X86_LOWER_BINARY, 8, false, VPERMILPD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("vpermilvarpd512", BINARY, 8, 64, VPERMILPD_Z_Z_ZM512, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_vpermilvarps", CHECK_X86_LOWER_BINARY, 4, false, VPERMILPS, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("vpermilvarps512", BINARY, 4, 64, VPERMILPS_Z_Z_ZM512, 0)
+    // The SSE builtins of two vectors: 16 bytes without a width in the name and 32 with "256", and the scalar ones, whose
+    // other elements are a's.
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_addsubpd", CHECK_X86_LOWER_BINARY, 8, false, VADDSUBPD, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_addsubps", CHECK_X86_LOWER_BINARY, 4, false, VADDSUBPS, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_haddpd", CHECK_X86_LOWER_BINARY, 8, false, VHADDPD, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_haddps", CHECK_X86_LOWER_BINARY, 4, false, VHADDPS, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_hsubpd", CHECK_X86_LOWER_BINARY, 8, false, VHSUBPD, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_hsubps", CHECK_X86_LOWER_BINARY, 4, false, VHSUBPS, X_X_XM128, Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_maxpd", CHECK_X86_LOWER_BINARY, 8, false, VMAXPD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_maxps", CHECK_X86_LOWER_BINARY, 4, false, VMAXPS, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_minpd", CHECK_X86_LOWER_BINARY, 8, false, VMINPD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_minps", CHECK_X86_LOWER_BINARY, 4, false, VMINPS, X_X_XM128_EVEX, Y_Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("phaddd128", BINARY, 4, 16, VPHADDD_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phaddd256", BINARY, 4, 32, VPHADDD_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("phaddw128", BINARY, 2, 16, VPHADDW_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phaddw256", BINARY, 2, 32, VPHADDW_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("phaddsw128", BINARY, 2, 16, VPHADDSW_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phaddsw256", BINARY, 2, 32, VPHADDSW_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("phsubd128", BINARY, 4, 16, VPHSUBD_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phsubd256", BINARY, 4, 32, VPHSUBD_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("phsubw128", BINARY, 2, 16, VPHSUBW_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phsubw256", BINARY, 2, 32, VPHSUBW_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("phsubsw128", BINARY, 2, 16, VPHSUBSW_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("phsubsw256", BINARY, 2, 32, VPHSUBSW_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("psignb128", BINARY, 1, 16, VPSIGNB_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("psignb256", BINARY, 1, 32, VPSIGNB_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("psignw128", BINARY, 2, 16, VPSIGNW_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("psignw256", BINARY, 2, 32, VPSIGNW_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("psignd128", BINARY, 4, 16, VPSIGND_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("psignd256", BINARY, 4, 32, VPSIGND_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("maxsd", BINARY, 8, 16, VMAXSD_X_X_XM64_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("maxss", BINARY, 4, 16, VMAXSS_X_X_XM32_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("minsd", BINARY, 8, 16, VMINSD_X_X_XM64_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("minss", BINARY, 4, 16, VMINSS_X_X_XM32_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("cvtsd2ss", BINARY, 8, 16, VCVTSD2SS_X_X_XM64_EVEX, 0)
+    // Shifts of each width by the count in an XMM register's low quadword (`other`'s 16 bytes past the first width).
+    BUSTER_CHECK_X86_ONE("psllw128", BINARY, 2, 16, VPSLLW_X_X_XM128_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psllw256", BINARY, 2, 32, false, VPSLLW_Y_Y_XM128_EVEX, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psllw512", BINARY, 2, 64, false, VPSLLW_Z_Z_XM128, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("pslld128", BINARY, 4, 16, VPSLLD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("pslld256", BINARY, 4, 32, false, VPSLLD_Y_Y_XM128_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("pslld512", BINARY, 4, 64, false, VPSLLD_Z_Z_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE("psllq128", BINARY, 8, 16, VPSLLQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psllq256", BINARY, 8, 32, false, VPSLLQ_Y_Y_XM128_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psllq512", BINARY, 8, 64, false, VPSLLQ_Z_Z_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE("psraw128", BINARY, 2, 16, VPSRAW_X_X_XM128_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psraw256", BINARY, 2, 32, false, VPSRAW_Y_Y_XM128_EVEX, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psraw512", BINARY, 2, 64, false, VPSRAW_Z_Z_XM128, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrad128", BINARY, 4, 16, VPSRAD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrad256", BINARY, 4, 32, false, VPSRAD_Y_Y_XM128_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrad512", BINARY, 4, 64, false, VPSRAD_Z_Z_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE("psraq128", BINARY, 8, 16, VPSRAQ_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psraq256", BINARY, 8, 32, false, VPSRAQ_Y_Y_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psraq512", BINARY, 8, 64, false, VPSRAQ_Z_Z_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE("psrlw128", BINARY, 2, 16, VPSRLW_X_X_XM128_EVEX, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psrlw256", BINARY, 2, 32, false, VPSRLW_Y_Y_XM128_EVEX, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE_OTHER("psrlw512", BINARY, 2, 64, false, VPSRLW_Z_Z_XM128, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("psrld128", BINARY, 4, 16, VPSRLD_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrld256", BINARY, 4, 32, false, VPSRLD_Y_Y_XM128_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrld512", BINARY, 4, 64, false, VPSRLD_Z_Z_XM128, 16, 0)
+    BUSTER_CHECK_X86_ONE("psrlq128", BINARY, 8, 16, VPSRLQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrlq256", BINARY, 8, 32, false, VPSRLQ_Y_Y_XM128_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("psrlq512", BINARY, 8, 64, false, VPSRLQ_Z_Z_XM128, 16, 0)
+    // One vector's operations, a narrowing conversion's result of `other` bytes; and the scalar ones of a's first element.
+    BUSTER_CHECK_X86_ONE("cvtpd2dq", UNARY, 8, 16, VCVTPD2DQ_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("cvtpd2dq256", UNARY, 8, 32, false, VCVTPD2DQ_X_YM256_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE("cvtpd2ps", UNARY, 8, 16, VCVTPD2PS_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("cvtpd2ps256", UNARY, 8, 32, false, VCVTPD2PS_X_YM256_EVEX, 16, 0)
+    BUSTER_CHECK_X86_ONE("cvttpd2dq", UNARY, 8, 16, VCVTTPD2DQ_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("cvttpd2dq256", UNARY, 8, 32, false, VCVTTPD2DQ_X_YM256_EVEX, 16, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_cvtps2dq", CHECK_X86_LOWER_UNARY, 4, false, VCVTPS2DQ, X_XM128_EVEX, Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_cvttps2dq", CHECK_X86_LOWER_UNARY, 4, false, VCVTTPS2DQ, X_XM128_EVEX, Y_YM256_EVEX, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_rcpps", CHECK_X86_LOWER_UNARY, 4, false, VRCPPS, X_XM128, Y_YM256, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_rsqrtps", CHECK_X86_LOWER_UNARY, 4, false, VRSQRTPS, X_XM128, Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("aesimc128", UNARY, 1, 16, VAESIMC_X_XM128, BUSTER_X86_FEATURE(AES))
+    BUSTER_CHECK_X86_ONE("phminposuw128", UNARY, 2, 16, VPHMINPOSUW_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("vpconflictdi_128", UNARY, 8, 16, VPCONFLICTQ_X_XM128, BUSTER_X86_FEATURE(AVX512CD))
+    BUSTER_CHECK_X86_ONE("vpconflictdi_256", UNARY, 8, 32, VPCONFLICTQ_Y_YM256, BUSTER_X86_FEATURE(AVX512CD))
+    BUSTER_CHECK_X86_ONE("vpconflictsi_128", UNARY, 4, 16, VPCONFLICTD_X_XM128, BUSTER_X86_FEATURE(AVX512CD))
+    BUSTER_CHECK_X86_ONE("vpconflictsi_256", UNARY, 4, 32, VPCONFLICTD_Y_YM256, BUSTER_X86_FEATURE(AVX512CD))
+    BUSTER_CHECK_X86_ONE("vcvtneps2bf16128", UNARY, 4, 16, VCVTNEPS2BF16_X_XM128_EVEX, BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ONE_OTHER("vcvtneps2bf16256", UNARY, 4, 32, false, VCVTNEPS2BF16_X_YM256_EVEX, 16, BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ONE("rcpss", UNARY_SCALAR, 4, 16, VRCPSS_X_X_XM32, 0)
+    BUSTER_CHECK_X86_ONE("rsqrtss", UNARY_SCALAR, 4, 16, VRSQRTSS_X_X_XM32, 0)
+    // Three vectors, the first the destination: FMA's 213 forms (a * b + c), VPERMT2's and the dot products; and the blends by a
+    // vector's signs.
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_vfmaddsubpd", CHECK_X86_LOWER_TERNARY, 8, false, VFMADDSUB213PD, X_X_XM128_EVEX, Y_Y_YM256_EVEX,
+                         BUSTER_X86_FEATURE(FMA))
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_vfmaddsubps", CHECK_X86_LOWER_TERNARY, 4, false, VFMADDSUB213PS, X_X_XM128_EVEX, Y_Y_YM256_EVEX,
+                         BUSTER_X86_FEATURE(FMA))
+    BUSTER_CHECK_X86_ONE("vpermi2vard128", TERNARY, 4, 16, VPERMT2D_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("vpermi2vard256", TERNARY, 4, 32, VPERMT2D_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("vpermi2varq128", TERNARY, 8, 16, VPERMT2Q_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("vpermi2varq256", TERNARY, 8, 32, VPERMT2Q_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("vpermi2varhi128", TERNARY, 2, 16, VPERMT2W_X_X_XM128, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_ONE("vpermi2varhi256", TERNARY, 2, 32, VPERMT2W_Y_Y_YM256, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpermi2varpd", CHECK_X86_LOWER_TERNARY, 8, false, VPERMT2PD, X_X_XM128, Y_Y_YM256, Z_Z_ZM512, 0)
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpermi2varps", CHECK_X86_LOWER_TERNARY, 4, false, VPERMT2PS, X_X_XM128, Y_Y_YM256, Z_Z_ZM512, 0)
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpmadd52huq", CHECK_X86_LOWER_TERNARY, 8, false, VPMADD52HUQ, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512IFMA))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpmadd52luq", CHECK_X86_LOWER_TERNARY, 8, false, VPMADD52LUQ, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512IFMA))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_dpbf16ps_", CHECK_X86_LOWER_TERNARY, 4, false, VDPBF16PS, X_X_XM128, Y_Y_YM256, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_blendvpd", CHECK_X86_LOWER_BLENDV, 8, false, VBLENDVPD, X_X_XM128_X, Y_Y_YM256_Y, 0)
+    BUSTER_CHECK_X86_SSE("__builtin_ia32_blendvps", CHECK_X86_LOWER_BLENDV, 4, false, VBLENDVPS, X_X_XM128_X, Y_Y_YM256_Y, 0)
+    // One vector's operation (a conversion's of other widths) merged into w under the mask, with a rounding control where
+    // the builtin's last argument is one.
+    BUSTER_CHECK_X86_ONE("cvtpd2dq128_mask", MASK_UNARY, 8, 16, VCVTPD2DQ_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("cvtpd2ps_mask", MASK_UNARY, 8, 16, VCVTPD2PS_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("cvtpd2qq128_mask", MASK_UNARY, 8, 16, VCVTPD2QQ_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtpd2qq256_mask", MASK_UNARY, 8, 32, VCVTPD2QQ_Y_YM256, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtpd2uqq128_mask", MASK_UNARY, 8, 16, VCVTPD2UQQ_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtpd2uqq256_mask", MASK_UNARY, 8, 32, VCVTPD2UQQ_Y_YM256, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttpd2qq128_mask", MASK_UNARY, 8, 16, VCVTTPD2QQ_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttpd2qq256_mask", MASK_UNARY, 8, 32, VCVTTPD2QQ_Y_YM256, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttpd2uqq128_mask", MASK_UNARY, 8, 16, VCVTTPD2UQQ_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttpd2uqq256_mask", MASK_UNARY, 8, 32, VCVTTPD2UQQ_Y_YM256, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtpd2udq128_mask", MASK_UNARY, 8, 16, VCVTPD2UDQ_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("cvtpd2udq256_mask", MASK_UNARY, 8, 32, false, VCVTPD2UDQ_X_YM256, 16, 0)
+    BUSTER_CHECK_X86_ONE("cvttpd2udq128_mask", MASK_UNARY, 8, 16, VCVTTPD2UDQ_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("cvttpd2udq256_mask", MASK_UNARY, 8, 32, false, VCVTTPD2UDQ_X_YM256, 16, 0)
+    BUSTER_CHECK_X86_ONE("cvttpd2dq128_mask", MASK_UNARY, 8, 16, VCVTTPD2DQ_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_ONE("cvtps2udq128_mask", MASK_UNARY, 4, 16, VCVTPS2UDQ_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("cvtps2udq256_mask", MASK_UNARY, 4, 32, VCVTPS2UDQ_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("cvttps2udq128_mask", MASK_UNARY, 4, 16, VCVTTPS2UDQ_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("cvttps2udq256_mask", MASK_UNARY, 4, 32, VCVTTPS2UDQ_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("cvtps2qq128_mask", MASK_UNARY, 8, 16, VCVTPS2QQ_X_XM64, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE_OTHER("cvtps2qq256_mask", MASK_UNARY, 4, 16, false, VCVTPS2QQ_Y_XM128, 32, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtps2uqq128_mask", MASK_UNARY, 8, 16, VCVTPS2UQQ_X_XM64, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE_OTHER("cvtps2uqq256_mask", MASK_UNARY, 4, 16, false, VCVTPS2UQQ_Y_XM128, 32, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttps2qq128_mask", MASK_UNARY, 8, 16, VCVTTPS2QQ_X_XM64, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE_OTHER("cvttps2qq256_mask", MASK_UNARY, 4, 16, false, VCVTTPS2QQ_Y_XM128, 32, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvttps2uqq128_mask", MASK_UNARY, 8, 16, VCVTTPS2UQQ_X_XM64, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE_OTHER("cvttps2uqq256_mask", MASK_UNARY, 4, 16, false, VCVTTPS2UQQ_Y_XM128, 32, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtqq2ps128_mask", MASK_UNARY, 8, 16, VCVTQQ2PS_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("cvtuqq2ps128_mask", MASK_UNARY, 8, 16, VCVTUQQ2PS_X_XM128, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_ONE("getexppd128_mask", MASK_UNARY, 8, 16, VGETEXPPD_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("getexppd256_mask", MASK_UNARY, 8, 32, VGETEXPPD_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("getexpps128_mask", MASK_UNARY, 4, 16, VGETEXPPS_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("getexpps256_mask", MASK_UNARY, 4, 32, VGETEXPPS_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("rcp14pd128_mask", MASK_UNARY, 8, 16, VRCP14PD_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("rcp14pd256_mask", MASK_UNARY, 8, 32, VRCP14PD_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("rcp14pd512_mask", MASK_UNARY, 8, 64, VRCP14PD_Z_ZM512, 0)
+    BUSTER_CHECK_X86_ONE("rcp14ps128_mask", MASK_UNARY, 4, 16, VRCP14PS_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("rcp14ps256_mask", MASK_UNARY, 4, 32, VRCP14PS_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("rcp14ps512_mask", MASK_UNARY, 4, 64, VRCP14PS_Z_ZM512, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14pd128_mask", MASK_UNARY, 8, 16, VRSQRT14PD_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14pd256_mask", MASK_UNARY, 8, 32, VRSQRT14PD_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14pd512_mask", MASK_UNARY, 8, 64, VRSQRT14PD_Z_ZM512, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14ps128_mask", MASK_UNARY, 4, 16, VRSQRT14PS_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14ps256_mask", MASK_UNARY, 4, 32, VRSQRT14PS_Y_YM256, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14ps512_mask", MASK_UNARY, 4, 64, VRSQRT14PS_Z_ZM512, 0)
+    BUSTER_CHECK_X86_ONE("vcvtph2ps_mask", MASK_UNARY, 4, 16, VCVTPH2PS_X_XM64_EVEX, 0)
+    BUSTER_CHECK_X86_ONE_OTHER("vcvtph2ps256_mask", MASK_UNARY, 2, 16, false, VCVTPH2PS_Y_XM128_EVEX, 32, 0)
+    BUSTER_CHECK_X86_ROUNDED("vcvtph2ps512_mask", MASK_UNARY, 2, 32, VCVTPH2PS_Z_YM256, 64, 0, VCVTPH2PS_Z_Y_SAE, SAE)
+    BUSTER_CHECK_X86_ONE("cvtneps2bf16_128_mask", MASK_UNARY, 4, 16, VCVTNEPS2BF16_X_XM128_EVEX, BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ONE_OTHER("cvtneps2bf16_256_mask", MASK_UNARY, 4, 32, false, VCVTNEPS2BF16_X_YM256_EVEX, 16, BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ONE_OTHER("cvtneps2bf16_512_mask", MASK_UNARY, 4, 64, false, VCVTNEPS2BF16_Y_ZM512, 32, BUSTER_X86_FEATURE(AVX512BF16))
+    BUSTER_CHECK_X86_ROUNDED("cvtpd2dq512_mask", MASK_UNARY, 8, 64, VCVTPD2DQ_Y_ZM512, 32, 0, VCVTPD2DQ_Y_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtpd2ps512_mask", MASK_UNARY, 8, 64, VCVTPD2PS_Y_ZM512, 32, 0, VCVTPD2PS_Y_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtpd2udq512_mask", MASK_UNARY, 8, 64, VCVTPD2UDQ_Y_ZM512, 32, 0, VCVTPD2UDQ_Y_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtqq2ps512_mask", MASK_UNARY, 8, 64, VCVTQQ2PS_Y_ZM512, 32, BUSTER_X86_FEATURE(AVX512DQ), VCVTQQ2PS_Y_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvttpd2dq512_mask", MASK_UNARY, 8, 64, VCVTTPD2DQ_Y_ZM512, 32, 0, VCVTTPD2DQ_Y_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvttpd2udq512_mask", MASK_UNARY, 8, 64, VCVTTPD2UDQ_Y_ZM512, 32, 0, VCVTTPD2UDQ_Y_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvtuqq2ps512_mask", MASK_UNARY, 8, 64, VCVTUQQ2PS_Y_ZM512, 32, BUSTER_X86_FEATURE(AVX512DQ), VCVTUQQ2PS_Y_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtpd2qq512_mask", MASK_UNARY, 8, 64, VCVTPD2QQ_Z_ZM512, 0, BUSTER_X86_FEATURE(AVX512DQ), VCVTPD2QQ_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtpd2uqq512_mask", MASK_UNARY, 8, 64, VCVTPD2UQQ_Z_ZM512, 0, BUSTER_X86_FEATURE(AVX512DQ), VCVTPD2UQQ_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvttpd2qq512_mask", MASK_UNARY, 8, 64, VCVTTPD2QQ_Z_ZM512, 0, BUSTER_X86_FEATURE(AVX512DQ), VCVTTPD2QQ_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvttpd2uqq512_mask", MASK_UNARY, 8, 64, VCVTTPD2UQQ_Z_ZM512, 0, BUSTER_X86_FEATURE(AVX512DQ), VCVTTPD2UQQ_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("getexppd512_mask", MASK_UNARY, 8, 64, VGETEXPPD_Z_ZM512, 0, 0, VGETEXPPD_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvtps2dq512_mask", MASK_UNARY, 4, 64, VCVTPS2DQ_Z_ZM512, 0, 0, VCVTPS2DQ_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtps2udq512_mask", MASK_UNARY, 4, 64, VCVTPS2UDQ_Z_ZM512, 0, 0, VCVTPS2UDQ_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvttps2dq512_mask", MASK_UNARY, 4, 64, VCVTTPS2DQ_Z_ZM512, 0, 0, VCVTTPS2DQ_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvttps2udq512_mask", MASK_UNARY, 4, 64, VCVTTPS2UDQ_Z_ZM512, 0, 0, VCVTTPS2UDQ_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("getexpps512_mask", MASK_UNARY, 4, 64, VGETEXPPS_Z_ZM512, 0, 0, VGETEXPPS_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvtps2qq512_mask", MASK_UNARY, 4, 32, VCVTPS2QQ_Z_YM256, 64, BUSTER_X86_FEATURE(AVX512DQ), VCVTPS2QQ_Z_Y_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtps2uqq512_mask", MASK_UNARY, 4, 32, VCVTPS2UQQ_Z_YM256, 64, BUSTER_X86_FEATURE(AVX512DQ), VCVTPS2UQQ_Z_Y_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvttps2qq512_mask", MASK_UNARY, 4, 32, VCVTTPS2QQ_Z_YM256, 64, BUSTER_X86_FEATURE(AVX512DQ), VCVTTPS2QQ_Z_Y_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("cvttps2uqq512_mask", MASK_UNARY, 4, 32, VCVTTPS2UQQ_Z_YM256, 64, BUSTER_X86_FEATURE(AVX512DQ), VCVTTPS2UQQ_Z_Y_SAE, SAE)
+    // Two vectors' operation merged into w under the mask, the scalar ones' other elements a's.
+    BUSTER_CHECK_X86_ONE("scalefpd128_mask", MASK_MERGE, 8, 16, VSCALEFPD_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("scalefpd256_mask", MASK_MERGE, 8, 32, VSCALEFPD_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ROUNDED("scalefpd512_mask", MASK_MERGE, 8, 64, VSCALEFPD_Z_Z_ZM512, 0, 0, VSCALEFPD_Z_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ONE("scalefps128_mask", MASK_MERGE, 4, 16, VSCALEFPS_X_X_XM128, 0)
+    BUSTER_CHECK_X86_ONE("scalefps256_mask", MASK_MERGE, 4, 32, VSCALEFPS_Y_Y_YM256, 0)
+    BUSTER_CHECK_X86_ROUNDED("scalefps512_mask", MASK_MERGE, 4, 64, VSCALEFPS_Z_Z_ZM512, 0, 0, VSCALEFPS_Z_Z_Z_ER, ER)
+    BUSTER_CHECK_X86_ONE("rcp14sd_mask", MASK_MERGE, 8, 16, VRCP14SD_X_X_XM64, 0)
+    BUSTER_CHECK_X86_ONE("rcp14ss_mask", MASK_MERGE, 4, 16, VRCP14SS_X_X_XM32, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14sd_mask", MASK_MERGE, 8, 16, VRSQRT14SD_X_X_XM64, 0)
+    BUSTER_CHECK_X86_ONE("rsqrt14ss_mask", MASK_MERGE, 4, 16, VRSQRT14SS_X_X_XM32, 0)
+    BUSTER_CHECK_X86_ROUNDED("maxsd_round_mask", MASK_MERGE, 8, 16, VMAXSD_X_X_XM64_EVEX, 0, 0, VMAXSD_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("maxss_round_mask", MASK_MERGE, 4, 16, VMAXSS_X_X_XM32_EVEX, 0, 0, VMAXSS_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("minsd_round_mask", MASK_MERGE, 8, 16, VMINSD_X_X_XM64_EVEX, 0, 0, VMINSD_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("minss_round_mask", MASK_MERGE, 4, 16, VMINSS_X_X_XM32_EVEX, 0, 0, VMINSS_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("getexpsd128_round_mask", MASK_MERGE, 8, 16, VGETEXPSD_X_X_XM64, 0, 0, VGETEXPSD_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("getexpss128_round_mask", MASK_MERGE, 4, 16, VGETEXPSS_X_X_XM32, 0, 0, VGETEXPSS_X_X_X_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("scalefsd_round_mask", MASK_MERGE, 8, 16, VSCALEFSD_X_X_XM64, 0, 0, VSCALEFSD_X_X_X_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("scalefss_round_mask", MASK_MERGE, 4, 16, VSCALEFSS_X_X_XM32, 0, 0, VSCALEFSS_X_X_X_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("sqrtsd_round_mask", MASK_MERGE, 8, 16, VSQRTSD_X_X_XM64_EVEX, 0, 0, VSQRTSD_X_X_X_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("sqrtss_round_mask", MASK_MERGE, 4, 16, VSQRTSS_X_X_XM32_EVEX, 0, 0, VSQRTSS_X_X_X_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtsd2ss_round_mask", MASK_MERGE, 4, 16, VCVTSD2SS_X_X_XM64_EVEX, 0, 0, VCVTSD2SS_X_X_X_ER, ER)
+    BUSTER_CHECK_X86_ROUNDED("cvtss2sd_round_mask", MASK_MERGE, 8, 16, VCVTSS2SD_X_X_XM32_EVEX, 0, 0, VCVTSS2SD_X_X_X_SAE, SAE)
+    // Two vectors with the exceptions' suppression where their last argument asks for it.
+    BUSTER_CHECK_X86_ROUNDED("maxpd512", BINARY, 8, 64, VMAXPD_Z_Z_ZM512, 0, 0, VMAXPD_Z_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("maxps512", BINARY, 4, 64, VMAXPS_Z_Z_ZM512, 0, 0, VMAXPS_Z_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("minpd512", BINARY, 8, 64, VMINPD_Z_Z_ZM512, 0, 0, VMINPD_Z_Z_Z_SAE, SAE)
+    BUSTER_CHECK_X86_ROUNDED("minps512", BINARY, 4, 64, VMINPS_Z_Z_ZM512, 0, 0, VMINPS_Z_Z_Z_SAE, SAE)
+    // The SSE compares by the predicates their names spell, VEX's VCMP into vectors.
+    BUSTER_CHECK_X86_PREDICATES("ps", 4, VCMPPS_X_X_XM128_IMM8)
+    BUSTER_CHECK_X86_PREDICATES("pd", 8, VCMPPD_X_X_XM128_IMM8)
+    BUSTER_CHECK_X86_PREDICATES("ss", 4, VCMPSS_X_X_XM32_IMM8)
+    BUSTER_CHECK_X86_PREDICATES("sd", 8, VCMPSD_X_X_XM64_IMM8)
 };
 
 #undef BUSTER_CHECK_X86_SHIFTS
@@ -418,6 +742,12 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
 #undef BUSTER_CHECK_X86_BINARIES
 #undef BUSTER_CHECK_X86_FORMS
 #undef BUSTER_CHECK_X86_ELEMENTS
+#undef BUSTER_CHECK_X86_PREDICATES
+#undef BUSTER_CHECK_X86_SSE
+#undef BUSTER_CHECK_X86_RULE_FIXED
+#undef BUSTER_CHECK_X86_ROUNDED
+#undef BUSTER_CHECK_X86_ONE_OTHER
+#undef BUSTER_CHECK_X86_ONE
 #undef BUSTER_CHECK_X86_TRUNCATIONS
 #undef BUSTER_CHECK_X86_TRUNCATION_STORES
 #undef BUSTER_CHECK_X86_TRUNCATION
@@ -478,20 +808,6 @@ static X86Instruction check_x86_lower_record(uint32_t form, uint8_t reg, uint8_t
     return (X86Instruction){ .form = (uint16_t)form, .reg = reg, .vvvv = vvvv, .rm = rm, .mode = BUSTER_X86_REGISTER_DIRECT };
 }
 
-// The index of a builtin's immediate argument, BUSTER_CHECK_X86_NO_IMMEDIATE for none, or for one the table doesn't name.
-static uint32_t check_x86_lower_immediate(const char* name, uint32_t length)
-{
-    const CheckX86LowerRule* rule = check_x86_lower_rule(name, length);
-    return rule != NULL ? rule->immediate : BUSTER_CHECK_X86_NO_IMMEDIATE;
-}
-
-// Whether a builtin's result is that its row's is 0 (ktestz's), which the caller tests.
-static bool check_x86_lower_zero_test(const char* name, uint32_t length)
-{
-    const CheckX86LowerRule* rule = check_x86_lower_rule(name, length);
-    return rule != NULL && rule->zero_test;
-}
-
 // The vector moves of a width (16, 32 or 64 bytes) into VECTOR(0): VMOVDQU64's, which a row ends with where its
 // instruction leaves its result in another register.
 static X86Instruction check_x86_lower_move_result(uint32_t bytes, uint8_t from)
@@ -525,21 +841,38 @@ static bool check_x86_lower_family_masks(uint8_t family)
     case CHECK_X86_LOWER_GATHER:
     case CHECK_X86_LOWER_SCATTER:
     case CHECK_X86_LOWER_MASK_BINARY:
-    case CHECK_X86_LOWER_TRUNCATE_STORE: result = true; break;
+    case CHECK_X86_LOWER_TRUNCATE_STORE:
+    case CHECK_X86_LOWER_MASK_UNARY:
+    case CHECK_X86_LOWER_MASK_MERGE: result = true; break;
     default: break;
     }
     return result;
 }
 
-// The row of an x86 builtin's call on a target: its records, operands and result, or the reason it has none.
-// `immediate` is its immediate argument's constant value (check_x86_lower_immediate's), which a record takes and no
-// operand is. Operands are the other arguments in order, and a role's j is its operand's place among them all, so that
-// a compare's mask is INTEGER(2) and a select's vectors VECTOR(1) and VECTOR(2). An integer operand's class here is its
-// width's; the caller gives each its argument's own (check_lower_x86_builtin). A result is in the class the instruction
-// extends it to, which the caller converts to the builtin's type.
-static const char* check_x86_lower_row(uint64_t target, const char* name, uint32_t length, uint64_t immediate, Tier0Operation* row)
+// A record of a rule with a rounding control at that control's value, `round` (CheckX86LowerRounding): its form, or the
+// rule's round_form with the direction in its rounding bits (BUSTER_X86_DECORATION_ROUNDING's, the low bits' order:
+// nearest, down, up, zero).
+static void check_x86_lower_round(const CheckX86LowerRule* rule, uint64_t round, X86Instruction* record)
 {
-    const CheckX86LowerRule* rule = check_x86_lower_rule(name, length);
+    if (rule->rounding != CHECK_X86_ROUND_NONE && (round & 8) != 0)
+    {
+        record->form = rule->round_form;
+        if (rule->rounding == CHECK_X86_ROUND_ER)
+        {
+            record->decorations = (uint8_t)(record->decorations | (round & 3) << 5);
+        }
+    }
+}
+
+// The row of an x86 builtin's call on a target: its records, operands and result, or the reason it has none.
+// `immediate` is its immediate argument's constant value (the rule's `immediate`'s), which a record takes and no operand
+// is, and `round` its rounding control's (its last argument's, where the rule has one). Operands are the other arguments
+// in order, and a role's j is its operand's place among them all, so that a compare's mask is INTEGER(2) and a select's
+// vectors VECTOR(1) and VECTOR(2). An integer operand's class here is its width's; the caller gives each its argument's
+// own (check_lower_x86_builtin). A result is in the class the instruction extends it to, which the caller converts to
+// the builtin's type.
+static const char* check_x86_lower_row_of(uint64_t target, const CheckX86LowerRule* rule, uint64_t immediate, uint64_t round, Tier0Operation* row)
+{
     const char* reason = NULL;
     uint64_t needed = 0;
     memset(row, 0, sizeof(*row));
@@ -662,13 +995,16 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
         }
         else if (rule->family == CHECK_X86_LOWER_BINARY)
         {
+            // b is of `other` bytes where they aren't a's (a shift's count, an XMM register at every width).
             row->records[0] = check_x86_lower_record(rule->form, v0, rule->swap ? v1 : v0, rule->swap ? v0 : v1);
+            row->records[0].immediate = rule->fixed;
+            check_x86_lower_round(rule, round, &row->records[0]);
             row->record_count = 1;
             row->operand_count = 2;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
             row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
-            row->operand_bytes[1] = rule->bytes;
+            row->operand_bytes[1] = rule->other != 0 ? rule->other : rule->bytes;
         }
         else if (rule->family == CHECK_X86_LOWER_SHIFT)
         {
@@ -863,12 +1199,50 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
         }
         else if (rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE || rule->family == CHECK_X86_LOWER_UNARY)
         {
+            // The result is of `other` bytes where they aren't a's (a narrowing conversion's, VCVTPD2DQ's of a YMM).
             row->records[0] = rule->swap ? check_x86_lower_record(rule->form, 0, v0, v0) : check_x86_lower_record(rule->form, v0, 0, v0);
             row->records[0].immediate = rule->family == CHECK_X86_LOWER_UNARY_IMMEDIATE ? (int32_t)(immediate & 0xff) : 0;
+            check_x86_lower_round(rule, round, &row->records[0]);
             row->record_count = 1;
             row->operand_count = 1;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
+            row->result_bytes = rule->other != 0 ? rule->other : rule->bytes;
+        }
+        else if (rule->family == CHECK_X86_LOWER_UNARY_SCALAR)
+        {
+            row->records[0] = check_x86_lower_record(rule->form, v0, v0, v0);
+            row->record_count = 1;
+            row->operand_count = 1;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+        }
+        else if (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE)
+        {
+            // The operation into w's register under the mask, then w to VECTOR(0) at its bytes. A MASK_UNARY's w is
+            // VECTOR(1) and its mask INTEGER(2); a MASK_MERGE's b VECTOR(1), w VECTOR(2) and its mask INTEGER(3).
+            const bool merge = rule->family == CHECK_X86_LOWER_MASK_MERGE;
+            const uint8_t w = merge ? v2 : v1;
+            const uint32_t w_bytes = !merge && rule->other != 0 ? rule->other : rule->bytes;
+            row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(merge ? 3 : 2));
+            row->records[1] = check_x86_lower_record(rule->form, w, merge ? v0 : 0, merge ? v1 : v0);
+            row->records[1].decorations = 1;
+            row->records[1].immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE ? (int32_t)(immediate & 0xff) : 0;
+            check_x86_lower_round(rule, round, &row->records[1]);
+            row->records[2] = check_x86_lower_move_result(w_bytes, w);
+            row->record_count = 3;
+            row->operand_count = merge ? 4 : 3;
+            row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[0] = rule->bytes;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = merge && rule->other != 0 ? rule->other : w_bytes;
+            row->operand_classes[merge ? 3 : 2] = mask_class;
+            if (merge)
+            {
+                row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+                row->operand_bytes[2] = rule->bytes;
+            }
+            row->result_bytes = w_bytes;
         }
         else if (rule->family == CHECK_X86_LOWER_TERNARY)
         {
