@@ -214,6 +214,8 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // A body's variable with a cleanup (#147) is a record of the unit's, in source order: source order's. One the attribute
     // is ignored on (a static's) is no record.
     { "cleanup-in-a-body", "void release(int* p);\nint f(int n) { int a __attribute__((cleanup(release))) = n; return a; }\n", false },
+    { "cleanup-in-multiple-bodies", "void release(int* p);\nint f(void) { int a __attribute__((cleanup(release))); return 0; }\n"
+      "int g(void) { int b __attribute__((cleanup(release))); return 1; }\n", false },
     { "cleanup-ignored-in-a-body", "void release(int* p);\nint f(int n) { static int a __attribute__((cleanup(release))); return a + n; }\n", true },
     { "transparent-local-union-in-a-body",
       "int f(int* p) { union L { int* a; long* b; }; typedef union L T __attribute__((transparent_union)); int (*fp)(T) = 0; return fp ? fp(p) : 0; }\n"
@@ -841,6 +843,63 @@ static bool check_deferred_test_merge_modes(void)
     return valid;
 }
 
+// A cleanup's scope-end write precedes the lane's refusal. Exercise that writer directly, before a source-order
+// fallback can hide its claim: no other writer runs, and this 64-byte-aligned column fits in one 2 MB region.
+// Source order, a one-lane reader, a cold claim, an already-completed claim and an ignored attribute retain their
+// respective stores, records and refusal behavior. The multi-body fixture above also attempts the normal fallback.
+static bool check_deferred_test_cleanup_claim(void)
+{
+    CheckTestTypes types = { 0 };
+    bool valid = check_test_types_open(&types);
+    const TypeId parameter = valid ? type_pointer(&types.table, BUSTER_TYPE_VOID) : 0;
+    const TypeId function = parameter != 0 ? type_function(&types.table, BUSTER_TYPE_VOID, &parameter, 1, BUSTER_TYPE_FLAG_PROTOTYPE) : 0;
+    valid = valid && function != 0;
+    for (uint32_t mode = 0; valid && mode < 5; mode += 1)
+    {
+        const bool lane = mode != 0;
+        const bool claiming = mode >= 2;
+        const bool applies = mode != 4;
+        uint32_t claim = mode == 3 ? 2 : 0;
+        _Alignas(64) uint32_t scope_ends[8] = { 0 };
+        uint32_t opening = 2;
+        uint32_t closing = 9;
+        TypeId declarations[1] = { function };
+        CheckInputCleanup cleanup[1] = { 0 };
+        CheckInput input = { .cleanups = cleanup, .cleanup_capacity = BUSTER_ARRAY_LENGTH(cleanup) };
+        CheckInputReader reader =
+        {
+            .types = &types.table,
+            .output = &input,
+            .declared_types = declarations,
+            .scope_count = 1,
+            .scope_openings = &opening,
+            .scope_ends = &closing,
+            .vla_scope_ends = scope_ends,
+            .rare_begin = (uint8_t*)scope_ends,
+            .rare_end = (uint8_t*)(scope_ends + BUSTER_ARRAY_LENGTH(scope_ends)),
+            .rare_claims = claiming ? &claim : NULL,
+            .lane = lane,
+        };
+        CheckInputAttribute attribute = { .argument_first = 3, .cleanup_function = 1, .kind = CHECK_ATTRIBUTE_CLEANUP };
+        const CheckInputAttributes attributes = { .records = &attribute, .count = 1 };
+        valid = check_input_cleanup_declaration(&reader, &attributes, 4, BUSTER_TYPE_INT, applies) && !input.resource &&
+                claim == (claiming && applies ? 2u : 0u) && scope_ends[4] == (applies ? closing + 1 : 0) &&
+                input.cleanup_count == (uint32_t)applies && reader.lane_unsupported == (lane && applies) &&
+                (reader.lane_reason != NULL) == (lane && applies);
+        if (valid && applies)
+        {
+            valid = cleanup[0].declaration == 4 && cleanup[0].function == 0 && cleanup[0].argument == 3 &&
+                    cleanup[0].scope == opening && cleanup[0].end == closing + 1;
+        }
+        for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(scope_ends); i += 1)
+        {
+            valid = scope_ends[i] == (applies && i == 4 ? closing + 1 : 0);
+        }
+    }
+    check_test_types_close(&types);
+    return valid;
+}
+
 // The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
 // from the rule (docs/c-deferred-bodies.md, "How many lanes").
 static uint64_t check_deferred_test_lane_tokens(uint64_t top)
@@ -1439,6 +1498,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!names)
     {
         fprintf(stderr, "test-checker-deferred: a lane's per-name columns weren't laid out, kept, cleared or refused as they should be\n");
+    }
+    const bool cleanup_claim = check_deferred_test_cleanup_claim();
+    checks += 1;
+    failures += !cleanup_claim;
+    if (!cleanup_claim)
+    {
+        fprintf(stderr, "test-checker-deferred: a cleanup scope write wasn't claimed before lane refusal, or its controls changed\n");
     }
     if (!keep && valid)
     {
