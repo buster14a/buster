@@ -2792,11 +2792,8 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
         }
         if (check_lower_wide_class(class))
         {
-            // A _BitInt narrower than 128 bits extends from its own width (check_lower_bit_int_shift), as a narrow one does.
-            const uint32_t shift = writer->bit_ints ? check_lower_bit_int_shift(writer->program->types, value->type) : 0;
-            const unsigned __int128 shifted = value->integer << shift;
-            const unsigned __int128 extended = class == BUSTER_TYPED_CLASS_I128 ? (unsigned __int128)((__int128)shifted >> shift) : shifted >> shift;
-            check_lower_wide_constant(writer, class, extended);
+            // (A _BitInt's of 65 to 127 bits comes folded to its width and extended from it, as its values are kept.)
+            check_lower_wide_constant(writer, class, value->integer);
         }
         else
         {
