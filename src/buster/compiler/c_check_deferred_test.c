@@ -458,6 +458,78 @@ static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
     return result;
 }
 
+// #764's fresh sparse arena: base pages throughout for deferred bodies, but source order keeps its small
+// prefix and huge-page tail. Check the kernel's advice, not timing or whether THP happened to be allocated.
+// Repeat with fresh mappings, including byte-sized and non-page-sized capacities and both sides of the prefix.
+static bool check_deferred_test_sparse_pages(void)
+{
+    const uint64_t capacities[] =
+    {
+        1,
+        BUSTER_ARENA_SMALL_BYTES,
+        BUSTER_ARENA_SMALL_BYTES + 1,
+        3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 17,
+    };
+    const uint64_t prefixes[] =
+    {
+        0,
+        BUSTER_ARENA_PAGE_BYTES,
+        BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_PAGE_BYTES,
+        BUSTER_ARENA_HUGE_PAGE_BYTES,
+    };
+    bool valid = true;
+    for (uint32_t reading = 0; valid && reading < 2; reading += 1)
+    {
+        for (uint32_t mode = 0; valid && mode < 2; mode += 1)
+        {
+            for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
+            {
+                for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(prefixes); p += 1)
+                {
+                    const uint64_t bytes = capacities[c];
+                    const uint64_t small = prefixes[p] > BUSTER_ARENA_SMALL_BYTES ? prefixes[p] : BUSTER_ARENA_SMALL_BYTES;
+                    const bool deferred = mode != 0;
+                    Arena arena = check_input_sparse_arena(bytes, prefixes[p], deferred);
+                    valid = arena.base != 0 && arena.capacity == bytes && arena.length == 0;
+                    // Reserving must not eagerly clear or commit the columns on the calling thread.
+                    valid = valid && !check_deferred_test_resident(arena.base, 1) && !check_deferred_test_resident(arena.base + bytes - 1, 1);
+                    const uint64_t offsets[] =
+                    {
+                        0,
+                        small < bytes ? small - 1 : bytes - 1,
+                        small < bytes ? small : bytes - 1,
+                        bytes - 1,
+                    };
+                    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
+                    {
+                        const bool huge = !deferred && offsets[i] >= small;
+                        const uintptr_t address = (uintptr_t)arena.base + offsets[i];
+                        bool found = false;
+                        const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
+                        valid = found && no_huge_flag == !huge;
+                        const bool huge_flag = lane_test_vm_flag(address, "hg", &found);
+                        valid = valid && found && huge_flag == huge && arena.base[offsets[i]] == 0;
+                    }
+                    if (valid)
+                    {
+                        arena.base[0] = 0x5a;
+                        arena.base[bytes - 1] = 0xa5;
+                        valid = arena.base[0] == (bytes == 1 ? 0xa5 : 0x5a) && arena.base[bytes - 1] == 0xa5;
+                    }
+                    arena_release(&arena);
+                    valid = valid && arena.base == 0 && arena.capacity == 0 && arena.length == 0;
+                }
+            }
+        }
+    }
+    Arena empty = check_input_sparse_arena(0, 0, true);
+    Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
+    valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;
+    arena_release(&empty);
+    arena_release(&oversized);
+    return valid;
+}
+
 // Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_commit asks for.
 static bool check_deferred_test_populates(void)
 {
@@ -1299,6 +1371,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!memory)
     {
         fprintf(stderr, "test-checker-deferred: the state's memory wasn't laid out, kept or released as it should be\n");
+    }
+    const bool sparse_pages = check_deferred_test_sparse_pages();
+    checks += 1;
+    failures += !sparse_pages;
+    if (!sparse_pages)
+    {
+        fprintf(stderr, "test-checker-deferred: the sparse arena's page policy, demand-zero storage or release differs\n");
     }
     const bool names = check_deferred_test_lane_names();
     checks += 1;
