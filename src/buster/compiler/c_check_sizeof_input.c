@@ -41,6 +41,13 @@ static void check_input_sizeof_prepare(CheckInputReader* reader)
                 continue;
             }
             TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
+            const uint32_t close = reader->ends[token];
+            if (requested == 0 && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_SIZEOF && parser->tree.parents[close] == token)
+            {
+                // Binding publishes type-name queries at their closing token. Graph construction later forwards
+                // that column to the prefix; do not fold the type's independent bounds a second time here.
+                requested = reader->query_types[close];
+            }
             if (requested == 0)
             {
                 requested = check_input_sizeof_operand(reader, token);

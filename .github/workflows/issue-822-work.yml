@@ -3,11 +3,14 @@ on:
   push:
     branches: [codex/issue-822-work]
 permissions:
-  contents: write
+  contents: read
+concurrency:
+  group: issue-822-isolated-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -17,38 +20,78 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          fetch-depth: 0
-      - name: Apply and retain the candidate on the isolated branch
-        run: |
-          set -euo pipefail
-          git apply .github/issue-822.patch
-          git diff --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/buster/compiler/c_check_constant.c src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_test.c
-          git -c core.hooksPath=/dev/null commit -m 'Apply issue 822 candidate for isolated validation'
-          git push origin HEAD:codex/issue-822-work
-          git rev-parse HEAD HEAD^{tree}
+          persist-credentials: false
       - name: Install official test toolchain
         run: bash tools/ci/setup-hosted.sh
       - name: Build compiler
         run: ./build.sh
       - name: Nested sizeof, warning and VLA regression tests
         run: build/compiler test-checker --sizeof
+      - name: Complete checker suite
+        run: build/compiler test-checker
       - name: Source driver tests
         run: build/compiler test-checker-driver
       - name: Deferred checker tests
         run: build/compiler test-checker-deferred
-      - name: Export candidate source and compiler
-        if: always()
+  native:
+    needs: validate
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: off
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Stage official Clang on the locked benchmark host
+        run: bash tools/ci/setup-benchpress.sh
+      - name: Build and check native vector compiler
         run: |
-          mkdir -p export
-          git archive HEAD --output=export/source.tar
-          if test -x build/compiler; then cp build/compiler export/compiler; fi
-          git rev-parse HEAD HEAD^{tree} > export/revision.txt
+          set -euo pipefail
+          clang -march=znver5 -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null | grep '^#define BUSTER_HOST_VECTOR 1$'
+          ./build.sh
+          mkdir -p evidence
+          build/compiler test-checker --sizeof 2>&1 | tee evidence/tests-sizeof.log
+          build/compiler test-checker-driver 2>&1 | tee evidence/tests-driver.log
+          build/compiler test-checker-deferred 2>&1 | tee evidence/tests-deferred.log
+      - name: Build pinned baseline
+        run: |
+          set -euo pipefail
+          baseline="$RUNNER_TEMP/issue-822-baseline-${GITHUB_RUN_ID}"
+          mkdir -p "$baseline"
+          git archive 1a9955ab5c3cb85d6ef6e346f1ab422abc995384 | tar -x -C "$baseline"
+          (cd "$baseline" && ./build.sh)
+          printf 'BASELINE=%s\n' "$baseline/build/compiler" >> "$GITHUB_ENV"
+      - name: Measure both input forms and paths through 16000 levels
+        run: |
+          set -euo pipefail
+          candidate="$PWD/build/compiler"
+          clang -std=c17 -O2 -Wall -Wextra -Werror .github/sizeof_measure.c -o evidence/sizeof-measure
+          cp .github/sizeof_measure.c evidence/
+          { git rev-parse HEAD; printf 'baseline: 1a9955ab5c3cb85d6ef6e346f1ab422abc995384\n'; clang --version; gcc --version; lscpu; } > evidence/environment.txt
+          cd evidence
+          taskset -c 2 ./sizeof-measure "$BASELINE" "$candidate" gcc | tee measurements.csv
+          for source in expression-*.c type-*.c; do
+            "$BASELINE" -c "$source" -o base.o 2> base.err
+            "$candidate" -c "$source" -o candidate.o 2> candidate.err
+            "$candidate" --scalar -c "$source" -o scalar.o 2> scalar.err
+            cmp base.o candidate.o
+            cmp candidate.o scalar.o
+            cmp base.err candidate.err
+            cmp candidate.err scalar.err
+            printf '%s: identical baseline/vector/scalar objects and diagnostics\n' "$source" | tee -a objects.txt
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: issue-822-candidate
-          path: export/
-          retention-days: 3
+          name: issue-822-native-evidence
+          path: evidence/
+          retention-days: 7
