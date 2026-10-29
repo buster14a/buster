@@ -434,7 +434,8 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
                               parent < repair->original_end && view->tree.roles[parent] == PARSE_ROLE_CLOSE_ATTRIBUTE &&
                               view->tree.parents[token - 1] == parent;
         result = (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && !label_address) ||
-                 (report->message == CHECK_INPUT_LITERAL && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING)) ||
+                 ((report->message == CHECK_INPUT_LITERAL || report->message == CHECK_INPUT_WIDE_LITERAL) &&
+                  (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING)) ||
                  (report->message == CHECK_INPUT_REDECLARATION && ((kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND) || role == PARSE_ROLE_LABEL)) ||
                  // The source reader proves the absence of an enclosing loop/switch from the original control
                  // headers. Appending closing braces cannot create such an enclosing statement around this use.
@@ -443,7 +444,11 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
         // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
         // cannot supply the non-asm body constraint, which remains outside this whitelist.
         result |= report->message == CHECK_INPUT_NAKED_PARAMETER && role == PARSE_ROLE_CLOSE_ASM;
-        if (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_GOTO)
+        // A label's second definition, and a name a block's `__label__` lists declare twice, are the original's.
+        result |= report->message == CHECK_INPUT_LABEL_REDEFINITION || report->message == CHECK_INPUT_LABEL_AMBIGUOUS;
+        // A missing label, at a goto's name or a local label's in its list, is its function's once its body is complete;
+        // an address's is not an ordinary use (above).
+        if ((report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_GOTO) || (report->message == CHECK_INPUT_LABEL_UNDECLARED && !label_address))
         {
             uint32_t ancestor = token;
             uint32_t steps = 0;

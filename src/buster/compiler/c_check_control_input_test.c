@@ -28,6 +28,9 @@ static void check_test_control_masks(CheckTest* test)
         { PARSE_KIND_GOTO, PARSE_ROLE_PREFIX, 3 },
         { PARSE_KIND_SEMI, PARSE_ROLE_PREFIX, 2 },
         { PARSE_KIND_AMPAMP, PARSE_ROLE_OPEN_BODY, 1 },
+        // A `__label__` list, which the first scan pushes (#147).
+        { PARSE_KIND_LABEL, PARSE_ROLE_NONE, 1 },
+        { PARSE_KIND_LABEL, PARSE_ROLE_OPERAND, 1 },
     };
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mappings[2] = { MAP_FAILED, MAP_FAILED };
