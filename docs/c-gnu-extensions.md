@@ -23,7 +23,9 @@ acceptance conditions pass.
 | `mode` | `type_machine_mode` transforms supported target types with Clang-checked results | Attribute argument resolution and declaration elaboration |
 | `packed`, `aligned`, `vector_size` | Existing type/layout actions and scalar/vector layout | Applying parsed attributes to those actions |
 | `typeof`, statement expressions, GNU `?:`, range designators | Existing parser grammar, with additional regression fixtures | Types, value categories, evaluation order and lowering |
-| Alternate keywords, `__int128`, zero-length arrays, local labels | Existing keyword/parser/type support as applicable | The remaining checker and control-flow rules |
+| Alternate keywords, `__int128`, zero-length arrays | Existing keyword/parser/type support as applicable | The remaining checker and control-flow rules |
+| Local labels (`__label__`) | Scoped as clang scopes them: a list's names are labels of its block, shadowing an outer list's and the function's, with clang's errors at its places; a statement expression's labeled last statement gives its value ([the checker guide](c-checker.md)'s "Local labels and `__auto_type` (#147)") | A name a block's lists declare twice is reported in source order, where clang reports its ambiguity first |
+| `__auto_type` | Deduced as clang deduces it: the initializer's type, lvalue-converted and decayed (`_Atomic` kept), with the specifiers' `const` and `volatile`; clang's errors at its places | Refused by name: a pointer or a second declarator (which clang deduces and GCC refuses), `_Atomic`, `restrict` or type attributes with it, a variably modified deduction, and a redeclaration of a name with linkage |
 | `__extension__` | Parser accepts expression/declaration forms | Pedantic-diagnostic suppression through semantic checking |
 | `transparent_union`, `gnu_inline`, `cleanup`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |

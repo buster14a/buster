@@ -15,8 +15,9 @@
 //     always used the imm32 form would emit).
 //   - effects: records of --functions functions (2,048) shaped like clang's -O0 code and like its -O2 code (branch
 //     sizing's generator, branch_sizing_generate, whose filler has uncovered EVEX forms and empty records too), by the
-//     scalar twin (effects-scalar) and the AVX-512 path (effects-avx512), per record, beside x86_encode of the same
-//     records (encode), the step the effects come before; the sets must be the same.
+//     scalar twin (effects-scalar), the AVX-512 path (effects-avx512) and the AVX-512 path with each record's opmask
+//     registers (effects-opmasks, x86_instructions_effects_opmasks, #760), per record, beside x86_encode of the same
+//     records (encode), the step the effects come before; the sets must be the same, and so must the opmask columns.
 //   - code: the run time and size of the choices that change the instruction sequence (or only its encoding), as blocks
 //     of 64 instructions over 8 registers in a loop, per instruction: add r64 with an imm8 against the same value as an
 //     imm32 (a form the chooser never picks for it), inc against add 1, xor r32, r32 against mov r32, 0, test r, r
@@ -382,17 +383,25 @@ static __attribute__((noinline, aligned(64))) void x86_semantics_benchmark_effec
     x86_instructions_effects(records, count, reads, writes);
 }
 
+static __attribute__((noinline, aligned(64))) void x86_semantics_benchmark_effects_opmasks(const X86Instruction* records, uint64_t count, uint64_t* reads, uint64_t* writes,
+                                                                                           uint16_t* opmasks)
+{
+    x86_instructions_effects_opmasks(records, count, reads, writes, opmasks);
+}
+
 static __attribute__((noinline, aligned(64))) int64_t x86_semantics_benchmark_encode(const X86Instruction* records, uint64_t count, uint8_t* output, uint64_t capacity)
 {
     return x86_encode(records, count, output, capacity, 0, 0);
 }
 
-// The paths a case times: the scalar twin, the AVX-512 path and x86_encode (for the effects).
+// The paths a case times: the scalar twin, the AVX-512 path and x86_encode (for the effects), and the AVX-512 path with
+// the opmask registers' column (the effects').
 typedef enum X86SemanticsBenchmarkPath
 {
     X86_SEMANTICS_BENCHMARK_SCALAR,
     X86_SEMANTICS_BENCHMARK_VECTOR,
     X86_SEMANTICS_BENCHMARK_ENCODE,
+    X86_SEMANTICS_BENCHMARK_OPMASKS,
     X86_SEMANTICS_BENCHMARK_PATHS,
 } X86SemanticsBenchmarkPath;
 
@@ -409,6 +418,7 @@ struct X86SemanticsBenchmarkData
     X86Instruction* records;
     uint64_t* reads;
     uint64_t* writes;
+    uint16_t* opmasks;
     uint8_t* code;
     uint64_t code_capacity;
 };
@@ -437,11 +447,15 @@ static void x86_semantics_benchmark_once(X86SemanticsBenchmarkData* data, X86Sem
         {
             x86_semantics_benchmark_effects_vector(data->records, data->count, data->reads, data->writes);
         }
+        else if (path == X86_SEMANTICS_BENCHMARK_OPMASKS)
+        {
+            x86_semantics_benchmark_effects_opmasks(data->records, data->count, data->reads, data->writes, data->opmasks);
+        }
         else
         {
             x86_semantics_benchmark_encode(data->records, data->count, data->code, data->code_capacity);
         }
-        __asm__ volatile("" : : "r"(data->reads), "r"(data->writes), "r"(data->code) : "memory");
+        __asm__ volatile("" : : "r"(data->reads), "r"(data->writes), "r"(data->opmasks), "r"(data->code) : "memory");
     }
 }
 
@@ -477,8 +491,8 @@ static void x86_semantics_benchmark_after_scalar(X86SemanticsBenchmarkData* data
 static void x86_semantics_benchmark_case(const char* name, X86SemanticsBenchmarkData* data, uint32_t timed, uint64_t after_scalar, X86SemanticsBenchmarkCounters* counters)
 {
     static const char* const path_names[2][X86_SEMANTICS_BENCHMARK_PATHS] = {
-        { "choose-scalar", "choose-avx512", "" },
-        { "effects-scalar", "effects-avx512", "encode" },
+        { "choose-scalar", "choose-avx512", "", "" },
+        { "effects-scalar", "effects-avx512", "encode", "effects-opmasks" },
     };
     X86SemanticsBenchmarkCounters no_counters = {
         .cycles = -1,
@@ -513,7 +527,7 @@ static void x86_semantics_benchmark_case(const char* name, X86SemanticsBenchmark
             const uint32_t path = (pass + turn) % X86_SEMANTICS_BENCHMARK_PATHS;
             if (timed & (1u << path))
             {
-                if (after_scalar != 0 && path == X86_SEMANTICS_BENCHMARK_VECTOR)
+                if (after_scalar != 0 && (path == X86_SEMANTICS_BENCHMARK_VECTOR || path == X86_SEMANTICS_BENCHMARK_OPMASKS))
                 {
                     x86_semantics_benchmark_after_scalar(data, after_scalar);
                 }
@@ -675,6 +689,7 @@ static bool x86_semantics_benchmark_effects(uint64_t seed, uint64_t functions, b
         .records = malloc(capacity * sizeof(X86Instruction)),
         .reads = malloc(capacity * sizeof(uint64_t)),
         .writes = malloc(capacity * sizeof(uint64_t)),
+        .opmasks = malloc(capacity * sizeof(uint16_t)),
         .code = malloc(BUSTER_X86_ENCODER_CAPACITY(capacity)),
         .code_capacity = BUSTER_X86_ENCODER_CAPACITY(capacity),
     };
@@ -682,7 +697,8 @@ static bool x86_semantics_benchmark_effects(uint64_t seed, uint64_t functions, b
     uint32_t* targets = malloc(capacity * sizeof(uint32_t));
     uint64_t* check_reads = malloc(capacity * sizeof(uint64_t));
     uint64_t* check_writes = malloc(capacity * sizeof(uint64_t));
-    bool valid = data.records && data.reads && data.writes && data.code && branches && targets && check_reads && check_writes;
+    uint16_t* check_opmasks = malloc(capacity * sizeof(uint16_t));
+    bool valid = data.records && data.reads && data.writes && data.opmasks && data.code && branches && targets && check_reads && check_writes && check_opmasks;
     if (valid)
     {
         // The shapes of clang's -O0 and -O2 code (branch_sizing_benchmark.c's), functions of 96 records.
@@ -709,6 +725,10 @@ static bool x86_semantics_benchmark_effects(uint64_t seed, uint64_t functions, b
         x86_instructions_effects_scalar(data.records, capacity, check_reads, check_writes);
         x86_instructions_effects(data.records, capacity, data.reads, data.writes);
         valid = memcmp(check_reads, data.reads, capacity * sizeof(uint64_t)) == 0 && memcmp(check_writes, data.writes, capacity * sizeof(uint64_t)) == 0;
+        x86_instructions_effects_opmasks_scalar(data.records, capacity, check_reads, check_writes, check_opmasks);
+        x86_instructions_effects_opmasks(data.records, capacity, data.reads, data.writes, data.opmasks);
+        valid = valid && memcmp(check_reads, data.reads, capacity * sizeof(uint64_t)) == 0 && memcmp(check_writes, data.writes, capacity * sizeof(uint64_t)) == 0 &&
+                memcmp(check_opmasks, data.opmasks, capacity * sizeof(uint16_t)) == 0;
         if (!valid)
         {
             fprintf(stderr, "effects: the scalar and AVX-512 paths disagree\n");
@@ -717,17 +737,19 @@ static bool x86_semantics_benchmark_effects(uint64_t seed, uint64_t functions, b
         {
             printf("effects: %s, %.1f%% of the records covered (the rest EVEX forms and empty records)\n", optimized ? "-O2's shape" : "-O0's shape",
                    100.0 * (double)covered / (double)capacity);
-            x86_semantics_benchmark_case(optimized ? "effects, -O2's shape" : "effects, -O0's shape", &data, timed & 7, after_scalar, counters);
+            x86_semantics_benchmark_case(optimized ? "effects, -O2's shape" : "effects, -O0's shape", &data, timed & 15, after_scalar, counters);
         }
     }
     free(data.records);
     free(data.reads);
     free(data.writes);
+    free(data.opmasks);
     free(data.code);
     free(branches);
     free(targets);
     free(check_reads);
     free(check_writes);
+    free(check_opmasks);
     return valid;
 }
 
@@ -851,7 +873,7 @@ int run_x86_semantics_benchmark(int argc, char** argv)
     uint64_t after_scalar = 0;
     // A bit per path of each case (scalar, AVX-512, encode); --only keeps one, of one case.
     uint32_t choice_paths = 3;
-    uint32_t effects_paths = 7;
+    uint32_t effects_paths = 15;
     bool code = true;
     for (int argument = 1; argument < argc; argument += 1)
     {
@@ -879,7 +901,7 @@ int run_x86_semantics_benchmark(int argc, char** argv)
         {
             const char* name = argv[argument + 1];
             choice_paths = strcmp(name, "choose-scalar") == 0 ? 1 : strcmp(name, "choose-avx512") == 0 ? 2 : 0;
-            effects_paths = strcmp(name, "effects-scalar") == 0 ? 1 : strcmp(name, "effects-avx512") == 0 ? 2 : strcmp(name, "encode") == 0 ? 4 : 0;
+            effects_paths = strcmp(name, "effects-scalar") == 0 ? 1 : strcmp(name, "effects-avx512") == 0 ? 2 : strcmp(name, "encode") == 0 ? 4 : strcmp(name, "effects-opmasks") == 0 ? 8 : 0;
             code = strcmp(name, "code") == 0;
             valid = valid && (choice_paths != 0 || effects_paths != 0 || code);
             argument += 1;
@@ -891,7 +913,7 @@ int run_x86_semantics_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--requests N] [--functions N] [--seed N] [--after-scalar MS] [--only choose-scalar|choose-avx512|effects-scalar|effects-avx512|encode|code]\n",
+        fprintf(stderr, "usage: %s [--requests N] [--functions N] [--seed N] [--after-scalar MS] [--only choose-scalar|choose-avx512|effects-scalar|effects-avx512|effects-opmasks|encode|code]\n",
                 argv[0]);
     }
     else

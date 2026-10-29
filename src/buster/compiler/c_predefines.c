@@ -944,6 +944,12 @@ struct PredefinesOptions
     uint8_t long_double;
 };
 
+// Clang keeps GNU inline rules in C89 even after -fno-gnu89-inline. In later modes the last explicit option decides.
+static bool predefines_gnu_inline(const PredefinesOptions* options, CLanguage language)
+{
+    return language.standard < 1999 || options->gnu89_inline == BUSTER_PREDEFINES_ON;
+}
+
 // The most feature flags one argument gives: -mapx-features= with all nine names.
 #define BUSTER_PREDEFINES_FLAGS_PER_ARGUMENT 9
 
@@ -3602,7 +3608,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
     {
         snprintf(line, sizeof(line), "#define __GNUC__ %u\n#define __GNUC_MINOR__ %u\n#define __GNUC_PATCHLEVEL__ %u\n#define __GXX_ABI_VERSION 1002\n", major, minor, patch);
         length = predefines_append(buffer, length, capacity, line);
-        const bool gnu_inline = language.standard < 1999 || options->gnu89_inline == BUSTER_PREDEFINES_ON;
+        const bool gnu_inline = predefines_gnu_inline(options, language);
         length = predefines_append(buffer, length, capacity, gnu_inline ? "#define __GNUC_GNU_INLINE__ 1\n" : "#define __GNUC_STDC_INLINE__ 1\n");
         length = predefines_append(buffer, length, capacity,
                                    "#define __GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1\n#define __GCC_ATOMIC_BOOL_LOCK_FREE 2\n#define __GCC_ATOMIC_CHAR_LOCK_FREE 2\n"

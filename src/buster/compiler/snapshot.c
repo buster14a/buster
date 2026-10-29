@@ -112,13 +112,15 @@ struct SnapshotResult
 };
 
 // The cache directory, as the XDG base directory specification has it: $XDG_CACHE_HOME/buster, or without it
-// $HOME/.cache/buster. False, with an empty path, if neither is set to an absolute path or the path doesn't fit.
+// $HOME/.cache/buster. False, with an empty path, if neither is set to an absolute path or the path does not fit.
 static __attribute__((unused)) bool snapshot_directory(char* path, uint64_t capacity);
 // The runtime: loaded from the snapshot in `directory` if it describes the system, otherwise imported and its snapshot
 // written there, the directory made if it is missing. With no directory (0), imported. A snapshot that can't be written
 // doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static, runtime_open_static_pie
 // and runtime_open_shared do the same for a static executable's runtime, a static PIE's and a shared library's.
 BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
+// For an environment-selected cache: never create its parent directories.
+BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_cache(Runtime* runtime, const char* directory, RuntimeKind kind);
 BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
 BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
 BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory);
@@ -1111,6 +1113,45 @@ static bool snapshot_make_directory(const char* directory, SnapshotResult* resul
     return made;
 }
 
+// Creates only the cache's own directories. For HOME, .cache can be made only under an existing HOME; for XDG,
+// the selected cache root itself must already exist. No missing ancestor is created, even if a root disappears.
+static bool snapshot_make_cache(const char* directory, SnapshotResult* result, bool home)
+{
+    bool made = true;
+    if (home)
+    {
+        char parent[BUSTER_RUNTIME_PATH_BYTES];
+        const uint64_t length = strlen(directory);
+        const uint64_t suffix = sizeof("/buster") - 1;
+        made = length > suffix && length < sizeof(parent) && strcmp(directory + length - suffix, "/buster") == 0;
+        if (made)
+        {
+            memcpy(parent, directory, length - suffix);
+            parent[length - suffix] = 0;
+            const int error = mkdir(parent, 0700) == 0 ? 0 : errno;
+            made = error == 0 || error == EEXIST;
+            if (!made)
+            {
+                snapshot_fail(result, "mkdir", error);
+            }
+        }
+        else
+        {
+            snapshot_fail(result, "the directory", EINVAL);
+        }
+    }
+    if (made)
+    {
+        const int error = mkdir(directory, 0700) == 0 ? 0 : errno;
+        made = error == 0 || error == EEXIST;
+        if (!made)
+        {
+            snapshot_fail(result, "mkdir", error);
+        }
+    }
+    return made;
+}
+
 // Writes the bytes into a new file in `directory` under a random name, then renames it to `path`.
 static bool snapshot_write_file(const char* directory, const char* path, const uint8_t* image, uint64_t bytes, SnapshotResult* result)
 {
@@ -1163,7 +1204,7 @@ static bool snapshot_write_file(const char* directory, const char* path, const u
 }
 
 // Writes the runtime's snapshot into `directory` as `compiler` wrote it, under its kind's name (snapshot_name).
-static bool snapshot_write(const Runtime* runtime, const char* directory, const RuntimeProbe* compiler, SnapshotResult* result)
+static bool snapshot_write_mode(const Runtime* runtime, const char* directory, const RuntimeProbe* compiler, SnapshotResult* result, bool bounded, bool home)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
     const int length = snprintf(path, sizeof(path), "%s/%s", directory, snapshot_name(runtime->kind));
@@ -1179,9 +1220,15 @@ static bool snapshot_write(const Runtime* runtime, const char* directory, const 
     {
         snapshot_fail(result, "the image", ENOMEM);
     }
-    const bool written = image != 0 && snapshot_make_directory(directory, result) && snapshot_write_file(directory, path, image, bytes, result);
+    const bool written = image != 0 && (bounded ? snapshot_make_cache(directory, result, home) : snapshot_make_directory(directory, result)) &&
+                         snapshot_write_file(directory, path, image, bytes, result);
     arena_release(&arena);
     return written;
+}
+
+static __attribute__((unused)) bool snapshot_write(const Runtime* runtime, const char* directory, const RuntimeProbe* compiler, SnapshotResult* result)
+{
+    return snapshot_write_mode(runtime, directory, compiler, result, false, false);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1335,7 +1382,7 @@ static bool snapshot_directory(char* path, uint64_t capacity)
 
 // runtime_open of a kind's runtime, as `compiler` (0 for an executable without an identity, which never loads or writes
 // a snapshot).
-static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, RuntimeKind kind, const RuntimeProbe* compiler)
+static SnapshotResult runtime_open_as_mode(Runtime* runtime, const char* directory, RuntimeKind kind, const RuntimeProbe* compiler, bool bounded, bool home)
 {
     SnapshotResult result = { .status = SNAPSHOT_STATUS_MISSING };
     char path[BUSTER_RUNTIME_PATH_BYTES];
@@ -1348,9 +1395,23 @@ static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, R
     if (result.status != SNAPSHOT_STATUS_LOADED)
     {
         result.error = runtime_import_kind(runtime, kind);
-        result.written = result.error == RUNTIME_ERROR_NONE && cached && snapshot_write(runtime, directory, compiler, &result);
+        result.written = result.error == RUNTIME_ERROR_NONE && cached && snapshot_write_mode(runtime, directory, compiler, &result, bounded, home);
     }
     return result;
+}
+
+static SnapshotResult runtime_open_as(Runtime* runtime, const char* directory, RuntimeKind kind, const RuntimeProbe* compiler)
+{
+    return runtime_open_as_mode(runtime, directory, kind, compiler, false, false);
+}
+
+BUSTER_LINKER_ENTRY SnapshotResult runtime_open_cache(Runtime* runtime, const char* directory, RuntimeKind kind)
+{
+    RuntimeProbe compiler;
+    const bool identified = snapshot_compiler(&compiler);
+    const char* cache = getenv("XDG_CACHE_HOME");
+    const bool home = cache == 0 || cache[0] != '/';
+    return runtime_open_as_mode(runtime, directory, kind, identified ? &compiler : 0, true, home);
 }
 
 BUSTER_LINKER_ENTRY SnapshotResult runtime_open(Runtime* runtime, const char* directory)

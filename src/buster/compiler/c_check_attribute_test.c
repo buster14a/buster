@@ -354,7 +354,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
         }
         if (valid && result != 0)
         {
-            result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef);
+            result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef, false);
             valid = result != 0 && check_input_attribute_function(&reader, &attributes, result);
         }
         snprintf(description, sizeof(description), "%s: exact attribute diagnosis", fixture->name);
