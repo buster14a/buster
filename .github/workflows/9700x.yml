@@ -1,4 +1,4 @@
-name: Tests and Zen 5 benchmarks
+name: Temporary microarchitecture diagnostic
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
@@ -393,841 +393,204 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
-      - name: Benchmark the C lexer on the repository sources
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
-        run: |
-          # Pin to one permitted CPU to avoid migration noise in throughput measurements.
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-lexer src
-
-      - name: Measure the Zen 5 instruction cases
-        # The job hook holds the shared lock. Each process interleaves its experiments, in three separate processes
-        # where `changes` doesn't rule out the next step. These observations are informational; counter/protocol
-        # failures still fail the step.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
-        run: |
-          sha256sum build/compiler src/buster/compiler/x86_zen5.c src/buster/compiler/x86_zen5_measure.c
-          echo "Zen 5 observation process 1"
-          taskset -c 2 ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
-
-      - name: Measure the Zen 5 instruction cases in two more processes
-        # Where `changes` doesn't rule it out (the module's sources): with the process above, three.
-        if: needs.changes.outputs.zen5 != 'false'
-        run: |
-          for sample in 2 3; do
-            echo "Zen 5 observation process $sample"
-            taskset -c 2 ./build/compiler measure-x86-zen5 --passes 11 --iterations 20000
-          done
-
-      - name: Benchmark Zen 5 cost lookup
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-zen5,')
-        run: taskset -c 2 ./build/compiler benchmark-x86-zen5
-
-      - name: Benchmark Zen 5 cost lookup in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources): with the plain run above, three processes of each
-        # mode.
-        if: needs.changes.outputs.zen5 != 'false'
-        run: |
-          cpu=2
-          for sample in 1 2 3; do
-            echo "Zen 5 lookup sample $sample"
-            if [ "$sample" != 1 ]; then
-              taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
-            fi
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
-          done
-
-      - name: Benchmark x86-64 disassembly
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-disassembler,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-x86-disassembler
-
-      - name: Benchmark the x86-64 encoder
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-encoder,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
-
-      - name: Benchmark assembly phases
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',assembler,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-assembler
-
-      - name: Check out pinned branch-sizing measurement harnesses
-        if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: buster14a/buster-performance
-          ref: a00d16e47b6f1090b8a0424ab0dd8cb4e6016713 # Initial byte-identical measurement import; see buster-performance/MIGRATION.md.
-          path: build/performance-evidence
-          sparse-checkout: docs/measurements/x86-lengths-2026-10-23
-          persist-credentials: false
-
-      - name: Benchmark branch sizing
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',branch-sizing,') || needs.changes.outputs.branch_sizing == 'true'
-        timeout-minutes: 3
-        env:
-          AB_ENABLED: ${{ github.event_name == 'pull_request' && needs.changes.outputs.branch_sizing != 'false' }}
-          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      - name: Collect microarchitecture evidence on the locked 9700X
         run: |
           set -euo pipefail
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+          mkdir -p "$RUNNER_TEMP/buster-microarchitecture"
+          cat > "$RUNNER_TEMP/buster-microarchitecture-campaign.py" <<'CAMPAIGN_PY'
+          #!/usr/bin/env python3
+          """Collect portable Buster/AMD perf evidence. See the accompanying README."""
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shlex
+          import subprocess
+          import tempfile
+          import time
 
-          if [[ "$AB_ENABLED" == true ]]; then
-              [[ "$AB_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-              ab_dir="$(mktemp -d "${RUNNER_TEMP}/branch-sizing-ab.XXXXXX")"
-              trap 'rm -rf "$ab_dir"' EXIT
-              fixture=build/performance-evidence/docs/measurements/x86-lengths-2026-10-23
+          p = argparse.ArgumentParser()
+          p.add_argument('--compiler', required=True)
+          p.add_argument('--corpus', required=True)
+          p.add_argument('--out', required=True)
+          p.add_argument('--local-cores', action='store_true')
+          p.add_argument('--repetitions', type=int, default=2)
+          p.add_argument('--stage-repetitions', type=int, default=5)
+          p.add_argument('--profile-runs', type=int, default=20)
+          p.add_argument('--max-events', type=int, default=0, help='smoke-test limit; 0 means all per-thread CPU events')
+          p.add_argument('--max-metrics', type=int, default=0, help='smoke-test limit; 0 means all per-thread core metrics')
+          p.add_argument('--no-profiles', action='store_true')
+          a = p.parse_args()
+          out = Path(a.out).resolve()
+          out.mkdir(parents=True, exist_ok=True)
+          compiler = str(Path(a.compiler).resolve())
+          corpus = Path(a.corpus).resolve()
+          os.environ['LC_ALL'] = 'C'
+          os.environ['SOURCE_DATE_EPOCH'] = '1792454400'
+          os.environ.pop('CPATH', None)
+          os.environ.pop('C_INCLUDE_PATH', None)
+          os.environ['CORES_TITLE'] = 'Buster microarchitecture counter sweep'
+          os.environ['CORES_LINK'] = 'https://github.com/buster14a/buster'
 
-              # The normal job lock covers this bounded qualification. Use one allowed logical CPU per physical
-              # core for scaling, and record the mapping rather than inferring SMT placement from CPU numbers.
-              allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
-              lscpu -e=CPU,SOCKET,CORE,ONLINE
-              core_cpus="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
-                  BEGIN {
-                      n = split(allowed, ranges, ",")
-                      for (r = 1; r <= n; r++) {
-                          m = split(ranges[r], ends, "-")
-                          last = m == 2 ? ends[2] : ends[1]
-                          for (c = ends[1]; c <= last; c++) permitted[c] = 1
-                      }
-                  }
-                  $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ { print $1 }
-              ' | paste -sd, -)"
-              test "$(tr ',' '\n' <<< "$core_cpus" | wc -l)" -ge 8
-              case ",$core_cpus," in
-                  *,2,*) cpu=2 ;;
-              esac
-              printf 'Allowed CPUs=%s; distinct-core CPUs=%s; module CPU=%s\n' "$allowed" "$core_cpus" "$cpu"
 
-              # The shallow checkout may lack the base object. Fetch only the public base commit, without tokens;
-              # read its source files, but do not execute its build scripts or change the checkout.
-              if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
-                  GIT_TERMINAL_PROMPT=0 timeout 30s git -c credential.helper= -c http.extraHeader= fetch \
-                      --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$AB_BASE_SHA"
-              fi
-              printf 'Matched base=%s checkout=%s cpu=%s\n' "$AB_BASE_SHA" "$(git rev-parse HEAD)" "$cpu"
-              clang --version
-              for side in before after; do
-                  mkdir -p "$ab_dir/$side/src/buster/compiler"
-                  for file in lane.c x86_64_encoder.c branch_sizing.c; do
-                      dest="$ab_dir/$side/src/buster/compiler/$file"
-                      if [[ "$side" == before ]]; then
-                          git show "${AB_BASE_SHA}:src/buster/compiler/$file" > "$dest"
-                      else
-                          cp "src/buster/compiler/$file" "$dest"
-                      fi
-                  done
-                  # Both modules, including the scaling fixture's include, use the same harness and generator.
-                  cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
-                      "$ab_dir/$side/src/buster/compiler/"
-                  # The shared harness includes the host-ISA adapter. Keep each revision's headers when present;
-                  # a base predating the adapter uses the current compatibility headers on this vector-only host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h; do
-                      dest="$ab_dir/$side/src/buster/compiler/$header"
-                      if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
-                          git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
-                      else
-                          cp "src/buster/compiler/$header" "$dest"
-                      fi
-                  done
-              done
-              before="$ab_dir/before/src/buster/compiler"
-              new='branch_sizing_lengths(records, count, offsets, vector)'
-              old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
-              interface='branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)'
-              test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-              if grep -Fq "$old" "$before/branch_sizing.c"; then
-                  sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
-                  test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-                  echo 'Baseline harness adaptation: old lengths scratch argument only'
-              # Since the host-ISA adapter, the call reads BUSTER_VECTOR_PATH(vector), so check the definition instead.
-              elif ! grep -Fq "$interface" "$before/branch_sizing.c"; then
-                  echo 'Unsupported baseline branch_sizing_lengths interface' >&2
-                  exit 1
-              fi
+          def output(command):
+              r = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
+              return {'command': command, 'status': r.returncode, 'output': r.stdout}
 
-              # Same compiler and production options. Compile all four binaries before serialized timing.
-              flags=(-O3 -g -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -pthread)
-              printf 'Standalone flags: %s\n' "${flags[*]}"
-              sha256sum "$fixture/benchmark-main.c" "$fixture/scaling.c"
-              for side in before after; do
-                  tree="$ab_dir/$side/src"
-                  sha256sum "$tree"/buster/compiler/*.[ch]
-                  host_defines=$(clang "${flags[@]}" -I "$tree" -dM -E \
-                      -include "$tree/buster/compiler/host_isa.h" -x c /dev/null)
-                  grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"
-                  timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
-                      "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
-                  timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"
-              done
-              sha256sum "$ab_dir"/*-module "$ab_dir"/*-scaling
 
-              run_module()
-              {
-                  local side="$1" row="$2" measure="$3" pair="$4"
-                  local log="$ab_dir/module-$row-$measure-$pair-$side.log"
-                  printf '\nMatched module pair=%s side=%s row=%s measure=%s\n' "$pair" "$side" "$row" "$measure"
-                  timeout 20s taskset -c "$cpu" "$ab_dir/$side-module" \
-                      --seed 1 --only "$row" --measure "$measure" --samples 11 2>&1 | tee "$log"
-                  test "$(grep -c "^$row: " "$log")" -eq 1
-                  test "$(grep -c ' ns per record ' "$log")" -eq 1
-                  grep "^$row: " "$log" > "$log.identity"
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, 'rb') as f:
+                  for b in iter(lambda: f.read(1024 * 1024), b''):
+                      h.update(b)
+              return h.hexdigest()
+
+
+          def wrapped(command, affinity_path):
+              if a.local_cores:
+                  # Each invocation acquires/releases the machine's shared core pool.
+                  shell = 'printf "%s\\n" "$CORES_CPUS" > "$1"; shift; exec taskset -c "${CORES_CPUS%%,*}" "$@"'
+                  return ['cores', '-n', '1', '--', 'bash', '-c', shell, 'pin', str(affinity_path), *command]
+              affinity_path.write_text('2\n')
+              return ['taskset', '-c', '2', *command]
+
+
+          def execute(command, stat_path=None, stdout_path=None, stderr_path=None):
+              affinity = out / '_affinity.txt'
+              if stat_path is not None:
+                  command = ['perf', 'stat', '--no-big-num', '-x', ';', '-o', str(stat_path), *command]
+              start = time.monotonic_ns()
+              with open(stdout_path or os.devnull, 'wb') as so, open(stderr_path or os.devnull, 'wb') as se:
+                  r = subprocess.run(wrapped(command, affinity), stdout=so, stderr=se, check=False)
+              return {'status': r.returncode, 'wall_ms': (time.monotonic_ns() - start) / 1e6,
+                      'affinity': affinity.read_text().strip() if affinity.exists() else None}
+
+
+          inventory_run = output(['perf', 'list', '--json'])
+          if inventory_run['status']:
+              raise SystemExit('perf list --json failed: ' + inventory_run['output'])
+          inventory = json.loads(inventory_run['output'])
+          (out / 'perf-list.json').write_text(json.dumps(inventory, indent=2) + '\n')
+          (out / 'perf-list-details.txt').write_text(output(['perf', 'list', '--details'])['output'])
+          metadata = {
+              'cpu': output(['lscpu', '-J']), 'kernel': output(['uname', '-srmo']),
+              'perf': output(['perf', '--version']), 'clang': output(['clang', '--version']),
+              'compiler_sha256': sha256(compiler),
+              'sqlite3_c_sha256': sha256(corpus / 'sqlite/sqlite3.c'),
+              'corpus_manifest_sha256': sha256(corpus / 'MANIFESTS.sha256'),
+              'predefines_sha256': sha256(corpus / 'provenance/gnu17-pinned-predefines.txt'),
+              'perf_event_paranoid': Path('/proc/sys/kernel/perf_event_paranoid').read_text().strip(),
+              'thp': Path('/sys/kernel/mm/transparent_hugepage/enabled').read_text().strip(),
+              'profile_runs': a.profile_runs, 'counter_repetitions': a.repetitions,
+              'stage_repetitions': a.stage_repetitions,
+              'local_cores': a.local_cores,
+          }
+          (out / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
+
+          base = ['--predefines', str(corpus / 'provenance/gnu17-pinned-predefines.txt'),
+                  '--clang-features', '-march=znver5', '-std=gnu17', '-nostdinc',
+                  '-isystem', str(corpus / 'headers/usr/lib/clang/23/include'),
+                  '-isystem', str(corpus / 'headers/usr/local/include'),
+                  '-isystem', str(corpus / 'headers/usr/include'), '-I' + str(corpus / 'sqlite')]
+          source = str(corpus / 'sqlite/sqlite3.c')
+          with tempfile.TemporaryDirectory(prefix='buster-microarch-') as scratch:
+              scratch = Path(scratch)
+              object_file = str(scratch / 'sqlite.o')
+              workloads = {
+                  'preprocess': [compiler, '-E', '-P', *base, '-o', '/dev/null', source],
+                  'syntax': [compiler, '-fsyntax-only', *base, source],
+                  'compile': [compiler, '-c', *base, '-o', object_file, source],
               }
-              run_scaling()
-              {
-                  local side="$1" workers="$2" pair="$3"
-                  local log="$ab_dir/scaling-$workers-$pair-$side.log"
-                  printf '\nMatched scaling pair=%s side=%s workers=%s passes=200\n' "$pair" "$side" "$workers"
-                  # The fixture pins workers within this distinct-physical-core mask, never a one-CPU taskset.
-                  timeout 30s taskset -c "$core_cpus" "$ab_dir/$side-scaling" "$workers" 200 tier0-mix 2>&1 | tee "$log"
-                  test "$(grep -c '^row=' "$log")" -eq 1
-                  grep '^row=' "$log" | tr ' ' '\n' |
-                      grep -E '^(row|workers|passes|seed|warmup|functions_per_worker|records_per_worker|encoded_bytes_per_worker|checksum|reference|coordinator_cpu|worker_cpus)=' \
-                      > "$log.identity"
-                  test "$(wc -l < "$log.identity")" -eq 12
-              }
-              for pair in 1 2 3; do
-                  order=(before after)
-                  if [[ "$pair" == 2 ]]; then
-                      order=(after before)
-                  fi
-                  for row in tier0-40 tier0-mix tier0-2000; do
-                      measures=(vector-lengths size_branches size_encode)
-                      if [[ "$row" == tier0-mix ]]; then
-                          measures+=(x86_encode)
-                      fi
-                      for measure in "${measures[@]}"; do
-                          for side in "${order[@]}"; do
-                              run_module "$side" "$row" "$measure" "$pair"
-                          done
-                          diff -u "$ab_dir/module-$row-$measure-$pair-before.log.identity" \
-                              "$ab_dir/module-$row-$measure-$pair-after.log.identity"
-                      done
-                  done
-                  for workers in 1 8; do
-                      for side in "${order[@]}"; do
-                          run_scaling "$side" "$workers" "$pair"
-                      done
-                      diff -u "$ab_dir/scaling-$workers-$pair-before.log.identity" "$ab_dir/scaling-$workers-$pair-after.log.identity"
-                  done
-              done
-              echo 'Matched branch-sizing qualification completed: 3 pairs per case'
-          fi
+              descriptions = {k: shlex.join(v).replace(compiler, '<COMPILER>').replace(str(corpus), '<CORPUS>').replace(str(scratch), '<SCRATCH>') for k, v in workloads.items()}
+              (out / 'commands.json').write_text(json.dumps(descriptions, indent=2) + '\n')
+              events = sorted({e['EventName'] for e in inventory if e.get('Unit') == 'cpu'
+                               and e.get('EventName') and '/' not in e['EventName']})
+              metrics = sorted({e['MetricName'] for e in inventory if e.get('Unit') == 'default_core' and e.get('MetricName')})
+              if a.max_events:
+                  events = events[:a.max_events]
+              if a.max_metrics:
+                  metrics = metrics[:a.max_metrics]
+              supported, probes = [], []
+              for event in events:
+                  r = output(['perf', 'stat', '-x', ';', '-e', event + ':u', '--', 'true'])
+                  ok = r['status'] == 0 and '<not supported>' not in r['output'] and '<not counted>' not in r['output']
+                  probes.append({'event': event, 'available': ok, 'status': r['status'], 'output': r['output']})
+                  if ok:
+                      supported.append(event)
+              (out / 'event-probes.json').write_text(json.dumps(probes, indent=2) + '\n')
+              print('inventory:', len(events), 'thread CPU events,', len(supported), 'passed probe;', len(metrics), 'core metrics', flush=True)
+              temp_stat = scratch / 'stat.csv'
+              temp_stderr = scratch / 'stderr.txt'
+              records = out / 'measurements.jsonl'
+              with records.open('w') as log:
+                  def record(kind, workload, variant, repetition, args, events_arg=None):
+                      result = execute(args, temp_stat, stderr_path=temp_stderr)
+                      row = {'kind': kind, 'workload': workload, 'variant': variant, 'repetition': repetition, **result,
+                             'perf_stat': temp_stat.read_text() if temp_stat.exists() else '',
+                             'workload_stderr': temp_stderr.read_text(errors='replace')}
+                      log.write(json.dumps(row) + '\n')
+                      log.flush()
+                      if row['status']:
+                          print('failed', kind, workload, variant, repetition, row['status'], flush=True)
+                      return row
+                  # Process-level anchors: include user and kernel for system time and faults.
+                  for rep in range(a.stage_repetitions):
+                      for workload, cmd in workloads.items():
+                          record('baseline', workload, 'process', rep,
+                                 ['-e', 'task-clock,cycles,instructions,branches,branch-misses,page-faults,minor-faults,major-faults,context-switches,cpu-migrations', '--', *cmd])
+                          if workload != 'preprocess':
+                              stage_cmd = cmd[:1] + ['--time-stages'] + cmd[1:]
+                              record('stages', workload, 'time-stages', rep,
+                                     ['-e', 'task-clock', '--', *stage_cmd])
+                  # Independent small groups keep the six core PMCs from excessive multiplexing.
+                  groups = [supported[i:i + 4] for i in range(0, len(supported), 4)]
+                  for index, group in enumerate(groups):
+                      for rep in range(a.repetitions):
+                          for workload, cmd in workloads.items():
+                              ev = ','.join(['cycles:u', 'instructions:u'] + [e + ':u' for e in group])
+                              record('counter', workload, group, rep, ['-e', ev, '--', *cmd])
+                      if index % 10 == 0:
+                          print('counter group', index + 1, 'of', len(groups), flush=True)
+                  # Each formula gets its own invocation. The output reports multiplexing or failures.
+                  for index, metric in enumerate(metrics):
+                      for workload, cmd in workloads.items():
+                          record('metric', workload, metric, 0, ['--all-user', '-M', metric, '--', *cmd])
+                      if index % 25 == 0:
+                          print('metric', index + 1, 'of', len(metrics), flush=True)
+              if not a.no_profiles:
+                  profiles = out / 'profiles'
+                  profiles.mkdir(exist_ok=True)
+                  for workload, cmd in workloads.items():
+                      # A fresh process per iteration; perf inherits children and covers the entire driver.
+                      shell = 'for ((i=0;i<$1;i++)); do "${@:2}" >/dev/null 2>/dev/null || exit $?; done'
+                      data = profiles / (workload + '.data')
+                      run_cmd = ['perf', 'record', '-q', '-e', 'cycles:u', '-F', '997', '--call-graph', 'dwarf,8192',
+                                 '-o', str(data), '--', 'bash', '-c', shell, 'repeat', str(a.profile_runs), *cmd]
+                      status = execute(run_cmd, stderr_path=profiles / (workload + '-record.stderr'))
+                      (profiles / (workload + '-record.json')).write_text(json.dumps(status, indent=2) + '\n')
+                      if status['status'] == 0 and data.exists():
+                          for child in ('no-children', 'children'):
+                              report = output(['perf', 'report', '--stdio', '--' + child, '--sort', 'comm,dso,symbol',
+                                               '--percent-limit', '0.25', '-i', str(data)])
+                              (profiles / (workload + '-' + child + '.txt')).write_text(report['output'])
+                          z = subprocess.run(['zstd', '-q', '-f', '--rm', str(data)], check=False)
+                          if z.returncode:
+                              print('zstd failed for', workload, flush=True)
+                      else:
+                          print('sampling failed for', workload, flush=True)
+              if (out / '_affinity.txt').exists():
+                  (out / '_affinity.txt').unlink()
+          print('done:', out, flush=True)
+          CAMPAIGN_PY
+          sha256sum "$RUNNER_TEMP/buster-microarchitecture-campaign.py" > "$RUNNER_TEMP/buster-microarchitecture/campaign.sha256"
+          python3 "$RUNNER_TEMP/buster-microarchitecture-campaign.py" --compiler build/compiler --corpus "$BUSTER_CORPUS" --out "$RUNNER_TEMP/buster-microarchitecture" --repetitions 2 --stage-repetitions 7 --profile-runs 30
 
-      - name: Benchmark the x86 semantics
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',x86-semantics,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-x86-semantics
-
-      - name: Benchmark the lanes
-        # It pins each lane to an allowed CPU of its own.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lanes,')
-        run: ./build/compiler benchmark-lanes
-
-      - name: Benchmark dataflow bitsets
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',dataflow,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-dataflow
-
-      - name: Benchmark local SSA construction on synthetic CFGs
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ssa,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ssa
-
-      - name: Benchmark local SSA construction in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources). Compare isolated execution and vector samples
-        # after warm scalar work across separate processes.
-        if: needs.changes.outputs.ssa != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          for repetition in 1 2 3; do
-              echo "SSA repetition $repetition"
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
-          done
-
-      - name: Benchmark the preprocessor fuzz harness
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor-fuzz,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
-
-      - name: Benchmark the object writer
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',object-writer,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-object-writer
-
-      - name: Benchmark DWARF validation, sizing, emission and final addresses
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',debug,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-debug
-
-      - name: Benchmark the import path
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',import,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-import
-
-      - name: Benchmark binding
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',bind,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-bind
-
-      - name: Benchmark the direct path's executables
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',executable,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-executable
-
-      - name: Benchmark the runtime snapshot
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',snapshot,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-snapshot
-
-      - name: Benchmark the foreign inputs against mold and wild
-        # --linkers also times mold's and wild's reading and resolving on one thread on the same command lines, which no
-        # pull request changes: it runs where `changes` doesn't rule it out (foreign_benchmark.c's harness).
-        if: needs.changes.outputs.foreign != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-foreign --linkers
-
-      - name: Benchmark the foreign inputs
-        # Every other pull request's: the resolution's times by the vector path and the exact one.
-        if: needs.changes.outputs.foreign == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',foreign,'))
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-foreign
-
-      - name: Benchmark foreign string pooling through executable output
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',foreign-strings,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-foreign-strings --counts 64,4096 --runs 3
-
-      - name: Benchmark the whole link against GNU ld, lld, mold and wild
-        # Without taskset: it pins its own lane and the linkers' runs on one thread, and the linkers' other runs need
-        # every CPU. Its linkers' side, most of the step, times GNU ld, lld, mold and wild, which no pull request
-        # changes, and link-foreign on the same command lines: it runs where `changes` doesn't rule it out (its
-        # baselines).
-        if: needs.changes.outputs.baselines != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          ./build/compiler benchmark-link --cpus "$cpu"
-
-      - name: Benchmark the whole link by the direct path
-        # Every other pull request's: the direct path's times, and its programs must still run as their models predict.
-        if: needs.changes.outputs.baselines == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',link,'))
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          ./build/compiler benchmark-link --cpus "$cpu" --only direct
-
-      - name: Benchmark the floors
-        # Without taskset too: it pins itself, and its writes from several threads take the first CPUs it may use. What
-        # the machine and the kernel charge doesn't depend on a pull request either: it runs with the linkers'.
-        if: needs.changes.outputs.baselines != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          ./build/compiler benchmark-floors --cpu "$cpu"
-
-      - name: Benchmark token refinement on the repository sources
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',refinement,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-refinement src
-
-      - name: Benchmark the preprocessor on main.c against clang -E
-        # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
-        # -funsigned-char's among them. --clang also times `clang -E` on the same file after each timed pass, about
-        # 6 s of the step's 12, which measures clang rather than this compiler: it runs where `changes` doesn't rule
-        # it out (c_preprocessor_benchmark.c's harness).
-        if: needs.changes.outputs.preprocessor_clang != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
-
-      - name: Benchmark the preprocessor on main.c
-        # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
-        # scalar twins, without clang's.
-        if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
-
-      - name: Benchmark the directive tables on the repository sources
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --tables src
-
-      - name: Benchmark the per-file jobs on the repository's translation units
-        # With the walk round by round (#262), from the same runs. Without taskset: it pins each lane to an allowed CPU
-        # of its own.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: ./build/compiler benchmark-files --rounds -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
-
-      - name: Benchmark the per-file jobs on musl, sqlite3.c and the flat C library corpus
-        # Where `changes` doesn't rule it out (the module's sources): docs/c-files.md's tables, on the preprocessor
-        # oracle's frozen corpora (docs/preprocessor-oracle.md), with sqlite3.c's walk round by round. Without taskset:
-        # it pins each lane to an allowed CPU of its own.
-        if: needs.changes.outputs.files != 'false'
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          musl="$corpus/libc/musl"
-          ./build/compiler benchmark-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$musl/arch/x86_64" -I "$musl/arch/generic" \
-            -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
-            "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
-          ./build/compiler benchmark-files --rounds "$corpus/sqlite/sqlite3.c"
-          ./build/compiler benchmark-files --flat "$corpus/libc"
-
-      - name: Benchmark the parser on main.c
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-          taskset -c "$cpu" ./build/compiler benchmark-parser --passes 1 --only vector tests/parser-handoff/pragma-heavy.c
-
-      - name: Benchmark selective lowering on synthetic graphs
-        # Includes independent result checks. These unconditioned single-operation samples are informational;
-        # source-corpus lowering and conditioned multi-process measurements remain separate acceptance work.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lowering,')
-        run: |
-          cpu="$(awk '/Cpus_allowed_list/ {split($2,a,/[-,]/); print a[1]}' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-lowering
-
-      - name: Benchmark GNU syntax metadata and parser handoff
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',gnu,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-
-      - name: Benchmark C-source binding production and resolution
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser-bindings,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
-
-      - name: Benchmark C-source binding resolution in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources, the parser's among them).
-        if: needs.changes.outputs.parser_bindings != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          # Isolate both paths and the vector work after a lighter phase; do not infer a speedup from mixed passes.
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only scalar "${system[@]}" "$corpus/sqlite/sqlite3.c"
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch "${system[@]}" "$corpus/sqlite/sqlite3.c"
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings --only batch --after-scalar 200 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-
-      - name: Benchmark the C type table
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',types,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-types
-
-      - name: Benchmark source-position environments
-        # Synthetic environment handoff only; actual deferred checker/corpus acceptance stays with #113.
-        # The runner hook already holds the 9700X lock. Isolate both vector states in independent processes.
-        # This step also checks every benchmark result against its scalar twin.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',environments,')
-        run: taskset -c 2 ./build/compiler benchmark-environments
-
-      - name: Benchmark source-position environments in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
-        if: needs.changes.outputs.environments != 'false'
-        run: |
-          for sample in 1 2 3; do
-            echo "Environment observation process $sample"
-            taskset -c 2 ./build/compiler benchmark-environments --only full-vector
-            taskset -c 2 ./build/compiler benchmark-environments --only full-vector --after-scalar 100
-            taskset -c 2 ./build/compiler benchmark-environments --only types-vector
-            taskset -c 2 ./build/compiler benchmark-environments --only types-vector --after-scalar 100
-          done
-
-      - name: Benchmark the calling convention
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',calling-convention,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-calling-convention
-
-      - name: Benchmark typed postorder checking on synthetic graphs
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-checker --shape wide
-          taskset -c "$cpu" ./build/compiler benchmark-checker --shape chain --nodes 4096
-
-      - name: Benchmark typed checking on frozen SQLite bodies
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-source,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          taskset -c 2 ./build/compiler benchmark-checker-source "${source[@]}"
-
-      - name: Benchmark what lowering only the referenced definitions saves on c-testsuite's programs
-        # #129: after checking, each program's selection and everything -c does after it, for the referenced definitions
-        # and for all of them (--lower-all), with the functions and objects defined, lowered and skipped.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',lowering-source,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-lowering-source build/c-testsuite/tests/single-exec/*.c
-
-      - name: Benchmark typed checking on frozen SQLite bodies in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the checker's sources, c_check*.c).
-        if: needs.changes.outputs.checker != 'false'
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          taskset -c 2 ./build/compiler benchmark-checker-source --only scalar "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only vector "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only levels "${source[@]}"
-          taskset -c 2 ./build/compiler benchmark-checker-source --only levels --after-scalar 100 "${source[@]}"
-
-      - name: Benchmark the C driver's source rows
-        # #395: each pass's vector path against its exact twin (raw rows, lines, kept rows and the unit), and what -g
-        # adds to the emission, after both paths agree.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-debug,')
-        run: |
-          taskset -c 2 ./build/compiler benchmark-check-debug
-
-      - name: Benchmark the C driver's source rows in isolation and after scalar work
-        # Where `changes` doesn't rule it out (c_check_debug*.c, the emission and the lowering, debug.c and tier0.c), each
-        # path alone and after scalar work, in processes of their own: the passes the rows' producers reach, what the
-        # rows add to the emission (the emit pass) and the unit built from the rows it makes (the build pass: their
-        # lines, the rows kept and the sections), whose inputs a change to the emission, the lowering or Tier 0 changes.
-        # Where the rows' own passes change (`check_debug_rows`: c_check_debug*.c and debug.c), and on the daily and
-        # dispatched runs, every pass at once, whose 200 ms of scalar work before each sample is most of the step's 22 s.
-        if: needs.changes.outputs.check_debug != 'false'
-        env:
-          ROWS: ${{ needs.changes.outputs.check_debug_rows != 'false' }}
-        run: |
-          passes=(emit build)
-          if [ "$ROWS" = true ]; then
-            passes=(every)
-          fi
-          for pass in "${passes[@]}"; do
-            only=(--only "$pass")
-            if [ "$pass" = every ]; then
-              only=()
-            fi
-            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path scalar
-            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector
-            taskset -c 2 ./build/compiler benchmark-check-debug "${only[@]}" --path vector --after-scalar 200
-          done
-
-      - name: Benchmark the deferred bodies' reader on frozen SQLite
-        # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart,
-        # in twice the six orders of its readings (--passes is a multiple of six). The command and lane 0 run on CPU 2,
-        # the other lanes on one CPU of each other core the job may use.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-deferred,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
-          others="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
-              BEGIN {
-                  n = split(allowed, ranges, ",")
-                  for (r = 1; r <= n; r++) {
-                      m = split(ranges[r], ends, "-")
-                      last = m == 2 ? ends[2] : ends[1]
-                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
-                  }
-              }
-              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && $1 != 2 { print $1 }
-          ' | head -n 7 | paste -sd, -)"
-          test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          ./build/compiler benchmark-checker-deferred --passes 12 --lanes 8 --cpus "2,$others" "${source[@]}"
-
-      - name: Benchmark the functions' lanes on frozen SQLite
-        # #151: -c's emission of the frozen SQLite source on 1, 2, 4 and 8 lanes and on the rule's, every run one lane's
-        # code and each lane count's object one lane's. Lane 0 runs on CPU 2, the other lanes on one CPU of each other
-        # core the job may use. The driver's own feature answers, not clang's (--clang-features), as -c takes them: with
-        # clang's, SQLite takes its atomics' path, which the emission refuses.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-lanes,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
-          others="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
-              BEGIN {
-                  n = split(allowed, ranges, ",")
-                  for (r = 1; r <= n; r++) {
-                      m = split(ranges[r], ends, "-")
-                      last = m == 2 ? ends[2] : ends[1]
-                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
-                  }
-              }
-              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && $1 != 2 { print $1 }
-          ' | head -n 7 | paste -sd, -)"
-          test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,4,8 --cpus "2,$others" "${source[@]}"
-
-      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
-        # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
-        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
-        # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
-        # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
-        if: needs.changes.outputs.compile_time != 'false'
-        run: |
-          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
-          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
-          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
-          # tcc is the comparison's reference: the step fails without it, or with another build of it. An upgrade
-          # starts a new series of ratios: update this hash and docs/compile-time.md's together.
-          tcc="$(command -v tcc)"
-          "$tcc" -v
-          printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
-          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
-          # The counters of 11 compiles of each, user and kernel apart, and the functions the default's samples fall
-          # in. They are the stage report's cross-check (#518), so the step fails when perf can't give them: when it
-          # can't run, when a counter isn't counted, or when the profile is empty.
-          out="$RUNNER_TEMP/compile-time"
-          mkdir -p "$out"
-          events=task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u
-          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-compiler.txt" -- ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
-          cat "$out/stat-compiler.txt"
-          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-tcc.txt" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
-          cat "$out/stat-tcc.txt"
-          if grep -E '<not (supported|counted)>' "$out/stat-compiler.txt" "$out/stat-tcc.txt"; then
-              echo "::error::perf counted only some of the events, so the stage report has no cross-check"
-              exit 1
-          fi
-          taskset -c 2 perf record -q -F 20000 -o "$out/perf.data" -- \
-              bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
-          perf report -i "$out/perf.data" --stdio --no-children --sort dso --percent-limit 0.5 > "$out/dso.txt"
-          perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 > "$out/symbol.txt"
-          grep -v '^#' "$out/dso.txt" | sed '/^$/d'
-          grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
-
-      - name: Benchmark the checker's binding handoff
-        # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
-        # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-bindings,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input small
-          taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input headers
-          taskset -c 2 ./build/compiler benchmark-checker-bindings --passes 5 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-
-      - name: Benchmark the checker's binding handoff in repeated processes, in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the handoff's timed path: `checker_bindings`), the default (direct) alone
-        # and after 100 ms of the scalar twin's reader. Where the handoffs themselves change (`checker_binding_modes`),
-        # and on the daily and dispatched runs, also every mode on the large input and SQLite, and the old default
-        # (parser-batch) alone and after the same scalar work: the comparison #336 chose direct by.
-        if: needs.changes.outputs.checker_bindings != 'false'
-        env:
-          MODES: ${{ needs.changes.outputs.checker_binding_modes != 'false' }}
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          modes=(direct)
-          if [ "$MODES" = true ]; then
-            modes+=(parser-batch)
-          fi
-          for sample in 1 2 3; do
-            echo "Binding handoff process $sample"
-            if [ "$MODES" = true ]; then
-              taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" --input large
-              taskset -c 2 ./build/compiler benchmark-checker-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            fi
-            for mode in "${modes[@]}"; do
-              taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" "${system[@]}" "$corpus/sqlite/sqlite3.c"
-              taskset -c 2 ./build/compiler benchmark-checker-bindings --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            done
-          done
-
-      - name: Benchmark binding handoffs through parsing, checking and cleanup
-        # Where `changes` doesn't rule it out (the handoff's timed path: `checker_bindings`), the default (direct) after
-        # 100 ms of the scalar twin's reader. Where the handoffs themselves change (`checker_binding_modes`), and on the
-        # daily and dispatched runs, also every mode on each input, and the old default (parser-batch) after the same
-        # scalar work.
-        if: needs.changes.outputs.checker_bindings != 'false'
-        env:
-          MODES: ${{ needs.changes.outputs.checker_binding_modes != 'false' }}
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          system=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
-          modes=(direct)
-          if [ "$MODES" = true ]; then
-            modes+=(parser-batch)
-          fi
-          for sample in 1 2 3; do
-            echo "Binding pipeline process $sample"
-            if [ "$MODES" = true ]; then
-              for input in small headers large; do
-                taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" --input "$input"
-              done
-              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            fi
-            for mode in "${modes[@]}"; do
-              taskset -c 2 ./build/compiler benchmark-checker-bindings --pipeline --passes 9 --only "$mode" --after-scalar 100 "${system[@]}" "$corpus/sqlite/sqlite3.c"
-            done
-          done
-
-      - name: Benchmark the backend (Tier 0, branch sizing and encoding)
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-backend
-          taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
-
-      - name: Benchmark streaming on distinct physical cores
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',streaming,')
-        run: |
-          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
-          mapfile -t core_cpus < <(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
-              BEGIN {
-                  n = split(allowed, ranges, ",")
-                  for (r = 1; r <= n; r++) {
-                      m = split(ranges[r], ends, "-")
-                      last = m == 2 ? ends[2] : ends[1]
-                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
-                  }
-              }
-              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && count++ < 8 { print $1 }
-          ')
-          test "${#core_cpus[@]}" -gt 0
-          printf -v placement '%s,' "${core_cpus[@]}"
-          placement="${placement%,}"
-          writer=()
-          if [ "${#core_cpus[@]}" -ge 2 ]; then
-            writer=(--cpus "${core_cpus[0]},${core_cpus[1]}")
-          fi
-          printf 'Streaming: allowed CPUs=%s; distinct-core CPUs=%s; lanes=%s\n' "$allowed" "$placement" "${#core_cpus[@]}"
-          taskset -c "$placement" ./build/compiler benchmark-streaming --units 100 --runs 5 --lanes "${#core_cpus[@]}" "${writer[@]}"
-
-      - name: Benchmark the backend on the frozen SQLite source's functions
-        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
-        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
-        # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-backend-source "${source[@]}"
-
-      - name: Benchmark the IR verifier and derived arrays
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir
-
-      - name: Benchmark the IR verifier after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
-        if: needs.changes.outputs.ir != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
-
-      - name: Benchmark typed-stream lowering through IR verification
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-lowering,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
-
-      - name: Benchmark typed-stream lowering after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
-        if: needs.changes.outputs.ir_lowering != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
-
-      - name: Benchmark the IR of the frozen SQLite source's functions
-        # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
-        # largest functions' shares, then lowering, verification and promotion per typed entry by both paths, after both
-        # lowerings agree on every function and both promotions verify. benchmark-backend-source's options.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-source,')
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-source "${source[@]}"
-
-      - name: Benchmark the IR lowering of the frozen SQLite source's functions after scalar work
-        # Where `changes` doesn't rule it out (the lowering's sources).
-        if: needs.changes.outputs.ir_lowering != 'false'
-        run: |
-          unset CPATH C_INCLUDE_PATH
-          export SOURCE_DATE_EPOCH=1792454400
-          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
-          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower --after-scalar 200 "${source[@]}"
-
-      - name: Benchmark the verified Tier 1 optimization passes
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
-
-      - name: Benchmark the verified Tier 1 optimization passes after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
-        if: needs.changes.outputs.ir_optimize != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
-
-  qualification:
-    # Preserve the existing required context: both hosted variants and the gated
-    # 9700X native correctness/benchmark job must pass on the same revision.
-    name: Build and execute on Ryzen 7 9700X
-    needs: [changes, test, benchmarks]
-    if: always()
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Require hosted and native correctness before successful qualification
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          CODE_CHANGED: ${{ needs.changes.outputs.code }}
-          TEST_RESULT: ${{ needs.test.result }}
-          BENCHMARK_RESULT: ${{ needs.benchmarks.result }}
-        shell: bash
-        run: |
-          if [ "$CHANGES_RESULT" = success ] && [ "$CODE_CHANGED" = false ] &&
-              [ "$TEST_RESULT" = skipped ] && [ "$BENCHMARK_RESULT" = skipped ]; then
-              echo 'Documentation-only change; no compilation or measurements required.'
-          else
-              test "$TEST_RESULT" = success
-              test "$BENCHMARK_RESULT" = success
-          fi
+      - name: Upload microarchitecture evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: buster-9700x-microarchitecture
+          path: ${{ runner.temp }}/buster-microarchitecture/
+          if-no-files-found: warn
+          retention-days: 14
