@@ -1563,9 +1563,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     time_stages = false;
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
-    Arena arena = arena_reserve(1ull << 36);
-    Arena scratch = arena_reserve(1ull << 36);
-    Arena output_arena = arena_reserve(1ull << 36);
+    const uint64_t reservation_bytes = UINT64_C(1) << 36;
+    Arena arena = arena_reserve(reservation_bytes);
+    Arena scratch = arena_reserve(reservation_bytes);
+    Arena output_arena = arena_reserve(reservation_bytes);
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
@@ -1730,7 +1731,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
+    const bool arguments_ready = filtered != NULL && libraries.names != NULL && libraries.directories != NULL;
+    const bool parsed = reserved && arguments_ready && !missing_value && !invalid_lanes && !invalid_id_order &&
+                        pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -1748,6 +1752,14 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     if (worker_budget.dry_run)
     {
         result = 0;
+    }
+    else if (!reserved)
+    {
+        fprintf(stderr, "fatal error: can't reserve checker memory (%" PRIu64 " bytes requested per arena)\n", reservation_bytes);
+    }
+    else if (!arguments_ready)
+    {
+        fprintf(stderr, "fatal error: can't allocate checker argument storage\n");
     }
     else if (!parsed)
     {
