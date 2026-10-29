@@ -5062,20 +5062,19 @@ static inline __attribute__((always_inline)) void check_lower_logical_arm(CheckL
     }
 }
 
-// A logical operator or a conditional, of class `class` and type `type` (check_lower_expand's), and a vector's
+// A logical operator or a conditional, of class `class` and value `value` (check_lower_expand's), and a vector's
 // conditional (check_lower_vector_operation's), with `vector` set, which splats a scalar arm (check_lower_logical_arm):
 // check_lower_expand's copy, with `vector` false, has no test of it.
-static inline __attribute__((always_inline)) void check_lower_logical(CheckLowerWriter* writer, uint32_t node, CheckOp op, uint32_t a, uint32_t b, TypeId type_a,
-                                                                      TypeId type_b, TypeId type, uint8_t class, bool vector)
+static inline __attribute__((always_inline)) void check_lower_logical(CheckLowerWriter* writer, const CheckProgram* program, uint32_t node, CheckOp op, uint32_t a,
+                                                                      uint32_t b, TypeId type_a, TypeId type_b, const CheckValue* value, uint8_t class, bool vector)
 {
-    const CheckProgram* program = writer->program;
     const bool reuse = op == CHECK_OP_CONDITIONAL && a == b;
     bool truth = false;
     if (check_program_runtime_truth(program, node, a, &truth))
     {
         if (op == CHECK_OP_CONDITIONAL)
         {
-            check_lower_logical_arm(writer, node, truth ? 1 : 2, type, vector);
+            check_lower_logical_arm(writer, node, truth ? 1 : 2, value->type, vector);
         }
         else if ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth))
         {
@@ -5099,7 +5098,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
         check_lower_mark(writer, end);
         if (op == CHECK_OP_CONDITIONAL)
         {
-            check_lower_logical_arm(writer, node, 2, type, vector);
+            check_lower_logical_arm(writer, node, 2, value->type, vector);
         }
         else
         {
@@ -5113,17 +5112,17 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             {
                 if (vector && check_lower_vector_bytes(program->types, type_a) == 0)
                 {
-                    check_lower_vector_splat(writer, type_a, type);
+                    check_lower_vector_splat(writer, type_a, value->type);
                 }
                 else
                 {
-                    check_lower_convert(writer, type_a, type);
+                    check_lower_convert(writer, type_a, value->type);
                 }
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, type_a), retained);
             }
             else
             {
-                check_lower_logical_arm(writer, node, 1, type, vector);
+                check_lower_logical_arm(writer, node, 1, value->type, vector);
             }
         }
         else
@@ -5157,8 +5156,8 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     const uint32_t b = graph->operand1[node];
     if (op == CHECK_OP_CONDITIONAL)
     {
-        check_lower_logical(writer, node, op, a, b, stream->conversions[node].operands[0].type, stream->conversions[node].operands[1].type,
-                            stream->values[node].type, BUSTER_TYPED_CLASS_VECTOR, true);
+        check_lower_logical(writer, program, node, op, a, b, stream->conversions[node].operands[0].type, stream->conversions[node].operands[1].type,
+                            stream->values + node, BUSTER_TYPED_CLASS_VECTOR, true);
     }
     else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
     {
@@ -6135,7 +6134,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             check_lower_operand(writer, node, 0, op == CHECK_OP_MEMBER, type_a);
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_VECTOR && ((op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT) || op == CHECK_OP_CONDITIONAL))
+    else if (class == BUSTER_TYPED_CLASS_VECTOR && op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT)
     {
         check_lower_vector_operation(writer, node);
     }
@@ -6181,7 +6180,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
     {
-        check_lower_logical(writer, node, op, a, b, type_a, type_b, value->type, class, false);
+        // A vector's conditional splats a scalar arm, out of line (check_lower_vector_operation).
+        if (class == BUSTER_TYPED_CLASS_VECTOR && op == CHECK_OP_CONDITIONAL)
+        {
+            check_lower_vector_operation(writer, node);
+        }
+        else
+        {
+            check_lower_logical(writer, program, node, op, a, b, type_a, type_b, value, class, false);
+        }
     }
     else if (op == CHECK_OP_CALL)
     {
