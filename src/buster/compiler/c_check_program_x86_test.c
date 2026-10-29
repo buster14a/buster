@@ -1669,6 +1669,81 @@ static void check_test_program_x86_rows(CheckTest* test)
     check_test_expect(test, rows != 0 && invalid == 0, description);
 }
 
+// A function's target attribute (#180, check_program_targets): in a baseline unit, functions of BMI, BMI2 and CRC32
+// builtins, each by its own attribute, an inherited one, an arch=, a list that turns a feature on and off, a trimmed one
+// and "default", against clang -O0's code; then what doesn't apply, refused as without the attribute (one after the
+// definition, one clang ignores, one that turns the feature off), a function of several versions (target attributes
+// of two strings, target_clones), and vectors where the unit's target or the function's has no AVX-512F and VL.
+static void check_test_program_x86_target_attributes(CheckTest* test, const char* clang)
+{
+    X86Target baseline = { 0 };
+    X86Target v3 = { 0 };
+    X86Target zen = { 0 };
+    const bool parsed = x86_target_parse("x86-64", strlen("x86-64"), &baseline) && x86_target_parse("x86-64-v3", strlen("x86-64-v3"), &v3) &&
+                        x86_target_parse("znver5", strlen("znver5"), &zen);
+    check_test_expect(test, parsed, "the target attributes' units' targets");
+    const X86Target native = x86_target_native();
+    const uint64_t needed = BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(BMI2) | BUSTER_X86_FEATURE(SSE42) | BUSTER_X86_FEATURE(CRC32);
+    if (parsed)
+    {
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64";
+        check_test_program_source_native_limits(test,
+                                                "__attribute__((target(\"bmi2\"))) static unsigned deposit(unsigned x, unsigned m);"
+                                                "static unsigned deposit(unsigned x, unsigned m){return __builtin_ia32_pdep_si(x,m);}"
+                                                "__attribute__((target(\"arch=x86-64-v3\"))) static unsigned long long extract(unsigned long long x, unsigned long long m)"
+                                                "{return __builtin_ia32_pext_di(x,m);}"
+                                                "__attribute__((target(\"bmi\"))) static unsigned field(unsigned x, unsigned c){return __builtin_ia32_bextr_u32(x,c);}"
+                                                "__attribute__((target(\" crc32 \"))) static unsigned check(unsigned c, unsigned char b){return __builtin_ia32_crc32qi(c,b);}"
+                                                "__attribute__((target(\"avx2,no-avx2,bmi2\"))) static unsigned low(unsigned x, unsigned n){return __builtin_ia32_bzhi_si(x,n);}"
+                                                "static unsigned plain(unsigned x);__attribute__((target(\"default\"))) static unsigned plain(unsigned x){return x*3u;}"
+                                                "int tested(int n){unsigned h=2166136261u;for(int i=0;i<8;i++){unsigned x=(unsigned)n*2654435761u+(unsigned)i*40503u;"
+                                                "h=(h^deposit(x,0x0f0f0f0fu))*16777619u;"
+                                                "h=(h^(unsigned)extract((unsigned long long)x<<17|x,0x00ff00ff00ff00ffull))*16777619u;"
+                                                "h=(h^field(x,0x0804u+(unsigned)i))*16777619u;h=(h^check(h,(unsigned char)x))*16777619u;"
+                                                "h=(h^low(x,(unsigned)i*4u))*16777619u;h=(h^plain(x))*16777619u;}return (int)h;}",
+                                                "x86-target-attributes", clang, false, -1, 0, &baseline, (native.features & needed) == needed);
+        check_test_program_build_release();
+        static const struct
+        {
+            const char* name;
+            const char* source;
+            const char* reason;
+        } refusals[] = {
+            { "target-attribute-after-definition",
+              "int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}__attribute__((target(\"bmi2\"))) int tested(int n);",
+              "x86 builtins whose instructions the target hasn't" },
+            { "target-attribute-ignored", "__attribute__((target(\"bmi2,bogus\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
+              "x86 builtins whose instructions the target hasn't" },
+            { "target-attribute-versions", "__attribute__((target(\"bmi\"))) int tested(int n);__attribute__((target(\"bmi2\"))) int tested(int n){return n;}",
+              "functions of several target versions (target_clones, or target attributes of other strings)" },
+            { "target-attribute-later-version", "__attribute__((target(\"bmi2\"))) int tested(int n){return n;}__attribute__((target(\"bmi\"))) int tested(int n);",
+              "functions of several target versions (target_clones, or target attributes of other strings)" },
+            { "target-clones", "__attribute__((target_clones(\"bmi2\",\"default\"))) int tested(int n){return n;}",
+              "functions of several target versions (target_clones, or target attributes of other strings)" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refusals); i += 1)
+        {
+            check_test_program_boundary_target(test, refusals[i].source, refusals[i].name, true, false, 0, 0, refusals[i].reason, &baseline);
+        }
+        check_test_program_march = "-march=x86-64-v3";
+        check_test_program_boundary_target(test, "__attribute__((target(\"no-bmi2\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
+                                           "target-attribute-off", true, false, 0, 0, "x86 builtins whose instructions the target hasn't", &v3);
+        check_test_program_march = "-march=znver5";
+        check_test_program_boundary_target(test,
+                                           "typedef int v4si __attribute__((vector_size(16)));"
+                                           "__attribute__((target(\"no-avx512vl\"))) int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
+                                           "target-attribute-without-avx512vl", true, false, 0, 2,
+                                           "vector types in a function whose target attribute turns off AVX-512F or AVX-512VL", &zen);
+        check_test_program_march = "-march=x86-64";
+        check_test_program_boundary_target(test,
+                                           "typedef int v4si __attribute__((vector_size(16)));"
+                                           "__attribute__((target(\"avx512f,avx512vl\"))) int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
+                                           "target-attribute-vectors-in-a-baseline-unit", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL",
+                                           &baseline);
+    }
+}
+
 static __attribute__((noinline)) void check_test_program_x86(CheckTest* test, const char* clang)
 {
     check_test_program_x86_rows(test);
@@ -1707,5 +1782,6 @@ static __attribute__((noinline)) void check_test_program_x86(CheckTest* test, co
             check_test_program_build_release();
             check_test_program_march = "-march=x86-64";
         }
+        check_test_program_x86_target_attributes(test, clang);
     }
 }
