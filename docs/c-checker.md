@@ -1498,8 +1498,9 @@ What the lowering covers past scalars (#145's programs):
   (`x86_target_native`), and compile and link elsewhere. `test-checker
   --program-vectors` runs them and the vector programs alone.
 - **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
-  `__builtin_convertvector`, the `__builtin_elementwise_*` functions and
-  `__builtin_reduce_*` of integer elements are X86 entries of rows of their own
+  `__builtin_convertvector`, the `__builtin_elementwise_*` functions,
+  `__builtin_reduce_*` of integer elements and `__builtin_nontemporal_load` and
+  `_store` of vectors are X86 entries of rows of their own
   (`c_check_program_vector_builtins.c`):
   - a shuffle by constant indices is VPERMT2 of its two vectors by an index
     vector, a constant (`Tier0Function.vector_constants`), at the wider of the
@@ -1511,6 +1512,15 @@ What the lowering covers past scalars (#145's programs):
     truncation at the operand's, or nothing between elements of one size. One
     of a shuffle's first elements (a vector's low half, as the intrinsics widen
     one) converts that shuffle's first vector in place;
+  - a conversion with floating elements is the pair's instruction, as clang
+    -O0's code is: from 32- and 64-bit integers by their signedness (VCVTDQ2PS,
+    VCVTUDQ2PD, VCVTQQ2PS and the rest, DQ's for 64-bit ones), to them truncated
+    as C converts (VCVTTPS2DQ, VCVTTPD2UQQ and the rest), between floats and
+    doubles, from half-precision elements to floats (VCVTPH2PS) and from floats
+    to them (VCVTPS2PH at the current rounding), from bf16 elements to floats
+    (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), and nothing
+    within one format. A widening one is at the result's width, so that it reads
+    a shuffle's first elements in place (`_mm_cvtps_pd`'s);
   - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
     shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
     has no class for, with a compound literal of constants) are VPMOV's
@@ -1523,22 +1533,37 @@ What the lowering covers past scalars (#145's programs):
   - max and min, the saturating sums and differences of 8- and 16-bit elements,
     abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
     blended in where an element is zero) and the funnel shifts (VPSHLDV and
-    VPSHRDV, with VBMI2) are an instruction each;
+    VPSHRDV, with VBMI2) are an instruction each, and so are sqrt and fma of
+    floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
+    rounding, as llvm.sqrt and llvm.fma are), of vectors and of scalars, whose
+    operands are floating values (`check_vector_scalar_row`, with AVX-512F);
+  - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
+    elements and a nontemporal load VMOVNTDQA, at an address the pointer's
+    element type aligns to the vector's bytes, as clang's code needs them;
   - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
     and VPSRLW) and applies its operation at each step, then moves the element
     into a general register, in two rows where that is more than a row's 8
     records.
 
-  `__builtin_nondeterministic_value` of a vector or a scalar is zeros. Floating
-  elements, a shuffle by a vector of indices, bit reversal, 8-bit
-  multiplication, the funnel shifts of 8-bit elements, the leading zero counts
-  of 8- and 16-bit ones, and the rows whose extensions the target hasn't (VBMI
-  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2) are refused
-  by name. `test-checker`'s vector builtin programs
-  (`c_check_program_vector_builtins_test.c`) call each at every width, the
-  narrowing conversions as the headers write them, with the masked truncating
-  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
-  paths against clang -O0's code for znver5.
+  `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
+  `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
+  floating constant the checker folded is its bytes; between integers or
+  pointers, or between vectors, the value's bits are the result; and between an
+  integer and a float or a double they go through a frame temporary, as clang
+  -O0's go through memory. The other floating elementwise functions and
+  conversions (of 8- and 16-bit integers, to bf16 elements, between
+  half-precision elements and doubles), the half-precision and bf16 elements'
+  elementwise functions, floating reductions, a shuffle by a vector of indices,
+  bit reversal, 8-bit multiplication, the funnel shifts of 8-bit elements, the
+  leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
+  at underaligned addresses, bit casts of other types, and the rows whose
+  extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
+  BITALG, VPOPCNTDQ, VBMI2, DQ) are refused by name. `test-checker`'s vector
+  builtin programs (`c_check_program_vector_builtins_test.c`) call each at every
+  width, the narrowing conversions and the floating intrinsics as the headers
+  write them, with the masked truncating stores and the leaves (monitorx and
+  mwaitx where the host has MWAITX), by both paths against clang -O0's code for
+  znver5.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
