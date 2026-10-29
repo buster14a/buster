@@ -1263,7 +1263,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     {
         again = false;
         Runtime runtime;
-        const SnapshotResult opened = runtime_open(&runtime, cached ? cache : NULL);
+        const SnapshotResult opened = runtime_open_cache(&runtime, cached ? cache : NULL, RUNTIME_KIND_DYNAMIC);
         // The libraries -l names, imported for this runtime, whose version indices theirs follow.
         static RuntimeLibraries named;
         const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;

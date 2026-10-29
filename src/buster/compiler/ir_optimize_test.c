@@ -225,6 +225,10 @@ static bool ir_optimize_test_equal(const IrFunction* a, const IrFunction* b)
         equal = equal && (a->extra_count == 0 || memcmp(a->extra, b->extra, (uint64_t)a->extra_count * 4) == 0);
         equal = equal && (a->constant_count == 0 || memcmp(a->constants, b->constants, (uint64_t)a->constant_count * sizeof(IrConstant)) == 0);
         equal = equal && (a->call_count == 0 || memcmp(a->calls, b->calls, (uint64_t)a->call_count * sizeof(IrCall)) == 0);
+        equal = equal && a->label_count == b->label_count && (a->label_count == 0 || memcmp(a->labels, b->labels, (uint64_t)a->label_count * 4) == 0);
+        equal = equal && a->abi_call_count == b->abi_call_count && (a->abi_call_count == 0 || memcmp(a->abi_calls, b->abi_calls, (uint64_t)a->abi_call_count * sizeof(IrAbiCall)) == 0);
+        equal = equal && a->passed_count == b->passed_count && (a->passed_count == 0 || memcmp(a->passed, b->passed, (uint64_t)a->passed_count * sizeof(IrPassed)) == 0);
+        equal = equal && a->parameter_passed == b->parameter_passed && a->result_size == b->result_size && memcmp(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) == 0 && a->variadic == b->variadic && memcmp(&a->incoming, &b->incoming, sizeof(AbiCall)) == 0;
     }
     return equal;
 }
@@ -236,6 +240,9 @@ struct IrOptimizeExecution
     uint64_t effects;
     uint32_t status;
 };
+
+// The fixtures' producer defines label k's symbol as BUSTER_IR_OPTIMIZE_TEST_LABEL + k (#131's labels).
+#define BUSTER_IR_OPTIMIZE_TEST_LABEL 64
 
 // Independent bounded interpreter used only by the original fixtures. It does not use optimizer opcode tables,
 // use enumeration, lattice, CFG, or fold code. Integer arithmetic goes through the independent wide-C oracle.
@@ -346,6 +353,7 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                     }
                 } break;
                 case IR_STACK_ADDR: value = (uint64_t)a * 64 + 1; break;
+                case IR_SYMBOL_ADDR: value = (uint64_t)a << 32; break;
                 case IR_ADDRESS: value = values[a] + (b == BUSTER_IR_NONE ? 0 : values[b] * f->addresses[f->c[i]].scale) + f->addresses[f->c[i]].offset; break;
                 case IR_LOAD:
                 case IR_STORE:
@@ -379,11 +387,28 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 case IR_CALL:
                 case IR_CALL_INDIRECT:
                 {
+                    // A call with ABI records (#131): an aggregate argument is the address of the bytes the callee reads,
+                    // and an aggregate result's bytes go where c points.
                     const IrCall call = f->calls[b];
+                    const IrAbiCall* abi = call.abi != 0 ? &f->abi_calls[call.abi - 1] : 0;
                     value = op == IR_CALL ? a : values[a];
-                    for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
+                    for (uint32_t argument = 0; folded && argument < call.argument_count; argument += 1)
                     {
-                        value = value * 31 + values[f->extra[call.argument_first + argument]];
+                        const uint64_t argument_value = values[f->extra[call.argument_first + argument]];
+                        const uint32_t size = abi != 0 ? f->passed[abi->passed + argument].size : 0;
+                        folded = size == 0 || (argument_value != 0 && argument_value - 1 <= sizeof(memory) && size <= sizeof(memory) - (argument_value - 1));
+                        value = value * 31 + (size == 0 ? argument_value : 0);
+                        for (uint32_t byte = 0; folded && byte < size; byte += 1)
+                        {
+                            value = value * 31 + memory[argument_value - 1 + byte];
+                        }
+                    }
+                    const uint32_t bytes = abi != 0 ? abi->result_size : 0;
+                    const uint64_t into = bytes != 0 ? values[f->c[i]] : 0;
+                    folded = folded && (bytes == 0 || (into != 0 && into - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (into - 1)));
+                    for (uint32_t byte = 0; folded && byte < bytes; byte += 1)
+                    {
+                        memory[into - 1 + byte] = (uint8_t)(value >> (byte % 8 * 8));
                     }
                     execution.effects = execution.effects * 65537 + value;
                 } break;
@@ -399,6 +424,12 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                             target = f->extra[b + 2 + entry * 2];
                         }
                     }
+                } break;
+                case IR_BR_INDIRECT:
+                {
+                    // To the label whose symbol's address the operand holds, or nowhere (status 4).
+                    const uint64_t label = (values[a] >> 32) - BUSTER_IR_OPTIMIZE_TEST_LABEL;
+                    target = (values[a] & UINT32_MAX) == 0 && label < f->label_count ? f->labels[label] : BUSTER_IR_NONE;
                 } break;
                 case IR_RET:
                 {
@@ -840,6 +871,227 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
     arena_pop_to(input, 0);
 }
 
+// #131's labels through the CFG cleanup (#783), each with a br_indirect that picks label 0 for an odd parameter: kind 0
+// threads label 0's block, a jump alone, to its target (the label moves there), kind 1 removes a block that no label or
+// edge reaches beside the live br_indirect (every label keeps its block), and kind 2 removes the function's only
+// br_indirect, in a block a constant branch leaves dead, with its labels' blocks (the labels then have none).
+static bool ir_optimize_test_labels(Arena* arena, IrFunction* f, uint32_t kind)
+{
+    const uint32_t blocks = kind == 2 ? 5 : 4;
+    const IrSizes sizes = {
+        .instruction_count = kind == 0 ? 10 : kind == 1 ? 11 : 13,
+        .block_count = blocks,
+        .constant_count = 4,
+        .parameter_count = 1,
+        .label_count = 2,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->parameter_types[0] = IR_I1;
+        f->symbol_count = 128;
+        f->constants[0].low = 10;
+        f->constants[1].low = 20;
+        f->constants[2].low = 30;
+        f->constants[3].low = 1;
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        // The selecting block: b0, or for kind 2 b2, behind b0's constant branch to b1.
+        uint32_t first = 1;
+        if (kind == 2)
+        {
+            ir_optimize_test_instruction(f, 1, IR_CONST, IR_I1, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(f, 2, IR_CBR, IR_VOID, 1, 1, 2);
+            ir_optimize_test_instruction(f, 3, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(f, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            f->block_offsets[1] = 3;
+            f->block_offsets[2] = 5;
+            first = 5;
+        }
+        ir_optimize_test_instruction(f, first, IR_SYMBOL_ADDR, IR_PTR, BUSTER_IR_OPTIMIZE_TEST_LABEL, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, first + 1, IR_SYMBOL_ADDR, IR_PTR, BUSTER_IR_OPTIMIZE_TEST_LABEL + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, first + 2, IR_SELECT, IR_PTR, 0, first, first + 1);
+        ir_optimize_test_instruction(f, first + 3, IR_BR_INDIRECT, IR_VOID, first + 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t next = first + 4;
+        uint32_t block = kind == 2 ? 3 : 2;
+        if (kind != 2)
+        {
+            // b1: label 0's jump alone, to b3 (kind 0), or a block with no label and no edge (kind 1).
+            f->block_offsets[1] = next;
+            if (kind == 0)
+            {
+                ir_optimize_test_instruction(f, next, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                next += 1;
+            }
+            else
+            {
+                ir_optimize_test_instruction(f, next, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(f, next + 1, IR_RET, IR_VOID, next, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                next += 2;
+            }
+        }
+        // Two returning blocks: 20 then 10 (kind 0: label 1's, then label 0's jump's target), or 10 then 20 (label 0's,
+        // then label 1's).
+        for (uint32_t r = 0; r < 2; r += 1)
+        {
+            f->block_offsets[block + r] = next;
+            ir_optimize_test_instruction(f, next, IR_CONST, IR_I64, kind == 0 ? 1 - r : r, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(f, next + 1, IR_RET, IR_VOID, next, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            next += 2;
+        }
+        f->block_offsets[blocks] = next;
+        f->labels[0] = kind == 0 ? 1 : block;
+        f->labels[1] = kind == 0 ? 2 : block + 1;
+    }
+    return created;
+}
+
+// An aggregate call (#131's ABI records) whose result's destination follows a dead instruction (#783): DCE renumbers the
+// destination, which the call's c must follow, and its old number becomes the argument's slot. It passes 16 bytes on
+// the stack and the parameter, and returns 16 bytes in registers.
+static bool ir_optimize_test_aggregate_call(Arena* arena, IrFunction* f)
+{
+    const IrSizes sizes = {
+        .instruction_count = 8,
+        .block_count = 1,
+        .extra_count = 2,
+        .slot_count = 2,
+        .call_count = 1,
+        .call_type_count = 2,
+        .parameter_count = 1,
+        .abi_call_count = 1,
+        .passed_count = 2,
+    };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->parameter_types[0] = IR_I64;
+        f->symbol_count = 128;
+        f->block_offsets[1] = 8;
+        for (uint32_t slot = 0; slot < 2; slot += 1)
+        {
+            f->slots[slot] = (IrSlot){
+                .size = 16,
+                .alignment = 8,
+                .type = IR_VOID,
+                .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN,
+            };
+        }
+        f->extra[0] = 3;
+        f->extra[1] = 0;
+        f->call_types[0] = IR_PTR;
+        f->call_types[1] = IR_I64;
+        f->calls[0] = (IrCall){
+            .argument_count = 2,
+            .parameter_count = 2,
+            .result_type = IR_VOID,
+            .abi = 1,
+        };
+        f->abi_calls[0] = (IrAbiCall){
+            .call = {
+                .stack_bytes = 16,
+                .stack_alignment_log2 = 4,
+                .integer_registers = 1,
+                .result = {
+                    .kind = BUSTER_ABI_RESULT_REGISTERS,
+                    .part_bytes = 8,
+                    .registers = {
+                        BUSTER_ABI_RAX,
+                        BUSTER_ABI_RDX,
+                        BUSTER_ABI_REGISTER_NONE,
+                        BUSTER_ABI_REGISTER_NONE,
+                    },
+                },
+            },
+            .result_size = 16,
+        };
+        f->passed[0] = (IrPassed){
+            .location = {
+                .registers = {
+                    BUSTER_ABI_REGISTER_NONE,
+                    BUSTER_ABI_REGISTER_NONE,
+                },
+                .kind = BUSTER_ABI_LOCATION_STACK,
+            },
+            .size = 16,
+        };
+        f->passed[1] = (IrPassed){
+            .location = {
+                .registers = {
+                    BUSTER_ABI_RDI,
+                    BUSTER_ABI_REGISTER_NONE,
+                },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            },
+        };
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 1, IR_NEG, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 3, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 4, IR_STORE, IR_VOID, 3, 0, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 5, IR_CALL, IR_VOID, 50, 0, 2);
+        ir_optimize_test_instruction(f, 6, IR_LOAD, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_optimize_test_instruction(f, 7, IR_RET, IR_VOID, 6, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// #783: the labels' and the aggregate call's fixtures through every pass mask, then optimized by every pass on both
+// paths, with each label's block and the call's destination as the test works them out.
+static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t kind = 0; kind < 4; kind += 1)
+    {
+        IrFunction f = { 0 };
+        const bool created = kind < 3 ? ir_optimize_test_labels(input, &f, kind) : ir_optimize_test_aggregate_call(input, &f);
+        ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
+        for (uint32_t passes = 0; created && passes < 8; passes += 1)
+        {
+            ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
+        }
+        for (uint32_t path = 0; created && path < 2; path += 1)
+        {
+            const uint64_t mark = vector->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.scalar = path != 0;
+            IrOptimizeResult result = { 0 };
+            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            const IrFunction* out = &result.function;
+            bool expected = check.error == IR_OK;
+            if (expected && kind == 0)
+            {
+                // b1 is threaded to b3: b0, b2 and b3 are blocks 0 to 2, and label 0 is b3's.
+                expected = out->block_count == 3 && out->label_count == 2 && out->labels[0] == 2 && out->labels[1] == 1;
+            }
+            else if (expected && kind == 1)
+            {
+                expected = out->block_count == 3 && out->label_count == 2 && out->labels[0] == 1 && out->labels[1] == 2;
+            }
+            else if (expected && kind == 2)
+            {
+                bool indirect = false;
+                for (uint32_t i = 0; i < out->instruction_count; i += 1)
+                {
+                    indirect |= out->op[i] == IR_BR_INDIRECT;
+                }
+                expected = !indirect && out->block_count == 2 && out->label_count == 2 && out->labels[0] == BUSTER_IR_NONE && out->labels[1] == BUSTER_IR_NONE;
+            }
+            else if (expected)
+            {
+                // The neg is gone: the call writes where the first stack_addr's new value points, with the input's
+                // records.
+                const uint32_t call = 4;
+                expected = out->instruction_count == 7 && out->op[call] == IR_CALL && out->c[call] == 1 && out->op[1] == IR_STACK_ADDR && out->a[1] == 0 && out->calls[out->b[call]].abi == 1 && out->abi_call_count == 1 &&
+                           memcmp(out->abi_calls, f.abi_calls, sizeof(IrAbiCall)) == 0 && out->passed_count == 2 && memcmp(out->passed, f.passed, 2 * sizeof(IrPassed)) == 0;
+            }
+            ir_optimize_test_expect(test, expected, kind == 0 ? "a threaded block's label moves to its target" : kind == 1 ? "labels keep their blocks beside a removed unreachable block" : kind == 2 ? "a dead br_indirect's labels have no block" : "an aggregate call's destination follows DCE's renumbering");
+            arena_pop_to(vector, mark);
+        }
+        arena_pop_to(input, 0);
+    }
+}
+
 static void ir_optimize_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
@@ -897,6 +1149,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             arena_pop_to(&input, 0);
         }
         ir_optimize_test_threading(test, &scratch);
+        ir_optimize_test_records(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_limits(test, &input, &vector, &scratch);
         ir_optimize_test_entry_phi(test, &input, &vector, &scratch);
         for (uint32_t length = 0; length < 130; length += 1)

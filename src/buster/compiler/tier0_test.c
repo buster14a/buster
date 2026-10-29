@@ -29,8 +29,8 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
-// The calling convention's compiled worlds keep their calls within Tier 0's depths, and their types within its objects'
-// alignments (calling_convention_test.c).
+// The calling convention's compiled worlds keep their types within Tier 0's objects' alignments, and their calls with
+// memory-class values within its depths (calling_convention_test.c).
 _Static_assert(BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS == BUSTER_TIER0_INTEGER_DEPTHS && BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS == BUSTER_TIER0_FLOATING_DEPTHS,
                "the compiled worlds' depths must be Tier 0's");
 _Static_assert(BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 == BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2, "the compiled worlds' alignments must be Tier 0's");
@@ -921,31 +921,15 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
 }
 
 // #221: every record of a function's code must have a covered form (x86_effects), which the effects' consumers (the
-// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, but an X86 entry's: the front end's row, any
-// VEX or EVEX form. A function with X86 entries needs its code's entries' first records (Tier0Function.entry_records)
-// to tell those apart; without them, its records go unchecked.
-static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, const Tier0Code* code)
+// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, an X86 entry's too: a row's form must be
+// covered (tier0_operation_form_valid, #760).
+static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Code* code)
 {
-    bool rows = false;
-    for (uint32_t e = 0; e < function->count; e += 1)
-    {
-        rows |= function->kinds[e] == BUSTER_TYPED_X86;
-    }
-    const bool entries = code->entry_records != 0 && code->entry_count == function->count;
     bool result = true;
-    // The first entry whose first record is past record r: r is that entry's predecessor's (the prologue's before entry
-    // 0's first record, the epilogue's from the last entry's end).
-    uint32_t next = 0;
-    for (uint32_t r = 0; result && (!rows || entries) && r < code->count; r += 1)
+    for (uint32_t r = 0; result && r < code->count; r += 1)
     {
-        while (entries && next <= function->count && code->entry_records[next] <= r)
-        {
-            next += 1;
-        }
-        const bool row = entries && next >= 1 && next <= function->count && function->kinds[next - 1] == BUSTER_TYPED_X86;
-        result = row || tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
-                                          "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r,
-                                          x86_semantics_test_name(code->records[r].form));
+        result = tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
+                                   "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r, x86_semantics_test_name(code->records[r].form));
     }
     return result;
 }
@@ -1003,7 +987,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
                                        scalar.count);
             char name[64];
             snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
-            result = result && tier0_test_covered(tally, "effects", name, function, &scalar);
+            result = result && tier0_test_covered(tally, "effects", name, &scalar);
         }
         if (result)
         {
@@ -4076,6 +4060,7 @@ struct Tier0TestPassing
 #define BUSTER_TIER0_TEST_N BUSTER_ABI_REGISTER_NONE
 #define BUSTER_TIER0_TEST_X(n) (BUSTER_ABI_REGISTER_VECTOR | (n))
 #define BUSTER_TIER0_TEST_HIGH BUSTER_ABI_FLAG_HIGH
+#define BUSTER_TIER0_TEST_LOW BUSTER_ABI_FLAG_LOW
 // An aggregate of `bytes` aligned to 2^`log2`, in registers `first` and `second` and at `offset` on the stack; a value
 // of `class` in register `first` or at `offset`; a result in registers `first` and `second`.
 #define BUSTER_TIER0_TEST_AGGREGATE(bytes, log2, kind, flags, first, second, offset)                                     \
@@ -4146,6 +4131,14 @@ static const Tier0TestPassing tier0_test_passings[] = {
         BUSTER_TIER0_TEST_AGGREGATE(16, 3, REGISTERS, 0, BUSTER_ABI_RSI, BUSTER_ABI_RDX, 0),
         BUSTER_TIER0_TEST_VALUE(I64, REGISTERS, BUSTER_ABI_RCX, 0),
     }, BUSTER_TIER0_TEST_RESULT(MEMORY, 0, 0, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N), 40 },
+    // The low eightbyte alone of a larger aggregate in its 8-byte slot (LOW: where clang's count has a register LLVM
+    // hasn't), each before a value in the next slot, which a copy of the aggregate's bytes would overwrite.
+    { "low eightbytes on the stack", 4, 32, {
+        BUSTER_TIER0_TEST_AGGREGATE(16, 3, STACK, BUSTER_TIER0_TEST_LOW, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 0),
+        BUSTER_TIER0_TEST_VALUE(I64, STACK, BUSTER_TIER0_TEST_N, 8),
+        BUSTER_TIER0_TEST_AGGREGATE(10, 1, STACK, BUSTER_TIER0_TEST_LOW, BUSTER_TIER0_TEST_N, BUSTER_TIER0_TEST_N, 16),
+        BUSTER_TIER0_TEST_VALUE(I64, STACK, BUSTER_TIER0_TEST_N, 24),
+    }, BUSTER_TIER0_TEST_NO_RESULT, 0 },
 };
 
 // The words of the stack a probe records and a driver passes, a hidden result's bytes, each parameter's place in the out
@@ -4981,6 +4974,10 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a call's result in rax and rbx", 3, false, BUSTER_TIER0_TEST_METADATA },
     { "a return of VOID with a hidden result", 12, true, "a return of an aggregate that isn't an address (U64)" },
     { "a function with a hidden result that reaches its end", 12, true, "a function returning an aggregate that reaches its end" },
+    { "a low eightbyte on the stack of 8 bytes", 13, false, BUSTER_TIER0_TEST_METADATA },
+    { "a low eightbyte on the stack with HIGH", 13, false, BUSTER_TIER0_TEST_METADATA },
+    { "LOW in registers", 2, false, BUSTER_TIER0_TEST_METADATA },
+    { "a low eightbyte's slot past the call's area", 13, false, BUSTER_TIER0_TEST_METADATA },
 };
 
 // Applies break `b` to a caller or a function built from its fixture.
@@ -5201,6 +5198,18 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
         case 56:
             // The pointer and its RETURN left out, so that the copy falls off the end.
             callee->function.count -= 2;
+            break;
+        case 57:
+            sizes[0] = 8;
+            break;
+        case 58:
+            locations[0].flags |= BUSTER_ABI_FLAG_HIGH;
+            break;
+        case 59:
+            locations[0].flags = BUSTER_ABI_FLAG_LOW;
+            break;
+        case 60:
+            locations[2].stack_offset = 32;
             break;
         default:
             break;

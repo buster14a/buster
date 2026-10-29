@@ -445,6 +445,10 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
         {
             extras += (uint64_t)f->c[i] * 2 + 1;
         }
+        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+        {
+            extras += f->c[i];
+        }
         else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
         {
             extras += f->calls[f->b[i]].argument_count;
@@ -488,6 +492,12 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             const uint64_t count = (uint64_t)f->c[i] * 2 + 1;
             memcpy(view.extra + extra, f->extra + f->b[i], count * sizeof(uint32_t));
             extra += count;
+        }
+        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+        {
+            view.b[i] = extra;
+            memcpy(view.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * sizeof(uint32_t));
+            extra += f->c[i];
         }
         else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
         {

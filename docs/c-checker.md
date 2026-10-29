@@ -1312,7 +1312,12 @@ What the lowering covers past scalars (#145's programs):
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is NO_CLASS passes as its low eightbyte alone, an
+  `i64` or a `double` in clang's code, in a register or, when clang's count of
+  registers has one left and LLVM's none, in one 8-byte stack slot, the next
+  argument's after it (`abi_assign`'s `BUSTER_ABI_FLAG_LOW`), which Tier 0
+  copies as one part (#137). A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
@@ -1345,7 +1350,11 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area, and
+  `va_arg` of a vector takes the path of a struct of its bytes, as a 128-bit
+  integer's does (a 16-byte one from its XMM register's slot of the save area,
+  a wider one in the overflow area, where the call puts it), and loads the
+  vector from their address. Named
   arguments aligned past 16 bytes align the incoming area to them, which
   Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
@@ -1444,6 +1453,41 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **`_BitInt(N)` of up to 64 bits (#148).** It takes the narrowest class of 8,
+  16, 32 or 64 bits that holds it (`check_lower_type_class`), its values extended
+  from N bits in it, as clang stores them (`check_lower_bit_int_shift`). What
+  may leave other bits is extended again after it by a pair of shifts
+  (`check_lower_bit_int_extend`): a sum, a difference, a product, a left shift,
+  a negation, a complement, an update, a conversion to it, and a value from
+  memory or a call (an update's old value too), whose bits past N the convention
+  leaves unspecified and clang's loads ignore. Tier 0 computes, compares and
+  shifts in I32, U32, I64 and U64 alone, so an operation of class I8, U8, I16 or
+  U16 (a `_BitInt`'s alone, as C promotes the other narrow types) converts its
+  operands to I32 or U32, by their signedness, and its result back
+  (`check_lower_computed`), and so does a switch on one, its cases too. A
+  constant extends from N bits. An expression of a `_BitInt` goes first to
+  `check_lower_bit_int_node`, out of line, by its value's kind, which the
+  expansion reads for every expression anyway, and the batch's templates
+  (`c_check_program_batch.c`) take none, by its type's fact
+  (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
+  `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
+  conversion's or constant's type for one, and its tasks' loop
+  (`check_lower_drain`) is a copy without the expansion's and the
+  conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
+  3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts. A constant comes
+  folded to its width's bits, which the lowering extends from the width, as a
+  narrower one's: a negative one's conversion to `__int128` or compare reads it
+  as it is.
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1654,7 +1698,10 @@ What the lowering covers past scalars (#145's programs):
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
-- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+- **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
+  GNU's complex integer types (`_Complex char` to `_Complex unsigned
+  __int128`) and the complex `_BitInt`s of up to 128 bits that the usual
+  arithmetic conversions make, are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
   objects, the stream carries a value by its object's address, and copies,
@@ -1670,21 +1717,34 @@ What the lowering covers past scalars (#145's programs):
   of two complex values, and a real dividend's over a complex divisor, call
   libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
   `__divxc3`, runtime functions as the 128-bit integers' are, which give the
-  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  values clang -O0's inline product and its NaN recovery give. A complex
+  integer type's operation computes in its element's class, or in 32 bits for
+  one of 8 or 16 (`check_lower_computed`), each part wrapped back to the
+  element's width (a `_BitInt`'s extended from it, as its values are, and so
+  are its parts loaded from memory, where another compiler's argument leaves
+  the bits past the width as they come), and its product and quotient are
+  clang -O0's inline ones,
+  in the element's type whatever the operands' domains: (ac − bd) + (ad + bc)i,
+  and ((ac + bd) / (cc + dd)) + ((bc − ad) / (cc + dd))i, each product and sum
+  wrapped before the division (`check_lower_complex_quotient`; an `__int128`
+  part's, or a `_BitInt`'s of 65 to 128 bits, computes in Tier 0's 128-bit
+  classes, and its divisions are libgcc's `__divti3` and `__udivti3`). `==` and `!=`
   compare both parts; a value's truth is either part's; a conversion converts
   each part (to a real type the real part, to `_Bool` the truth); a compound
   assignment reads its destination in the calculation's type through its
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
-  parts are a floating constant's (a `long double`'s in the function's table).
+  parts are a floating constant's (a `long double`'s in the function's table),
+  or a complex integer constant's halves, each its part's bits.
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: GNU's
-  complex integer types ("complex integer types") and the complex types of
-  the other floating types, `_Complex _Float16` and `_Complex __float128`
-  ("complex types other than _Complex float, double and long double"). A
+  The complex types it doesn't take are refused by what they need: the
+  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
+  bits"), and the complex types of the other floating types, `_Complex
+  _Float16` and `_Complex __float128` ("complex types other than _Complex
+  float, double and long double"). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
@@ -1806,7 +1866,10 @@ What the lowering covers past scalars (#145's programs):
   difference from the lowest case's, unsigned, is past the last entry goes to
   the default or the switch's end, and any other to the table's address plus
   the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
-  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. Its labels and
+  that jump are the function's next table in Tier 0's columns
+  (`label_tables`, `table_jumps`, #785), so that the IR's `br_indirect` for it
+  goes to its own labels alone. The table is a
   `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
   label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
   record as it does `&&label`'s) with the entry's offset as its addend, as
@@ -1849,8 +1912,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: `__float128` values,
+`_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation

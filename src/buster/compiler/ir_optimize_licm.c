@@ -282,6 +282,10 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
         {
             extras += (uint64_t)f->c[i] * 2 + 1;
         }
+        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+        {
+            extras += f->c[i];
+        }
         else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
         {
             extras += f->calls[f->b[i]].argument_count;
@@ -370,6 +374,12 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
                 const uint64_t words = (uint64_t)f->c[i] * 2 + 1;
                 memcpy(view.extra + extra, f->extra + f->b[i], words * 4);
                 extra += words;
+            }
+            else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+            {
+                view.b[out] = extra;
+                memcpy(view.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * 4);
+                extra += f->c[i];
             }
             else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
             {
