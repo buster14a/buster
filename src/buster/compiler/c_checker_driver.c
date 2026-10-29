@@ -1872,7 +1872,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .initializer_references = data.references,
                         .initializer_reference_count = data.reference_count,
                         .scalar = scalar,
-                        .target_features = options->target.features,
+                        .target = options->target,
+                        .predefines = &options->predefines,
                     };
                     const bool program_diagnostics = result == 0 ||
                         (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp->errors != 0 &&

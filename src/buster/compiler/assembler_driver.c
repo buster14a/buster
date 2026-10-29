@@ -271,7 +271,7 @@ static int run_assembler_command(int count, char** arguments)
         }
         const uint64_t start = asm_clock();
         X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&arena, X86MatchIndex, 1);
-        if (!valid || index == 0 || !x86_encoder_initialize() || !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
+        if (!valid || index == 0 || !x86_encoder_initialize() || !x86_semantics_initialize() || !(preprocessed ? asm_preprocess_file(input, preprocessing, &arena, &source) : asm_read_file(input, &arena, &source)))
         {
             fprintf(stderr, "%s: unable to initialize or read assembly input (maximum 16 MiB)\n", input);
         }
