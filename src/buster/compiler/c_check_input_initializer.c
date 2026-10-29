@@ -97,7 +97,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         }
     }
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
-    if (valid && (incomplete || check_const_eligible(reader->types, type)))
+    if (valid && (incomplete || check_const_eligible(reader->types, type) || check_input_auto_type(type)))
     {
         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
         reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
@@ -148,6 +148,96 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
 
 #include "c_check_input_const_values.c"
 
+// An __auto_type declaration's type, once the walk has read its initializer (whose uses' declarations it captured:
+// inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
+// _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
+// there, a bit-field's value one at the member's name, an incomplete type one at the variable's name, and an _Alignas
+// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this); a variably
+// modified type, whose sizes the declaration would have evaluated, is refused by name. The declaration's columns take the
+// type, which is returned, or 0.
+static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputReader* reader, uint32_t declaration, uint32_t begin, uint32_t end,
+                                                                     TypeId placeholder)
+{
+    const Parser* parser = reader->parser;
+    TypeTable* types = reader->types;
+    const uint32_t assignment = begin - 1;
+    uint32_t self = BUSTER_CHECK_NONE;
+    for (uint32_t token = begin; token < end && self == BUSTER_CHECK_NONE; token += 1)
+    {
+        self = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == declaration ? token : BUSTER_CHECK_NONE;
+    }
+    CheckValue value = { 0 };
+    uint32_t failed = BUSTER_CHECK_NONE;
+    const bool evaluated = self == BUSTER_CHECK_NONE && check_input_evaluate_cached_at(reader, begin, end, &value, &failed);
+    TypeId result = 0;
+    if (self != BUSTER_CHECK_NONE)
+    {
+        check_input_report(reader, self, CHECK_INPUT_AUTO_TYPE_SELF);
+    }
+    else if (!evaluated)
+    {
+        // An identifier the walk found no declaration for is clang's undeclared one.
+        const bool undeclared = failed < parser->tokens.count && parser->tokens.kinds[failed] == PARSE_KIND_IDENTIFIER &&
+                                reader->output->declarations[failed] == BUSTER_CHECK_NONE;
+        if (!reader->output->resource)
+        {
+            check_input_report(reader, failed < parser->tokens.count ? failed : begin, undeclared ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+        }
+    }
+    else if ((value.flags & BUSTER_CHECK_BIT_FIELD) != 0)
+    {
+        uint32_t root = reader->first_child[assignment];
+        while (root != BUSTER_CHECK_NONE && root < assignment)
+        {
+            root = reader->next_child[root];
+        }
+        const bool member = root < end && (parser->tokens.kinds[root] == PARSE_KIND_PERIOD || parser->tokens.kinds[root] == PARSE_KIND_ARROW);
+        check_input_report(reader, member ? reader->ends[root] : begin, CHECK_INPUT_AUTO_TYPE_BIT_FIELD);
+    }
+    else
+    {
+        const TypeId deduced = check_input_type_result(reader, type_adjust_parameter(types, value.type));
+        CheckInputAttributes* attributes = reader->output->attributes[declaration];
+        const uint32_t required = attributes != 0 ? attributes->required_alignment_log2 : 0;
+        if (deduced != 0 && !type_is_complete(types, deduced))
+        {
+            check_input_report(reader, declaration, CHECK_INPUT_INCOMPLETE_OBJECT);
+        }
+        else if (deduced != 0 && (type_inherited_flags(types, deduced) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
+        {
+            check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
+        }
+        else if (deduced != 0 && required != 0 && required - 1 < type_alignment_log2(types, deduced))
+        {
+            for (uint32_t i = 0; i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = &attributes->records[i];
+                if (attribute->kind == CHECK_ATTRIBUTE_ALIGNAS)
+                {
+                    check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_ALIGNMENT);
+                }
+            }
+        }
+        else if (deduced != 0)
+        {
+            result = type_qualify(types, deduced, type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+            reader->declared_types[declaration] = result;
+            reader->query_types[assignment] = result;
+            reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
+            if (reader->linkage[declaration] != 0)
+            {
+                const uint32_t name = parser->tokens.names[declaration];
+                reader->linked_types[name] = result;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t declaration)
 {
     const Parser* parser = reader->parser;
@@ -156,6 +246,11 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     const uint32_t assignment = reader->output->compound_objects[declaration] ? declaration : begin - 1;
     TypeId type = reader->declared_types[declaration];
     bool valid = begin < end && end <= parser->tokens.count;
+    if (valid && check_input_auto_type(type))
+    {
+        type = check_input_auto_type_finish(reader, declaration, begin, end, type);
+        valid = type != 0;
+    }
     if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
         uint32_t string_token = begin;

@@ -242,6 +242,9 @@ struct CheckControlWriter
     const uint32_t* region_next;
     // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
     const uint8_t* addressed;
+    // The statement expression's last statement while its region is written: the region's result, never a statement of
+    // its own, also where it is a label's (CheckInputRegion.final_statement).
+    uint32_t region_final;
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
@@ -1070,7 +1073,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     {
         for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
         {
-            if (child > token)
+            if (child > token && child != writer->region_final)
             {
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
@@ -1322,6 +1325,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         }
         else
         {
+            writer->region_final = source->final_statement;
             for (uint32_t child = writer->last[source->block]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
             {
                 if (child != source->final_statement && writer->parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
@@ -1331,6 +1335,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             }
             check_control_drain(writer);
             check_control_end(writer, source->closing);
+            writer->region_final = BUSTER_CHECK_NONE;
             region->count = writer->count - writer->first_entry - region->first;
         }
     }
@@ -2538,6 +2543,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .repeats = repeats,
         .region_first = region_first,
         .region_next = region_next,
+        .region_final = BUSTER_CHECK_NONE,
         .addressed = addressed,
         .entries = entries,
         .tasks = tasks,
