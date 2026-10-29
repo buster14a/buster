@@ -1732,8 +1732,8 @@ What the lowering covers past scalars (#145's programs):
   folds and the checker refuses as not a constant.
   The two control walks filter the parser's immutable kind/role columns in
   bounded 64-byte blocks and visit exact events in source order: function
-  bodies, labels, cases, gotos and label addresses in the first walk; gotos,
-  label addresses and semicolons in the second. Masked tails need no padding;
+  bodies, labels, `__label__` lists, cases, gotos and label addresses in the
+  first walk; gotos, label addresses and semicolons in the second. Masked tails need no padding;
   the scalar option retains the original full traversals. Deferred masking,
   branch priorities, body expiry and diagnostic order are unchanged.
   The control reader counts resolved `&&label` expressions while finding their
@@ -2694,3 +2694,74 @@ The [frozen qualification record](https://github.com/buster14a/buster-performanc
 retains the exact source/binary identities, stage clocks, every object and all
 outliers. Those timings compare `bc1b4861` with `086c24b1`; they do not measure
 this later integration's whole-compile throughput.
+
+## Local labels and `__auto_type` (#147)
+
+**Local labels.** A `__label__` list at a block's start (the parser's
+`PARSE_KIND_LABEL` statement) declares its names as labels of that block, as
+clang's scopes have them. The reader marks the list's tokens
+(`check_input_local_labels`); the controls' first walk pushes the list's names
+where it meets the list and pops them past the block's closing brace
+(`CheckLocalLabels`). A label's definition, a goto and an `&&` inside the block
+take the innermost list's name token as their scope, by which the labels' table
+keys a label with its name (the function's body for the others). An inner list
+so shadows an outer one and the function's label of the same name, and a goto
+from outside the block reaches none of them. Clang's errors, at its places: a
+list's name that its block doesn't define is "use of undeclared label" at the
+name in the list, reported as the block ends; a second definition in the scope
+is "redefinition of label" at its name; and a name that a block's lists declare
+twice is ambiguous where it is defined or used, and undeclared at both of its
+declarations. Clang reports that last one's ambiguity first, the driver in
+source order. A unit without a list builds none of it; the vector path's mask
+takes `__label__`'s kind among the first walk's events, which the scalar path's
+full walk meets anyway.
+
+**A labeled last statement.** A statement expression's value is its last
+statement's through the labels on it, as clang has it: `({ ...; out: r; })` is
+`r`, the idiom local labels serve. The region's final statement is found
+through the labels' children (`check_input_region_prepare`); the expression
+walk finds the region of a terminator whose parent is a label through its
+labels (`check_input_labeled_region`, tested only in a unit with statement
+expressions); the cached evaluation's label passes its statement's value on;
+and the control writer marks the labels but leaves their statement to the
+region's value (`CheckControlWriter.region_final`).
+
+**`__auto_type`.** A variable's declaration with `__auto_type` among its
+specifiers takes its type from its initializer, as clang deduces it in C: the
+initializer's type converted as an lvalue's (its qualifiers dropped, but not
+`_Atomic`, a kind), an array's and a function's decayed, with the specifiers'
+`const` and `volatile`. Until the walk has read the initializer, the
+declaration's type is a placeholder, `restrict int` with the specifiers'
+qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise. Its
+initializer registers a finish event (`check_input_initializer_prepare`), so
+that the initializer's uses capture their declarations as an incomplete array's
+do (`inference_end`). The finish (`check_input_auto_type_finish`) types the
+initializer with the cached evaluator and gives the declaration, its
+initialization's query and kind, and its linked type the deduced type, before
+any later use reads it. The cached evaluator takes a compound literal now, as the
+expression walk's leaf at its `}`: `(struct S){...}` and `(int[]){...}` are
+initializers it types, in `typeof`'s regions too. A use of the placeholder in a
+constant evaluation's binding is a use of the variable in its own initializer
+(`(typeof(x)){0}`, `sizeof(typeof(x))`), refused there.
+
+Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
+specifiers (a parameter's, a member's, a type name's) at the keyword
+(`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
+keyword; a variable without an initializer at its name; an initializer list
+and an array at the initializer; a use of the variable in its initializer at
+the use, an outer variable of its name notwithstanding; a bit-field's value at
+the member's name; a void or incomplete type at the variable's name; and its
+clashes with the other specifiers where clang reports them: a second type
+specifier at itself, and a signedness or a width at its keyword, wherever it is
+in the list (`check_input_auto_type_clash`). Refused by name: what clang deduces
+as C++ deduces a declarator's type and GCC refuses (a pointer declarator, and a
+declaration's second declarator); `_Atomic`, `restrict` and type attributes with
+`__auto_type`; a variably modified deduced type, whose sizes the declaration
+would have evaluated; and a variable with linkage that a declaration before it
+declared, whose types bind before the deduction.
+
+`test-checker`'s source fixtures compare these with clang, their acceptance and
+first error's line, on both paths, and its programs (`local-labels`,
+`auto-type`) run natively against clang -O0's code. `test-checker-driver`
+compares each error's line and column, and its text where the driver's message
+is clang's (`c_checker_driver_gnu_test.c`).

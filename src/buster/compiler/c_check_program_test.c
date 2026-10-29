@@ -3626,6 +3626,31 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "last:if(r>12)goto*r++,&&done;goto*p=&&done;"
         "done:return r*100+k*10+(p==&&done);}",
         "labels-as-values-whole-operand", clang);
+    // GNU C's local labels (#147): a macro's statement expression with a label of its own, expanded twice, whose value is
+    // its labeled last statement's; nested blocks' lists beside the function's label of the same name; a local label's
+    // address; and a goto to a statement expression's last statement under two labels.
+    check_test_program_source(test,
+        "#define FIND(a,k)({__label__ found;int i_=0;for(;i_<4;i_++)if((a)[i_]==(k))goto found;i_=-1;found:i_;})\n"
+        "int tested(int n){int t[4]={3,n,7,n*2};int r=FIND(t,7)*10+FIND(t,n*2);"
+        "{__label__ again,done;int k=n&3;again:if(k-->0){r+=5;goto again;}goto done;done:;}"
+        "{__label__ again;void*p=&&again;int k=2;again:r+=k;if(--k>0)goto*p;}"
+        "int e=0;r+=({int v=n;if(v>5)goto out;v*=2;out:x:e++,v+1;})+e*1000;"
+        "if(r<0)goto again;return r;again:return -r;}",
+        "local-labels", clang);
+    // GNU C's __auto_type (#147): a macro's maximum, nested; a file scope's and a static's; structures from a call and a
+    // compound literal, an array's compound literal, a statement expression's value whose variable has its name, a
+    // loop's, and the specifiers' const over a char's value.
+    check_test_program_source(test,
+        "#define MAX(a,b)({__auto_type a_=(a);__auto_type b_=(b);a_>b_?a_:b_;})\n"
+        "typedef struct{int x;long y;}P;static P make(int n){P p={n,n*3L};return p;}"
+        "__auto_type scale=3L;static __auto_type bias='c';"
+        "int tested(int n){__auto_type m=MAX(n,2L);__auto_type p=make(n);__auto_type q=(P){n+1,7};"
+        "const __auto_type c=(char)n;__auto_type s=\"abcd\";__auto_type v=(int[]){n,n+1,n+2};"
+        "__auto_type r=({__auto_type r=m*scale;r+1;});__auto_type u=(unsigned char)(n*37);"
+        "long t=0;for(__auto_type i=0u;i<3;i++)t+=v[i];__auto_type d=n/2.0;"
+        "__auto_type w=({int k=n;if(k>3)goto done;k=5;done:k*2L;});"
+        "return(int)(m*100+p.y+q.x*q.y+c+s[n&3]+r+t+MAX(MAX(n,1),-n)+bias+u+(long)(d*4)+(long)sizeof(u)*1000+w*(long)sizeof(w));}",
+        "auto-type", clang);
     {
         char source[4096];
         uint32_t length = 0;

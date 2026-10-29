@@ -70,6 +70,15 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
+        case CHECK_INPUT_LABEL_UNDECLARED: result = "use of undeclared label"; break;
+        case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
+        case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
+        case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
+        case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
+        case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
+        case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
+        case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
+        case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
     }
     return result;
 }
@@ -746,6 +755,28 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
+                                 input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // A label's errors name it, as clang's do.
+                            const uint32_t name = parser->tokens.names[token];
+                            const CheckInputMessage label = input->reports[index].message;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 label == CHECK_INPUT_LABEL_UNDECLARED ? "use of undeclared label '%.*s'" :
+                                                 label == CHECK_INPUT_LABEL_REDEFINITION ? "redefinition of label '%.*s'" : "reference to '%.*s' is ambiguous",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER || input->reports[index].message == CHECK_INPUT_AUTO_TYPE_SELF) &&
+                                 token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // An __auto_type variable's errors at its name, or at a use of it, name it as clang's do.
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                 input->reports[index].message == CHECK_INPUT_AUTO_TYPE_INITIALIZER ?
+                                                 "declaration of variable '%.*s' with deduced type '__auto_type' requires an initializer" :
+                                                 "variable '%.*s' declared with deduced type '__auto_type' cannot appear in its own initializer",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else
