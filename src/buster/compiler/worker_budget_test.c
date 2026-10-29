@@ -178,6 +178,22 @@ static void worker_budget_test_pipe(WorkerBudgetTest* test, uint32_t supplied, u
 
 static void worker_budget_test_flags(WorkerBudgetTest* test)
 {
+    static const struct
+    {
+        const char* flags;
+        bool dry_run;
+    } dry_cases[] = {
+        { NULL, false }, { "", false }, { " \t", false }, { "n", true }, { "kn", true },
+        { "ns", true }, { "n -j2 --jobserver-auth=3,4", true }, { "w -j8", false },
+        { " -I/usr/include", false }, { " -Onone", false }, { " -I/opt/inc -j2", false },
+        { " -l2", false }, { " -C dir", false }, { " --no-print-directory", false },
+        { " -j2 --jobserver-auth=3,4", false }, { "name=value", false }, { "w name=n", false },
+    };
+    for (uint32_t f = 0; f < sizeof(dry_cases) / sizeof(dry_cases[0]); f += 1)
+    {
+        worker_budget_test_expect(test, worker_budget_dry_run(dry_cases[f].flags) == dry_cases[f].dry_run,
+                                  "only n in make's short-flag word selects a dry run");
+    }
     const char* absent[] = { NULL, "", "w -j8", " VAR=--jobserver-auth=3,4", " -j -- OTHER=--jobserver-auth=fifo:/not-a-server" };
     for (uint32_t f = 0; f < sizeof(absent) / sizeof(absent[0]); f += 1)
     {
@@ -627,7 +643,7 @@ static void worker_budget_test_dry_run(WorkerBudgetTest* test)
     for (uint32_t form = 0; ready && form < 5; form += 1)
     {
         char flags[128];
-        const char* prefix = form == 0 ? "n" : form == 1 ? "-kn" : form == 2 ? "w VAR=n" : "w n";
+        const char* prefix = form == 0 ? "n" : form == 1 ? "kn" : form == 2 ? "w VAR=n" : "w n";
         snprintf(flags, sizeof(flags), "%s --jobserver-auth=%d,%d", prefix, fds[0], fds[1]);
         if (form == 4)
         {
