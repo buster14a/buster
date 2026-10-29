@@ -4039,8 +4039,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         200,
         256,
     };
-    // (A compiled world's of up to 64 bits, which the producer lowers in the classes of 8 to 64 bits, #534.)
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths) && (!world->compiled || widths[i] <= 64); i += 1)
+    // (A compiled world's of up to 128 bits, which the producer lowers in the classes of 8 to 64 bits (#534) and in the
+    // 128-bit ones.)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths) && (!world->compiled || widths[i] <= 128); i += 1)
     {
         abi_test_world_add(world, type_bit_int(table, widths[i], false));
         abi_test_world_add(world, type_bit_int(table, widths[i], true));
@@ -4562,19 +4563,20 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 #define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
 
 // Whether a value of `type` has one of Tier 0's memory classes in this compiler's C: a long double's (F80, complex long
-// double's parts too), a 128-bit integer's (I128 and U128) or a vector's (VECTOR).
+// double's parts too), a 128-bit integer's or a _BitInt's of 65 to 128 bits (I128 and U128) or a vector's (VECTOR).
 static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
     const uint8_t code = table->types.code[resolved];
-    return (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
+    return (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
+           ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && table->types.size[resolved] == 16) ||
            (kind == BUSTER_TYPE_KIND_COMPLEX && code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE) || kind == BUSTER_TYPE_KIND_VECTOR ||
            kind == BUSTER_TYPE_KIND_EXT_VECTOR;
 }
 
-// Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer or a
-// _BitInt of up to 64 bits, an enum, a pointer, nullptr_t, float and double, a long double, a 128-bit integer, a complex
+// Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
+// to 64 bits or 128, a _BitInt of up to 128 bits, an enum, a pointer, nullptr_t, float and double, a long double, a complex
 // float, double or long double, a struct or a union, and a vector of 16, 32 or 64 bytes of integers or floating values of
 // up to 8 bytes (which only a vector world, AbiTestWorld.vectors, makes), at any alignment the world makes (a value
 // aligned past 8 bytes is an object of its own, and past 16 one in a realigned frame).
@@ -4593,8 +4595,9 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                         (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_FLOATING);
     const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
                                                               code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && size == 16) || complex ||
-                      vector || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
+                      ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
+                      kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     return (scalar || wide) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
 }
 
@@ -5574,7 +5577,10 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         // (#136, #712), but not in a function with memory-class values (a long double, a 128-bit integer or a vector), whose
         // slots its depths index. Our caller's `r = c_callee(...)` may hold r's address under them when the result is a
         // struct, a union, a long double or a 128-bit integer. So in a compiled world's signature with such a value, an
-        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
+        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both). A
+        // _BitInt of 65 to 127 bits, whose value extends from its width as it loads (the convention leaves the bits past it
+        // unspecified) through shifts of 128 bits whose count takes the depth above it, takes one depth more than a 128-bit
+        // integer: it is never the last of the 12.
         bool memory = cross->compiled && abi_test_tier0_memory(table, signature->result);
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -5586,7 +5592,9 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         {
             const TypeId stripped = type_strip_aligned(table, cross->arguments[argument + a]);
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
-            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3);
+            const uint64_t width = type_kind(table, stripped) == BUSTER_TYPE_KIND_BIT_INT ? type_integer_width(table, stripped) : 0;
+            const uint32_t extends = width > 64 && width < 128 ? 1 : 0;
+            const bool full = depths[floating] >= (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3 - extends);
             const TypeId type = memory && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : cross->arguments[argument + a];
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;

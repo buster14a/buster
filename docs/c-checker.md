@@ -1475,8 +1475,17 @@ What the lowering covers past scalars (#145's programs):
   (`check_lower_drain`) is a copy without the expansion's and the
   conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
   3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
-  `_BitInt` destination its value extended so. `_BitInt(65)` to `_BitInt(128)`
-  are refused by name.
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts (a constant comes
+  folded to its width and extended so).
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1883,7 +1892,7 @@ What the lowering covers past scalars (#145's programs):
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`s past 64 bits, inline assembly and so on. The c-testsuite harness counts such a
+`_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation

@@ -1478,8 +1478,8 @@ failure.
 16 bytes and at 64 (`-march=x86-64-v4`, both sides), put C that this compiler
 compiles on our side. Their worlds (`AbiTestWorld.compiled`,
 `abi_test_compiled_passes`) hold what its C passes: integers of up to 64 bits,
-and `_BitInt`s of 2 to 64 bits (#534's lowering, in the classes of 8 to 64
-bits), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
+and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
+bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
 (#133's lowering, as aggregates of their two parts), at 64 bytes the vectors
@@ -1491,7 +1491,7 @@ them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
-no `_BitInt` past 64 bits, vector of another size or of `bool`, complex integer
+no `_BitInt` past 128 bits, vector of another size or of `bool`, complex integer
 or `_Atomic` type, and none of the record runs' directed records, whose
 bit-fields span more than 8 bytes, but a directed record of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
@@ -1504,11 +1504,16 @@ the 128-bit integers' and the vectors'), whose slots its depths index; and our
 caller's `r = c_callee(...)` holds `r`'s address under
 the arguments when the result is a struct, a union, a `long double` or a
 128-bit integer. So a compiled world's signature with a `long double`, a
-128-bit integer or a vector among its arguments or as its result
+128-bit integer (a `_BitInt` of 65 to 128 bits too) or a vector among its
+arguments or as its result
 (`abi_test_tier0_memory`) passes at most 12 integer values (an aggregate is
 its address, and a `long double` or a 128-bit integer takes an integer depth)
 and 15 floating ones, an argument past them becoming one of the other stack's,
-and the others pass their 21 named and 6 unnamed arguments as drawn. Our side is C (`abi_test_write_ours`): per signature, a callee
+and the others pass their 21 named and 6 unnamed arguments as drawn. A
+`_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
+as it loads (the convention leaves the bits past it unspecified), through
+128-bit shifts whose count takes the depth above it, one more than a
+128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
 that stores each named parameter's bytes as it arrived (its incoming copy's,
 which the C caller checks against the data), its unnamed ones read with
 `va_arg`, then writes each named parameter's bytes from the signature's data,

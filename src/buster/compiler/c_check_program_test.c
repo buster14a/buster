@@ -2572,6 +2572,30 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "long g=(long)(S30)(n*0x10000000);unsigned long h=(unsigned long)(U30)((unsigned)n*0x50000000u);long k=(long)(S60)((long)n<<58);"
         "return (int)((x+(long)y*3+z%1000003*5+g*7+(long)(h%1000003)*11+k/(1L<<40)*13)%1000003);}",
         "bit-int-class-wide-casts-and-conversions", clang);
+    // Of 65 to 128 bits, in the 128-bit classes (#137): every operation, kept extended from the width as the narrow ones
+    // are, libgcc's division and conversions to and from double, constants past 64 bits, storage whose bits past the
+    // width a union's bytes set, a switch, a pointer's update, and calls: an argument split between r9 and the stack.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "typedef _BitInt(65) S65;typedef _BitInt(100) S100;typedef _BitInt(128) S128;\n#define U65 unsigned _BitInt(65)\n"
+        "#define U80 unsigned _BitInt(80)\n#define U127 unsigned _BitInt(127)\n"
+        "static S100 mul(S100 a,S100 b){return a*b;}static U127 shl(U127 a,int s){return a<<s;}"
+        "static S65 split(long a,long b,long c,long d,long e,S65 f){return f+(S65)(a+b+c+d+e);}"
+        "static U80 back(U80*p,int n){U80 r=*p;*p=r*(U80)n+(U80)7;return r;}"
+        "int tested(int n){S65 a=(S65)n*(S65)0x123456789abcdefLL;S65 b=-a;S65 c=a>>3;S65 d=a/(S65)(n|1);S65 e=a%(S65)(n+7);S65 k=a*(S65)(n&7);"
+        "U65 p=(U65)a;p=p*p;p+=(U65)1<<64;p=~p;"
+        "S100 f=(S100)n*((S100)1<<80);f+=(S100)0x7fffffffffffffffLL;S100 g=mul((S100)n*((S100)1<<40),(S100)0x123456789LL);S100 h=~g^f;"
+        "U127 u=(U127)n*(U127)0xfedcba9876543210ULL;u=u*u;u=u*u;U127 v=shl(u,n&63);U127 w=u/(U127)(n+4);U127 r=u%(U127)1000003;"
+        "U80 x=(U80)-1;x+=(U80)n;x<<=3;U80 xb=back(&x,n);S128 y=(S128)a*(S128)(n+1);double z=(double)f;S100 fz=(S100)(z*0.5);"
+        "union{unsigned char raw[16];S100 v;U80 w;}m;for(int i=0;i<16;i++)m.raw[i]=(unsigned char)(0xa5^(i*n));S100 mv=m.v;U80 mw=m.w;"
+        "S65 s=split(1,2,3,4,(long)n,a);int sw=0;switch(f>>80){case 0:sw=1;break;case 1:sw=2;break;case 2:sw=4;break;default:sw=3;}"
+        "unsigned long acc=(unsigned long)a^(unsigned long)(a>>40)*3+(unsigned long)b*5+(unsigned long)c*7+(unsigned long)d*11+(unsigned long)e*13+(unsigned long)k*17;"
+        "acc=acc*29+(unsigned long)p+(unsigned long)(p>>60)*3+(unsigned long)(f>>50)+(unsigned long)g*3+(unsigned long)(g>>70)*5+(unsigned long)h*7+(unsigned long)(h>>64)*9;"
+        "acc=acc*37+(unsigned long)u+(unsigned long)(u>>64)*3+(unsigned long)v*5+(unsigned long)(v>>100)*7+(unsigned long)w*11+(unsigned long)r*13;"
+        "acc=acc*41+(unsigned long)x+(unsigned long)(x>>40)*3+(unsigned long)xb*5+(unsigned long)y+(unsigned long)(y>>64)*7+(unsigned long)fz*11;"
+        "acc=acc*43+(unsigned long)mv+(unsigned long)(mv>>64)*3+(unsigned long)(mw>>16)*5+(unsigned long)s*7+(unsigned long)(s>>64)*11;"
+        "return (int)(acc%1000003)+sw*7+(a<f)*2+(u>=(U127)n)*4+(mv==0)*8+!p*16;}",
+        "bit-int-128-bit-classes", clang);
 }
 
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
@@ -4014,9 +4038,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
-    // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
+    // The 128-bit integers and _BitInt(65) to _BitInt(128): lowered, but a _BitInt past 128 bits, the overflow builtins of
+    // a _BitInt of 65 to 127 bits, and a bit-field of them spread over more than 8 bytes.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
-    check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, true, 0, 1);
+    check_test_program_boundary_reason(test, "int tested(int n){_BitInt(129) x=n;return x>1;}", "bit-int-129", true, false, 0, 1, "_BitInt");
+    check_test_program_boundary_reason(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, false, 0, 0,
+                                       "overflow builtins of _BitInt of 65 to 127 bits");
     check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                 false, 0, 0);
     check_test_program_boundary(test,
