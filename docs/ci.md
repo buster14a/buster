@@ -87,7 +87,9 @@ Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
 `BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit optimization level.
 The full hosted sanitizer matrix runs at `-O3`; additional combined ASan/UBSan
-rows run the entire suite at `-O1` on both host architectures. This retains
+rows run the entire suite at `-O1` on both host architectures. These rows and the
+fuzz campaigns run on pushes to main and on the daily and dispatched runs, not on
+pull requests, whose hosted jobs are the plain builds of both architectures. This retains
 diagnostic-friendly coverage without substituting it for production optimization.
 
 | `BUSTER_SANITIZER` | Checks |
@@ -189,8 +191,8 @@ header reader. It is an actual replacement for the default frontend callback.
 Do not retain borrowed input pointers after the callback returns.
 
 Hosted CI runs bounded frontend and ELF campaigns with seed 133, original C
-seeds and newly compiled original ELF fixtures. PRs and main pushes run 10,000
+seeds and newly compiled original ELF fixtures. Main pushes run 10,000
 inputs per campaign; scheduled/manual runs use 100,000. A third, deliberately
 crashing entry proves the override, saved crash bytes and exact-input replay.
 All three jobs retain their corpora, crash inputs, logs, compile commands and
-matching executable, and must pass before hardware qualification can start.
+matching executable, and on those runs must pass before hardware qualification can start.
