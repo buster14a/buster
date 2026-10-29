@@ -42,13 +42,16 @@ first, so that the last ones to finish are small, and the command line's
 order among equals. Each unit runs on one lane from preprocessing to its code:
 the parse, the checker, the selection, the lowering, Tier 0, branch sizing,
 encoding and the object's write or the link's copy. A unit's functions compile
-on its lane alone. #151's function lanes inside a unit's lane would be a lane
-group inside another, which `lane_run` refuses, and with several units the
+on its lane, and on the lanes that have no unit left to take ("The functions
+on the units' lanes" below): #151's function lanes inside a unit's lane would
+be a lane group inside another, which `lane_run` refuses. With many units the
 units fill the lanes: on the 9700X's eight cores, more than a few units keep
 every lane busy.
 
-The driver runs at most one lane per unit, and by default one per CPU the
-process may run on; `--lanes N` runs N, and the worker budget (#673:
+The driver runs a lane per unit, and past the units one per 32 KB of their
+sources (`BUSTER_CHECK_UNITS_LANE_BYTES`), whose only work is the units'
+functions' parts (#777, below); by default no more than one per CPU the
+process may run on, and with `--lanes N` no more than N; and the worker budget (#673:
 `--worker-budget`, GNU make's jobserver) limits the lanes past the calling
 thread's own as it limits #151's. Its lease covers the units' lanes and the
 executable's writers, which run on as many, and its slots go back once both
@@ -66,6 +69,73 @@ reads and the first unit to need them would otherwise build: the parser's
 (through `parse_initialize`, in the front end's home: `main.c`), the
 encoder's, the semantics' and Tier 0's, and with unwind tables, theirs. The
 lanes then only read them.
+
+### The functions on the units' lanes
+
+A unit's functions can't run lanes of their own, so a command of a few large
+units ran a lane per unit, and its lanes without a unit waited: `sqlite3.c
+shell.c` took longer than `sqlite3.c` alone on one lane (#777). The units'
+lanes are a board instead (`CheckEmitBoard`, `c_check_program_emit.c`):
+
+- **A unit's emission that starts while one of the lanes takes no units** (the
+  board counts the lanes that still take them) cuts its bodies into parts as
+  lanes of its own would, by #151's rule (`parts_by_cost`), opens them as a new
+  epoch of its lane's share, and takes them itself, costliest first.
+- **A lane with no unit left to take** takes the parts of any lane's share
+  (`check_program_emit_help`), and while none has a part it waits on the
+  board's word, which a share's opening and a lane's last unit advance
+  (`lane_advance`), until no lane takes units. It sleeps on the word's futex at
+  once (`lane_sleep`): it waits for another lane's front end, and a core that
+  spun or waited in `mwaitx` meanwhile would draw power that the cores at work
+  lack for their clocks.
+- **Each lane that takes parts of an emission** has a writer and arenas of its
+  own in it, as a function lane does (its place on the board plus one; the
+  sharing lane's are the caller's), which the sharing lane releases after its
+  unit. The parts are #151's steps, which the sharing lane merges in source
+  order once the last one is done: every object and executable is one lane's.
+
+A take is a compare-and-swap of the share's ticket, the epoch's next part beside
+the epoch, whose epoch must be the share's limit's: a lane that read one epoch's
+ticket takes no part of the next. The last part done publishes the epoch
+complete, which the sharing lane waits for before its emission goes on, so no
+lane reads an epoch's run after its emission. An emission that starts while
+every lane still takes units runs alone, its bodies one part, as before: a
+command of many units pays for the board only once its units run out, when its
+last units' emissions share their parts.
+
+On the 9700X's CPUs 0 to 7, SQLite 3.53.4's `sqlite3.c` (9.5 MB) and `shell.c`
+(1.2 MB) as one command, against the same executable's two processes at once,
+whole processes' medians (`time-runs`, 21 runs, each row twice); [the
+record](https://github.com/buster14a/buster-performance/tree/afdfdd4051b834e5a880766a87bf7f464be3b437/docs/measurements/units-functions-777-cache-776-2026-10-29) has the commands and logs:
+
+The two-process column is an **unverified historical control**. Its shell
+commands use operand-free `wait`; the recorded zero failures count wrappers,
+not each compiler child, and no retained per-child status or fresh-output receipt
+proves every timed compile succeeded. The linked control can reuse old objects.
+This establishes no actual compiler failure, but the derived 0.9% compile gap
+and 8.6% linked speedup against that column cannot qualify performance
+acceptance. The synchronous one-command parent/head rows and tests have their
+own recorded scope. The record preserves the original scripts, numbers and logs;
+this correction adds no measurement, and #777 remains open.
+
+| ms | #778 | #777 | two processes at once (unverified) |
+| --- | ---: | ---: | ---: |
+| `-c` | 133.86 | 122.04, 122.18 | 121.08, 120.85 |
+| linked | 138.25 | 125.97 | 137.77, with `cc`'s link of their objects |
+
+- The large unit's emission shared its parts with the seven other lanes, which
+  took 1,020 of them. `sqlite3.c` alone with `-c` takes 114.10 ms. The recorded
+  0.9% gap against the two-process wrappers is unverified; it does not establish
+  a slowdown or its cause in one process's address space.
+- The command's peak resident set is 537 MB, against #778's 436: the other
+  lanes' writers and arenas for the parts they take. The historical larger
+  process's 424 MB is from the unverified two-process control.
+- Its lanes without units sleep on the board's futex at once: waiting with
+  `lane_wait`'s spin and its millisecond in `mwaitx` took 192 ms of user time
+  against 164 to 171, with no difference in wall time.
+- Lua's, synth's and musl's commands by 8 lanes, which have no lanes without
+  units until their last units, run as #778's (34.47 ms against 34.65, 530.34
+  against 528.40, 238.36 against 240.57), with the same peaks.
 
 ## What the units share
 
@@ -86,20 +156,60 @@ them, so a unit's object is the same bytes whichever lane compiles it and
 after whichever units. `test-check-units` checks it: each unit's object of a
 command of several units is its object alone, at every lane count.
 
-### Not shared across lanes, yet
+### One cache for all the lanes, measured
 
 #152's design shares one file cache and one intern table between all the
 units, so that a header is prepared once in the process, as #150's run-ahead
 walk prepares a command's files on lanes. A unit's preprocessing writes both:
 the spellings that token pasting makes, the paths its `__has_include` and
 computed includes probe, and a file the walk didn't prepare (pp_run's
-`intern_find_or_add`, `file_cache_lookup_path` and `file_cache_prepare`). One
-cache for units running at once on several lanes needs those writes made
-safe for readers on other lanes: a lock for the writers and tables that never
-move while lanes read them, or each lane's writes into an overlay of its own.
-Each lane's cache prepares a header at most once per lane instead: on 8
-lanes, a header that every unit includes is prepared 8 times rather than
-once.
+`intern_find_or_add`, `file_cache_lookup_path` and `file_cache_prepare`). Each
+lane's cache prepares a header at most once per lane instead: on 8 lanes, a
+header that every unit includes is prepared 8 times rather than once.
+
+#776 measured the sharing that writes nothing shared while the units run:
+#150's walk (`files_run_ahead`) from every unit's main file, on the command's
+lanes before the units, into one cache and table, of which each lane's were
+then copies (the walk's records and paths copied by value, their files and
+prepared columns borrowed; its spellings under their ids), so that a lane
+wrote only its own, without a lock. It was slower on every command, and kept
+more memory, so the compiler doesn't have it: the experiment (`--units-walk`,
+`3ea2a6e5` on #776's branch) and its measurements are in [the
+record](https://github.com/buster14a/buster-performance/tree/e5cc5bb8b3a2265772611d45a502dcdac8d34e94/docs/measurements/units-functions-777-cache-776-2026-10-29). One executable without the walk and with it, on the
+9700X's CPUs 0 to 7, by 8 lanes (whole processes' medians, `time-runs`; the
+stages are `--time-stages`' medians of three runs):
+
+| ms | without | with the walk | the walk | the lanes' run, without and with |
+| --- | ---: | ---: | ---: | ---: |
+| Lua's 33 units, linked | 31.35 | 32.27 | 3.47 | 27.27, 25.47 |
+| synth's 512 units, linked | 527.75 | 602.13 | 21.20 | 498.87, 540.67 |
+| musl's 1,006 units, `-c` | 235.01 | 243.15 | 4.41 | 209.37, 209.83 |
+
+- **What the units saved** is less than the walk takes: Lua's lanes ran 1.8 ms
+  shorter with their files prepared, for a walk of 3.5 ms, and musl's saved
+  nothing, its lanes' own caches preparing each header once after their first
+  units and its units' own files small.
+- **Synth's lanes ran 42 ms longer:** the walk prepared every unit's main
+  file at the start (62 MB of source, 12.9 million tokens), which a unit then
+  read from memory long out of the caches, where a unit that prepares its own
+  file reads its tokens as they are made.
+- **The peaks rose** by the walk's records, which every lane's copies borrow
+  until the last unit: by 18 MB for Lua, 87 MB for synth and 60 MB for musl.
+- **On fewer lanes** the walk costs less, and saves no more: Lua 46.05 and
+  46.93 ms by 2 lanes, 76.28 and 76.40 by one; synth 917.3 and 935.8 by 2,
+  1,629.1 and 1,620.0 by one; musl 387.9 and 390.9 by 2, 641.4 and 638.8 by
+  one.
+
+The walk alone, from nothing (`benchmark-files` by 8 lanes), takes 1.98 ms for
+Lua's roots (242 files, of which 47 no unit entered, 8.5% of their tokens),
+3.27 ms for musl's (1,221 files, all entered) and 20.19 ms for synth's. A
+cache that the lanes fill as they run, with a lock for its writers (#776's
+other way), wasn't built, and these runs don't measure it: it would have
+neither the walk before the units, nor the lanes' copies, nor the walk's
+tokens read long out of the caches, and would pay for its lock's waits and
+its shared memory's traffic instead. The 1.8 ms Lua's lanes saved is what the
+walk's prepared files saved them net of those copies and cold reads, not a
+bound on what such a cache could save.
 
 ### Diagnostics
 
@@ -451,6 +561,13 @@ driver as a process, in a directory of its own:
   whose stack was filled with a mapping's address first, which must exit with
   its message as with a clean stack: a local the driver read before setting
   it would release an arena of that address and unmap the child's code.
+- **A few large units** (#777): a unit of 800 functions beside a small one's
+  `main`, with `-c` by 8 lanes and `--shared-parts` (a test option: a sharing
+  emission pauses after each part it takes itself, and the command reports how
+  many parts the other lanes took), each object its own alone, the six lanes
+  without a unit having taken parts of the large one's; and linked by
+  `--lanes` 1, by 8 and by the scalar path on 8, the same bytes, a program
+  whose sum is the test's.
 - **The merge on lanes against its twin**, by `--lanes` 1 (the twin), 2 and 8
   and by the scalar path: four units that define three names twice, refused
   with the same standard error, which names the first duplicate in the units'

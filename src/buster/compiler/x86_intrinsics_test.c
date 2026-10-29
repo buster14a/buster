@@ -482,6 +482,16 @@ static void x86_intrinsic_append_node(X86IntrinsicPiece* piece, const X86Intrins
     x86_intrinsic_append(piece, trace->text + trace->nodes[node].text, trace->nodes[node].length);
 }
 
+// Node text is a slice, not a terminated string. Equal prefixes use their lengths, without reading either tail.
+static int x86_intrinsic_node_compare(const X86IntrinsicTrace* trace, uint32_t left, uint32_t right)
+{
+    const X86IntrinsicNode* a = &trace->nodes[left];
+    const X86IntrinsicNode* b = &trace->nodes[right];
+    const uint32_t shorter = a->length < b->length ? a->length : b->length;
+    const int order = memcmp(trace->text + a->text, trace->text + b->text, shorter);
+    return order != 0 ? order : (a->length > b->length) - (a->length < b->length);
+}
+
 static uint32_t x86_intrinsic_node(X86IntrinsicTrace* trace, uint32_t kind, uint32_t bytes, const X86IntrinsicPiece* piece)
 {
     uint32_t result = BUSTER_X86_INTRINSIC_UNKNOWN;
@@ -1829,7 +1839,7 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
         uint32_t right = x86_intrinsic_read(trace, decoded, form, place, rm, rm->place == X86_INTRINSIC_PLACE_MEMORY ? x86_intrinsic_memory_bytes(form) : rm->bytes, other);
         const bool swap = predicate == 1 || predicate == 2 ||
                           ((predicate == 0 || predicate == 3 || predicate == 4 || predicate == 7) && !trace->failed &&
-                           strcmp(trace->text + trace->nodes[left].text, trace->text + trace->nodes[right].text) > 0);
+                           x86_intrinsic_node_compare(trace, left, right) > 0);
         predicate = predicate == 1 ? 6 : predicate == 2 ? 5 : predicate;
         unsigned_compare = unsigned_compare && predicate != 0 && predicate != 3 && predicate != 4 && predicate != 7;
         const uint32_t first = swap ? right : left;
@@ -2220,6 +2230,61 @@ static void x86_intrinsic_print_log(const char* path)
     }
 }
 
+// Equal separately appended slices must stop at the guarded text tail, including in the actual opmask step. Once
+// both slices fill the arena, only the following result reservation may fail; with room, it must keep their expression.
+static bool x86_intrinsic_test_node_text(void)
+{
+    const long page_size = sysconf(_SC_PAGESIZE);
+    uint64_t mapped = 0;
+    uint8_t* end = page_size > 0 ? x86_map_guarded(BUSTER_X86_INTRINSIC_TEXT, (uint64_t)page_size, &mapped) : 0;
+    bool valid = end != 0;
+    if (valid)
+    {
+        X86IntrinsicNode nodes[8] = { 0 };
+        X86IntrinsicTrace trace = { .nodes = nodes, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT };
+        memcpy(end - 10, "v0:16v0:16", 10);
+        nodes[0] = (X86IntrinsicNode){ .text = BUSTER_X86_INTRINSIC_TEXT - 10, .length = 5 };
+        nodes[1] = (X86IntrinsicNode){ .text = BUSTER_X86_INTRINSIC_TEXT - 5, .length = 5 };
+        valid = x86_intrinsic_node_compare(&trace, 0, 1) == 0 && x86_intrinsic_node_compare(&trace, 1, 0) == 0;
+        nodes[1].length = 4;
+        valid = x86_intrinsic_node_compare(&trace, 0, 1) > 0 && x86_intrinsic_node_compare(&trace, 1, 0) < 0 && valid;
+        nodes[1].length = 5;
+        end[-1] = '7';
+        valid = x86_intrinsic_node_compare(&trace, 0, 1) < 0 && x86_intrinsic_node_compare(&trace, 1, 0) > 0 && valid;
+
+        // vpcmpeqb k1,xmm0,xmm0: each read appends v0:16 from the same 64-byte argument. The final read ends
+        // exactly at PROT_NONE. There is no terminator, and the two equal slices must compare within their five bytes.
+        const X86Decoded compare = { .instruction = { .form = X86_FORM_VPCMPEQB_K_X_XM128, .reg = 1,
+                                                      .mode = BUSTER_X86_REGISTER_DIRECT } };
+        for (uint32_t full = 0; full < 2; full += 1)
+        {
+            memset(nodes, 0, sizeof(nodes));
+            trace = (X86IntrinsicTrace){ .nodes = nodes, .node_count = 2, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT,
+                                         .text_length = full != 0 ? BUSTER_X86_INTRINSIC_TEXT - 12 : 0 };
+            const uint32_t argument = x86_intrinsic_named(&trace, X86_INTRINSIC_ARGUMENT, 64, "v0");
+            x86_intrinsic_fill(trace.vector[0], 64, argument);
+            uint64_t target = 0;
+            const X86IntrinsicAction action = x86_intrinsic_step(&trace, &compare, (X86IntrinsicPlaceInCode){ 0 }, &target);
+            if (full != 0)
+            {
+                valid = action == X86_INTRINSIC_NEXT && trace.failed && trace.node_count == 5 &&
+                        trace.text_length == BUSTER_X86_INTRINSIC_TEXT && memcmp(end - 10, "v0:16v0:16", 10) == 0 &&
+                        strcmp(trace.failure, "the trace's values are longer than it keeps") == 0 && valid;
+            }
+            else
+            {
+                static const char expected[] = "vpcmpb/16(v0:16,v0:16)$0";
+                const uint32_t result = trace.opmask[1][0].node;
+                valid = action == X86_INTRINSIC_NEXT && !trace.failed && result > BUSTER_X86_INTRINSIC_ZERO && result < trace.node_count &&
+                        nodes[result].length == sizeof(expected) - 1 &&
+                        memcmp(trace.text + nodes[result].text, expected, sizeof(expected) - 1) == 0 && valid;
+            }
+        }
+        munmap(end + (uint64_t)page_size - mapped, mapped);
+    }
+    return valid;
+}
+
 static int run_x86_intrinsic_tests(int argc, char** argv)
 {
     const char* executable = "/proc/self/exe";
@@ -2336,6 +2401,13 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     };
     uint64_t checks = 0;
     uint64_t failures = 0;
+    const bool bounded_text = valid && x86_intrinsic_test_node_text();
+    checks += valid;
+    failures += valid && !bounded_text;
+    if (valid && !bounded_text)
+    {
+        fprintf(stderr, "test-x86-intrinsics: node text ordering or the guarded equal-operand compare is wrong\n");
+    }
     for (uint32_t i = 0; valid && i < 3; i += 1)
     {
         const bool compiled = x86_intrinsic_run(compiles[i], logs[i]);

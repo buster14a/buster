@@ -7,6 +7,9 @@
 // wrapper also supports data-only inspection. String candidates are emitted only when their symbols are used.
 // Input, typed stream, initializer plans and type table must belong to the same successful source snapshot.
 
+// Shared by standalone data and the program emitter: selected overloads have one ABI spelling.
+#include "c_check_mangle.c"
+
 typedef enum CheckDataInputStatus
 {
     CHECK_DATA_INPUT_OK,
@@ -434,16 +437,77 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
         }
     }
     const CheckGraph* graph = stream->graph;
-    for (uint32_t i = 0; valid && graph != 0 && i < graph->overload_candidate_count; i += 1)
+    const bool overloads = graph != NULL && graph->overload_candidate_count != 0;
+    String8* overload_names = valid && overloads ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)count + 1) : NULL;
+    if (valid && overloads)
+    {
+        valid = overload_names != NULL;
+        result->status = valid ? result->status : CHECK_DATA_INPUT_RESOURCE;
+        if (valid)
+        {
+            memset(overload_names, 0, ((uint64_t)count + 1) * sizeof(String8));
+        }
+    }
+    // Like the program consumer, prefer an explicit asm label, including one on an earlier declaration. The
+    // standalone consumer only needs function names when static data refers to them; ordinary data stays unchanged.
+    for (uint32_t d = 0; valid && overloads && d < prepared.declaration_count; d += 1)
+    {
+        const uint32_t token = (uint32_t)prepared.declaration_keys[d];
+        const uint32_t object = (uint32_t)(prepared.declaration_keys[d] >> 32);
+        const CheckInputAttributes* attributes = input->attributes[token];
+        if (needed[object] && input->declaration_kinds[token] == C_BINDING_FUNCTION && attributes != NULL)
+        {
+            for (uint32_t i = 0; valid && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                if (!attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL)
+                {
+                    const String8 previous = overload_names[object];
+                    valid = previous.length == 0 || (previous.length == attribute->text.length &&
+                            memcmp(previous.pointer, attribute->text.pointer, previous.length) == 0);
+                    overload_names[object] = attribute->text;
+                    if (!valid)
+                    {
+                        result->status = CHECK_DATA_INPUT_INVALID;
+                        result->token = attribute->name_token;
+                    }
+                }
+            }
+        }
+    }
+    CheckMangleSource mangling = {
+        .input = input,
+        .parser = parser,
+        .identifiers = identifiers,
+        .types = types,
+        .output = scratch,
+        .scalar = parser->options.scalar,
+    };
+    Scratch mangle_scratch = { 0 };
+    for (uint32_t i = 0; valid && overloads && i < graph->overload_candidate_count; i += 1)
     {
         const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
-        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object <= count && needed[candidate->object])
+        const uint32_t object = candidate->object;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && object != 0 && object <= count && needed[object] && overload_names[object].length == 0)
         {
-            // A selected overload object still needs its ABI symbol name before standalone publication.
-            valid = false;
-            result->status = CHECK_DATA_INPUT_UNSUPPORTED;
-            result->token = candidate->declaration;
+            if (mangle_scratch.arena == NULL)
+            {
+                mangle_scratch = scratch_begin(scratch);
+            }
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+                                                               mangle_scratch.arena, &overload_names[object]);
+            valid = status == CHECK_MANGLE_OK;
+            if (!valid)
+            {
+                result->status = status == CHECK_MANGLE_RESOURCE ? CHECK_DATA_INPUT_RESOURCE :
+                                 status == CHECK_MANGLE_INVALID ? CHECK_DATA_INPUT_INVALID : CHECK_DATA_INPUT_UNSUPPORTED;
+                result->token = candidate->declaration;
+            }
         }
+    }
+    if (mangle_scratch.arena != NULL)
+    {
+        scratch_end(mangle_scratch);
     }
     if (valid)
     {
@@ -469,7 +533,9 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
             const uint32_t name = !literal ? parser->tokens.names[token] : 0;
             uint8_t generated_name[48];
             const int generated_length = compound ? snprintf((char*)generated_name, sizeof(generated_name), ".Lcompound.%u", object) : 0;
+            const String8 renamed = overload_names != NULL ? overload_names[object] : (String8){ 0 };
             const NameId link_name = compound ? link_add_name(&result->link, generated_name, (uint32_t)generated_length) :
+                                     renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
                                      !literal ? link_add_name(&result->link, intern_bytes(identifiers, name), intern_length(identifiers, name)) : 0;
             const uint8_t kind = !literal && input->declaration_kinds[token] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  !literal && input->thread_local[token] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;

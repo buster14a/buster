@@ -230,6 +230,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-check-units --corpus build/c-testsuite/tests/single-exec
 == Test the x86-64 encoder
 ./build/compiler test-x86-encoder
+== Test RSS accounting across exec from small and large parents
+clang -std=c17 -O2 -Wall -Wextra -Werror tests/peak-rss.c -o build/test-peak-rss
+./build/test-peak-rss ./build/compiler
 == Test the semantic driver's diagnostics and emission against clang
 ./build/compiler test-checker-driver --executable ./build/compiler
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
