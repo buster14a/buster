@@ -24,6 +24,13 @@
 #define BUSTER_CHECK_UNITS_LARGE_SOURCE (1ull << 20)
 // What --poison-arenas writes over the bytes a unit left in its lane's arenas (arena_poison).
 #define BUSTER_CHECK_UNITS_POISON 0xa5
+// The units' sources' bytes that pay for a lane past one per unit, whose only work is the units' functions' parts
+// (#777): about the bodies' tokens that pay for a function lane (BUSTER_CHECK_EMIT_LANE_TOKENS, at about 5 bytes of
+// source a token) times two.
+#define BUSTER_CHECK_UNITS_LANE_BYTES (32ull << 10)
+// --shared-parts' pause after each part that a unit's emission takes itself on the board (#777), in microseconds: long
+// enough that the lanes without units, woken from their futex in 10 to 14 µs, take some of its parts.
+#define BUSTER_CHECK_UNITS_SHARED_PAUSE 1000
 
 // A unit's link kept for the units' link (check_units_keep): a copy of its records, with room for no more, and which of
 // its undefined global symbols a system header declared, for the link's error about them (check_driver_executable's,
@@ -88,6 +95,9 @@ struct CheckUnitsRun
     // The units' indices, costliest first.
     const uint32_t* order;
     CheckUnitsLane* lanes;
+    // The lanes' board (#777), on which a unit's emission shares its functions' parts with the lanes that have no unit
+    // left to take; null on one lane.
+    CheckEmitBoard* board;
 };
 
 // Copies `link`, a unit's whole link (check_driver_object's, its code and data published and link_check passed), into
@@ -1473,7 +1483,13 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         options.files = &lane->cache;
         options.diagnostics = errors;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
-        lane->functions = (CheckProgramLanes){ .lanes = 1 };
+        // On the board, the unit's functions as parts that the lanes without units may take (#777).
+        lane->functions = (CheckProgramLanes){
+            .lanes = run->board != NULL ? run->board->lanes : 1,
+            .board = run->board,
+            .board_lane = (uint32_t)(lane - run->lanes),
+            .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
+        };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
@@ -1507,12 +1523,23 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
-    CheckUnitsLane* lane = run->lanes + lane_index();
+    const uint32_t index = lane_index();
+    CheckUnitsLane* lane = run->lanes + index;
     arena_pool = &lane->pool;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
+        lane_restore(group);
+    }
+    // No unit left to take: the lane takes the parts of the units' emissions still running (#777), alone in its group as
+    // a unit is, until no lane takes units.
+    if (run->board != NULL)
+    {
+        const Lane group = lane_alone();
+        __atomic_sub_fetch(&run->board->taking, 1, __ATOMIC_RELEASE);
+        lane_advance(&run->board->generation);
+        check_program_emit_help(run->board, index);
         lane_restore(group);
     }
     check_units_lane_release(lane);
@@ -1564,7 +1591,8 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
 }
 
 // The command's translation units (`count` source files, `inputs`, two or more): the lanes compile them (at most
-// `lanes->lanes` of them, one per unit, which a GNU make jobserver's budget may reduce), the units' diagnostics are
+// `lanes->lanes` of them, a unit at a time each and past the units as many as their sources pay for, which a GNU make
+// jobserver's budget may reduce; the lanes without a unit left take the units' functions' parts), the units' diagnostics are
 // printed in the command line's order, and then with a link to make, the units' links are merged and linked
 // (check_driver_executable), with -g their DWARF units, one each. -o with -c, a dump and --id-order are refused: their
 // outputs are one unit's.
@@ -1627,10 +1655,19 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             ready = unwind_initialize();
         }
-        // A lane per unit, at most, and the lanes past the calling thread's own as the budget gives them (#673). The
-        // lease covers the units' lanes and the executable's writers, as many, and goes back once both are done.
+        // A lane per unit, and past the units, lanes whose only work is the units' functions' parts (#777): one per
+        // BUSTER_CHECK_UNITS_LANE_BYTES of the units' sources, so that a few large units' functions get about the lanes
+        // they would get alone; no more than `lanes->lanes`, and those past the calling thread's own as the budget gives
+        // them (#673). The lease covers the units' lanes and the executable's writers, as many, and goes back once both
+        // are done.
+        uint64_t source_bytes = 0;
+        for (uint32_t u = 0; u < count; u += 1)
+        {
+            source_bytes += units[u].bytes;
+        }
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
-        const uint32_t wanted = most < count ? most : count;
+        const uint64_t paid = (uint64_t)count + source_bytes / BUSTER_CHECK_UNITS_LANE_BYTES;
+        const uint32_t wanted = most < paid ? most : (uint32_t)paid;
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
         const uint32_t active = ready && lanes->budget != NULL ? worker_budget_acquire(lanes->budget, wanted, &lease) : wanted;
         CheckUnitsLane* states = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckUnitsLane, active) : NULL;
@@ -1642,12 +1679,22 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         if (states != NULL)
         {
             memset(states, 0, (uint64_t)active * sizeof(*states));
+            // The lanes' board (#777): every lane takes units at first. Without its memory, each unit's functions compile
+            // on its lane alone.
+            CheckEmitBoard* board = active > 1 ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckEmitBoard, 1) : NULL;
+            if (board != NULL)
+            {
+                memset(board, 0, sizeof(*board));
+                board->lanes = active;
+                board->taking = active;
+            }
             CheckUnitsRun run = {
                 .command = command,
                 .units = units,
                 .count = count,
                 .order = order,
                 .lanes = states,
+                .board = board,
             };
             // One team of threads for the units' run and the executable's write (lane_team_start, as link-foreign's,
             // #501), which keep their scratch arenas from one to the other (#778).
@@ -1695,6 +1742,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 free(units[u].diagnostics);
                 units[u].diagnostics = NULL;
                 result = units[u].status != 0 ? 1 : result;
+            }
+            if (command->shared_parts)
+            {
+                fprintf(stderr, "shared parts: %llu taken by lanes without units\n", (unsigned long long)(board != NULL ? board->others : 0));
             }
             // The lanes released their caches and arenas as they ended (check_units_lane_release): the kept links are
             // all the link reads.

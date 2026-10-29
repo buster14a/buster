@@ -1120,7 +1120,10 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     return active & (bad | defer);
 }
 
-static IrCheck ir_check_rows(const IrFunction* f, bool vector)
+// The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify_path
+// and ir_build_uses) stay out of line and start lines of their own, so that where the code before them ends doesn't
+// move their loops within lines, which changed their times between builds of the same code (#786).
+static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f, bool vector)
 {
     (void)vector;
 
@@ -1194,7 +1197,7 @@ static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
 
 // Internal version also permits arena==scratch for the verifier, which discards the entire graph at its end.
 // Public callers use disjoint arenas; their graph excludes the marks/cursors and survives scratch restoration.
-static IrError ir_cfg_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
+static __attribute__((noinline, aligned(64))) IrError ir_cfg_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
 {
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
@@ -1355,20 +1358,28 @@ static uint64_t ir_operand_count(const IrFunction* f, uint32_t i)
     return result;
 }
 
+// The places of a value mask's bits in order: an instruction's n-th direct operand is a, b or c by
+// ir_operand_positions[mask][n], without a loop that clears the n bits before it (#786).
+static const uint8_t ir_operand_positions[8][3] = {
+    [1] = { 0 },
+    [2] = { 1 },
+    [3] = { 0, 1 },
+    [4] = { 2 },
+    [5] = { 0, 2 },
+    [6] = { 1, 2 },
+    [7] = { 0, 1, 2 },
+};
+
 static IrOperand ir_operand(const IrFunction* f, uint32_t i, uint32_t number, uint32_t block)
 {
-    uint32_t mask = ir_value_mask(f, i);
+    const uint32_t mask = ir_value_mask(f, i);
     const uint32_t direct = (uint32_t)__builtin_popcount(mask);
     IrOperand result = {
         .block = block,
     };
     if (number < direct)
     {
-        for (uint32_t p = 0; p < number; p += 1)
-        {
-            mask &= mask - 1;
-        }
-        result.position = (uint32_t)__builtin_ctz(mask);
+        result.position = ir_operand_positions[mask][number];
         result.value = result.position == 0 ? f->a[i] : result.position == 1 ? f->b[i] : f->c[i];
     }
     else if (f->op[i] == IR_PHI)
@@ -1519,7 +1530,7 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool 
     return check;
 }
 
-static IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
+static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
 {
     (void)vector;
 
@@ -1636,7 +1647,7 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     return check;
 }
 
-static IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
+static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
 {
     (void)vector;
 
@@ -1675,7 +1686,7 @@ static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDom
     return ir_verify_path(f, scratch, dominance, false);
 }
 
-static IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
+static __attribute__((noinline, aligned(64))) IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
 {
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;

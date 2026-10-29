@@ -6,14 +6,14 @@
 // truth, compound assignments (into destinations of other types too), increments, conditionals and statement values;
 // conversions to and from every integer and floating type, between _Float16 and the others, of constants and as bit
 // casts; calls passing and returning them alone, in structs and through va_arg, with members, arrays, globals and
-// unions of them; unary chains over signaling NaNs and subnormals; and floating-point flags under FENV_ACCESS. Each
-// program runs for five targets, each where the host has the features clang's code of it may take and their saved
-// state, and is compiled and linked elsewhere: x86-64 (libgcc's conversions), x86-64-v3 (F16C's), x86-64-v4 (AVX-512
-// without BF16), znver5 (AVX512-BF16's rounding) and sapphirerapids (AVX512-FP16's arithmetic, which rounds each
-// operation). Then what the lowering refuses by name. What clang 23 compiles wrong the programs leave out
-// (docs/c-checker.md, "Half-precision values"): conversions between __fp16 and __bf16, __bf16 under FENV_ACCESS, and
-// __bf16 parameters' subnormals and signaling NaNs. They leave out too what the lowering doesn't follow: a unary +
-// alone of a signaling NaN in a function with FENV_ACCESS. Include after c_check_program_fp16_test.c.
+// unions of them, and past a return's cleanups; unary chains over signaling NaNs and subnormals; and floating-point
+// flags under FENV_ACCESS. Each program runs for five targets, each where the host has the features clang's code of it
+// may take and their saved state, and is compiled and linked elsewhere: x86-64 (libgcc's conversions), x86-64-v3
+// (F16C's), x86-64-v4 (AVX-512 without BF16), znver5 (AVX512-BF16's rounding) and sapphirerapids (AVX512-FP16's
+// arithmetic, which rounds each operation). Then what the lowering refuses by name. What clang 23 compiles wrong the
+// programs leave out (docs/c-checker.md, "Half-precision values"): conversions between __fp16 and __bf16, __bf16 under
+// FENV_ACCESS, and __bf16 parameters' subnormals and signaling NaNs. They leave out too what the lowering doesn't
+// follow: a unary + alone of a signaling NaN in a function with FENV_ACCESS. Include after c_check_program_fp16_test.c.
 
 // The programs' helpers: the hash, half-precision values from their bits, and bits of special values (zeros,
 // infinities, a quiet and a signaling NaN, subnormals, ones, the largest finite one, the smallest normal one, and
@@ -201,6 +201,21 @@ static const char* const check_test_half_programs[][2] = {
         "__bf16 c=bb(bspecials[(unsigned)(n+3)%16u]);_Float16 d=hb(specials[(unsigned)(n+3)%16u]);"
         "__bf16 r[]={-c,+c,-(-c),-(+c),-(-(-c)),+(-c),c};_Float16 s[]={-d,+d,-(-d),-(+d),-(-(-d)),+(-d),d};FOLD(r);FOLD(s);"
         "_Float16 t[3];strict_chains(d,t);FOLD(t);"
+        "return (int)h;}",
+    },
+    {
+        // Results returned past a return's cleanups (#147's cleanup attributes, merged from main): each function's value
+        // is computed before its variable's cleanup runs, kept in its class's temporary, and returned after the cleanup
+        // changes the variable; and a cleanup function whose result is a _Float16, dropped.
+        "half-cleanups",
+        "static int g;static void bump(int*p){g=g*3+*p;}static _Float16 bumph(int*p){g=g*5+*p;return (_Float16)*p;}"
+        "static __attribute__((noinline)) _Float16 retf(int n){int c __attribute__((cleanup(bump)))=n;_Float16 x=(_Float16)n/(_Float16)3;c=7;"
+        "return x*(_Float16)2+(_Float16)c;}"
+        "static __attribute__((noinline)) __bf16 retb(int n){int c __attribute__((cleanup(bumph)))=n+1;__bf16 x=(__bf16)n/(__bf16)3;c=9;return x+(__bf16)c;}"
+        "static __attribute__((noinline)) _Float16 early(int n){int c __attribute__((cleanup(bump)))=n;if(n>4){c=2;return (_Float16)n*(_Float16)0.1;}"
+        "c=3;return (_Float16)c;}"
+        "int tested(int n){unsigned h=2166136261u;g=n;"
+        "_Float16 a=retf(n);FOLD(a);FOLD(g);__bf16 b=retb(n);FOLD(b);FOLD(g);_Float16 e=early(n);FOLD(e);FOLD(g);"
         "return (int)h;}",
     },
 };

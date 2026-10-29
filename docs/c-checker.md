@@ -13,6 +13,12 @@ the semantic driver:
 ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
 
+The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
+one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
+target triple. These actions need no source file and accept `-target` or `--target=` for supported x86-64 Linux GNU
+targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
+compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
@@ -540,6 +546,24 @@ mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
 
+Unnamed parameters in definitions (#792) retain their positions in the complete
+function signature. `CheckInput.parameters` stores the first named parameter at
+a body-opening token and a parameter's full-signature ordinal at its name token;
+these token roles are disjoint. `parameter_next` still links only named tokens,
+so binding, prototype-scope restoration and deferred body readers never see an
+invented identifier. The ordinal reuses existing initialized storage: no new
+per-token column, allocation or scan is added, including for ordinary all-named
+functions. K&R identifier lists publish their source-order ordinals too.
+
+Lowering walks the contiguous type signature and consumes a named token only at
+its ordinal. Every parameter gets an incoming ABI local, including unnamed
+integer, SSE, aggregate and stack-passed parameters; only named parameters enter
+the source-object map. This preserves the contiguous incoming-local prefix,
+hidden result pointer, register-exhaustion rollback and fixed variadic offsets.
+Named parameters keep their qualifiers, alignment and K&R entry conversions.
+`test-checker` covers these paths against Clang, including a Clang-built caller
+of a buster definition. This is a correctness change, not a throughput claim.
+
 K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
 decision has it. The declarator records an identifier list's names as the
 definition's parameters, in the list's order, without a prototype
@@ -1065,10 +1089,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
 stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
 constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
-The standalone source bridge refuses a referenced overloadable symbol until
-its ABI symbol name is available, before publishing any Link state. An unused
-overloadable declaration needs no symbol; the lower-level emitter can consume
-an explicitly supplied object-to-symbol map.
+The standalone source bridge and the program emitter share `c_check_mangle.c`
+for selected overloadable symbols (#821). Calls and contextual addresses retain
+the checker's selected object, and each emitted object receives its Itanium ABI
+name once; explicit asm labels override it. Static inline overloads, including
+Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
+Unmarked overload candidates retain C names, and unused declarations need none.
+
+The mangler uses an explicit worklist and canonical type substitutions, with
+scalar/vector substitution lookup. It covers builtin and complex arithmetic,
+qualified pointers, fixed/incomplete arrays, function pointers, vectors,
+atomics, bit-precise integers and file-scope named tags. Signatures requiring
+local/anonymous tag naming, variable array bounds, or an unsupported calling
+convention still fail before publication unless an asm label supplies the ABI
+name. These refusals do not select a different overload or publish an unmangled
+fallback. The focused `test-checker --program-overloads` suite checks independently
+stated encodings, deep signatures, allocation failures, deterministic emission,
+cross-compiler linkage in both directions and the installed `<tgmath.h>` through
+both object and direct-executable driver paths; the full checker suite runs it too.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
@@ -2136,6 +2174,106 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **GNU's `cleanup` attribute** (#147, `c_check_cleanup_input.c`). As clang
+  23's `handleCleanupAttr` checks it: on a block-scope variable of automatic
+  storage (on any other declaration clang warns and ignores it, and the
+  checker ignores it), its argument is an expression whose names are looked
+  up where it is, so the variable isn't visible in its own attribute and an
+  undeclared name is an error wherever the attribute is. It must name a
+  function: an object, a function pointer or an enumerator is "'cleanup'
+  argument 'o' is not a function", and any other expression isn't a function
+  either, an error at its first token without a name. Of those the
+  attribute's reader takes a name in parentheses, whose name it looks up as
+  clang does, and a literal, and refuses the others as malformed (clang puts
+  a binary operator's error at the operator, and an invalid expression's
+  error is its own). A type's name is the parser's error ("unexpected type
+  name"), which skips the rest of the declaration, so the error clang adds
+  after it isn't reported. The function has a prototype of one parameter
+  ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
+  address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
+  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  clang's message without its two types). A pointer of another signedness or
+  to a pointer of other qualifiers, which an assignment only warns about, is
+  an error here. An `__auto_type` variable's parameter type is checked once
+  its initializer gives the type (`check_input_cleanup_deduced`, from the
+  initializer's finish), as clang checks it against the deduced type; the
+  rest, and the variable's record, at its declaration. Another count of
+  arguments is "'cleanup' attribute takes one argument" on a variable it
+  applies to (clang checks the subject first). The last of a declaration's
+  cleanup attributes applies (clang warns about the others; the checker
+  doesn't). A cleanup's error, as the reader's errors but
+  an undeclared name's, ends the unit's checking, where clang goes on to the
+  later declarations' diagnostics (`check_input_diagnostic_recover`). Each
+  applied one is a
+  `CheckInputCleanup` (`CheckInput.cleanups`, in source order: none in a unit
+  without one, which reads no declarator's attributes for it), with its
+  variable's scope: its block's, or its `for` statement's, to the token after
+  the scope's last. A goto or a case must not enter that scope, as a
+  variable-length array's (`check_input_vla_finish`), and a computed goto
+  must neither enter nor leave it: its labels' first and last must be inside
+  the innermost cleanup's scope that holds the goto. The jumps' errors are
+  clang's messages, for variable-length arrays too. A body read on a lane
+  that declares such a variable leaves the unit to source order.
+  The control stream calls the function at each exit from the scope
+  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
+  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
+  switch's token stands for where a break or a continue goes, so that a `for`
+  statement's own variables' cleanups run once, after its end's label), the
+  function's end, and a statement expression's end, after its value is kept
+  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
+  or for a struct or union its bytes copied into a frame object of their own
+  or where the hidden pointer points), then the cleanups, then returns it
+  (`RETURN` of target `BUSTER_CHECK_CONTROL_KEPT`). But a named return value,
+  which clang's code builds in the return slot (Sema's NRVO), is returned
+  after the cleanups, which may write it: a struct or union variable of the
+  function's result type, automatic, neither volatile nor aligned past its
+  type, named alone (in parentheses or not), with every return after its
+  declaration in its scope naming it too (`check_control_named`: what
+  `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
+  lowering's call (`check_lower_cleanup`) takes the variable's address,
+  which makes its local a frame slot, and drops the result. A function of a
+  parameter other than a pointer is refused by name (clang's code bit-casts
+  the address to the `_Bool`, invalid IR that leaves the address's low bit),
+  and so is one whose result is an aggregate (including one returned in
+  registers), a 128-bit integer or a vector. The body's selection references
+  the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
+  54 fixtures' acceptance and first errors with clang's, and run programs of
+  each exit, each class of returned value, the named return value's cases,
+  statement expressions, switches and the functions' kinds natively against
+  clang -O0's build on both paths; `test-checker-driver` compares every error
+  of 39 fixtures with clang's, its place and its message, on both paths
+  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
+  the deferred reader's fixtures and the selection's take a cleanup too.
+- **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
+  emission's attribute pass). A weak declaration's symbol is weak, defined
+  or undefined; on a declaration without external linkage it is clang's error
+  "weak declaration cannot have internal linkage", at the attribute, and on a
+  typedef it is ignored. One after its entity's definition is dropped, as
+  clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
+  constructors and destructors there (`check_input_attribute_late`, which
+  copies a specifier's list before marking one declarator's). A weak
+  declaration after a use makes the reference weak, as GCC's does; clang's
+  stays global, as its code generation made it at the use (GCC says the
+  behavior is unspecified). A defined function's constructor and destructor
+  each give an entry of the init or fini array: an atom of a pointer to the
+  function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
+  `llvm.global_dtors`, stably by priority from the definitions' order (an
+  attribute's priority, 65535 without one and past it, as
+  `preprocessXXStructorList` clamps it). The latest declaration's attribute
+  applies, and in one declaration the first, as clang takes them. An entry
+  below 65535 has its priority (`link_add_priority`), which the direct path's
+  executable orders and `-c`'s object puts in `.init_array.N` or
+  `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
+  has them. The selection takes constructors and destructors as roots.
+  `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
+  of them by clang and both paths: each symbol's binding must be clang's,
+  both paths' objects the same bytes, and the objects, linked by `cc` alone
+  and with another object's strong definitions, and the direct path's
+  executables, must print what clang's build prints, its constructors' order
+  before `main` and its destructors' after it.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -3233,3 +3371,33 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+## Ignorable and unsupported pragmas
+
+The checker consumes retained pragmas after their existing semantic handlers. An
+unknown directive is not an unsupported C construct: it is ignored, with
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
+Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
+`#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
+is not an implementation of COFF linker directives or automatic library loading.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
+`optimize` use the unknown-pragma policy, as in the Clang oracle.
+
+OpenMP directives are ignored when OpenMP was not requested, with the separately
+enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
+not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
+active `-fopenmp` request, including alternate runtime selections, is refused
+until execution semantics are implemented; it must not silently produce serial
+code. A subsequent `-fno-openmp` restores the ignore behavior.
+
+Known unsupported semantic effects remain hard, named errors, including
+`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
+`align=packed`. Warning suppression cannot approve these directives. Already
+supported directives keep their original handlers and syntax validation.
+
+Directive warnings are sparse lexical facts with independent preprocessing
+source coordinates. Command-line policy, source-ordered diagnostic push/pop,
+macro invocation locations, system headers, parser recovery, and EOF directives
+use the same warning machinery. A warning promoted to an error prevents object
+emission. Neither classification nor warning policy changes `-E` output.

@@ -679,7 +679,11 @@ benchmark on the preprocessor oracle's frozen corpora (musl's 1,355 units,
   occurrences or to insert concurrently ("Interning from several lanes").
 - **Translation units on lanes** (#152): after the walk, a unit still prepares
   the files the walk couldn't reach (computed includes, its predefines) and
-  interns its pastes into the shared table, one unit at a time.
+  interns its pastes into the shared table, one unit at a time. #776 ran the
+  walk before a command's units, from their main files, and gave each units
+  lane copies of its cache and table: slower than each lane's own cache on
+  Lua's, synth's and musl's units, with more memory ([the translation units
+  guide](translation-units.md)'s "One cache for all the lanes, measured").
 
 ## Boundary audit #298
 

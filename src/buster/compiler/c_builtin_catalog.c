@@ -61,6 +61,7 @@
     X(TYPES_COMPATIBLE_P, 0x131u, "__builtin_types_compatible_p") \
     X(CHOOSE_EXPR, 0x132u, "__builtin_choose_expr") \
     X(OBJECT_SIZE, 0x133u, "__builtin_object_size") \
+    X(DYNAMIC_OBJECT_SIZE, 0x134u, "__builtin_dynamic_object_size") \
     X(HUGE_VAL, 0x140u, "__builtin_huge_val") \
     X(HUGE_VALF, 0x141u, "__builtin_huge_valf") \
     X(HUGE_VALL, 0x142u, "__builtin_huge_vall") \
