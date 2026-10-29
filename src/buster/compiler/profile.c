@@ -1643,6 +1643,7 @@ struct ProfileTimed
     uint64_t wall_ns;
     uint64_t user_us;
     uint64_t system_us;
+    // wait4's KiB peak, including pre-exec memory and possibly waited descendants. Not executable-only.
     uint64_t peak_kb;
     uint64_t minor_faults;
     uint64_t major_faults;
@@ -2116,6 +2117,7 @@ static char** profile_time_make_copies(Arena* arena, const ProfileTimeRuns* t, c
 // start (status 127, or no wait); and one more if the copies couldn't be made or the report couldn't be printed.
 static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
 {
+    dprintf(t->output, "memory: wait4 peaks include pre-exec memory and waited descendants; executable-only peak unavailable (not measured)\n");
     uint64_t failures = 0;
     const uint64_t mark = arena->length;
     const uint64_t slot_count = profile_time_slot_count(t);
@@ -2164,7 +2166,7 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
                 timed[(run - t->warmups) * slot_count + s] = one;
                 dprintf(t->output, "run %llu list %llu", (unsigned long long)(run - t->warmups + 1), (unsigned long long)(slot.list + 1));
                 profile_time_print_unit(t->output, t, slot);
-                dprintf(t->output, ": %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, %llu user cycles, %llu instructions, status %d%s\n",
+                dprintf(t->output, ": %.3f ms wall, %.3f ms user, %.3f ms system, %llu KiB wait4 peak, %llu minor faults, %llu major, %llu user cycles, %llu instructions, status %d%s\n",
                         (double)one.wall_ns / 1e6, (double)one.user_us / 1e3, (double)one.system_us / 1e3, (unsigned long long)one.peak_kb,
                         (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults, (unsigned long long)one.cycles, (unsigned long long)one.instructions,
                         exited ? WEXITSTATUS(one.status) : -1, same ? "" : " (FAILED: another status than the first warm-up's)");
@@ -2209,7 +2211,7 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
                 dprintf(t->output, "%s%s", a == 0 ? "" : " ", t->arguments[t->starts[slot.list] + a]);
             }
             dprintf(t->output,
-                    "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, %llu user cycles, %llu "
+                    "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KiB wait4 peak, %llu minor faults, %llu major, %llu user cycles, %llu "
                     "instructions\n",
                     (unsigned long long)t->runs, (double)medians[0] / 1e6, (double)values[0] / 1e6, (double)values[t->runs - 1] / 1e6, (double)medians[1] / 1e3,
                     (double)medians[2] / 1e3, (unsigned long long)medians[3], (unsigned long long)medians[4], (unsigned long long)medians[5],

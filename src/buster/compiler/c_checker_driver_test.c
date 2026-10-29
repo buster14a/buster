@@ -121,9 +121,9 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return ready;
 }
 
-// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
-// the caller frees: its exit status, or -1 if it didn't exit.
-static int check_test_driver_spawn(char* const* arguments, char** text)
+// Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
+// The caller frees *text. Returns the exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
 {
     FILE* errors = tmpfile();
     int status = 0;
@@ -137,7 +137,8 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         if (child == 0)
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            if (output >= 0 && dup2(stdout_capture ? fileno(errors) : output, STDOUT_FILENO) >= 0 &&
+                dup2(stdout_capture ? output : fileno(errors), STDERR_FILENO) >= 0)
             {
                 execvp(arguments[0], arguments);
             }
@@ -156,6 +157,67 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         fclose(errors);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    return check_test_driver_spawn_stream(arguments, text, false);
+}
+
+// Exercise the real reservation failure in a child so its address-space limit cannot affect the test process.
+static void check_test_driver_reservation_failure(CheckTest* test)
+{
+#if (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)) && !defined(BUSTER_SANITIZER_RESOURCES)
+    // Until the resource-failure injection is available, a detector's shadow memory must not be constrained.
+    (void)test;
+#else
+    for (uint32_t command = 0; command < 2; command += 1)
+    {
+        FILE* errors = tmpfile();
+        pid_t child = -1;
+        int status = 0;
+        if (errors != NULL)
+        {
+            fflush(NULL);
+            child = fork();
+            if (child == 0)
+            {
+                const bool prepared = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0;
+#if defined(BUSTER_SANITIZER_RESOURCES) && BUSTER_SANITIZER_RESOURCES
+                lane_test_resources.arena_limited = true;
+                lane_test_resources.arena_limit = 0;
+                const bool limited = true;
+#else
+                const struct rlimit limit = { 0, 0 };
+                const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
+                const bool ready = prepared && limited;
+                char* arguments[] = { (char*)"-fsyntax-only", (char*)"missing.c" };
+                const int code = ready ? run_check_command(2, arguments, command != 0) : 126;
+                fflush(stderr);
+                _exit(code);
+            }
+        }
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && child > 0 && errno == EINTR);
+        char* output = NULL;
+        size_t length = 0;
+        const bool read = errors != NULL && waited == child && pp_test_read_output(errors, &output, &length);
+        check_test_expect(test, read && WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+                                strstr(output, "fatal error: can't reserve checker memory") != NULL &&
+                                strstr(output, "68719476736 bytes") != NULL && strstr(output, "usage:") == NULL,
+                          "driver reservation failures report the requested size instead of usage");
+        free(output);
+        if (errors != NULL)
+        {
+            fclose(errors);
+        }
+    }
+#endif
 }
 
 // Whether the files at `a` and `b` can be read and have the same bytes.
@@ -2086,6 +2148,82 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     }
 }
 
+// Compiler identification is an action, while an option operand that spells an action is still an operand.
+static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
+{
+    char compiler[PATH_MAX];
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/identity.c", directory);
+    snprintf(object, sizeof(object), "%s/--version", directory);
+    static const char program[] = "int value = 42;\n";
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const version[] = { compiler, "-O2", "--version", source, NULL };
+    char* const machine[] = { compiler, "-dumpmachine", NULL };
+    char* const target[] = { compiler, "-target", "x86_64-acme-linux-gnu", "-dumpmachine", NULL };
+    char* const target_last[] = { compiler, "--target=x86_64-first-linux-gnu", "-target", "x86_64-linux-gnu", "-dumpmachine", NULL };
+    char* const both[] = { compiler, "--version", "-dumpmachine", NULL };
+    char* const invalid[] = { compiler, "-target", "aarch64-linux-gnu", "-dumpmachine", NULL };
+    char* const missing[] = { compiler, "-dumpmachine", "-target", NULL };
+    char* const* cases[] = { version, machine, target, target_last, both, invalid, missing };
+    const char* const expected[] = { "buster (development build)\nTarget: ", "x86_64-", "x86_64-acme-linux-gnu\n",
+                                     "x86_64-unknown-linux-gnu\n", "x86_64-", "", "" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(cases[i], &text, true) : -1;
+        const bool prefix = text != NULL && strncmp(text, expected[i], strlen(expected[i])) == 0;
+        check_test_expect(test, i < 5 ? status == 0 && prefix : status != 0 && text != NULL && text[0] == 0,
+                          "compiler identification selects the correct target and refuses unsupported targets");
+        free(text);
+    }
+    char* const compile[] = { "env", "-C", (char*)directory, compiler, "-pipe", "-c", "-o", "--version", "identity.c", NULL };
+    char* text = NULL;
+    const int compiled = made ? check_test_driver_spawn(compile, &text) : -1;
+    free(text);
+    FILE* output = fopen(object, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output != NULL && fread(magic, 1, sizeof(magic), output) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output != NULL)
+    {
+        fclose(output);
+    }
+    check_test_expect(test, compiled == 0 && elf, "-pipe compiles and an output named --version remains an operand");
+    char* const preprocess[] = { compiler, "-pipe", "-E", "-P", source, NULL };
+    text = NULL;
+    const int preprocessed = made ? check_test_driver_spawn_stream(preprocess, &text, true) : -1;
+    check_test_expect(test, preprocessed == 0 && text != NULL && strstr(text, "int value = 42;") != NULL,
+                      "-pipe is accepted in preprocessing mode");
+    free(text);
+    char* const command[] = { compiler, "parallel", "--version", NULL };
+    text = NULL;
+    const int command_status = made ? check_test_driver_spawn(command, &text) : -1;
+    check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "named commands take precedence over compiler identification");
+    free(text);
+    char* const assembly_version[] = { compiler, "-c", "--version", "missing.s", NULL };
+    char* const assembly_machine[] = { compiler, "-c", "-dumpmachine", "missing.s", NULL };
+    char* const* assembly_queries[] = { assembly_version, assembly_machine };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(assembly_queries); i += 1)
+    {
+        text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(assembly_queries[i], &text, true) : -1;
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, i == 0 ? "buster (development build)" : "x86_64-") != NULL,
+                          "information actions take precedence over implicit assembly compilation");
+        free(text);
+    }
+    char missing_assembly[256];
+    snprintf(missing_assembly, sizeof(missing_assembly), "%s/missing.s", directory);
+    char* const assembly_operand[] = { compiler, "-c", "-o", "--version", missing_assembly, NULL };
+    text = NULL;
+    const int operand_status = made ? check_test_driver_spawn_stream(assembly_operand, &text, true) : -1;
+    check_test_expect(test, operand_status != 0 && text != NULL && text[0] == 0,
+                      "an assembly output named --version does not select compiler identification");
+    free(text);
+    unlink(object);
+    unlink(source);
+}
+
 // Layout flags not implemented by the checker must not silently produce objects with another ABI.
 static void check_test_driver_layout_options(CheckTest* test, const char* executable, const char* directory)
 {
@@ -2334,9 +2472,12 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     unlink(source);
 }
 
+#include "c_check_pic_driver_test.c"
+
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
 static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
 {
+    check_test_driver_pic(test, executable, directory);
     static const char source_text[] = "int main(void) { return 0; }\n";
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
@@ -3426,6 +3567,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
+#include "c_check_cleanup_driver_test.c"
 #include "c_checker_driver_const_test.c"
 #include "c_checker_driver_gnu_test.c"
 
@@ -3680,6 +3822,8 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
+#include "c_check_symbol_driver_test.c"
+
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
@@ -4502,9 +4646,11 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_reservation_failure(&test);
         check_test_driver_link_failure_messages(&test);
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
+        check_test_driver_cleanup_errors(&test, clang, executable, directory);
         check_test_driver_const(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
@@ -4519,6 +4665,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
+            check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
@@ -4538,6 +4685,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_identification(&test, executable, directory);
             check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
             check_test_driver_layout_options(&test, executable, directory);
