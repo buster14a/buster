@@ -680,10 +680,6 @@ struct FileCache
     // The base pages at the start of the token columns' arenas of the lanes past lane 0, which c_files.c sets for a group
     // of many lanes before it reserves them (file_cache_arenas), or 0 for arena_reserve's.
     uint64_t lane_small_bytes;
-    // A fork's first records and paths (file_cache_fork, #776): its source's, whose files and prepared columns are the
-    // source's to unmap and release.
-    uint32_t borrowed_records;
-    uint32_t borrowed_paths;
 };
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
@@ -3819,50 +3815,18 @@ static __attribute__((unused)) bool file_cache_initialize(FileCache* cache, Inte
     return cache->records != 0 && cache->identity_slots != 0 && cache->paths != 0 && cache->path_slots != 0 && cache->path_arena.base != 0;
 }
 
-static __attribute__((unused)) void file_cache_release(FileCache* cache);
-
-// A cache for one lane of a command's units (#776): `source`'s records and paths, as #150's walk left them (every path
-// identified: no probe's mapping left to a path), and room
-// for its own, prepared with `table`, a copy of the source's table (intern_copy), whose ids the records' tokens hold. Each
-// record's and path's fields are copied, and what they point to (the files, the prepared columns and tables, the paths'
-// bytes) stays the source's: no cache writes a prepared record's columns, and the source outlives its forks, whose
-// release unmaps and frees only their own. False, with nothing reserved, if its memory can't be.
-static __attribute__((unused)) bool file_cache_fork(FileCache* cache, const FileCache* source, InternTable* table)
-{
-    bool result = file_cache_initialize(cache, table, source->prepare);
-    if (result)
-    {
-        memcpy(cache->records, source->records, (uint64_t)source->record_count * sizeof(PPFileData));
-        memcpy(cache->identity_slots, source->identity_slots, ((uint64_t)source->identity_slot_mask + 1) * sizeof(uint32_t));
-        memcpy(cache->paths, source->paths, (uint64_t)source->path_count * sizeof(FileCachePath));
-        memcpy(cache->path_slots, source->path_slots, ((uint64_t)source->path_slot_mask + 1) * sizeof(uint32_t));
-        cache->record_count = source->record_count;
-        cache->identity_slot_mask = source->identity_slot_mask;
-        cache->path_count = source->path_count;
-        cache->path_slot_mask = source->path_slot_mask;
-        cache->read_limit = source->read_limit;
-        cache->borrowed_records = source->record_count;
-        cache->borrowed_paths = source->path_count;
-    }
-    else
-    {
-        file_cache_release(cache);
-    }
-    return result;
-}
-
 // Unmaps the records' files, and the files of paths whose probe mapped one that no record took, and releases the
-// cache's memory; a fork's borrowed records and paths are its source's (file_cache_fork).
+// cache's memory.
 static __attribute__((unused)) void file_cache_release(FileCache* cache)
 {
-    for (uint32_t r = cache->borrowed_records; r < cache->record_count; r += 1)
+    for (uint32_t r = 0; r < cache->record_count; r += 1)
     {
         if (cache->records[r].mapped)
         {
             munmap((void*)cache->records[r].bytes, cache->records[r].length);
         }
     }
-    for (uint32_t p = cache->borrowed_paths; p < cache->path_count; p += 1)
+    for (uint32_t p = 0; p < cache->path_count; p += 1)
     {
         if (cache->paths[p].probe.mapped)
         {

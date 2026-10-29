@@ -119,20 +119,56 @@ them, so a unit's object is the same bytes whichever lane compiles it and
 after whichever units. `test-check-units` checks it: each unit's object of a
 command of several units is its object alone, at every lane count.
 
-### Not shared across lanes, yet
+### One cache for all the lanes, measured
 
 #152's design shares one file cache and one intern table between all the
 units, so that a header is prepared once in the process, as #150's run-ahead
 walk prepares a command's files on lanes. A unit's preprocessing writes both:
 the spellings that token pasting makes, the paths its `__has_include` and
 computed includes probe, and a file the walk didn't prepare (pp_run's
-`intern_find_or_add`, `file_cache_lookup_path` and `file_cache_prepare`). One
-cache for units running at once on several lanes needs those writes made
-safe for readers on other lanes: a lock for the writers and tables that never
-move while lanes read them, or each lane's writes into an overlay of its own.
-Each lane's cache prepares a header at most once per lane instead: on 8
-lanes, a header that every unit includes is prepared 8 times rather than
-once.
+`intern_find_or_add`, `file_cache_lookup_path` and `file_cache_prepare`). Each
+lane's cache prepares a header at most once per lane instead: on 8 lanes, a
+header that every unit includes is prepared 8 times rather than once.
+
+#776 measured the sharing that writes nothing shared while the units run:
+#150's walk (`files_run_ahead`) from every unit's main file, on the command's
+lanes before the units, into one cache and table, of which each lane's were
+then copies (the walk's records and paths copied by value, their files and
+prepared columns borrowed; its spellings under their ids), so that a lane
+wrote only its own, without a lock. It was slower on every command, and kept
+more memory, so the compiler doesn't have it: the experiment (`--units-walk`,
+`3ea2a6e5` on #776's branch) and its measurements are in [the
+record](https://github.com/buster14a/buster-performance/tree/e5cc5bb8b3a2265772611d45a502dcdac8d34e94/docs/measurements/units-functions-777-cache-776-2026-10-29). One executable without the walk and with it, on the
+9700X's CPUs 0 to 7, by 8 lanes (whole processes' medians, `time-runs`; the
+stages are `--time-stages`' medians of three runs):
+
+| ms | without | with the walk | the walk | the lanes' run, without and with |
+| --- | ---: | ---: | ---: | ---: |
+| Lua's 33 units, linked | 31.35 | 32.27 | 3.47 | 27.27, 25.47 |
+| synth's 512 units, linked | 527.75 | 602.13 | 21.20 | 498.87, 540.67 |
+| musl's 1,006 units, `-c` | 235.01 | 243.15 | 4.41 | 209.37, 209.83 |
+
+- **What the units saved** is less than the walk takes: Lua's lanes ran 1.8 ms
+  shorter with their files prepared, for a walk of 3.5 ms, and musl's saved
+  nothing, its lanes' own caches preparing each header once after their first
+  units and its units' own files small.
+- **Synth's lanes ran 42 ms longer:** the walk prepared every unit's main
+  file at the start (62 MB of source, 12.9 million tokens), which a unit then
+  read from memory long out of the caches, where a unit that prepares its own
+  file reads its tokens as they are made.
+- **The peaks rose** by the walk's records, which every lane's copies borrow
+  until the last unit: by 18 MB for Lua, 87 MB for synth and 60 MB for musl.
+- **On fewer lanes** the walk costs less, and saves no more: Lua 46.05 and
+  46.93 ms by 2 lanes, 76.28 and 76.40 by one; synth 917.3 and 935.8 by 2,
+  1,629.1 and 1,620.0 by one; musl 387.9 and 390.9 by 2, 641.4 and 638.8 by
+  one.
+
+The walk alone, from nothing (`benchmark-files` by 8 lanes), takes 1.98 ms for
+Lua's roots (242 files, of which 47 no unit entered, 8.5% of their tokens),
+3.27 ms for musl's (1,221 files, all entered) and 20.19 ms for synth's. A
+cache that the lanes fill as they run, with a lock for its writers (#776's
+other way), could save at most what Lua's lanes did, 1.8 ms of 29.7, less its
+waits and its shared memory's traffic.
 
 ### Diagnostics
 

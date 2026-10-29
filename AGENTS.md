@@ -5187,8 +5187,11 @@ unit's emission that starts while a lane takes no units shares its parts, cut as
 function lanes cut them, with the lanes that take none,
 `check_program_emit_help`; its outputs one lane's). Each lane keeps an
 intern table and a file cache that its units share; no lane shares anything a
-unit writes. Each unit's diagnostics go to a stream of its own, printed in the
-command line's order after every unit has run. A lane keeps its three big
+unit writes (#776 measured one cache and table for all the lanes, filled by
+#150's walk before the units and copied by each lane, and found it slower:
+the guide's "One cache for all the lanes, measured"). Each unit's diagnostics
+go to a stream of its own, printed in the command line's order after every
+unit has run. A lane keeps its three big
 arenas from one unit to the next, emptied; it pools the other arenas its units
 release (`arena_pool`, `lane.c`: their pages freed with `MADV_DONTNEED` and the
 mappings kept for the next reservations of their shapes); and the arenas of a
