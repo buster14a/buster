@@ -354,7 +354,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
         }
         if (valid && result != 0)
         {
-            result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef);
+            result = check_input_attribute_type(&reader, &attributes, result, fixture->is_typedef, false);
             valid = result != 0 && check_input_attribute_function(&reader, &attributes, result);
         }
         snprintf(description, sizeof(description), "%s: exact attribute diagnosis", fixture->name);
@@ -1385,6 +1385,20 @@ static __attribute__((noinline)) void check_test_attribute_sources(CheckTest* te
             true,
             false,
         },
+        // GNU's weak attribute needs external linkage (#147); a typedef's is ignored, and so is one after the entity's
+        // definition, as a constructor or a destructor after it is.
+        { "weak static function rejected", "static int\n__attribute__((weak)) f(void) { return 1; }\n", true, false },
+        { "weak static variable rejected", "static int x\n__attribute__((weak));\n", true, false },
+        { "weak block-scope static rejected", "void f(void) { static int x\n__attribute__((weak)); }\n", true, false },
+        { "weak automatic variable rejected", "void f(void) { int x\n__attribute__((weak)); }\n", true, false },
+        { "weak redeclaration of a static function rejected", "static int f(void);\nint f(void)\n__attribute__((weak));\n", true, false },
+        { "weak block-scope extern", "void f(void) { extern int x __attribute__((weak)); }\n", false, false },
+        { "weak block-scope function", "void f(void) { int g(void) __attribute__((weak)); }\n", false, false },
+        { "weak typedef ignored", "typedef int T __attribute__((weak));\n", false, false },
+        { "weak after the definition ignored", "int x = 1;\nint x __attribute__((weak));\n", false, false },
+        { "weak declarators after one's definition", "int x = 1;\n__attribute__((weak)) int x, y;\n", false, false },
+        { "constructor after the definition ignored", "void f(void) {}\nvoid f(void) __attribute__((constructor));\n", false, false },
+        { "constructor priorities", "void __attribute__((constructor(101), destructor(65536))) f(void) {}\n", false, false },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-attribute-source-XXXXXX";

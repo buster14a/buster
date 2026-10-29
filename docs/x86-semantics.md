@@ -28,7 +28,10 @@ measurements.
   (`x86_instructions_effects` and its twin `x86_instructions_effects_scalar`),
   and form choice (`x86_choice_row`, `x86_choose_forms` and its twin
   `x86_choose_forms_scalar`, `x86_choice_instruction`).
-  `x86_semantics_initialize` builds the tables.
+  `x86_semantics_initialize` builds the tables: each covered form's record from
+  its row and its form's syntax and operands, the part its operands decide (its
+  shape) made once for each distinct one and kept by a hash of its inputs, which
+  the 3,148 forms share 328 of (#760).
 - `x86_semantics_test.c`: `test-x86-semantics`.
 - `x86_semantics_benchmark.c`: `benchmark-x86-semantics`.
 
@@ -184,10 +187,33 @@ record:
   - the stack and fences are memory;
   - an x87 form reads the x87's state and control word and writes the state,
     fldcw the control word too; vzeroupper reads and writes ZMM0 to ZMM15;
-  - a record with an opmask (an EVEX form's: `x86_validate` refuses one in any
-    other's) merges or zeroes its destination's elements by a mask register,
-    which the sets have no resource for: it reads and writes everything, as an
-    uncovered form does.
+  - an /is4 operand (`vpblendvb`'s, in the immediate's bits 7 to 4) is read; a
+    VSIB operand's index is a vector register; a VEX gather reads and clears
+    its mask, vvvv's register, and keeps the destination's elements the mask
+    leaves (#760);
+  - a record that touches an opmask register reads and writes everything, as
+    an uncovered form does: one with an opmask (an EVEX form's: `x86_validate`
+    refuses one in any other's), and a form with an opmask register among its
+    operands (kmov, kand, a compare into an opmask).
+- `x86_instructions_effects_opmasks` and its twin
+  `x86_instructions_effects_opmasks_scalar` (#760) give the same sets with
+  those records resolved too, and each record's opmask registers in a 16-bit
+  column: bits 0 to 7 the ones it reads (K0 to K7), bits 8 to 15 the ones it
+  writes. The sets have no room for them: 61 of their 64 bits are taken.
+  - an opmask role's register is in the column, not the sets
+    (`BUSTER_X86_EFFECT_OPMASK_REG`, `_RM` and `_VVVV`, which the
+    initialization gives the roles of the form's opmask operands);
+    vp2intersect writes its even register and the next;
+  - the record's opmask is read; a vector destination of it merges into its
+    old elements, so it reads the register too, unless it zeroes them
+    (`BUSTER_X86_DECORATION_ZEROING`); a gather or a scatter clears its
+    opmask, so writes it too;
+  - an uncovered form's column is 0xffff, every opmask register read and
+    written.
+
+  A consumer that may reorder records with opmask registers takes the column;
+  one that doesn't (#172's scheduler of Tier 1's records, the unwind analyzer)
+  keeps `x86_instructions_effects`, whose answer for them stays everything.
 
 Memory is one resource: alias analysis is the consumer's. A form's memory read
 alone doesn't prove that a load may move or fold; that stays #136's and #141's
@@ -283,7 +309,10 @@ value needs a register, or isn't a value of the width.
     too.
 
   inc and dec are smaller and run as fast on the 9700X (below), but whether
-  they are faster is the target's (#181), so the caller turns them on.
+  they cost more is the target's, so the caller turns them on: Tier 0 asks
+  for them where the Zen 5 model's observations of them cost no more than add's
+  and sub's with an imm8 (#181, `tier0_inc_dec`; `x86-zen5.md`'s "inc and dec
+  against add and sub", before a conditional branch too), which they don't.
 
 A substitution's conditions aren't written by hand. Each candidate of another
 instruction names the status flags it defines as the operation would (inc and
@@ -371,20 +400,28 @@ input, every bit of the context too.
   mask registers in flight already: a `vptestmq` for the property, or a join
   inside the chain of masked ORs that builds the read set, measured slower
   (below);
-- a record with an opmask is an uncovered one's lane (`vptestnmq` of the
-  records' last bytes, joined with the covered forms' mask);
-- the rare records are the scalar twin's: an x87 form's, vzeroupper's and a
-  form's with an operand in vvvv. A masked `vpternlogq` ORs the effects
-  records' upper halves (their properties and the vvvv role) into a register,
-  one `vptestmq` of it after the loop says whether any lane was rare, and then
-  `x86_instruction_effects_scalar` overwrites the rare lanes after the stores.
-  A count in a general register cost more (below): the lanes' lookups take
-  every general register the loop has.
+- vvvv is a lane's third role, as reg and rm are: the X86 rows' three-operand
+  VEX and EVEX forms (#760) are most of vector code's records, which the scalar
+  twin would take one at a time;
+- a record that touches an opmask register is an uncovered one's lane
+  (`vptestnmq` of the records' last bytes and of the opmask roles' properties,
+  joined with the covered forms' mask), but in
+  `x86_instructions_effects_opmasks`, whose lanes compute the opmask column and
+  the merging destinations' reads. The two entry points inline one body
+  (`x86_instructions_effects_lanes`, `always_inline`) with the column's pointer
+  null and not, so that the first has none of the column's instructions;
+- the rare records are the scalar twin's: an x87 form's, vzeroupper's and
+  `BUSTER_X86_EFFECT_RARE`'s (an /is4 operand, a VSIB one's vector index, and
+  vp2intersect's pair of opmask registers). A masked `vpternlogq` ORs the effects
+  records' properties into a register, one `vptestmq` of it after the loop says
+  whether any lane was rare, and then `x86_instruction_resolve` overwrites the
+  rare lanes after the stores. A count in a general register cost more
+  (below): the lanes' lookups take every general register the loop has.
   Code generators emit them rarely (Tier 0's long double code, its vector
-  constants' zeroing, a function's vzeroupper), so the common lane pays the test
-  alone, rather than the vvvv role and the x87's resources in every lane. An
-  EVEX form isn't one: clang -O2's AVX-512 code has many (`vmovdqu64`), and
-  sending them there cost the loop 20% (below).
+  constants' zeroing, a function's vzeroupper, a gather), so the common lane
+  pays the test alone, rather than the x87's resources in every lane. An EVEX
+  form isn't one: clang -O2's AVX-512 code has many (`vmovdqu64`), and sending
+  them there cost the loop 20% (below).
 
 Gathers would cost more here: a `vpgatherdd` of 16 is 64 µops on Zen 5
 (`docs/coding-style.md`). The records and outputs are read and written with
@@ -400,14 +437,22 @@ Each consumer reads the tables rather than keeping a copy of their rules:
   records its emitter writes with a computed constant (the frame's reservation
   and release, its realignment, `ALLOCA`'s rounding, a vector constant's words)
   take their imm8 or imm32 form by `x86_immediate_encodes`. Every record it
-  emits but an X86 entry's (the front end's row, any VEX or EVEX form) has a
-  covered form: `test-tier0` checks it on every program it compiles (the x87's,
-  the 128-bit integers', the vectors' and the deep values' too).
-  `tier0_operation_form_valid` still keeps its own list of the VEX forms with
-  implicit operands, which the rows refuse: it can't ask the tables until they
-  cover VEX and EVEX forms.
+  emits has a covered form, an X86 entry's too: `test-tier0` checks it on every
+  program it compiles (the x87's, the 128-bit integers', the vectors' and the
+  deep values' too). `tier0_operation_form_valid` asks the tables which VEX and
+  EVEX forms a row may have (#760): a covered one whose effects name no register
+  its syntax doesn't, neither implicit registers (mulx's rdx) nor vzeroupper's
+  every vector register; an uncovered form's conservative record has both
+  (vzeroall, vmaskmovdqu, the string compares). `tier0_initialize` builds the
+  tables where they aren't built, so that a caller of Tier 0 alone (a test of
+  its rows) reads them too. The legacy forms the x86
+  builtins take (`tier0_operation_legacy_forms`, #148) stay a list of their own:
+  most aren't covered (the shadow stack's, RDRAND, the FS and GS bases' writes,
+  WBINVD, INVPCID), and the harness can't run many of them.
 - **Tier 1's selector** (#141, `tier1_select.c`) chooses its immediates' forms
-  by the rows, one request at a time with the scalar twin; the scheduler (#172,
+  by the rows, a function's requests 32 at a time through `x86_choose_forms`
+  (on the scalar path each as it comes, by the twin), and every record it emits
+  has a covered form, which its tests check; the scheduler (#172,
   `tier1_schedule.c`) builds its dependency graph from the resolved effects.
 - **The unwind tables' analyzer** (`unwind_tier0.c`) refuses a function with an
   uncovered form, which every Tier 0 function with long doubles, 128-bit
@@ -428,7 +473,10 @@ effects: a volatile object read as often as the source reads it (twice for
 write, a load through a pointer kept on its side of a store through it, and an
 atomic increment written by a locked form in its helper. A program whose locals'
 homes are read and written through pointers to them between their uses runs
-natively against clang. Folding loads through pointers is Tier 1's (#141).
+natively against clang. Folding loads through pointers is Tier 1's (#141): its
+selector folds a load into its only consumer in its block past nodes that
+neither write memory, call nor access a volatile object, and past none that do
+(`docs/tier1-selection.md`).
 
 ## Tests
 
@@ -552,7 +600,7 @@ Mutations of the tables, each built and run once, are caught. Among them:
 
 ## The covered subset
 
-712 forms:
+3,148 forms:
 
 - **The integer ALU:** add, or, adc, sbb, and, sub, xor and cmp (every form,
   with their locked forms on memory); test; not, neg, inc and dec (and their
@@ -588,13 +636,89 @@ Mutations of the tables, each built and run once, are caught. Among them:
   each of their five shapes; fchs and fabs; fcmovcc of the 8 conditions; fcomi,
   fcomip, fucomi and fucomip; fldcw and fnstcw.
 - **VEX and EVEX**, the forms Tier 0's own vector code emits: vmovdqu (128 and
-  256 bits), vmovdqu64 (128, 256 and 512), vpxord (each width, and its
-  broadcasts) and vzeroupper.
+  256 bits), vmovdqu64 (128, 256 and 512), EVEX's vmovd and vmovq (between an
+  XMM register and a general one or memory, the narrow vectors' loads and
+  stores), vpxord (each width, and its broadcasts) and vzeroupper.
+- **The front end's X86 rows** (#760: every VEX and EVEX form the rows of
+  `c_check_program_x86.c`, `c_check_program_vectors.c`,
+  `c_check_program_vector_builtins.c` and the lowering's own
+  (`c_check_program_lower.c`) may have, 1,321 of their 1,404 forms, and
+  test-tier0's vector check's), with their families' other widths, broadcasts and rounding forms,
+  VEX and EVEX:
+  - the moves: vmovups, vmovupd, vmovaps, vmovapd, vmovdqa32, vmovdqa64,
+    vmovdqu8, vmovdqu16 and vmovdqu32, vlddqu, vmovss, vmovsd and vmovsh,
+    vmovd, vmovq, vmovshdup, the non-temporal moves (vmovntps, vmovntpd,
+    vmovntdq, vmovntdqa), and VEX's masked loads and stores (vmaskmovps,
+    vmaskmovpd, vpmaskmovd, vpmaskmovq);
+  - floating arithmetic in ps, pd and ph and their scalars (ss, sd, sh): vadd,
+    vsub, vmul, vdiv, vmin, vmax and vsqrt; vaddsub, vhadd and vhsub; the fused
+    multiply-adds (vfmadd213, vfmadd231, vfmsub231, vfmaddsub213,
+    vfmaddsub231, vfmsubadd231) and AVX512-FP16's complex multiplies (vfmulc,
+    vfcmulc, vfmaddc, vfcmaddc); the approximations (vrcp, vrsqrt, their 14-bit
+    and half-precision forms); vgetexp, vscalef and vrndscale; AVX512BF16's
+    vdpbf16ps;
+  - the conversions: between floating formats (vcvtss2sd, vcvtsd2ss,
+    vcvtpd2ps, the half-precision ones, F16C's vcvtph2ps and vcvtps2ph,
+    vcvtps2pd, AVX512BF16's vcvtneps2bf16 and vcvtne2ps2bf16), to integers
+    (vcvt and vcvtt from ps, pd, ph, ss, sd and sh to dq, udq, qq, uqq, w, uw,
+    si and usi) and from them (dq, udq, qq and uqq to ps, pd and ph, and w and
+    uw to ph);
+  - the compares: vcmp (VEX's into a vector, EVEX's into an opmask), vcomis
+    and vucomis into the flags, vpcmp and vpcmpu in b, w, d and q, vpcmpeqb,
+    vptestm and vptestnm, vp2intersectd and vp2intersectq; the tests into the
+    flags: vptest, vtestps, vtestpd, kortest and ktest;
+  - integer arithmetic: vpadd and vpsub in b, w, d and q and their
+    saturating forms (vpadds, vpaddus, vpsubs, vpsubus in b and w), vpmin and
+    vpmax (signed and unsigned, b, w, d and q), vpabs, vpavgb and vpavgw,
+    vpmaddwd, vpmaddubsw, vpmullw, vpmulld, vpmullq, vpmulhw, vpmulhuw,
+    vpmulhrsw, vpmuldq, vpmuludq, vpsadbw, the horizontal vphadd and vphsub
+    (w, d, sw), vpsign, vphminposuw, vpconflictd, vpconflictq, vplzcntd,
+    vplzcntq, vpopcnt (b, w, d, q), vpmultishiftqb,
+    and the accumulating dot products (AVX512VNNI's and AVX-VNNI's vpdpbusd,
+    vpdpbusds, vpdpwssd, vpdpwssds) and multiply-adds (AVX512IFMA's
+    vpmadd52luq and vpmadd52huq);
+  - the logic: vpandq, vporq, vpxorq, vpternlogd and vpternlogq;
+  - the shifts: vpsll, vpsrl and vpsra in w, d and q, by an immediate and by an
+    XMM register's count, vpsraq, the variable ones (vpsllv, vpsrlv, vpsrav in
+    w, d and q), vpslldq, vpsrldq, vprold, and AVX512VBMI2's concatenating
+    vpshldv and vpshrdv (w, d, q);
+  - the moves of elements: the permutes (vpermb, vpermw, vpermd, vpermq,
+    vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd),
+    vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,
+    vshufi32x4, vshufi64x2, the broadcasts
+    (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
+    register too), the inserts and extracts (vinserti32x4, vinserti64x4, f32x4,
+    f64x4, i32x4, i64x4, vpinsr and vpextr in b, w, d, q), the packs (vpacksswb,
+    vpackssdw, vpackuswb, vpackusdw), the narrowing moves (vpmov, vpmovs and
+    vpmovus from d and q to b, w and d, and from w to b) and the widening ones
+    (vpmovzx and vpmovsx from b, w and d), and the compresses
+    and expands (vcompress and vexpand in ps and pd, vpcompress and vpexpand in
+    b, w, d and q);
+  - a vector's signs, bytes or bits into a register: vpmovb2m, vpmovw2m,
+    vpmovd2m, vpmovq2m, vpmovmskb, vmovmskps, vmovmskpd, vpshufbitqmb; an
+    opmask's bits into a vector's elements: vpmovm2b, vpmovm2w, vpmovm2d,
+    vpmovm2q; the selects by a register's signs (vpblendvb, vblendvps,
+    vblendvpd) and by an opmask (vpblendmd, vpblendmq);
+  - gathers and scatters: vpgatherdd, vpgatherdq, vpgatherqq, vpscatterdd,
+    vpscatterqd, vpscatterqq (VEX and EVEX);
+  - AES and GF(2^8): vaesenc, vaesenclast, vaesdec, vaesdeclast, vaesimc,
+    vgf2p8affineqb, vgf2p8mulb;
+  - the opmask registers: kmov (to and from general registers, memory and each
+    other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck and kshiftl;
+  - BMI's andn, bextr, bzhi, pdep and pext (their VEX forms), paddd (SSE2's,
+    the vector check's) and prefetchit0 and prefetchit1.
 
-The other VEX and EVEX forms are uncovered (#180's levels will bring them, with
-their merges from vvvv, their zeroed upper lanes and their masks), the front
-end's X86 rows among them, and so are the string instructions and the moffs
-forms.
+The other VEX and EVEX forms are uncovered, and so are mulx (whose rdx the rows
+can't name, as Tier 0's rows refuse it), v4fmaddps (a register block), APX's
+EVEX forms of general registers and their NF and ND forms, MMX's, the string
+instructions and the moffs forms. The families' rows come from a generator's
+rules on the form table, executed and corrected on hardware: the harness, not
+the generator, is their check. It runs every covered form its host's target
+allows, which #180's table decides: neither the 9700X nor the Zen 4s run
+AVX512-FP16's forms, an extension the table doesn't classify, nor the VEX forms
+of AVX-IFMA and AVX-NE-CONVERT (vpmadd52luq's and vcvtneps2bf16's), features it
+has no bit for. Their rows follow their EVEX and single-precision twins' by
+rule, unexecuted. AVX512VP2INTERSECT's and AVX-VNNI's run on the 9700X alone.
 
 ## Adding a form
 
@@ -613,14 +737,20 @@ forms.
 2. If a fixture of the issue's kind fits (a fixed register, a partial write, a
    flag), add one to `x86_semantics_fixtures`.
 3. If the vector resolver should leave the form's records to its scalar twin
-   (a property or a role it doesn't resolve itself), add it to the rare facts in
-   `x86_instructions_effects`.
-4. Run `test-x86-semantics`: it executes the form from random states. A form
+   (an operand no role names: an /is4 register, a VSIB index, an opmask pair),
+   the initialization gives it `BUSTER_X86_EFFECT_RARE` from its operands; a new
+   kind of such operand goes there and in `x86_instruction_resolve`. An opmask
+   operand's role gets its `BUSTER_X86_EFFECT_OPMASK_*` from its class.
+4. If #180's table doesn't classify it, add its row to `x86_target_rows.c` with
+   its features: the harness runs only a form its host's target allows, and
+   `test-x86-target`'s GNU as gate checks the features.
+5. Run `test-x86-semantics`: it executes the form from random states, with
+   XMM16 to XMM31 and an opmask (zeroing too) where an EVEX form takes them. A form
    that branches or traps isn't executed; add a fixture of its effects instead,
    as call's and ret's are. A form that needs operands the harness doesn't
    generate gets them where `x86_semantics_check_run` makes division and bt
    fault-free.
-5. If a selector gives it immediates, add its row and candidates to
+6. If a selector gives it immediates, add its row and candidates to
    `x86_choice_sources`, shortest first. A candidate of another instruction
    names the flags it defines alike. The test then runs every candidate against
    its reference, and `--cross-check` against GNU as.
@@ -633,6 +763,34 @@ clang's code. Main is `9bb5060e` and the head `cff7bc98`, each built by
 `build.sh` with `BUSTER_DEBUG_INFO=0`, five rounds in an order alternating by
 round ([the record](https://github.com/buster14a/buster-performance/tree/a74e2a6ee49e31ea9f948f597ecefc9c02f3e835/docs/measurements/x86-semantics-221-2026-10-28)). The final head (`ecb3fcfd`) takes the scalar
 twin's x87 and vzeroupper resources from a table, measured below as a variant.
+
+**The VEX and EVEX coverage (#760)**, on the 9700X: main `5c7a0bd7` against
+`62c638ac`, five rounds in an order alternating by round
+([the record](https://github.com/buster14a/buster-performance/blob/ae896f8bedeca1419e8d384e26a221326d255396/docs/measurements/x86-semantics-760-2026-10-29/README.md)):
+
+- the records take 50,384 bytes (3,149 of 16: the 3,148 covered forms' and the
+  conservative one), and `x86_semantics_initialize` 97,285 cycles (17.5 µs)
+  against 45,750 (8.3 µs), the operands' part of a record made once per
+  distinct shape (328);
+- the choice is unchanged: 3.33 cycles per request;
+- the AVX-512 effects loop takes 6.19 cycles per record on -O0's shape and
+  6.23 on -O2's, against 5.45 and 5.50, at 25.50 instructions against 23.63,
+  back to back and after 200 ms of its twin alike: it takes a `vvvv` operand as
+  a lane's third role, which every record pays for, rather than sending its
+  record to the twin. The twin takes 72.43 cycles against 46.86, walking three
+  roles and checking the opmask roles, `/is4` operands, VEX gathers and merges
+  for every record, and the opmask column (`x86_instructions_effects_opmasks`)
+  8.89. The default compile runs neither: their consumers, the Tier 1
+  scheduler and the unwind analyzer, are opt-in. The benchmark's records are
+  legacy forms almost all, so this is their cost, not vector code's;
+- #180's table takes 795 cycles to build, against 707, classifying 3,463
+  forms from 1,675;
+- `-c` of the frozen `sqlite3.c` writes the same object, with 281,969
+  instructions more (+0.021%; `tiny.c`'s two functions take 314,928 more: the
+  initialization's fixed cost) and 0.58% more cycles (rounds +0.23% to
+  +0.70%), which no placement comparison attributes.
+
+The rest of this section is #761's: main `9bb5060e` against `cff7bc98`.
 
 **Tables:**
 
@@ -775,18 +933,16 @@ the table compares the second ones. The instructions and cycles are one
 
 ## Next steps
 
-- **#141:** its load folding (addressing modes, loads folded into their
-  consumers) is where single-use and multi-use loads, interfering writes and
-  volatile and atomic accesses decide a fold; its tests of them belong with it,
-  on the resolved effects. Its selector's requests could go to the vector
-  choice in batches, as Tier 0's do.
-- **VEX and EVEX coverage (#760):** the front end's X86 rows and the x86
-  builtins (#725) emit any VEX or EVEX form. Covering them (#180's levels:
-  BMI2's shlx, VEX's three-operand scalar arithmetic, their merges from vvvv,
-  zeroed upper lanes and masks) would let `tier0_operation_form_valid` ask the
-  tables for the forms with implicit operands, rather than keep its own list,
-  and the resolved effects cover masked records with an opmask resource.
-- **#181:** key its latencies by the same forms, and decide inc and dec.
+- **The X86 rows' legacy forms** (`tier0_operation_legacy_forms`, #148): most
+  are uncovered (the shadow stack's, RDRAND and RDSEED, the FS and GS bases'
+  writes, the cache flushes, WBINVD, INVPCID), so a record of them reads and
+  writes everything; the deterministic user-mode ones (CRC32, SHA, the
+  non-temporal and direct stores, EXTRQ and INSERTQ) can get rows the harness
+  runs.
+- **A consumer of the opmask column:** a scheduler of records with opmask
+  registers takes `x86_instructions_effects_opmasks`; Tier 1 has none yet
+  (#748 brings its vector masks).
+- **#181:** key its latencies by the same forms.
 
 ## Boundary audit #298
 

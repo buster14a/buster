@@ -13,6 +13,12 @@ the semantic driver:
 ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
 
+The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
+one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
+target triple. These actions need no source file and accept `-target` or `--target=` for supported x86-64 Linux GNU
+targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
+compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
@@ -93,6 +99,18 @@ conversion metadata. `--dump-static` materializes supported static
 definitions as real `Link` atoms and prints their bytes and symbolic fixups.
 Preprocessor options include the
 existing language, include-path and macro-definition options.
+
+The semantic driver refuses unsupported hardening, instrumentation and ABI
+options by name rather than silently producing an object without them (#814).
+This includes stack protection, CET, stack-clash checking, `-pg`, function
+instrumentation and profile-generation forms, coverage flags, explicit TLS models, `-mno-red-zone`,
+`-fno-plt`, and the unsupported structure-return, short-double and
+wide-execution-character options. The last stack-protector and CET option
+decides those families, so `-fno-stack-protector` and `-fcf-protection=none`
+can turn them off. The other listed options are conservatively refused even if
+a later argument would disable them. The separate `-E` preprocessor retains
+its predefined-macro behavior; it emits no object. This list does not cover
+sanitizer options.
 
 Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
@@ -180,6 +198,32 @@ each where clang reports it. An `aligned` attribute after its body, which clang
 applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
+
+**Bit-precise constants** (#768, `check_literal_integer`): C23's `wb` and `WB`
+suffixes, alone or with `u` or `U` before or after them, in every radix and with
+digit separators (where the mode lexes them), typed as C23 and clang 23 type
+them in every mode: `_BitInt(N)` of the smallest N above 1 that holds the value
+and a sign bit, or `unsigned _BitInt(N)` of the smallest N above 0 that holds
+it. An ordinary integer constant is read as before, in 64 bits: a spelling that
+reader can't take goes to a cold reader of bit-precise constants
+(`check_literal_bit_precise`), which reads the digits again in 128 bits, the
+most the checker's values hold (`BUSTER_CHECK_LITERAL_BIT_WIDTH`), so that
+every other constant's path is as it was. (A first version that read every
+constant's suffixes for these, with a 128-bit value in every literal, cost
+1.36 million more instructions on `sqlite3.c`'s `-fsyntax-only`, about 25 per
+integer constant; this one about 196,000, in the literal's two new fields.) A
+constant that needs more than 128 bits is refused by
+name, "bit-precise integer constants wider than 128 bits are not supported",
+where clang takes it: a `wb` one of 128 bits with its top bit set is
+`_BitInt(129)`. The literal leaves its type to the reader, which makes the
+`_BitInt` in its table (`CheckLiteral.bit_width`, `check_input_literal`); #658's
+literal tables leave such constants to the ordinary path. `#if` reads them as
+clang does, through the preprocessor's own constants. Two differences from clang
+remain:
+- before C23, clang warns that the suffix is a C23 extension
+  (`-Wc23-extensions`), and the checker doesn't;
+- clang takes an imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't
+  let a program spell otherwise), which the checker refuses, as GCC does.
 
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
@@ -501,6 +545,24 @@ before comparing scalar and vector schedules. The corpora and their semantic
 mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
+
+Unnamed parameters in definitions (#792) retain their positions in the complete
+function signature. `CheckInput.parameters` stores the first named parameter at
+a body-opening token and a parameter's full-signature ordinal at its name token;
+these token roles are disjoint. `parameter_next` still links only named tokens,
+so binding, prototype-scope restoration and deferred body readers never see an
+invented identifier. The ordinal reuses existing initialized storage: no new
+per-token column, allocation or scan is added, including for ordinary all-named
+functions. K&R identifier lists publish their source-order ordinals too.
+
+Lowering walks the contiguous type signature and consumes a named token only at
+its ordinal. Every parameter gets an incoming ABI local, including unnamed
+integer, SSE, aggregate and stack-passed parameters; only named parameters enter
+the source-object map. This preserves the contiguous incoming-local prefix,
+hidden result pointer, register-exhaustion rollback and fixed variadic offsets.
+Named parameters keep their qualifiers, alignment and K&R entry conversions.
+`test-checker` covers these paths against Clang, including a Clang-built caller
+of a buster definition. This is a correctness change, not a throughput claim.
 
 K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
 decision has it. The declarator records an identifier list's names as the
@@ -1027,10 +1089,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
 stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
 constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
-The standalone source bridge refuses a referenced overloadable symbol until
-its ABI symbol name is available, before publishing any Link state. An unused
-overloadable declaration needs no symbol; the lower-level emitter can consume
-an explicitly supplied object-to-symbol map.
+The standalone source bridge and the program emitter share `c_check_mangle.c`
+for selected overloadable symbols (#821). Calls and contextual addresses retain
+the checker's selected object, and each emitted object receives its Itanium ABI
+name once; explicit asm labels override it. Static inline overloads, including
+Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
+Unmarked overload candidates retain C names, and unused declarations need none.
+
+The mangler uses an explicit worklist and canonical type substitutions, with
+scalar/vector substitution lookup. It covers builtin and complex arithmetic,
+qualified pointers, fixed/incomplete arrays, function pointers, vectors,
+atomics, bit-precise integers and file-scope named tags. Signatures requiring
+local/anonymous tag naming, variable array bounds, or an unsupported calling
+convention still fail before publication unless an asm label supplies the ABI
+name. These refusals do not select a different overload or publish an unmangled
+fallback. The focused `test-checker --program-overloads` suite checks independently
+stated encodings, deep signatures, allocation failures, deterministic emission,
+cross-compiler linkage in both directions and the installed `<tgmath.h>` through
+both object and direct-executable driver paths; the full checker suite runs it too.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
@@ -1312,13 +1388,66 @@ What the lowering covers past scalars (#145's programs):
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is NO_CLASS passes as its low eightbyte alone, an
+  `i64` or a `double` in clang's code, in a register or, when clang's count of
+  registers has one left and LLVM's none, in one 8-byte stack slot, the next
+  argument's after it (`abi_assign`'s `BUSTER_ABI_FLAG_LOW`), which Tier 0
+  copies as one part (#137). A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
   of a `long double`, in st0) returns its bytes' address too. Those larger than
   64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
   stack aligned to it at the call, which realigns the caller's frame.
+- **Transparent unions (#147).** An argument, a parameter and `va_arg`'s type
+  that is a transparent union passes as the union's first member, as clang's
+  code classifies it (`useFirstFieldIfTransparentUnion`; a result keeps the
+  union's own classes): `check_lower_passed_as` gives `abi_assign` and
+  `abi_va_arg` the member, and a parameter's frame object takes the union's
+  bytes from where the member arrives. A first member of an integer, a pointer,
+  an enum or `_Bool` passes as a value of its class, extended as its type is (a
+  `short`'s sign-extended, as clang's `signext`); a struct, a union, an array,
+  a 128-bit integer or an `_Atomic` one passes as the union's bytes, as an
+  aggregate of the member's type does (`check_lower_transparent_class`). The
+  value comes from the union's object, or from the member a conversion to the
+  union selects (`BUSTER_CHECK_CONVERT_TRANSPARENT_UNION`, which the lowering
+  refused before), whose value starts the union's bytes, every member having
+  the first's size (`check_lower_transparent_value`): an integer's or a
+  pointer's bits as the first member's class, a struct's, a union's or a
+  complex value's from its address, and any other's (a floating value's, a
+  wide one's) through a temporary. So a union of a struct of two floats and a
+  struct of two ints passes in xmm0, where its own classes would take a general
+  register, and glibc's
+  socket calls (`bind`, `connect`, `accept`, `getsockname`, `sendto`,
+  `recvfrom` and the rest) take `__SOCKADDR_ARG` and `__CONST_SOCKADDR_ARG`
+  with `_GNU_SOURCE`. Two cases are refused by name. A union sized or aligned
+  otherwise than its first member, by an `aligned` or `packed` attribute of its
+  own: clang's code takes its registers from the member and its stack slot
+  from the union (`getIndirectResult`). And a union made transparent, by a
+  later declaration's attribute, after a function definition or a static
+  object's initializer that names a function, whose first member passes
+  otherwise than the union does (its registers, its stack or its extension):
+  clang's code classifies a function's type where it first meets it, which an
+  object's initializer does where clang's code emits the object, and keeps
+  that for the type's every use (`check_lower_transparent_late`; clang 23.1.4
+  passes `void f(union U)` as the union in a call after the attribute when a
+  definition before it met the type, or an initializer such as
+  `void (*p)(union U) = f;`). The lowering takes the earliest such place in the
+  unit (`check_lower_first_classification`, the first body or an earlier
+  initializer that names any function), the first time a lane asks, which
+  only such a union makes it do. So a union only made transparent inside a
+  body, or after a static object's initializer, which clang's code emits only
+  once a function uses the object, or after one that names a function of
+  another type, is refused so too, though clang's code would pass it as its
+  member. `test-checker`'s programs
+  (`c_check_program_transparent_test.c`) run each kind of member value, union
+  values, unnamed arguments and `va_arg`, in registers and on the stack,
+  against clang -O0's build of the same source, calling the harness's clang
+  functions and called by them through pointers, with the registers a
+  `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
+  `test-checker-driver` links and runs glibc's socket calls with `_GNU_SOURCE`
+  by both paths against clang's build (`c_check_transparent_driver_test.c`).
 - **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
   aggregate-returning body's control graph removes unreachable transfers
   without renumbering labels. A reachable implicit return supplies an address
@@ -1345,7 +1474,11 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area, and
+  `va_arg` of a vector takes the path of a struct of its bytes, as a 128-bit
+  integer's does (a 16-byte one from its XMM register's slot of the save area,
+  a wider one in the overflow area, where the call puts it), and loads the
+  vector from their address. Named
   arguments aligned past 16 bytes align the incoming area to them, which
   Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
@@ -1393,9 +1526,10 @@ What the lowering covers past scalars (#145's programs):
   is refused by name. The overflow builtins take 128-bit operands and
   destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
   in a frame object of its own.
-- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 16, 32
-  or 64 bytes (the intrinsics' `__m128` to `__m512i`, elements other than
-  `bool`) are Tier 0's VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
+- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 4, 8,
+  16, 32 or 64 bytes (the intrinsics' `__m64` and `__m128` to `__m512i`, and the
+  narrow vectors of their conversions; elements other than `bool`) are Tier 0's
+  VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
   memory class: their locals, parameters and temporaries are frame objects of
   their bytes (`check_lower_temporary_of`), their globals are read and written
   through their addresses, and each `LOAD`, `STORE` and `SET` of one has its
@@ -1407,15 +1541,24 @@ What the lowering covers past scalars (#145's programs):
   `-march` and the `-m` flags), the unit's and the function's (its target
   attribute's, below), and without them a vector's first entry is refused by
   name. The convention passes a vector in a register as wide as the unit's
-  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
-  passes and returns one as the 128-bit integers are passed, through a frame
-  object of its bytes. An operator is an X86 entry of its row
+  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does, and one
+  of 4 or 8 bytes as clang's ABI classes it (4 bytes INTEGER, 8 bytes SSE, but a
+  vector of one double MEMORY); a call passes and returns one as the 128-bit
+  integers are passed, through a frame object of its bytes. A vector of 4 or 8
+  bytes is in an XMM register's first bytes, the rest zero, so that its rows
+  are XMM forms, as clang's code of `__m64` is; its floating division divides
+  its own elements alone, under a mask of them, so that the zeros past them
+  raise no `FE_INVALID` (clang's code divides them one at a time under
+  `FENV_ACCESS`). An operator is an X86 entry of its row
   (`c_check_program_vectors.c`): an instruction per operator and element type
   where AVX-512 has one (`+ - * / & | ^ << >>`, the compares through an opmask
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
-  type. `op=` loads, computes and stores back. Half-precision elements'
+  type, and so is a conditional's scalar arm (`check_lower_vector_operand`: the
+  operator splats it itself, so that an integer's conversion to a GNU C vector
+  of its bytes is a cast's, below, and the tasks' loop asks no cast whether it is
+  one). `op=` loads, computes and stores back. Half-precision elements'
   (`_Float16`'s) arithmetic and compares are AVX512-FP16's (VADDPH, VCMPPH and
   the others), which the function's target must have (its extension:
   `X86Target.extensions`), and their negation flips the sign bits. Where the
@@ -1432,10 +1575,13 @@ What the lowering covers past scalars (#145's programs):
   computes chains in half precision, as clang does. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
   (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
-  same bytes changes no bits. Integer division and remainder, and 8-bit
+  same bytes changes no bits, and so does one between a GNU C vector of 4 or 8
+  bytes and an integer of its bytes, a move between their registers
+  (`check_lower_vector_bits`: VMOVD or VMOVQ), where an extended vector's cast
+  of a scalar splats it. Integer division and remainder, and 8-bit
   multiplication and shifts, which clang computes an element at a time, are
-  refused by name, and so are a cast between a vector and an integer, vectors of
-  other sizes and of `bool`, logical vector operators and vector conditions.
+  refused by name, and so are vectors of other sizes and of `bool`, logical
+  vector operators and vector conditions.
   Element access through a volatile vector lvalue is also refused: Clang uses
   a whole-vector volatile load, and a read/insert/store for an element write,
   which a scalar access at the element's address cannot preserve. Whole-vector
@@ -1444,6 +1590,41 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **`_BitInt(N)` of up to 64 bits (#148).** It takes the narrowest class of 8,
+  16, 32 or 64 bits that holds it (`check_lower_type_class`), its values extended
+  from N bits in it, as clang stores them (`check_lower_bit_int_shift`). What
+  may leave other bits is extended again after it by a pair of shifts
+  (`check_lower_bit_int_extend`): a sum, a difference, a product, a left shift,
+  a negation, a complement, an update, a conversion to it, and a value from
+  memory or a call (an update's old value too), whose bits past N the convention
+  leaves unspecified and clang's loads ignore. Tier 0 computes, compares and
+  shifts in I32, U32, I64 and U64 alone, so an operation of class I8, U8, I16 or
+  U16 (a `_BitInt`'s alone, as C promotes the other narrow types) converts its
+  operands to I32 or U32, by their signedness, and its result back
+  (`check_lower_computed`), and so does a switch on one, its cases too. A
+  constant extends from N bits. An expression of a `_BitInt` goes first to
+  `check_lower_bit_int_node`, out of line, by its value's kind, which the
+  expansion reads for every expression anyway, and the batch's templates
+  (`c_check_program_batch.c`) take none, by its type's fact
+  (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
+  `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
+  conversion's or constant's type for one, and its tasks' loop
+  (`check_lower_drain`) is a copy without the expansion's and the
+  conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
+  3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts. A constant comes
+  folded to its width's bits, which the lowering extends from the width, as a
+  narrower one's: a negative one's conversion to `__int128` or compare reads it
+  as it is.
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole).
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1581,6 +1762,10 @@ What the lowering covers past scalars (#145's programs):
     truncation at the operand's, or nothing between elements of one size. One
     of a shuffle's first elements (a vector's low half, as the intrinsics widen
     one) converts that shuffle's first vector in place;
+  - a conversion between 8- or 16-bit integers and floats or doubles goes
+    through 32-bit integers, as LLVM converts them: VPMOVSX or VPMOVZX to
+    them, then VCVTDQ2PS or VCVTDQ2PD; or VCVTTPS2DQ or VCVTTPD2DQ, then
+    VPMOVDB or VPMOVDW's truncation;
   - a conversion with floating elements is the pair's instruction, as clang
     -O0's code is: from 32- and 64-bit integers by their signedness (VCVTDQ2PS,
     VCVTUDQ2PD, VCVTQQ2PS and the rest, DQ's for 64-bit ones), to them truncated
@@ -1592,9 +1777,10 @@ What the lowering covers past scalars (#145's programs):
     (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), and nothing
     within one format. A widening one is at the result's width, so that it reads
     a shuffle's first elements in place (`_mm_cvtps_pd`'s);
-  - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
-    shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
-    has no class for, with a compound literal of constants) are VPMOV's
+  - the intrinsics' narrowing conversions into a vector of 4 or 8 bytes
+    (`_mm_cvtepi32_epi8` and the rest: a shuffle of a conversion into it with a
+    compound literal of zeros) are the conversion, then the shuffle; into one of
+    2 bytes (`_mm_cvtepi64_epi8`'s, a vector Tier 0 has no class for) they are VPMOV's
     truncation, which zeroes the rest of its register, where every element past
     the conversion's is a zero of the literal's; else that, then VPERMT2 with
     the literal's bytes as its second table. This requires a nonvolatile literal
@@ -1611,7 +1797,9 @@ What the lowering covers past scalars (#145's programs):
     and of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH);
   - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
     elements and a nontemporal load VMOVNTDQA, at an address the pointer's
-    element type aligns to the vector's bytes, as clang's code needs them;
+    element type aligns to the vector's bytes, as clang's code needs them; of a
+    vector of 4 or 8 bytes, its bytes moved to a general register (VMOVD,
+    VMOVQ), then MOVNTI, and a plain load;
   - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
     and VPSRLW) and applies its operation at each step, then moves the element
     into a general register, in two rows where that is more than a row's 8
@@ -1619,12 +1807,14 @@ What the lowering covers past scalars (#145's programs):
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
-  floating constant the checker folded is its bytes; between integers or
-  pointers, or between vectors, the value's bits are the result; and between an
-  integer and a float or a double they go through a frame temporary, as clang
-  -O0's go through memory. The other floating elementwise functions and
-  conversions (of 8-bit integers, of 16-bit ones but to and from half-precision
-  elements, to bf16 elements, and between half-precision elements and other
+  floating or vector constant the checker folded is its bytes; between integers
+  or pointers, or between vectors, the value's bits are the result; between a
+  vector of 4 or 8 bytes and an integer, a float or a double of its bytes, a
+  move between their registers (VMOVD, VMOVQ); and between an integer and a
+  float or a double they go through a frame temporary, as clang -O0's go through
+  memory. The other floating elementwise functions and conversions (between
+  8-bit integers and half-precision elements, between 8- and 16-bit integers and
+  bf16 elements, to bf16 elements, and between half-precision elements and other
   types than floats without AVX512-FP16), the bf16 elements' elementwise
   functions and the half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
@@ -1634,10 +1824,12 @@ What the lowering covers past scalars (#145's programs):
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
   BITALG, VPOPCNTDQ, VBMI2, DQ) are refused by name. `test-checker`'s vector
   builtin programs (`c_check_program_vector_builtins_test.c`) call each at every
-  width, the narrowing conversions and the floating intrinsics as the headers
-  write them, with the masked truncating stores and the leaves (monitorx and
-  mwaitx where the host has MWAITX), by both paths against clang -O0's code for
-  znver5.
+  width, those of vectors of 4 and 8 bytes, the narrowing conversions and the
+  floating intrinsics as the headers write them, with the masked truncating
+  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
+  paths against clang -O0's code for znver5; and `test-checker-driver` links a
+  program of MMX's intrinsics through clang's `<immintrin.h>` by both paths,
+  whose output must be clang's build's.
 - **A function's target attribute (#180).** A function's
   `__attribute__((target("...")))` gives its rows and leaves its own
   instruction set (`CheckProgram.body_targets`, made by
@@ -1654,7 +1846,10 @@ What the lowering covers past scalars (#145's programs):
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
-- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+- **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
+  GNU's complex integer types (`_Complex char` to `_Complex unsigned
+  __int128`) and the complex `_BitInt`s of up to 128 bits that the usual
+  arithmetic conversions make, are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
   objects, the stream carries a value by its object's address, and copies,
@@ -1670,24 +1865,125 @@ What the lowering covers past scalars (#145's programs):
   of two complex values, and a real dividend's over a complex divisor, call
   libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
   `__divxc3`, runtime functions as the 128-bit integers' are, which give the
-  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  values clang -O0's inline product and its NaN recovery give. A complex
+  integer type's operation computes in its element's class, or in 32 bits for
+  one of 8 or 16 (`check_lower_computed`), each part wrapped back to the
+  element's width (a `_BitInt`'s extended from it, as its values are, and so
+  are its parts loaded from memory, where another compiler's argument leaves
+  the bits past the width as they come), and its product and quotient are
+  clang -O0's inline ones,
+  in the element's type whatever the operands' domains: (ac − bd) + (ad + bc)i,
+  and ((ac + bd) / (cc + dd)) + ((bc − ad) / (cc + dd))i, each product and sum
+  wrapped before the division (`check_lower_complex_quotient`; an `__int128`
+  part's, or a `_BitInt`'s of 65 to 128 bits, computes in Tier 0's 128-bit
+  classes, and its divisions are libgcc's `__divti3` and `__udivti3`). `==` and `!=`
   compare both parts; a value's truth is either part's; a conversion converts
   each part (to a real type the real part, to `_Bool` the truth); a compound
   assignment reads its destination in the calculation's type through its
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
-  parts are a floating constant's (a `long double`'s in the function's table).
+  parts are a floating constant's (a `long double`'s in the function's table),
+  or a complex integer constant's halves, each its part's bits.
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: GNU's
-  complex integer types ("complex integer types") and the complex types of
-  the other floating types, `_Complex _Float16` and `_Complex __float128`
-  ("complex types other than _Complex float, double and long double"). A
+  The complex types it doesn't take are refused by what they need: the
+  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
+  bits"), and the complex types of the other floating types, `_Complex
+  _Float16` ("complex types other than _Complex float, double, long double
+  and __float128"). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
+- **`__float128` (#137).** A value is an aggregate's: a frame object of its
+  16 bytes, aligned to 16, which the stream carries by its address
+  (`check_lower_quad`), so that copies, calls, returns and `va_arg` take it as
+  the convention classifies it (SSE, SSEUP: a vector register's 16 bytes,
+  which Tier 0 moves with `movups`). Tier 0 has no entry of its arithmetic,
+  and as clang -O0's code its sums, differences, products and quotients are
+  libgcc's `__addtf3`, `__subtf3`, `__multf3` and `__divtf3`
+  (`check_lower_quad_compute`), its comparisons `__lttf2` to `__netf2`'s int
+  against 0 (unordered operands make each false but `!=`), a value's truth
+  `__netf2`'s against +0.0, and its conversions `__extendsftf2` to
+  `__trunctfxf2` for the floating types and `__floatsitf` to `__fixunstfti`
+  for the integers, through `int`, `unsigned int`, `long`, `unsigned long`,
+  `__int128` or `unsigned __int128`, the first that holds the integer's values,
+  a signed one where one does, as LLVM promotes a narrower unsigned
+  conversion (`check_lower_quad_conversion`, from the scalar conversions' rare
+  branch, an aggregate against a scalar); a negation flips a copy's sign bit,
+  as clang's `xorps` does. A compound assignment reads its destination in
+  `__float128`, computes and copies the result back, or converts and stores it
+  into a real destination; a global without an initializer is 16 zero bytes.
+  A real `__float128`'s `__imag__` is a frame object of zeros: the checker
+  folds it to a constant zero of its type where its operand has no effect
+  (`check_lower_quad_constant` writes a folded constant's bits), and after the
+  operand where it has (`check_lower_aggregate_zero`).
+  The checker folds no `__float128` constant (`check_action_float_supported`):
+  a static one with an initializer is refused as not constant, an increment by
+  name ("increments of __float128 values"), and the `q` suffix's literals as
+  invalid. `test-checker`'s `float128` program, against clang -O0's build of
+  it, has each of them, clean under clang's UBSan on every input.
+- **Complex values of aggregate parts (#137).** `_Complex __float128`, and
+  the complex `_BitInt`s past 128 bits that the usual arithmetic conversions
+  make, are frame objects of two parts, the real one then the imaginary one,
+  whose parts are values as their element's are: an aggregate's, each part's
+  value its bytes' address (`check_lower_complex_parts`), which `__real__` and
+  `__imag__` read without a load. Their operations take each part through the
+  element's (`__float128`'s, or the `_BitInt`'s a limb at a time), a part's
+  result copied into the object (`check_lower_complex_parts_compute`): sums,
+  differences, negations and the conjugate, and products with and quotients
+  by a real value, a real operand kept real as for the other complex types.
+  As clang -O0's code has them, a `__float128` product and quotient of two
+  complex values are libgcc's `__multc3` and `__divtc3`, and a `_BitInt`'s
+  are the integer types' formulas, (ac − bd) + (ad + bc)i and
+  ((ac + bd) + (bc − ad)i) / (cc + dd) whatever the domains, its parts'
+  products and quotients libgcc's. Equality and truth go by parts, and
+  conversions to and from the other complex and real types convert each part,
+  an aggregate part by its address (`check_lower_complex_parts_conversion`).
+  Compound assignments convert a complex or real destination to it, compute
+  and convert back. The convention passes and returns them in memory; a
+  global without an initializer is zeros. clang stores a `_BitInt` part as
+  its width's bytes, leaving the bits past it as they were, which the
+  operations extend again as they read them. clang's compiled worlds draw
+  both (GCC can't spell `_Complex __float128`). `test-checker`'s
+  `complex-float128`, `complex-bit-int-past-128-bits` and
+  `complex-aggregate-parts` programs, against clang -O0's builds of them, have
+  each of them, clean under clang's UBSan on every input.
+- **`_BitInt` past 128 bits (#137).** A value is an aggregate's: a frame object
+  of its 64-bit limbs, the least significant first, `ceil(N / 64)` of them
+  aligned to 8 as clang lays one out, which the stream carries by its address
+  (`check_lower_limb_type`), so that copies (through `memmove` past 256
+  bytes), calls, returns and `va_arg` take it as the convention classifies it,
+  in memory. A result keeps its bits past N extended from N, as clang's stores
+  leave them; a compare, a right shift, a conversion and a value's truth
+  extend an operand's top limb again as they read it, as clang's loads read N
+  bits alone, since another compiler's value or a byte copy may leave those
+  bits otherwise. Sums, differences and negations go a limb at a time with
+  their carries, the bitwise operations a limb at a time, compares from the
+  least significant limb up (the top limbs signed for a signed type), and
+  shifts through a buffer of twice the limbs, each limb of the result two
+  neighbouring limbs of the buffer shifted (`check_lower_limb_shift`, which
+  keeps a count past the width inside the buffer). As GCC -O0's code does
+  (clang's expands them inline), products, quotients and remainders are
+  libgcc's `__mulbitint3` and `__divmodbitint4`, and conversions to and from
+  `float`, `double`, `long double` and `__float128` libgcc's `__floatbitint*`
+  and `__fix*bitint`, their precisions -N for a signed type and N for an
+  unsigned one. Conversions to and from the other integers take or give the
+  low limbs, then the sign's or zeros past them; a conversion between such
+  types copies the limbs both have. Compound assignments and increments
+  convert the destination to the calculation's type, compute and convert
+  back, a postfix one keeping a copy of the old value. A global without an
+  initializer is zeros. A unit with such a type has room for 64 entries a
+  limb for each node that touches one (`check_lower_limb_room`), so the stream
+  grows with the width as clang's code does: a `_BitInt(1048576)`'s sum and
+  product compile, and a `_BitInt(8388608)`'s too, whose frames need more than
+  the default 8 MB stack. The checker folds none of their constants (its
+  values hold 128 bits), so a static one with an initializer is refused as not
+  constant; a bit-field of one is refused by name, and so is a complex one
+  ("complex types of _BitInt past 128 bits"). `test-checker`'s
+  `bit-int-past-128-bits` program, against clang -O0's build of it, has each of
+  them, clean under clang's UBSan on every input.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -1767,8 +2063,8 @@ What the lowering covers past scalars (#145's programs):
   folds and the checker refuses as not a constant.
   The two control walks filter the parser's immutable kind/role columns in
   bounded 64-byte blocks and visit exact events in source order: function
-  bodies, labels, cases, gotos and label addresses in the first walk; gotos,
-  label addresses and semicolons in the second. Masked tails need no padding;
+  bodies, labels, `__label__` lists, cases, gotos and label addresses in the
+  first walk; gotos, label addresses and semicolons in the second. Masked tails need no padding;
   the scalar option retains the original full traversals. Deferred masking,
   branch priorities, body expiry and diagnostic order are unchanged.
   The control reader counts resolved `&&label` expressions while finding their
@@ -1788,6 +2084,106 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **GNU's `cleanup` attribute** (#147, `c_check_cleanup_input.c`). As clang
+  23's `handleCleanupAttr` checks it: on a block-scope variable of automatic
+  storage (on any other declaration clang warns and ignores it, and the
+  checker ignores it), its argument is an expression whose names are looked
+  up where it is, so the variable isn't visible in its own attribute and an
+  undeclared name is an error wherever the attribute is. It must name a
+  function: an object, a function pointer or an enumerator is "'cleanup'
+  argument 'o' is not a function", and any other expression isn't a function
+  either, an error at its first token without a name. Of those the
+  attribute's reader takes a name in parentheses, whose name it looks up as
+  clang does, and a literal, and refuses the others as malformed (clang puts
+  a binary operator's error at the operator, and an invalid expression's
+  error is its own). A type's name is the parser's error ("unexpected type
+  name"), which skips the rest of the declaration, so the error clang adds
+  after it isn't reported. The function has a prototype of one parameter
+  ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
+  address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
+  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  clang's message without its two types). A pointer of another signedness or
+  to a pointer of other qualifiers, which an assignment only warns about, is
+  an error here. An `__auto_type` variable's parameter type is checked once
+  its initializer gives the type (`check_input_cleanup_deduced`, from the
+  initializer's finish), as clang checks it against the deduced type; the
+  rest, and the variable's record, at its declaration. Another count of
+  arguments is "'cleanup' attribute takes one argument" on a variable it
+  applies to (clang checks the subject first). The last of a declaration's
+  cleanup attributes applies (clang warns about the others; the checker
+  doesn't). A cleanup's error, as the reader's errors but
+  an undeclared name's, ends the unit's checking, where clang goes on to the
+  later declarations' diagnostics (`check_input_diagnostic_recover`). Each
+  applied one is a
+  `CheckInputCleanup` (`CheckInput.cleanups`, in source order: none in a unit
+  without one, which reads no declarator's attributes for it), with its
+  variable's scope: its block's, or its `for` statement's, to the token after
+  the scope's last. A goto or a case must not enter that scope, as a
+  variable-length array's (`check_input_vla_finish`), and a computed goto
+  must neither enter nor leave it: its labels' first and last must be inside
+  the innermost cleanup's scope that holds the goto. The jumps' errors are
+  clang's messages, for variable-length arrays too. A body read on a lane
+  that declares such a variable leaves the unit to source order.
+  The control stream calls the function at each exit from the scope
+  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
+  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
+  switch's token stands for where a break or a continue goes, so that a `for`
+  statement's own variables' cleanups run once, after its end's label), the
+  function's end, and a statement expression's end, after its value is kept
+  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
+  or for a struct or union its bytes copied into a frame object of their own
+  or where the hidden pointer points), then the cleanups, then returns it
+  (`RETURN` of target `BUSTER_CHECK_CONTROL_KEPT`). But a named return value,
+  which clang's code builds in the return slot (Sema's NRVO), is returned
+  after the cleanups, which may write it: a struct or union variable of the
+  function's result type, automatic, neither volatile nor aligned past its
+  type, named alone (in parentheses or not), with every return after its
+  declaration in its scope naming it too (`check_control_named`: what
+  `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
+  lowering's call (`check_lower_cleanup`) takes the variable's address,
+  which makes its local a frame slot, and drops the result. A function of a
+  parameter other than a pointer is refused by name (clang's code bit-casts
+  the address to the `_Bool`, invalid IR that leaves the address's low bit),
+  and so is one whose result is an aggregate (including one returned in
+  registers), a 128-bit integer or a vector. The body's selection references
+  the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
+  54 fixtures' acceptance and first errors with clang's, and run programs of
+  each exit, each class of returned value, the named return value's cases,
+  statement expressions, switches and the functions' kinds natively against
+  clang -O0's build on both paths; `test-checker-driver` compares every error
+  of 39 fixtures with clang's, its place and its message, on both paths
+  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
+  the deferred reader's fixtures and the selection's take a cleanup too.
+- **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
+  emission's attribute pass). A weak declaration's symbol is weak, defined
+  or undefined; on a declaration without external linkage it is clang's error
+  "weak declaration cannot have internal linkage", at the attribute, and on a
+  typedef it is ignored. One after its entity's definition is dropped, as
+  clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
+  constructors and destructors there (`check_input_attribute_late`, which
+  copies a specifier's list before marking one declarator's). A weak
+  declaration after a use makes the reference weak, as GCC's does; clang's
+  stays global, as its code generation made it at the use (GCC says the
+  behavior is unspecified). A defined function's constructor and destructor
+  each give an entry of the init or fini array: an atom of a pointer to the
+  function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
+  `llvm.global_dtors`, stably by priority from the definitions' order (an
+  attribute's priority, 65535 without one and past it, as
+  `preprocessXXStructorList` clamps it). The latest declaration's attribute
+  applies, and in one declaration the first, as clang takes them. An entry
+  below 65535 has its priority (`link_add_priority`), which the direct path's
+  executable orders and `-c`'s object puts in `.init_array.N` or
+  `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
+  has them. The selection takes constructors and destructors as roots.
+  `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
+  of them by clang and both paths: each symbol's binding must be clang's,
+  both paths' objects the same bytes, and the objects, linked by `cc` alone
+  and with another object's strong definitions, and the direct path's
+  executables, must print what clang's build prints, its constructors' order
+  before `main` and its destructors' after it.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -1806,7 +2202,10 @@ What the lowering covers past scalars (#145's programs):
   difference from the lowest case's, unsigned, is past the last entry goes to
   the default or the switch's end, and any other to the table's address plus
   the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
-  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. Its labels and
+  that jump are the function's next table in Tier 0's columns
+  (`label_tables`, `table_jumps`, #785), so that the IR's `br_indirect` for it
+  goes to its own labels alone. The table is a
   `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
   label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
   record as it does `&&label`'s) with the entry's offset as its addend, as
@@ -1849,8 +2248,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: increments of `__float128`
+values, bit-fields of `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -2029,6 +2428,13 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Bit-precise constants (#768): their widths, signedness and values from the
+  literal reader (`check_literal_number`) in each radix, case and order of
+  suffix, with digit separators, past 64 bits and at 128 and 129, and the
+  spellings C23 doesn't have; their types by `_Generic` and their values by
+  static assertions in a C23 source fixture, by both paths and against clang,
+  and at run time in a program against clang -O0's
+  (`bit-precise-constants`); and a 129-bit one refused by name.
 - Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
@@ -2151,8 +2557,9 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 `test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
 every Constraints paragraph of C17's 6.4 to 6.10 it has a violation of each of the paragraph's rules and a valid
 twin. Fixtures of the conversions (6.3), the constant expressions (6.6) and the initializers (6.7.9) join them:
-322 fixtures and 644 sources in all, 21 of 6.3, 14 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
-6.9 and 20 of 6.10.
+325 fixtures and 650 sources in all, 21 of 6.3, 17 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
+6.9 and 20 of 6.10. Three of 6.4's are C23's bit-precise suffixes (#768: `wB`, `uwbu` and `wbl`, which clang
+refuses in every mode, beside valid twins).
 
 Each source is checked as the corpus check checks a file (`check_corpus_file`): preprocessing, the parse, the
 checker and the program's control flow, as the driver checks it, by both paths alike. A directive's source (6.10)
@@ -2160,7 +2567,7 @@ runs through the preprocessor's two kernels instead (`check_test_constraint_prep
 from the diagnostics, since the corpus check gives a preprocessing error no place. Every source is also checked by
 `clang -fsyntax-only -std=gnu17`. The acceptance and the first error's line must be clang's and the fixture's own
 record of them. A fixture records clang's verdict on its violation:
-- an error, for 263;
+- an error, for 266;
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
@@ -2742,3 +3149,79 @@ The [frozen qualification record](https://github.com/buster14a/buster-performanc
 retains the exact source/binary identities, stage clocks, every object and all
 outliers. Those timings compare `bc1b4861` with `086c24b1`; they do not measure
 this later integration's whole-compile throughput.
+
+## Local labels and `__auto_type` (#147)
+
+**Local labels.** A `__label__` list at a block's start (the parser's
+`PARSE_KIND_LABEL` statement) declares its names as labels of that block, as
+clang's scopes have them. The reader marks the list's tokens
+(`check_input_local_labels`); the controls' first walk pushes the list's names
+where it meets the list and pops them past the block's closing brace
+(`CheckLocalLabels`). A label's definition, a goto and an `&&` inside the block
+take the innermost list's name token as their scope, by which the labels' table
+keys a label with its name (the function's body for the others). An inner list
+so shadows an outer one and the function's label of the same name, and a goto
+from outside the block reaches none of them. Clang's errors, at its places: a
+list's name that its block doesn't define is "use of undeclared label" at the
+name in the list, reported as the block ends; a second definition in the scope
+is "redefinition of label" at its name; and a name that a block's lists declare
+twice is ambiguous where it is defined or used, and undeclared at both of its
+declarations. Clang reports that last one's ambiguity first, the driver in
+source order. A unit without a list builds none of it; the vector path's mask
+takes `__label__`'s kind among the first walk's events, which the scalar path's
+full walk meets anyway.
+
+**A labeled last statement.** A statement expression's value is its last
+statement's through the labels on it, as clang has it: `({ ...; out: r; })` is
+`r`, the idiom local labels serve. The region's final statement is found
+through the labels' children (`check_input_region_prepare`); the expression
+walk finds the region of a terminator whose parent is a label through its
+labels (`check_input_labeled_region`, tested only in a unit with statement
+expressions); the cached evaluation's label passes its statement's value on;
+and the control writer marks the labels but leaves their statement to the
+region's value (`CheckControlWriter.region_final`).
+
+**`__auto_type`.** A variable's declaration with `__auto_type` among its
+specifiers takes its type from its initializer, as clang deduces it in C: the
+initializer's type converted as an lvalue's (its qualifiers dropped, but not
+`_Atomic`, a kind), an array's and a function's decayed, with the specifiers'
+`const` and `volatile`. Until the walk has read the initializer, the
+declaration's type is a placeholder, `restrict int` with the specifiers'
+qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise. Its
+initializer registers a finish event (`check_input_initializer_prepare`), so
+that the initializer's uses capture their declarations as an incomplete array's
+do (`inference_end`). The finish (`check_input_auto_type_finish`) types the
+initializer with the cached evaluator and gives the declaration, its
+initialization's query and kind, and its linked type the deduced type, before
+any later use reads it. The cached evaluator takes a compound literal now, as the
+expression walk's leaf at its `}`: `(struct S){...}` and `(int[]){...}` are
+initializers it types, in `typeof`'s regions too. A use of the variable in a
+constant evaluation of its own initializer (`(typeof(x)){0}`,
+`sizeof(typeof(x))`, an array's bound in a compound literal there) binds as
+any use does, recording its declaration, so that the finish's scan of the
+initializer reports it at the use, with clang's message.
+
+Clang's errors, at its places: `__auto_type` anywhere but a declaration's own
+specifiers (a parameter's, a member's, a type name's) at the keyword
+(`CheckInputReader.specifier_auto_type`); a typedef's and a function's at the
+keyword; a variable without an initializer at its name; an initializer list and
+an array at the initializer; a use of the variable in its initializer at the
+use, an outer variable of its name notwithstanding; a bit-field's value at the
+member's name; a void or incomplete type at the variable's name; an `_Alignas`
+below the deduced type's alignment at the `_Alignas`, which the specifiers and
+the declarator leave to the deduction rather than check against the
+placeholder's `int` (`check_input_attribute_type`'s `deduced`); and its clashes
+with the other specifiers where clang reports them: a second type specifier at
+itself, and a signedness or a width at its keyword, wherever it is in the list
+(`check_input_auto_type_clash`). Refused by name: what clang deduces as C++
+deduces a declarator's type and GCC refuses (a pointer declarator, and a
+declaration's second declarator); `_Atomic`, `restrict` and type attributes with
+`__auto_type`; a variably modified deduced type, whose sizes the declaration
+would have evaluated; and a variable with linkage that a declaration before it
+declared, whose types bind before the deduction.
+
+`test-checker`'s source fixtures compare these with clang, their acceptance and
+first error's line, on both paths, and its programs (`local-labels`,
+`auto-type`) run natively against clang -O0's code. `test-checker-driver`
+compares each error's line and column, and its text where the driver's message
+is clang's (`c_checker_driver_gnu_test.c`).

@@ -6,14 +6,12 @@ follow Clang, with GNU17 as the default and the selected standard's keyword rule
 
 ## Current boundary
 
-The parser accepts GNU syntax, records its tree, and can now supply structured
-GNU attribute and asm-label metadata. `type_machine_mode` supplies the missing
-machine-mode type action beside the existing layout and vector actions.
-**These are frontend building blocks, not completed source-language semantics.**
-The normal driver on this revision preprocesses and parses; it does not type
-check or generate an object from C. Issue #147 must stay open until the source
-checker and lowering actually consume these constructs and its corpus/runtime
-acceptance conditions pass.
+The parser accepts GNU syntax, records its tree, and can supply structured
+GNU attribute and asm-label metadata. `type_machine_mode` supplies the
+machine-mode type action beside the layout and vector actions. The checker
+([its guide](c-checker.md)) gives the constructs below their meaning, and `-c`
+and the direct path lower them, or refuse by name what isn't lowered yet.
+Issue #147 stays open until the rows that say so are done.
 
 | Construct | Implemented here or already available | Remaining source integration |
 | --- | --- | --- |
@@ -23,11 +21,17 @@ acceptance conditions pass.
 | `mode` | `type_machine_mode` transforms supported target types with Clang-checked results | Attribute argument resolution and declaration elaboration |
 | `packed`, `aligned`, `vector_size` | Existing type/layout actions and scalar/vector layout | Applying parsed attributes to those actions |
 | `typeof`, statement expressions, GNU `?:`, range designators | Existing parser grammar, with additional regression fixtures | Types, value categories, evaluation order and lowering |
-| Alternate keywords, `__int128`, zero-length arrays, local labels | Existing keyword/parser/type support as applicable | The remaining checker and control-flow rules |
+| Alternate keywords, `__int128`, zero-length arrays | Existing keyword/parser/type support as applicable | The remaining checker and control-flow rules |
+| Local labels (`__label__`) | Scoped as clang scopes them: a list's names are labels of its block, shadowing an outer list's and the function's, with clang's errors at its places; a statement expression's labeled last statement gives its value ([the checker guide](c-checker.md)'s "Local labels and `__auto_type` (#147)") | A name a block's lists declare twice is reported in source order, where clang reports its ambiguity first |
+| `__auto_type` | Deduced as clang deduces it: the initializer's type, lvalue-converted and decayed (`_Atomic` kept), with the specifiers' `const` and `volatile`; clang's errors at its places | Refused by name: a pointer or a second declarator (which clang deduces and GCC refuses), `_Atomic`, `restrict` or type attributes with it, a variably modified deduction, and a redeclaration of a name with linkage |
 | `__extension__` | Parser accepts expression/declaration forms | Pedantic-diagnostic suppression through semantic checking |
-| `transparent_union`, `gnu_inline`, `cleanup`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
+| `cleanup` | Checked as clang checks it, its scopes' jumps too, and called at each exit from its variable's scope, the named return value's after the return's cleanups as clang's NRVO has it ([the checker guide](c-checker.md)) | A function of a parameter other than a pointer, or whose result is an aggregate (including a register-returned one), a 128-bit integer or a vector, is refused by name |
+| `transparent_union` | Checked as clang checks it, a conversion to the union selecting its member as clang's does; its arguments, parameters and `va_arg` pass as its first member, as clang's code passes them ([the checker guide](c-checker.md)'s "Transparent unions (#147)") | A union sized or aligned otherwise than its first member, or made transparent after a function definition or an initializer naming a function where its first member passes otherwise, is refused by name |
+| `gnu_inline`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |
-| `weak`, `alias`, `visibility`, constructors/destructors | Parsed and retained; link representation has relevant primitives | Source-to-symbol/atom creation, init/fini entries and execution tests |
+| `constructor`, `destructor` | An entry of `.init_array` or `.fini_array` each, its priority's `.init_array.N` or `.fini_array.N` in `-c`'s object, in LLVM's order (stably by priority, past 65535 its default), run against clang's build ([the checker guide](c-checker.md)) | None |
+| `weak` | A weak symbol, defined or undefined; clang's error without external linkage, and one after the definition ignored | A weak declaration after a use makes the reference weak, as GCC's does, where clang's stays global (GCC says the behavior is unspecified) |
+| `alias`, `ifunc`, `weakref` | Parsed and retained; link representation has relevant primitives | Refused by name at emission: the symbols they name |
 | `section` | Parsed and retained | Custom named-section representation and source emission |
 | Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers ([the inline assembly guide](c-inline-assembly.md)) | `asm goto`, naked functions, and templates that refer to symbols |
 

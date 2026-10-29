@@ -1,5 +1,12 @@
 # Where sqlite3.c's compile time goes
 
+**RSS accounting correction (#865).** The historical RSS figures below retain
+their original `getrusage`/`wait4` scope; they have not been remeasured. Those
+peaks can include the launcher's pre-exec address space. This does not establish
+that any particular historical run was contaminated. Current `--time-stages`
+uses a separate approximate post-exec peak, while subprocess peaks are labelled
+`wait4`. See the [RSS contract and regression](peak-rss.md).
+
 This is [#518](https://github.com/buster14a/buster/issues/518)'s attribution of
 `compiler -c sqlite3.c` on the Ryzen 7 9700X, against tcc: how long the whole
 process takes, which of the compiler's stages take that time, and which
@@ -95,8 +102,9 @@ process's wall time was within 0.71 ms of the clock's span: exec, the loader,
 | release | 1.351 | 0.7% | 1.269 | 0 |
 | span | 189.181 | | | |
 
-`debug` (`-g`'s DWARF) and `executable` (the direct path's link) are zero in
-`-c` without `-g`, and are left out. The stages' medians add up to 189.27 ms,
+`debug` (`-g`'s DWARF) and `executable` (the direct path's link, since #778
+its `runtime`, `executable` and `write` stages) are zero in `-c` without `-g`,
+and are left out. The stages' medians add up to 189.27 ms,
 the span's median 189.18.
 
 ### The functions
@@ -682,7 +690,8 @@ every token) and visits only them:
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
 189.6 ms here, are `compiler -c sqlite3.c -o sqlite3.o`: it ends when it has
 written the relocatable object. Building and writing that object takes 0.57 ms
-(0.3%); the `executable` stage, the direct path's link, is zero.
+(0.3%); the direct path's link (the `executable` stage, since #778 `runtime`,
+`executable` and `write`) is zero.
 
 **The record's link is a separate step.** It linked both objects with `cc` (GCC's
 driver and GNU ld) in 14.2 ms. That is 6.4% of the two-file build's 221.8 ms,
@@ -694,7 +703,8 @@ the system's, can't touch them.
 The direct path (`compiler -o` of one unit), which links in the same process,
 isn't measured here: its input is a different unit (speedtest1's with
 `sqlite3.c`), and its link is work `-c` doesn't do. Its stages would show in
-the `executable` row.
+the `runtime`, `executable` and `write` rows, and its write's phases on the
+report's `time-write` lines.
 
 ## Small-unit setup and exit (#652)
 

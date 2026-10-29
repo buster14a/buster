@@ -51,6 +51,11 @@ struct String8
 #include "buster/compiler/lane.c"
 #include "buster/compiler/link.c"
 #include "buster/compiler/x86_semantics.c"
+// The Zen 5 model's lookups this file doesn't call: Tier 0 reads its cases (its inc and dec, #181).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#include "buster/compiler/x86_zen5.c"
+#pragma clang diagnostic pop
 #include "buster/compiler/c_types.c"
 #include "buster/compiler/calling_convention.c"
 #include "buster/compiler/branch_sizing.c"

@@ -549,7 +549,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         const uint8_t kind = parser->tokens.kinds[token];
         if (attributes != 0)
         {
-            base = check_input_attribute_type(reader, &attributes->parsed, base, false);
+            base = check_input_attribute_type(reader, &attributes->parsed, base, false, false);
             valid = base != 0 && check_constant_type_attribute(frame, links, link_count, capacity, attributes);
             token = attributes->end;
         }
@@ -1351,6 +1351,25 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         const uint8_t role = parser->tree.roles[token];
         const uint8_t kind = parser->tokens.kinds[token];
         const uint32_t name = parser->tokens.names[token];
+        if (input->cached && role == PARSE_ROLE_OPEN_COMPOUND)
+        {
+            // A compound literal, whose type and object the walk made at this `(`: its tokens are syntax up to its body's
+            // `}`, the evaluation's leaf, as it is the expression walk's.
+            const uint32_t close = parser->tree.parents[token];
+            const uint32_t body_end = close > token && close + 1 < input->end ? parser->tree.parents[close + 1] : input->end;
+            valid = body_end > close && body_end < input->end && reader->initializer_declarations[body_end] == token;
+            for (uint32_t item = token; valid && item < body_end; item += 1)
+            {
+                input->syntax[item - input->first] = true;
+                input->statement_syntax[item - input->first] &= (uint8_t)~1u;
+            }
+            if (!valid && input->failed_token != 0)
+            {
+                *input->failed_token = token;
+            }
+            token = valid ? body_end - 1 : token;
+            continue;
+        }
         if (input->syntax[index] && check_input_attribute_starts(parser, token, input->end))
         {
             uint32_t after = token;
@@ -2098,7 +2117,16 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         bool produced = false;
         bool list = false;
         bool void_statement = false;
-        if (source_syntax)
+        if (input->cached && role == PARSE_ROLE_LABEL)
+        {
+            // A labeled statement's value is its statement's, which a statement expression's last one gives through its
+            // labels (check_input_region_prepare); the walk's label is source syntax, its name no value.
+            const uint32_t statement = count == 1 ? last : BUSTER_CHECK_NONE;
+            input->values[index] = statement != BUSTER_CHECK_NONE ? input->values[statement - input->first] : check_constant_void_statement(input, first);
+            proof = statement != BUSTER_CHECK_NONE && input->proof_values != 0 ? input->proof_values[statement - input->first] : proof;
+            produced = true;
+        }
+        else if (source_syntax)
         {
             list = true;
         }
@@ -2123,6 +2151,24 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .flags = BUSTER_CHECK_STATIC_OBJECT,
                     .constant_kind = CHECK_CONSTANT_ADDRESS,
                     .object = string->object,
+                };
+                produced = true;
+            }
+        }
+        else if (input->cached && role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+        {
+            // A compound literal's object (check_constant_bind), as the expression walk's leaf at this `}` has it.
+            const uint32_t declaration = reader->initializer_declarations[token];
+            valid = declaration < parser->tokens.count && reader->output->compound_objects[declaration] && reader->declared_types[declaration] != 0;
+            if (valid)
+            {
+                input->values[index] = (CheckValue)
+                {
+                    .type = reader->declared_types[declaration],
+                    .category = CHECK_LVALUE,
+                    .flags = reader->static_objects[declaration] ? BUSTER_CHECK_STATIC_OBJECT : BUSTER_CHECK_SIDE_EFFECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = reader->objects[declaration],
                 };
                 produced = true;
             }
@@ -2335,7 +2381,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             void_statement = true;
         }
         else if (input->cached && (role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || role == PARSE_ROLE_ELSE ||
-                                  role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_RETURN))
+                                  role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_RETURN))
         {
             input->values[index] = check_constant_void_statement(input, first);
             produced = true;

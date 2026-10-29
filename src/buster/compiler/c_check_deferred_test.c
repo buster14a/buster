@@ -211,6 +211,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // A file-scope union made transparent in a body applies to what follows it: source order's. A union the body made,
     // which nothing after it can name, the merge takes, with its activation, which a call through a pointer reads.
     { "transparent-union-in-a-body", "union U { int* a; long* b; };\nint f(void) { typedef union U T __attribute__((transparent_union)); return 0; }\n", false },
+    // A body's variable with a cleanup (#147) is a record of the unit's, in source order: source order's. One the attribute
+    // is ignored on (a static's) is no record.
+    { "cleanup-in-a-body", "void release(int* p);\nint f(int n) { int a __attribute__((cleanup(release))) = n; return a; }\n", false },
+    { "cleanup-ignored-in-a-body", "void release(int* p);\nint f(int n) { static int a __attribute__((cleanup(release))); return a + n; }\n", true },
     { "transparent-local-union-in-a-body",
       "int f(int* p) { union L { int* a; long* b; }; typedef union L T __attribute__((transparent_union)); int (*fp)(T) = 0; return fp ? fp(p) : 0; }\n"
       "int g(void) { union M { char* c; }; return (int)sizeof(union M); }\n", true },

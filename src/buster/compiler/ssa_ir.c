@@ -71,6 +71,7 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         ssa_ir_owned(arena, f->block_offsets, (uint64_t)f->block_count + 1, 4) ||
         ssa_ir_owned(arena, f->extra, f->extra_count, 4) ||
         ssa_ir_owned(arena, f->constants, f->constant_count, sizeof(IrConstant)) ||
+        ssa_ir_owned(arena, f->vector_constants, f->vector_constant_count, sizeof(IrSimdValue)) ||
         ssa_ir_owned(arena, f->slots, f->slot_count, sizeof(IrSlot)) ||
         ssa_ir_owned(arena, f->addresses, f->address_count, sizeof(IrAddress)) ||
         ssa_ir_owned(arena, f->calls, f->call_count, sizeof(IrCall)) ||
@@ -312,6 +313,10 @@ static IrError ssa_ir_layout(SsaIrWork* work)
                 {
                     work->sizes.extra_count += (uint64_t)f->c[i] * 2 + 1;
                 }
+                else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                {
+                    work->sizes.extra_count += f->c[i];
+                }
             }
         }
         for (uint32_t block = 0; block < f->block_count; block += 1)
@@ -518,6 +523,15 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
                             f->extra[extra++] = work->blocks[input->extra[input->b[i] + p * 2 + 2]];
                         }
                     }
+                    else if (op == IR_BR_INDIRECT && input->b[i] != BUSTER_IR_NONE)
+                    {
+                        // Its labels' list, label indices, which promotion keeps.
+                        f->b[instruction] = extra;
+                        for (uint32_t p = 0; p < input->c[i]; p += 1)
+                        {
+                            f->extra[extra++] = input->extra[input->b[i] + p];
+                        }
+                    }
                     instruction += 1;
                 }
             }
@@ -555,6 +569,14 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
     return check;
 }
 
+// The most (block, slot) cells a function's promotion takes the vector path for (#787). Its phi placement, entry
+// definitions and renaming each pass over every cell (ssa.c's ssa_place_phis, ssa_entry_definitions and
+// ssa_rename_vector), where the scalar twin's work follows the instructions, so past this many the twin is faster. On
+// the 9700X, each of the frozen sqlite3.c's 2,602 functions timed by both paths (benchmark-ir-source --functions): the
+// vector path alone 40.15 ms, the twin alone 37.01, the vector path to 16,384 cells and the twin past them 35.96 (each
+// function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
+#define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
+
 static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
     (void)vector;
@@ -579,6 +601,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
     }
+    if (check.error == IR_OK && ir_function_has_simd(input))
+    {
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     if (check.error == IR_OK)
     {
         check.error = ir_cfg_validated(input, scratch, scratch, &work.cfg);
@@ -593,9 +619,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        // Match the builder's combined reserved-frontier/temporary-matrix cap. This is a memory bound,
-        // not a measured performance crossover; larger graphs use the independent scalar constructor.
-        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count);
+        // Match the builder's combined reserved-frontier/temporary-matrix cap, a memory bound; and past
+        // BUSTER_SSA_IR_VECTOR_CELLS, the measured crossover, the vector path costs more than it saves (#787). Both
+        // larger cases use the independent scalar constructor.
+        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (uint64_t)input->block_count * work.source.local_count <= BUSTER_SSA_IR_VECTOR_CELLS;
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
         check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector)));

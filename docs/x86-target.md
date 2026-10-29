@@ -61,12 +61,18 @@ Include `x86_target_forms.c` after the encoder and build a byte table with
 `x86_target_forms(&target, allowed)`, where `allowed` has `X86_FORM_COUNT` bytes.
 It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host;
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
-change to the 16-byte `X86Instruction` or the encoder's templates.
+change to the 16-byte `X86Instruction` or the encoder's templates. The rows that
+need a feature the 32-bit word doesn't project (AVX512BF16's, AVX512BITALG's,
+AVX512IFMA's, AVX512VBMI2's, AVX512VNNI's, AVX512VPOPCNTDQ's and AVX-VNNI's: 125,
+#760) are its rare case: `BUSTER_X86_TARGET_EXTENDED`'s rows, last in `x86_target_rows.c`, whose
+compact words carry a mark no target has, so that the vector loop denies them,
+and an exact pass over their full requirements then decides them.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
-builder reads the compact32 table (33,408 bytes). The independent scalar
-reference keeps all 64 feature bits densely for 1,667 classified rows (13,336
-bytes), with their form indices (3,334 bytes). It clears all 8,352 output bytes
+builder reads the compact32 table (33,408 bytes), and its exact pass the
+extended rows' full requirements and forms. The independent scalar
+reference keeps all 64 feature bits densely for 3,463 classified rows (27,704
+bytes), with their form indices (6,926 bytes). It clears all 8,352 output bytes
 then checks those complete requirements directly. Its loop stays scalar to
 avoid widening and extracting indices for byte stores.
 
@@ -74,9 +80,11 @@ A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
 canonical dense slot plus one. Zero means unknown, and the bounded query returns
 zero for out-of-range forms. Forward/inverse/requirement/projection checks cover
 every form; independent named-form expectations and external ISA checks remain.
-The four arrays contain 66,782 payload bytes before alignment, replacing 116,894
-bytes of sparse64, compact32 and dense-reference data. A new requirement outside
-the 32-bit projection or without the classified marker fails at compile time.
+The four arrays contain 84,742 payload bytes before alignment (66,782 before
+#760's rows), replacing 116,894 bytes of sparse64, compact32 and dense-reference
+data. A compact row with a requirement outside the 32-bit projection, an
+extended row without one or before a compact row, and a row without the
+classified marker fail at compile time.
 
 The executable's main units share these arrays through the frontend's existing
 hidden policy-data home; standalone inclusions stay static. Kernels read them
@@ -126,8 +134,27 @@ arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
 SSE4 operations; scalar AVX moves, arithmetic and conversions; the FMA
 families in VEX and EVEX; and Tier 0's vector values' 128- and 256-bit
 `vmovdqu64` moves and `vpxord` (AVX512F and AVX512VL, #221: their slots' moves
-through zmm16, and its zeroing). `FISTTP` requires SSE3 even though its encoding uses
-x87 registers. A zero row means **unclassified and
+through zmm16, and its zeroing), and EVEX's `vmovd` and `vmovq` (AVX512F: the
+loads and stores of its vectors of 4 and 8 bytes); and the front end's X86 rows'
+VEX and EVEX forms with their families (#760: VEX's 256-bit integer forms and those AVX2
+has at every length, the broadcasts, permutes, masked moves, variable shifts
+and gathers, by AVX2; the opmask registers' forms and their tests by their
+sizes' AVX512F, DQ and BW; the byte and word elements' BW, the quadwords'
+multiplies, conversions and mask moves' DQ, AVX512CD's conflicts and leading
+zero counts; AVX512VBMI's byte permutes and AVX512VBMI2's byte and word
+compresses and expands and concatenating shifts, each with BW, as
+AVX512BITALG's vpshufbitqmb and byte and word counts and AVX512BF16's
+conversions and dot product are, since clang's options and GNU as take BW with
+them; AVX512VPOPCNTDQ, AVX512IFMA, AVX512VNNI, AVX-VNNI, AVX512VP2INTERSECT,
+GFNI, AES, VAES, F16C's conversions and PREFETCHI's prefetches), each form's own requirement written out in
+`x86_target_rows.c`'s last blocks. The compact word keeps the features to AES at
+their bits and then PCLMUL, AVX512VBMI, AVX512VP2INTERSECT, GFNI, VAES and
+PREFETCHI at the next six; AVX512-FP16, an extension the table doesn't
+classify, leaves its forms unclassified, and so do AVX-IFMA and AVX-NE-CONVERT,
+which the table has no bit for, their VEX forms of vpmadd52luq, vpmadd52huq and
+vcvtneps2bf16. VEX's vbroadcastss and vbroadcastsd from a register are AVX2's,
+from memory AVX's: the form's requirement is its register operand's.
+`FISTTP` requires SSE3 even though its encoding uses x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that
 all of the encoder's catalogue has been classified. Extend it, with independent
@@ -156,13 +183,18 @@ These kernel checks use the requirement table as
 their scalar specification; independent named-form expectations and GNU as's
 architecture gate establish instruction legality. The assembler oracle checks
 every classified form at baseline/v2/v3/v4/Zen 5 and with individual features
-removed, including FMA and AVX512VL/BW/DQ. An unavailable tool, malformed input,
-unknown architecture or unexpected diagnostic fails the oracle.
+removed, including FMA and AVX512VL/BW/DQ, AVX2 from v3, and (#760) AVX512VBMI,
+AVX512VBMI2, AVX512BITALG, AVX512IFMA, AVX512VNNI, AVX512BF16,
+AVX512VP2INTERSECT, GFNI, VAES and AVX-VNNI from Zen 5. An unavailable tool,
+malformed input, unknown architecture or unexpected diagnostic fails the oracle.
 GNU as 2.47 has one explicitly reported coverage gap: its dual FMA/AVX512F
-templates accept the 144 packed EVEX XMM/YMM FMA forms with AVX512VL disabled.
-Those cases remain denied by the policy and covered by independent F|VL
-minimal-feature negatives; they are counted separately from external assembler
-comparisons. If a later assembler rejects them, they follow the normal comparison.
+templates accept the 144 packed EVEX XMM/YMM FMA forms with AVX512VL disabled,
+and its dual AVX/AVX2 and AVX512F ones 50 of the X86 rows' (#760: the variable
+shifts, vpermd, vpermq, vpermps, vpermpd, vpermilps, the broadcasts, vaesenc,
+vaesdec and vgf2p8mulb, their broadcast forms too). Those cases remain denied by
+the policy and covered by independent F|VL minimal-feature negatives; they are
+counted separately from external assembler comparisons. If a later assembler
+rejects them, they follow the normal comparison.
 
 `test-x86-target` runs policy, profile and preprocessor checks in the frontend
 unit, with that unit's encoder and preprocessor state. The separate

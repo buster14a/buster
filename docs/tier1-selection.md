@@ -30,10 +30,20 @@ patterns are:
   and folding those addresses into memory operands. Byte/word loads zero-extend
   into registers, while stores write exactly one/two bytes. Larger displacements
   return an unsupported result until materialization is implemented.
-- A nonvolatile load with exactly one use immediately followed by its arithmetic
-  consumer can become that consumer's memory operand. No store, volatile
-  operation, call or other instruction is crossed. A volatile load remains
-  a separate access; a store retains its original order and access width.
+- A nonvolatile load whose only use is an arithmetic consumer in its block
+  can become that consumer's memory operand (the right operand, or a
+  commutative operation's left where its right isn't a load), its access moved
+  to the consumer (#141). It moves past the nodes between them that neither write
+  memory, call nor access a volatile object (arithmetic, constants, addresses,
+  other nonvolatile loads) and past none that do: a store to any address, a
+  call, a volatile load or store. A pass of its own after the plan's pass over
+  the nodes keeps each one's last such barrier (`Tier1SelectForest.barriers`),
+  a running maximum 16 nodes at a time (`tier1_select_barriers`, its scalar
+  twin `tier1_select_barriers_scalar`), so the check is a comparison. Inside the
+  plan's pass, its store made the operands' walk reload the function's columns
+  (the build's `-fno-strict-aliasing`): 40 instructions more per node. The IR has no atomic access of its own: C's atomic operations
+  reach it as calls of the unit's leaves. A volatile load remains a separate
+  access; a store retains its original order and access width.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
   `cmov`, unconditional branches, returns and `IR_UNREACHABLE` as `ud2`.
@@ -151,6 +161,20 @@ error_node)` consumes the allocator's direct byte register column. A value
 without one stable supported register is rejected. The caller supplies an
 allocation verified against the selected-use liveness; this API does not
 reconstruct or independently solve allocation.
+
+The immediates' forms are the shared form choice's (#221). Expansion leaves
+each record with an immediate empty, with its request (the operation's row,
+the value, the live flags and the destination); both emitters collect a
+function's requests and choose their forms 32 at a time, one pass of
+`x86_choose_forms`'s lanes, before checking the records; on the scalar path
+(the plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
+`tier1_emit_function`) each request's form is its scalar twin's, chosen as
+the request comes, and none is held (#141). This emitter
+checks them in order after the batch, so a node's invalid record or a form
+the target refuses is reported before a later node's allocation failure, as
+when each node's records were checked as it was selected. Every record either
+emitter writes has a form `x86_semantics.c` covers, which the selector, emitter
+and pipeline tests check.
 
 `Tier1SelectCode` publishes:
 
@@ -329,6 +353,18 @@ benchmark to CPU 2. Use separate fresh processes for sustained `--only vector`
 and `--only vector --after-scalar 200`, and compare both against scalar runs.
 Local runs are diagnostic only. The current slice supplies the reproducible
 measurement path; it does not establish a performance gain.
+
+#141's batched choice and load fold, against main `0dd6fbc3` over six
+placements of the benchmark's unit
+([the record](https://github.com/buster14a/buster-performance/blob/6441e0df565d3c21ee4413848f75ce2a3927a7d3/docs/measurements/tier1-select-141-2026-10-29/README.md)),
+each placement against each of main's as `docs/profiling.md` compares builds:
+the plan's medians 1.5% to 2.5% lower on every shape and path, outside the
+comparison's floor on four rows (the vector path's three shapes and `wide`'s
+scalar twin); the whole pipeline's 0.3% to 2.1% lower, within the floor (one
+placement of the head's executable misses its op cache). The fold's barriers
+kept inside the plan's pass over the nodes had made the plan up to 10% slower,
+37 to 42 instructions more per node, which their pass of their own doesn't
+cost. The shapes hold no loads, so these are the costs, not the fold's gains.
 
 ## Remaining acceptance
 

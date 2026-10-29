@@ -75,6 +75,7 @@ struct IrParseState
     IrParseArray blocks;
     IrParseArray extra;
     IrParseArray constants;
+    IrParseArray vector_constants;
     IrParseArray slots;
     IrParseArray addresses;
     IrParseArray calls;
@@ -287,6 +288,41 @@ static IrConstant ir_parse_constant(IrParseState* state)
         {
             value.high = (value.high << 4) | (value.low >> 60);
             value.low = (value.low << 4) | digit;
+            digits += 1;
+            state->cursor += 1;
+        }
+    }
+    if (digits == 0)
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    return value;
+}
+
+static IrSimdValue ir_parse_vector_constant(IrParseState* state, uint8_t type)
+{
+    IrSimdValue value = { 0 };
+    ir_parse_keyword(state, "0x");
+    uint32_t digits = 0;
+    const uint32_t limit = ir_vector_type(type) ? ir_type_bits[type] / 4 : 128;
+    while (state->result.error == IR_PARSE_OK && state->cursor < state->end)
+    {
+        const uint8_t byte = (uint8_t)state->source.pointer[state->cursor];
+        const uint32_t digit = byte >= '0' && byte <= '9' ? byte - '0' : (byte | 32u) >= 'a' && (byte | 32u) <= 'f' ? (byte | 32u) - 'a' + 10 : 16;
+        if (digit >= 16)
+        {
+            break;
+        }
+        if (digits == limit)
+        {
+            ir_parse_fail(state, IR_PARSE_LIMIT);
+        }
+        else
+        {
+            for (uint32_t word = 8; word-- > 0;)
+            {
+                value.words[word] = (value.words[word] << 4) | (word != 0 ? value.words[word - 1] >> 60 : digit);
+            }
             digits += 1;
             state->cursor += 1;
         }
@@ -622,6 +658,11 @@ static void ir_parse_instruction(IrParseState* state)
                 const IrConstant constant = ir_parse_constant(state);
                 row.a = ir_parse_append(state, &state->constants, &constant);
             } break;
+            case IR_VCONST:
+            {
+                const IrSimdValue constant = ir_parse_vector_constant(state, row.type);
+                row.a = ir_parse_append(state, &state->vector_constants, &constant);
+            } break;
             case IR_PARAM: row.a = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false); break;
             case IR_STACK_ADDR: row.a = ir_parse_id(state, '$'); break;
             case IR_SYMBOL_ADDR:
@@ -643,6 +684,26 @@ static void ir_parse_instruction(IrParseState* state)
                 row.c = ir_parse_id(state, 'b');
             } break;
             case IR_SWITCH: ir_parse_switch(state, &row); break;
+            case IR_BR_INDIRECT:
+            {
+                // Its labels, a jump table's (#785), when it lists them: [#k, ...].
+                row.a = ir_parse_id(state, '%');
+                if (!ir_parse_end_line(state))
+                {
+                    ir_parse_expect(state, '[');
+                    row.b = state->extra.count;
+                    row.c = 0;
+                    bool more = true;
+                    while (state->result.error == IR_PARSE_OK && more)
+                    {
+                        const uint32_t label = ir_parse_id(state, '#');
+                        ir_parse_append(state, &state->extra, &label);
+                        row.c += 1;
+                        more = ir_parse_take(state, ',');
+                    }
+                    ir_parse_expect(state, ']');
+                }
+            } break;
             case IR_RET:
             {
                 if (!ir_parse_end_line(state))
@@ -671,7 +732,7 @@ static void ir_parse_instruction(IrParseState* state)
                         first = false;
                     }
                 }
-                if (row.op == IR_ICMP || row.op == IR_FCMP)
+                if (row.op == IR_ICMP || row.op == IR_FCMP || row.op == IR_VCMP)
                 {
                     static const char* const names[IR_PREDICATE_COUNT] = {
                         "eq",
@@ -770,6 +831,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         .block_count = state->blocks.count,
         .extra_count = state->extra.count,
         .constant_count = state->constants.count,
+        .vector_constant_count = state->vector_constants.count,
         .slot_count = state->slots.count,
         .address_count = state->addresses.count,
         .call_count = state->calls.count,
@@ -793,6 +855,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         function.block_offsets[function.block_count] = function.instruction_count;
         ir_parse_copy(state->extra, function.extra);
         ir_parse_copy(state->constants, function.constants);
+        ir_parse_copy(state->vector_constants, function.vector_constants);
         ir_parse_copy(state->slots, function.slots);
         ir_parse_copy(state->addresses, function.addresses);
         ir_parse_copy(state->calls, function.calls);
@@ -855,6 +918,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
         .blocks.bytes = sizeof(uint32_t),
         .extra.bytes = sizeof(uint32_t),
         .constants.bytes = sizeof(IrConstant),
+        .vector_constants.bytes = sizeof(IrSimdValue),
         .slots.bytes = sizeof(IrSlot),
         .addresses.bytes = sizeof(IrAddress),
         .calls.bytes = sizeof(IrCall),

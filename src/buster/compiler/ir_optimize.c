@@ -882,7 +882,8 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
     }
     else if (op == IR_BR_INDIRECT)
     {
-        // It may go to any label: no address it holds is known to be one label's rather than another's.
+        // It may go to any of its labels (its list's, a jump table's, or every label): no address it holds is known to be
+        // one label's rather than another's.
         all = true;
     }
     else if (op == IR_CBR || op == IR_SWITCH)
@@ -919,7 +920,9 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
     return changed;
 }
 
-static bool ir_optimize_visit(IrOptimizeWork* work, uint32_t i, bool queue)
+// The optimizer's hot functions start lines of their own, as the verifier's do (ir.c's ir_check_rows), so that
+// where the code before them ends doesn't move their loops within lines (#786).
+static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work, uint32_t i, bool queue)
 {
     bool changed = false;
     if (work->blocks[work->cfg.instruction_blocks[i]] != 0)
@@ -949,7 +952,7 @@ static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
     return changed;
 }
 
-static void ir_optimize_sccp_worklist(IrOptimizeWork* work)
+static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWork* work)
 {
     for (uint32_t i = 0; i < work->function->instruction_count; i += 1)
     {
@@ -1227,12 +1230,16 @@ static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
     }
 }
 
-static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
 {
     (void)scalar;
 
     work->function = function;
     IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    if (check.error == IR_OK && ir_function_has_simd(function))
+    {
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     // Entry phis are forbidden by the shared IR contract: initial invocation has no predecessor value.
     // Pruning their dead predecessors cannot invent an undef value or emit a zero-input phi.
     if (check.error == IR_OK && function->block_count != 0 && function->op[0] == IR_PHI)
@@ -1308,7 +1315,7 @@ static uint32_t ir_optimize_phi_inputs(const IrOptimizeWork* work, uint32_t inst
     return count;
 }
 
-static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* scratch, IrOptimizeOptions options, IrFunction* result)
+static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* scratch, IrOptimizeOptions options, IrFunction* result)
 {
     const IrFunction* f = work->function;
     bool ok = true;
@@ -1380,6 +1387,10 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
                         else if (f->op[i] == IR_SWITCH && ir_optimize_single_successor(work, block) == BUSTER_IR_NONE)
                         {
                             sizes.extra_count += 1 + (uint64_t)f->c[i] * 2;
+                        }
+                        else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                        {
+                            sizes.extra_count += f->c[i];
                         }
                     }
                 }
@@ -1533,6 +1544,15 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
                                     {
                                         candidate.extra[extra++] = f->extra[f->b[i] + 1 + entry * 2];
                                         candidate.extra[extra++] = blocks[threads[f->extra[f->b[i] + 2 + entry * 2]]];
+                                    }
+                                }
+                                else if (op == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
+                                {
+                                    // Its labels' list: label indices, which the rewrite keeps (their blocks move).
+                                    candidate.b[out] = extra;
+                                    for (uint32_t entry = 0; entry < f->c[i]; entry += 1)
+                                    {
+                                        candidate.extra[extra++] = f->extra[f->b[i] + entry];
                                     }
                                 }
                             }

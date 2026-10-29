@@ -50,10 +50,11 @@ static CheckVectorShape check_vector_builtin_shape(const TypeTable* types, TypeI
     return result;
 }
 
-// A width's place among a family's forms: 16, 32 and 64 bytes.
+// A width's place among a family's forms: 16, 32 and 64 bytes, and 16's for a vector of 4 or 8 bytes, in an XMM
+// register whose bytes past it Tier 0 zeroes.
 static uint32_t check_vector_builtin_width(uint32_t bytes)
 {
-    return bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    return bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
 }
 
 // An element's bytes' place in the four-entry tables below: 1, 2, 4 and 8.
@@ -128,7 +129,9 @@ static const char* check_vector_shuffle_row(const TypeTable* types, const X86Tar
     }
     else if (!identity)
     {
-        const uint32_t bytes = in.bytes > out.bytes ? in.bytes : out.bytes;
+        // The wider vector's register: an XMM one for vectors of 4 and 8 bytes.
+        const uint32_t wider = in.bytes > out.bytes ? in.bytes : out.bytes;
+        const uint32_t bytes = wider > 16 ? wider : 16;
         const uint32_t table = bytes / in.element;
         uint8_t constant[64] = { 0 };
         for (uint32_t i = 0; i < out.lanes; i += 1)
@@ -212,7 +215,7 @@ static const char* check_vector_convert_floating_forms(CheckVectorShape in, Chec
     }
     else if ((in.integer && in.element <= 2) || (out.integer && out.element <= 2))
     {
-        reason = "vector conversions between 8- or 16-bit integers and floating elements";
+        reason = "vector conversions between half-precision elements and 8-bit integers, or bf16 elements and 8- or 16-bit integers";
     }
     else if ((in.bfloat && !(out.floating && !out.bfloat && out.element == 4)) || out.bfloat)
     {
@@ -310,6 +313,41 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
     {
         reason = "vector conversions of a shuffle's elements to narrower ones";
     }
+    else if ((in.integer && in.element <= 2 && out.floating && !out.bfloat && out.element >= 4) ||
+             (out.integer && out.element <= 2 && in.floating && !in.bfloat && in.element >= 4))
+    {
+        // Between 8- or 16-bit integers and floats or doubles, through 32-bit integers, as LLVM converts them: extended
+        // by the source's signedness (VPMOVSX, VPMOVZX), whose ints a signed conversion takes exactly, then VCVTDQ2PS
+        // or VCVTDQ2PD; or truncated by VCVTTPS2DQ or VCVTTPD2DQ, then to the result's elements (VPMOVDW, VPMOVDB),
+        // which C leaves undefined outside their range.
+        static const CheckVectorForms extend[2][2] = {
+            { BUSTER_CHECK_VECTOR_FORMS(VPMOVSXBD_X_XM32_EVEX, VPMOVSXBD_Y_XM64_EVEX, VPMOVSXBD_Z_XM128),
+              BUSTER_CHECK_VECTOR_FORMS(VPMOVSXWD_X_XM64_EVEX, VPMOVSXWD_Y_XM128_EVEX, VPMOVSXWD_Z_YM256) },
+            { BUSTER_CHECK_VECTOR_FORMS(VPMOVZXBD_X_XM32_EVEX, VPMOVZXBD_Y_XM64_EVEX, VPMOVZXBD_Z_XM128),
+              BUSTER_CHECK_VECTOR_FORMS(VPMOVZXWD_X_XM64_EVEX, VPMOVZXWD_Y_XM128_EVEX, VPMOVZXWD_Z_YM256) },
+        };
+        static const CheckVectorForms truncate[2] = {
+            BUSTER_CHECK_VECTOR_FORMS(VPMOVDB_XM32_X, VPMOVDB_XM64_Y, VPMOVDB_XM128_Z),
+            BUSTER_CHECK_VECTOR_FORMS(VPMOVDW_XM64_X, VPMOVDW_XM128_Y, VPMOVDW_YM256_Z),
+        };
+        const uint32_t ints = check_vector_builtin_width(4 * out.lanes);
+        if (in.integer)
+        {
+            const CheckVectorForms convert = out.element == 4 ? BUSTER_CHECK_VECTOR_UNARY_EVEX(VCVTDQ2PS) :
+                                                                BUSTER_CHECK_VECTOR_FORMS(VCVTDQ2PD_X_XM64_EVEX, VCVTDQ2PD_Y_XM128_EVEX, VCVTDQ2PD_Z_YM256);
+            row->records[0] = check_vector_lower_record(extend[in.is_signed ? 0 : 1][in.element == 2].forms[ints], v0, 0, v0);
+            row->records[1] = check_vector_lower_record(convert.forms[check_vector_builtin_width(out.bytes)], v0, 0, v0);
+        }
+        else
+        {
+            const CheckVectorForms convert = in.element == 4 ? BUSTER_CHECK_VECTOR_UNARY_EVEX(VCVTTPS2DQ) :
+                                                               BUSTER_CHECK_VECTOR_FORMS(VCVTTPD2DQ_X_XM128_EVEX, VCVTTPD2DQ_X_YM256_EVEX, VCVTTPD2DQ_Y_ZM512);
+            // The truncation's rm is its destination.
+            row->records[0] = check_vector_lower_record(convert.forms[check_vector_builtin_width(in.bytes)], v0, 0, v0);
+            row->records[1] = check_vector_lower_record(truncate[out.element == 2].forms[ints], v0, 0, v0);
+        }
+        row->record_count = 2;
+    }
     else if (in.floating || out.floating)
     {
         CheckVectorForms forms;
@@ -384,10 +422,10 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
     return reason;
 }
 
-// The row of a shuffle of a conversion into a vector narrower than 16 bytes (`narrow`, which Tier 0 has no class for)
-// with a constant vector of its type (`b_bytes`, its bytes, or NULL where the shuffle reads none of its elements): the
-// intrinsics' narrowing conversions, which widen the result back with zeros
-// (`__builtin_shufflevector(__builtin_convertvector(x, v4qi), (v4qi){0, 0, 0, 0}, 0, 1, ..., 7, 7, ...)`). It truncates
+// The row of a shuffle of a conversion into a vector Tier 0 has no class for (`narrow`, of 2 bytes) with a constant
+// vector of its type (`b_bytes`, its bytes, or NULL where the shuffle reads none of its elements): the intrinsics'
+// narrowing conversions, which widen the result back with zeros (_mm_cvtepi64_epi8's
+// `__builtin_shufflevector(__builtin_convertvector(x, v2qi), (v2qi){0, 0}, 0, 1, 2, 3, 3, ...)`). It truncates
 // x into its register's first bytes (check_vector_convert_row's VPMOV), which zeroes the rest: where every result
 // element is the conversion's at its place or a zero of the constant's past the conversion's, that is the result. Else
 // it permutes the two (VPERMT2, at the result's width or 16 bytes): the conversion's elements are the first table's, the
@@ -418,7 +456,7 @@ static const char* check_vector_narrow_shuffle_row(const TypeTable* types, const
     if (reason == NULL && (row->record_count != 1 || out.element != middle.element || out.lanes > BUSTER_CHECK_VECTOR_SHUFFLE_LANES ||
                            middle.bytes >= 16 || (reads_b && b_bytes == NULL)))
     {
-        reason = "vector types of other than 16, 32 or 64 bytes";
+        reason = "vector types of other than 4, 8, 16, 32 or 64 bytes";
     }
     else if (reason == NULL)
     {
@@ -727,16 +765,40 @@ static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId b
     return reason;
 }
 
-// The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at an
-// address aligned to its bytes: VMOVNTPS, VMOVNTPD or VMOVNTDQ of the value by its elements, or VMOVNTDQA's load of any,
-// as clang's code's are. A store's operands are the value and the address, a load's the address.
+// The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at
+// an address aligned to its bytes: VMOVNTPS, VMOVNTPD or VMOVNTDQ of the value by its elements, or VMOVNTDQA's load of
+// any, as clang's code's are; of a vector of 4 or 8 bytes, its bits through a scratch register stored by MOVNTI
+// (clang's for MMX's __m64, which takes SSE4A's MOVNTSD for floats where the target has it), and an ordinary load
+// (clang's). A store's operands are the value and the address, a load's the address.
 static void check_vector_nontemporal_row(const TypeTable* types, TypeId vector, bool store, Tier0Operation* row)
 {
     const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
+    const bool narrow = shape.bytes < 16;
+    const bool wide = shape.bytes == 8;
     memset(row, 0, sizeof(*row));
     row->record_count = 1;
-    if (store)
+    if (store && narrow)
+    {
+        row->records[0] = check_vector_lower_record(wide ? X86_FORM_VMOVQ_RM64_X_EVEX : X86_FORM_VMOVD_RM32_X_EVEX, BUSTER_TIER0_ROLE_VECTOR(0), 0,
+                                                    BUSTER_TIER0_ROLE_SCRATCH(0));
+        row->records[1] = check_x86_lower_memory(wide ? X86_FORM_MOVNTI_M64_R64 : X86_FORM_MOVNTI_M32_R32, BUSTER_TIER0_ROLE_SCRATCH(0), BUSTER_TIER0_ROLE_INTEGER(1));
+        row->record_count = 2;
+        row->operand_count = 2;
+        row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+        row->operand_bytes[0] = (uint8_t)shape.bytes;
+        row->operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+        row->result_class = BUSTER_TYPED_CLASS_VOID;
+    }
+    else if (narrow)
+    {
+        row->records[0] = check_x86_lower_memory(wide ? X86_FORM_VMOVQ_X_XM64_EVEX : X86_FORM_VMOVD_X_RM32_EVEX, BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_INTEGER(0));
+        row->operand_count = 1;
+        row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+        row->result_class = BUSTER_TYPED_CLASS_VECTOR;
+        row->result_bytes = (uint8_t)shape.bytes;
+    }
+    else if (store)
     {
         static const CheckVectorForms stores[3] = {
             BUSTER_CHECK_VECTOR_FORMS(VMOVNTPS_M128_X_EVEX, VMOVNTPS_M256_Y_EVEX, VMOVNTPS_M512_Z),

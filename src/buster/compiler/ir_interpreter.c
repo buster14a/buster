@@ -13,7 +13,9 @@
 
 // A function and its symbol; `labels`, the producer's symbols of its labels in IrFunction.labels' order (label_count of
 // them), or null for a function whose labels' addresses nothing takes. A label's address is its labels entry's, which
-// only br_indirect reads. A function with by-value aggregates' ABI records or a variadic frame (#131) is refused.
+// only br_indirect reads. A call with by-value aggregates' ABI records (#131) passes each aggregate as a copy its callee
+// owns, and a result through a hidden pointer or from the bytes its callee returns the address of; a variadic definition
+// finds its anchors laid out from its call's arguments (#148). An entry with records of its own, or variadic, is refused.
 typedef struct IrInterpreterFunction IrInterpreterFunction;
 struct IrInterpreterFunction
 {
@@ -248,7 +250,102 @@ static bool ir_interpreter_symbol_address(const IrInterpreterProgram* program, S
     return found;
 }
 
-static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, Arena* arena)
+// A variadic definition's incoming arguments (#148), named and unnamed, as its call passes them: each one's value (an
+// aggregate's the address of its bytes, its place's size nonzero), IR type and place, the bytes of the call's argument
+// area and its alignment, rsp's at the call (2^stack_alignment_log2, which a va_arg of an argument aligned past 16 rounds
+// its address up to), and a result's hidden pointer, which rdi holds.
+typedef struct IrInterpreterIncoming IrInterpreterIncoming;
+struct IrInterpreterIncoming
+{
+    const InterpreterValue* values;
+    const uint16_t* types;
+    const IrPassed* places;
+    uint32_t count;
+    uint64_t stack_bytes;
+    uint64_t hidden;
+    uint8_t stack_alignment_log2;
+    bool has_hidden;
+};
+
+// The most a call's argument area is aligned to (AbiCall.stack_alignment_log2), Tier 0's and Tier 1's bound: a call
+// aligned past it is refused.
+#define BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2 30u
+
+// An object representation's copy (#131's aggregates by value): `size` bytes from `source` to `destination` and each
+// byte's definedness with them, both in registered memory where memory is checked, the destination writable.
+static InterpreterStatus ir_interpreter_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t size)
+{
+    InterpreterNativeRange from = {
+        0
+    };
+    InterpreterNativeRange to = {
+        0
+    };
+    const bool ranges = interpreter_native_range(runtime, source, size, false, &from) && interpreter_native_range(runtime, destination, size, true, &to);
+    const InterpreterStatus status = ranges ? INTERPRETER_OK : INTERPRETER_MEMORY;
+    if (ranges && size != 0)
+    {
+        memmove((void*)(uintptr_t)destination, (const void*)(uintptr_t)source, size);
+        if (to.memory != 0 && to.memory->defined != 0)
+        {
+            if (from.memory != 0 && from.memory->defined != 0)
+            {
+                memmove(to.memory->defined + to.offset, from.memory->defined + from.offset, size);
+            }
+            else
+            {
+                memset(to.memory->defined + to.offset, 1, size);
+            }
+        }
+    }
+    return status;
+}
+
+// The anchors of a variadic definition's frame (#148) as its entry finds them: the register save area holding the
+// argument registers (rdi to r9, then xmm0 to xmm7's low eightbytes), and the overflow area the call's argument area
+// past the named arguments'; each argument's bytes where its place puts them (an aggregate's from its memory), and only
+// those bytes defined. INTERPRETER_INVALID for a place outside them.
+static InterpreterStatus ir_interpreter_anchors(const IrInterpreterIncoming* incoming, InterpreterRuntime* runtime, const InterpreterNativeArea* area)
+{
+    InterpreterStatus status = INTERPRETER_OK;
+    if (incoming->has_hidden)
+    {
+        const uint8_t all[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+        interpreter_native_store(area->registers, area->registers_defined, (const uint8_t*)&incoming->hidden, all, sizeof(incoming->hidden));
+    }
+    for (uint32_t i = 0; status == INTERPRETER_OK && i < incoming->count; i += 1)
+    {
+        const IrPassed place = incoming->places[i];
+        const uint16_t type = incoming->types[i];
+        bool placed = false;
+        if (place.size != 0)
+        {
+            InterpreterNativeRange range = {
+                0
+            };
+            const uint64_t address = incoming->values[i].low;
+            placed = interpreter_native_range(runtime, address, place.size, false, &range);
+            const uint8_t* defined = range.memory != 0 && range.memory->defined != 0 ? range.memory->defined + range.offset : 0;
+            placed = placed && interpreter_native_put(area, place.location, (const uint8_t*)(uintptr_t)address, defined, place.size);
+            status = placed ? INTERPRETER_OK : INTERPRETER_MEMORY;
+        }
+        else
+        {
+            // A scalar's register or slot: its value's bytes defined, the rest of its 8 (16 for an i128 or a long double)
+            // not, as a register's bits past a narrower value aren't.
+            const uint32_t value_bytes = (ir_type_bits[type] + 7) / 8;
+            uint8_t defined[16] = {
+                0
+            };
+            memset(defined, 1, value_bytes);
+            placed = interpreter_native_put(area, place.location, (const uint8_t*)&incoming->values[i], defined, type == IR_I128 || type == IR_F80 ? 16 : 8);
+            status = placed ? INTERPRETER_OK : INTERPRETER_INVALID;
+        }
+    }
+    return status;
+}
+
+static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, Arena* arena)
 {
     const IrFunction* function = program->functions[function_index].function;
     const uint64_t mark = arena->length;
@@ -262,10 +359,15 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     {
         status = INTERPRETER_RESOURCE;
     }
-    else if (verified.error != IR_OK || function->parameter_count != count || (count != 0 && arguments == 0) || function->parameter_passed != 0 || function->variadic)
+    else if (verified.error != IR_OK || function->parameter_count != count || (count != 0 && arguments == 0) || function->variadic != (incoming != 0) ||
+             (incoming != 0 && incoming->stack_bytes < function->incoming.stack_bytes))
     {
-        // By-value aggregates' copies and a variadic definition's incoming frame aren't executed yet (#131).
+        // A variadic definition's anchors take its call's arguments' places (#148); no other frame takes any.
         status = INTERPRETER_INVALID;
+    }
+    else if (ir_function_has_simd(function))
+    {
+        status = INTERPRETER_UNSUPPORTED;
     }
     else if ((uint64_t)function->instruction_count + count > UINT32_MAX || active_values + function->instruction_count + count > options->max_values)
     {
@@ -303,25 +405,67 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
                 frame->arguments[p] = ir_interpreter_value(ir_interpreter_integer(arguments[p]), function->parameter_types[p]);
             }
         }
+        InterpreterNativeArea anchors = {
+            0
+        };
         for (uint32_t s = 0; s < function->slot_count && status == INTERPRETER_OK; s += 1)
         {
+            // The overflow area: the call's argument area, aligned as rsp is at the call (an argument's offset there,
+            // its alignment's multiple, is so its address's), its anchor past the named arguments' bytes, which the
+            // frame doesn't hold.
             const IrSlot slot = function->slots[s];
-            uint8_t* bytes = arena_push(arena, slot.size, slot.alignment);
-            uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slot.size);
+            const bool save = (slot.flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0;
+            const bool overflow = (slot.flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0;
+            const uint64_t size = overflow ? incoming->stack_bytes : slot.size;
+            const uint64_t named = overflow ? function->incoming.stack_bytes : 0;
+            uint8_t* bytes = arena_push(arena, size, overflow ? UINT64_C(1) << incoming->stack_alignment_log2 : slot.alignment);
+            uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, size);
             if (bytes == 0 || defined == 0)
             {
                 status = INTERPRETER_RESOURCE;
             }
             else
             {
-                memset(bytes, 0, slot.size);
-                memset(defined, 0, slot.size);
-                frame->slots[s] = (uintptr_t)bytes;
-                const bool added = interpreter_memory_add(runtime, bytes, slot.size, defined, true, owner);
+                memset(bytes, 0, size);
+                memset(defined, 0, size);
+                frame->slots[s] = (uintptr_t)bytes + named;
+                const bool added = interpreter_memory_add(runtime, bytes + named, size - named, defined + named, true, owner);
                 if (!added)
                 {
                     status = INTERPRETER_RESOURCE;
                 }
+                if (save)
+                {
+                    anchors.registers = bytes;
+                    anchors.registers_defined = defined;
+                }
+                if (overflow)
+                {
+                    anchors.stack = bytes;
+                    anchors.stack_defined = defined;
+                    anchors.stack_capacity = size;
+                }
+            }
+        }
+        if (status == INTERPRETER_OK && incoming != 0)
+        {
+            // Anchors the function doesn't have take nothing: their bytes go to scratch the frame releases.
+            uint8_t* scratch = arena_push(arena, (uint64_t)BUSTER_ABI_SAVE_AREA_BYTES * 2 + incoming->stack_bytes * 2, 16);
+            status = scratch == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
+            if (status == INTERPRETER_OK && anchors.registers == 0)
+            {
+                anchors.registers = scratch;
+                anchors.registers_defined = scratch + BUSTER_ABI_SAVE_AREA_BYTES;
+            }
+            if (status == INTERPRETER_OK && anchors.stack == 0)
+            {
+                anchors.stack = scratch + BUSTER_ABI_SAVE_AREA_BYTES * 2;
+                anchors.stack_defined = anchors.stack + incoming->stack_bytes;
+                anchors.stack_capacity = incoming->stack_bytes;
+            }
+            if (status == INTERPRETER_OK)
+            {
+                status = ir_interpreter_anchors(incoming, runtime, &anchors);
             }
         }
     }
@@ -329,6 +473,115 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     {
         interpreter_memory_remove_owner(runtime, owner);
         arena_pop_to(arena, mark);
+    }
+    return status;
+}
+
+// A call's arguments as its interpreted callee takes them (#131, #148), as both functions' records have them: a named
+// aggregate's size alike in each (a callee's IGNOREd one, an empty record's, takes a fresh object of its own, whatever the
+// call passes, as no bytes pass), and a result's kind; a hidden pointer, the call's destination, as the callee's parameter
+// 0; a result in registers that the call has no room for dropped, as a call that doesn't use it drops it; each named
+// aggregate as the address of a copy its frame owns (`owner`), aligned as its place in the call's argument area is; and
+// for a variadic definition, which only takes the default argument promotions' types past its named parameters, every
+// argument's place, its records' or worked out as LLVM's assignment places a scalar, whose register counts must be its
+// incoming frame's, and the argument area's alignment. INTERPRETER_INVALID for a call its callee can't take, or whose
+// argument area is aligned past BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2.
+static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
+{
+    const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+    const uint32_t own = target->parameter_passed;
+    const uint32_t result_size = records != 0 ? records->result_size : 0;
+    const bool hidden = own != 0 && target->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
+    const bool registers = own != 0 && target->result_size != 0;
+    const uint32_t named = call.parameter_count;
+    // The call's argument area's alignment, rsp's at the call: the records' (or 16 for a call without them, whose stack
+    // arguments are scalars), or the callee's incoming frame's where that says more. A stack argument lies there at a
+    // multiple of its alignment, which a copy of it must keep.
+    const uint8_t call_alignment = records != 0 ? records->call.stack_alignment_log2 : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    const uint8_t larger = call_alignment > target->incoming.stack_alignment_log2 ? call_alignment : target->incoming.stack_alignment_log2;
+    const uint8_t alignment_log2 = larger > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? larger : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    bool valid = call.variadic == target->variadic && target->parameter_count == named + hidden && !(hidden && registers) && alignment_log2 <= BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2;
+    valid = valid && (hidden || registers ? call.result_type == IR_VOID && (result_size != 0 || !hidden) && (result_size == 0 || records->call.result.kind == target->result_abi.kind) &&
+                                                (!registers || target->result_type == IR_PTR)
+                                          : result_size == 0 && call.result_type == target->result_type);
+    valid = valid && (!hidden || target->parameter_types[0] == IR_I64 || target->parameter_types[0] == IR_PTR);
+    for (uint32_t p = 0; valid && p < call.argument_count; p += 1)
+    {
+        const uint32_t size = records != 0 ? function->passed[records->passed + p].size : 0;
+        const IrPassed parameter = p < named && own != 0 ? target->passed[own - 1 + hidden + p] : (IrPassed){ 0 };
+        const uint16_t type = types[p];
+        const bool ignored = parameter.size != 0 && parameter.location.kind == BUSTER_ABI_LOCATION_IGNORE;
+        valid = p < named ? ignored || (type == target->parameter_types[hidden + p] && size == parameter.size) : size != 0 || (type != IR_F32 && (type < IR_I1 || type > IR_I16));
+    }
+    InterpreterStatus status = valid ? INTERPRETER_OK : INTERPRETER_INVALID;
+    if (status == INTERPRETER_OK && hidden)
+    {
+        parameters[0] = (InterpreterValue){ .low = destination };
+    }
+    for (uint32_t p = 0; status == INTERPRETER_OK && p < named; p += 1)
+    {
+        const IrPassed parameter = own != 0 ? target->passed[own - 1 + hidden + p] : (IrPassed){ 0 };
+        parameters[hidden + p] = passed[p];
+        if (parameter.size != 0)
+        {
+            // The callee's copy of the call's bytes, aligned to 64 or as the call's argument area is (a register's
+            // aggregate is 16 bytes at most, a stack argument's offset its alignment's multiple); an IGNOREd aggregate's
+            // undefined.
+            uint8_t* bytes = arena_push(arena, parameter.size, UINT64_C(1) << (alignment_log2 > 6 ? alignment_log2 : 6));
+            uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, parameter.size);
+            status = bytes == 0 || defined == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
+            if (status == INTERPRETER_OK)
+            {
+                memset(bytes, 0, parameter.size);
+                memset(defined, 0, parameter.size);
+                status = interpreter_memory_add(runtime, bytes, parameter.size, defined, true, owner) ? INTERPRETER_OK : INTERPRETER_RESOURCE;
+            }
+            if (status == INTERPRETER_OK && parameter.location.kind != BUSTER_ABI_LOCATION_IGNORE)
+            {
+                status = ir_interpreter_copy(runtime, (uintptr_t)bytes, passed[p].low, parameter.size);
+            }
+            parameters[hidden + p] = (InterpreterValue){ .low = (uintptr_t)bytes };
+        }
+    }
+    if (status == INTERPRETER_OK && target->variadic)
+    {
+        IrPassed* places = records != 0 ? 0 : BUSTER_ARENA_PUSH_ARRAY(arena, IrPassed, (uint64_t)call.argument_count + 1);
+        uint32_t integers = 0;
+        uint32_t vectors = 0;
+        uint64_t stack_bytes = 0;
+        uint8_t stack_alignment = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+        status = records != 0 || places != 0 ? INTERPRETER_OK : INTERPRETER_RESOURCE;
+        for (uint32_t p = 0; places != 0 && p < call.argument_count; p += 1)
+        {
+            places[p] = (IrPassed){ .location = interpreter_native_place(types[p], &integers, &vectors, &stack_bytes, &stack_alignment) };
+        }
+        *incoming = (IrInterpreterIncoming){
+            .values = passed,
+            .types = types,
+            .places = records != 0 ? &function->passed[records->passed] : places,
+            .count = call.argument_count,
+            .stack_bytes = records != 0 ? records->call.stack_bytes : (stack_bytes + 7) & ~7ull,
+            .hidden = destination,
+            .stack_alignment_log2 = stack_alignment > alignment_log2 ? stack_alignment : alignment_log2,
+            .has_hidden = hidden,
+        };
+        // The named arguments' registers are the incoming frame's, which va_start's offsets count, and every unnamed
+        // argument on the stack lies past its stack bytes, in the overflow area.
+        uint32_t named_integers = hidden;
+        uint32_t named_vectors = 0;
+        for (uint32_t p = 0; status == INTERPRETER_OK && p < call.argument_count; p += 1)
+        {
+            const AbiLocation location = incoming->places[p].location;
+            const bool stacked = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
+            for (uint32_t r = 0; p < named && r < 2; r += 1)
+            {
+                const uint8_t reg = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT ? location.registers[r] : BUSTER_ABI_REGISTER_NONE;
+                named_vectors += reg != BUSTER_ABI_REGISTER_NONE && reg >= BUSTER_ABI_REGISTER_VECTOR;
+                named_integers += reg != BUSTER_ABI_REGISTER_NONE && reg < BUSTER_ABI_REGISTER_VECTOR;
+            }
+            status = p >= named && stacked && location.stack_offset < target->incoming.stack_bytes ? INTERPRETER_INVALID : INTERPRETER_OK;
+        }
+        status = status == INTERPRETER_OK && (named_integers != target->incoming.integer_registers || named_vectors != target->incoming.vector_registers || incoming->stack_bytes < target->incoming.stack_bytes) ? INTERPRETER_INVALID : status;
     }
     return status;
 }
@@ -640,7 +893,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
         else
         {
             result.function = first;
-            result.status = ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, arena);
+            // An entry has no call whose records would place its aggregates (#131).
+            const IrFunction* function = program->functions[first].function;
+            result.status = function != 0 && function->parameter_passed != 0 ? INTERPRETER_INVALID
+                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, arena);
             if (result.status == INTERPRETER_OK)
             {
                 depth = 1;
@@ -823,13 +1079,22 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const IrCall call = function->calls[b];
                     const uint32_t callee = ir_interpreter_find_function(program, a, av.low, op == IR_CALL_INDIRECT);
                     const InterpreterNativeBinding* native = callee == UINT32_MAX ? ir_interpreter_find_native(program, a, av.low, op == IR_CALL_INDIRECT) : 0;
+                    // A call with ABI records (#131): an aggregate result's destination is c.
+                    const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+                    const uint32_t result_size = records != 0 ? records->result_size : 0;
+                    const uint64_t destination = result_size != 0 ? frame->values[c].low : 0;
                     const uint64_t call_mark = arena->length;
                     bool pushed_frame = false;
                     InterpreterValue* passed = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)call.argument_count + 1);
+                    InterpreterValue* parameters = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)call.argument_count + 2);
                     uint16_t* types = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, (uint64_t)call.argument_count + 1);
-                    if (passed == 0 || types == 0)
+                    if (passed == 0 || parameters == 0 || types == 0)
                     {
                         result.status = INTERPRETER_RESOURCE;
+                    }
+                    else if (result_size != 0 && frame->defined[c] == 0 && options->check_undefined)
+                    {
+                        result.status = INTERPRETER_UNDEFINED;
                     }
                     for (uint32_t p = 0; result.status == INTERPRETER_OK && p < call.argument_count; p += 1)
                     {
@@ -841,15 +1106,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             result.status = INTERPRETER_UNDEFINED;
                         }
                     }
-                    if (result.status == INTERPRETER_OK && call.abi != 0)
-                    {
-                        // A call that passes or returns an aggregate by value isn't executed yet (#131).
-                        result.status = INTERPRETER_INVALID;
-                    }
                     if (result.status == INTERPRETER_OK && callee != UINT32_MAX)
                     {
                         const IrFunction* target = program->functions[callee].function;
                         IrCheck target_check = { .error = IR_ERROR_STRUCTURE };
+                        IrInterpreterIncoming incoming = {
+                            0
+                        };
                         if (target != 0)
                         {
                             target_check = ir_verify_complete(target, arena, false);
@@ -858,16 +1121,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         {
                             result.status = INTERPRETER_RESOURCE;
                         }
-                        else if (target_check.error != IR_OK || call.variadic || call.result_type != target->result_type || call.argument_count != target->parameter_count)
+                        else if (target_check.error != IR_OK)
                         {
                             result.status = INTERPRETER_INVALID;
-                        }
-                        for (uint32_t p = 0; result.status == INTERPRETER_OK && p < call.argument_count; p += 1)
-                        {
-                            if (types[p] != target->parameter_types[p])
-                            {
-                                result.status = INTERPRETER_INVALID;
-                            }
                         }
                         if (result.status == INTERPRETER_OK && depth == options->max_frames)
                         {
@@ -875,7 +1131,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         }
                         if (result.status == INTERPRETER_OK)
                         {
-                            result.status = ir_interpreter_frame(&frames[depth], program, callee, passed, call.argument_count, i, depth + 1, options, active_values, active_locals, &runtime, arena);
+                            result.status = ir_interpreter_arguments(function, call, target, passed, types, destination, depth + 1, &runtime, arena, parameters, &incoming);
+                        }
+                        if (result.status == INTERPRETER_OK)
+                        {
+                            result.status = ir_interpreter_frame(&frames[depth], program, callee, parameters, target->parameter_count, target->variadic ? &incoming : 0, i, depth + 1, options,
+                                                                 active_values, active_locals, &runtime, arena);
                             if (result.status == INTERPRETER_OK)
                             {
                                 // The new frame owns its copied arguments and the staging storage preceding them.
@@ -900,6 +1161,10 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .result_type = call.result_type,
                             .variadic = call.variadic,
                             .runtime = &runtime,
+                            .abi = records != 0 ? &records->call : 0,
+                            .passed = records != 0 ? &function->passed[records->passed] : 0,
+                            .destination = destination,
+                            .result_size = result_size,
                         };
                         const bool invoked = interpreter_native_invoke(&request, &value);
                         if (!invoked)
@@ -913,6 +1178,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     }
                     if (!pushed_frame)
                     {
+                        // Copies of aggregates made for a callee that didn't start go with their staging storage.
+                        interpreter_memory_remove_owner(&runtime, depth + 1);
                         arena_pop_to(arena, call_mark);
                     }
                     break;
@@ -948,6 +1215,16 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     value = a == BUSTER_IR_NONE ? (InterpreterValue){ 0 } : av;
                     const uint32_t destination = frame->destination;
                     const uint64_t frame_mark = frame->arena_mark;
+                    const IrInterpreterFrame* caller = depth > 1 ? &frames[depth - 2] : 0;
+                    const IrCall* call = caller != 0 ? &caller->function->calls[caller->function->b[destination]] : 0;
+                    const uint32_t room = call != 0 && call->abi != 0 ? caller->function->abi_calls[call->abi - 1].result_size : 0;
+                    if (function->result_size != 0 && room != 0)
+                    {
+                        // An aggregate returned in registers (#131): its bytes, at most the call's room, from the address
+                        // it returns to the call's destination, while the callee's memory still holds them.
+                        const uint64_t into = caller->values[caller->function->c[destination]].low;
+                        result.status = ir_interpreter_copy(&runtime, into, value.low, function->result_size < room ? function->result_size : room);
+                    }
                     active_values -= frame->value_charge;
                     active_locals -= function->slot_count;
                     interpreter_memory_remove_owner(&runtime, depth);
@@ -970,10 +1247,16 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 case IR_BR_INDIRECT:
                 {
-                    // An address of one of this function's labels (ir_interpreter_symbol_address), or undefined.
+                    // An address of one of this function's labels (ir_interpreter_symbol_address), of its list's if it
+                    // lists them (a jump table's, #785), or undefined.
                     const uint64_t offset = av.low - (uintptr_t)function->labels;
                     const uint64_t label = offset / sizeof(uint32_t);
-                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count ?
+                    bool listed = b == BUSTER_IR_NONE;
+                    for (uint32_t k = 0; !listed && k < c; k += 1)
+                    {
+                        listed = function->extra[b + k] == label;
+                    }
+                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count && listed ?
                                         ir_interpreter_enter_block(frame, function->labels[label], frame->block, options, &result.steps) : INTERPRETER_UNDEFINED;
                     break;
                 }

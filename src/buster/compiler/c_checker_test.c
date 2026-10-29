@@ -1216,6 +1216,79 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     CheckLiteral hexadecimal = { 0 };
     check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch, &hexadecimal);
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
+    // Bit-precise constants (#768): C23's wb and WB, alone or with u or U before or after them, in each radix and with
+    // digit separators, as the widths and values clang 23 gives them (each checked there by _Generic), a width past 128
+    // bits and a value past them (UINT32_MAX), which the reader refuses by name; and the spellings C23 doesn't have,
+    // with the imaginary one, which clang takes as a _Complex _BitInt it doesn't let a program spell and GCC refuses.
+    const struct
+    {
+        const char* spelling;
+        uint32_t width;
+        bool is_unsigned;
+        uint64_t high;
+        uint64_t low;
+    } bit_precise[] =
+    {
+        { "0wb", 2, false, 0, 0 },
+        { "1wb", 2, false, 0, 1 },
+        { "2WB", 3, false, 0, 2 },
+        { "0uwb", 1, true, 0, 0 },
+        { "1Uwb", 1, true, 0, 1 },
+        { "5uWB", 3, true, 0, 5 },
+        { "5wbu", 3, true, 0, 5 },
+        { "5WBU", 3, true, 0, 5 },
+        { "0777wb", 10, false, 0, 511 },
+        { "0b1010'1010wb", 9, false, 0, 170 },
+        { "0x7fff'ffff'ffff'ffffwb", 64, false, 0, INT64_MAX },
+        { "0x8000000000000000wb", 65, false, 0, UINT64_C(0x8000000000000000) },
+        { "0xffffffffffffffffuwb", 64, true, 0, UINT64_MAX },
+        { "18446744073709551616wb", 66, false, 1, 0 },
+        { "0x1'0000'0000'0000'0000uwb", 65, true, 1, 0 },
+        { "0x7fffffffffffffffffffffffffffffffwb", 128, false, INT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffuwb", 128, true, UINT64_MAX, UINT64_MAX },
+        { "0xffffffffffffffffffffffffffffffffwb", 129, false, UINT64_MAX, UINT64_MAX },
+        { "340282366920938463463374607431768211456uwb", UINT32_MAX, true, 0, 0 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)bit_precise[i].spelling, (uint32_t)strlen(bit_precise[i].spelling), scratch, &literal);
+        const unsigned __int128 value = (unsigned __int128)bit_precise[i].high << 64 | bit_precise[i].low;
+        char description[160];
+        snprintf(description, sizeof(description), "%s is a bit-precise constant of %u bits with clang's value", bit_precise[i].spelling, bit_precise[i].width);
+        check_test_expect(test, literal.valid && literal.type == 0 && literal.bit_width == bit_precise[i].width && literal.bit_unsigned == bit_precise[i].is_unsigned &&
+                                (bit_precise[i].width == UINT32_MAX || ((unsigned __int128)literal.high << 64 | literal.integer) == value) && !literal.imaginary &&
+                                scratch->length == mark,
+                          description);
+    }
+    const char* invalid_bit_precise[] =
+    {
+        "5wB",
+        "5Wb",
+        "5uwbu",
+        "5UwbU",
+        "5wbl",
+        "5lwb",
+        "5llwb",
+        "5wbll",
+        "5wbwb",
+        "5wbi",
+        "5iwb",
+        "5w",
+        "5b",
+        "5uw",
+        "0b2wb",
+        "09wb",
+        "5'wb",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_bit_precise); i += 1)
+    {
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)invalid_bit_precise[i], (uint32_t)strlen(invalid_bit_precise[i]), scratch, &literal);
+        char description[128];
+        snprintf(description, sizeof(description), "%s is no constant C23 has, as clang has it", invalid_bit_precise[i]);
+        check_test_expect(test, !literal.valid && !literal.resource && scratch->length == mark, description);
+    }
 }
 
 static __attribute__((noinline)) void check_test_action_oracles(CheckTest* test, const char* clang)
@@ -2039,6 +2112,8 @@ struct CheckSourceFixture
     bool undecided;
     // The type table's room, for a fixture larger than check_test_types_open's; null for that.
     const TypeCapacity* capacity;
+    // Optional sum of scalar and vector reader/checker times, excluding fixture setup and comparisons.
+    double* check_seconds;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -2135,7 +2210,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         lines[p] = outcome.line;
         if (!rejected[p])
         {
+            struct timespec reader_start;
+            struct timespec reader_stop;
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_start);
+            }
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
+            if (fixture->check_seconds != NULL)
+            {
+                clock_gettime(CLOCK_MONOTONIC, &reader_stop);
+                *fixture->check_seconds += (double)(reader_stop.tv_sec - reader_start.tv_sec) + (double)(reader_stop.tv_nsec - reader_start.tv_nsec) * 1e-9;
+            }
             if (adapted || input[p].diagnostic_graph)
             {
                 check_test_input_recorded(test, &input[p].graph, &scratch[p]);
@@ -2161,7 +2247,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                 const CheckInputReport* report = &input[p].reports[i];
                 const uint32_t source = check_diagnostic_input_report_source(&input[p], &parsers[p], report);
                 first = source < first ? source : first;
-                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED;
+                unsupported[p] |= report->message == CHECK_INPUT_UNSUPPORTED || report->message == CHECK_INPUT_WIDE_LITERAL;
             }
             if (adapted)
             {
@@ -2169,7 +2255,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     .scalar = p == 0,
                     .verify = true
                 };
+                struct timespec start;
+                struct timespec stop;
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &start);
+                }
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
+                if (fixture->check_seconds != NULL)
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &stop);
+                    *fixture->check_seconds += (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9;
+                }
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
                 rejected[p] = !checked[p] || streams[p].report_count != 0;
                 if (checked[p] && streams[p].report_count != 0)
@@ -2926,6 +3023,369 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // GNU C's local labels (#147): a `__label__` list's names are labels of its block, which shadow the function's
+        // and an outer list's, in a statement expression a macro expands twice too, whose labeled last statement gives
+        // its value.
+        {
+            "local labels: a statement expression's, expanded twice",
+            "#define CHECKED(x) ({ __label__ out; int r = 0; if (x) goto out; r = 1; out: r; })\n"
+            "int f(int a) {\n"
+            "    return CHECKED(a) + CHECKED(a > 1);\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "local labels: nested blocks' and the function's",
+            "int f(int n) {\n"
+            "    int s = 0;\n"
+            "    {\n"
+            "        __label__ again, done;\n"
+            "    again:\n"
+            "        if (n-- > 0) { s += 1; goto again; }\n"
+            "        {\n"
+            "            __label__ again;\n"
+            "        again:\n"
+            "            if (s > 100) { s -= 1; goto again; }\n"
+            "        }\n"
+            "        goto done;\n"
+            "    done:;\n"
+            "    }\n"
+            "    if (s == 0) goto again;\n"
+            "    return s;\n"
+            "again:\n"
+            "    return -s;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "local labels: an address of one",
+            "int f(int n) {\n"
+            "    {\n"
+            "        __label__ odd;\n"
+            "        void *p = &&odd;\n"
+            "        if (n & 1) goto *p;\n"
+            "        return 0;\n"
+            "    odd:\n"
+            "        return 1;\n"
+            "    }\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // A local label its block doesn't define: clang's "use of undeclared label", at its name in the list.
+            "local labels: one its block doesn't define",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ missing;\n"
+            "        (void)0;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A goto from outside the block reaches no label of the function.
+            "local labels: a goto from outside the block",
+            "void f(void) {\n"
+            "    goto inner;\n"
+            "    {\n"
+            "        __label__ inner;\n"
+            "    inner:;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "local labels: one defined twice",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ a;\n"
+            "    a:;\n"
+            "    a:;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "local labels: the function's after the block",
+            "void f(void) {\n"
+            "    {\n"
+            "        __label__ a;\n"
+            "    a:;\n"
+            "    }\n"
+            "    goto a;\n"
+            "}\n",
+            true,
+            false
+        },
+        // GNU C's __auto_type (#147): a variable's type is its initializer's, lvalue-converted and decayed, with the
+        // specifiers' qualifiers, as clang deduces it.
+        {
+            "__auto_type: a statement expression's maximum",
+            "#define MAX(a, b) ({ __auto_type a_ = (a); __auto_type b_ = (b); a_ > b_ ? a_ : b_; })\n"
+            "long f(int x, long y) {\n"
+            "    __auto_type m = MAX(x, y);\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(m), long), \"the conditional's type\");\n"
+            "    return m + MAX(MAX(x, 1), 2);\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: lvalue conversion and decay",
+            "int g(void);\n"
+            "const char *h(void) {\n"
+            "    const int c = 1;\n"
+            "    int a[3] = { 0 };\n"
+            "    volatile short v = 2;\n"
+            "    _Atomic int t = 3;\n"
+            "    __auto_type x = c;\n"
+            "    __auto_type p = a;\n"
+            "    __auto_type q = g;\n"
+            "    __auto_type s = \"abc\";\n"
+            "    __auto_type w = v;\n"
+            "    __auto_type z = t;\n"
+            "    const __auto_type k = 2.0f;\n"
+            "    __auto_type volatile u = (char)1 + (char)2;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(x), int), \"lvalue conversion\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(p), int *), \"an array's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(q), int (*)(void)), \"a function's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(s), char *), \"a string's decay\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(w), short), \"volatile dropped\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(z), _Atomic int), \"_Atomic kept\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(k), const float), \"the specifiers' const\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(u), volatile int), \"promoted, and volatile\");\n"
+            "    x = 3;\n"
+            "    p[0] = x + q() + w + z + (int)k + u;\n"
+            "    return s;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: file scope, static, a loop's, structures and compound literals",
+            "typedef struct { int a; } S;\n"
+            "S make(void);\n"
+            "__auto_type g = 1L;\n"
+            "static __auto_type h = 'c';\n"
+            "int f(void) {\n"
+            "    static __auto_type n = sizeof g;\n"
+            "    __auto_type s = make();\n"
+            "    __auto_type t = (S){ 2 };\n"
+            "    __auto_type e = (int[]){ 1, 2, 3 };\n"
+            "    __auto_type r = ({ __auto_type r = 4; r + 1; });\n"
+            "    int sum = s.a + t.a + h + e[2] + r;\n"
+            "    for (__auto_type i = 0u; i < n; i++) sum += (int)i;\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(g), long), \"file scope\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(h), int), \"a character constant's int\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(n), unsigned long), \"sizeof's size_t\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(s), S), \"a structure\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(t), S), \"a compound literal\");\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(e), int *), \"an array's compound literal decays\");\n"
+            "    __auto_type l = ({ int k = sum; if (k > 3) goto done; k = 5; done: k * 2L; });\n"
+            "    _Static_assert(__builtin_types_compatible_p(__typeof__(l), long), \"a labeled last statement's\");\n"
+            "    extern long g;\n"
+            "    return sum + (int)l + (int)g;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // A use of the variable in its own initializer, though an outer one has its name: at the use.
+            "__auto_type: its own initializer names it",
+            "void f(void) {\n"
+            "    int x = 1;\n"
+            "    {\n"
+            "        __auto_type x =\n"
+            "            x + 1;\n"
+            "    }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A use of it in a type query of its own initializer, which the walk doesn't resolve: the query's binding.
+            "__auto_type: its own initializer's type query names it",
+            "unsigned long f(void) {\n"
+            "    __auto_type x =\n"
+            "        sizeof(__typeof__(x));\n"
+            "    return x;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: without an initializer",
+            "void f(void) {\n"
+            "    __auto_type\n"
+            "        x;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a parameter's",
+            "void f(int a,\n"
+            "       __auto_type b);\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a function's result",
+            "__auto_type\n"
+            "f(void);\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a typedef's",
+            "typedef\n"
+            "    __auto_type T;\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a type name's",
+            "unsigned long f(void) {\n"
+            "    return sizeof(\n"
+            "        __auto_type);\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an initializer list",
+            "void f(void) {\n"
+            "    __auto_type x =\n"
+            "        { 1 };\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an array",
+            "void f(void) {\n"
+            "    __auto_type a[] =\n"
+            "        { 1, 2 };\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a bit-field's value",
+            "struct B { int b : 3; };\n"
+            "void f(struct B s) {\n"
+            "    __auto_type x =\n"
+            "        s.b;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: a void value",
+            "void f(void) {\n"
+            "    __auto_type\n"
+            "        x = (void)0;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A signedness, at its keyword wherever it is among the specifiers (DeclSpec::Finish).
+            "__auto_type: a signedness",
+            "void f(void) {\n"
+            "    long\n"
+            "        unsigned __auto_type x = 1;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // What clang deduces as C++ deduces a declarator's type, and GCC refuses: refused by name.
+            "__auto_type: a pointer declarator",
+            "void f(void) {\n"
+            "    int y = 0;\n"
+            "    __auto_type *p = &y;\n"
+            "}\n",
+            true,
+            true
+        },
+        {
+            "__auto_type: a second declarator",
+            "void f(void) {\n"
+            "    __auto_type x = 1, y = 2;\n"
+            "}\n",
+            true,
+            true
+        },
+        {
+            // A name with linkage declared before: its types would bind before the deduction.
+            "__auto_type: a linked name declared before",
+            "extern int e;\n"
+            "__auto_type e = 1;\n",
+            true,
+            true
+        },
+        {
+            // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
+            // int's alignment where the deduced type's is, at file scope, a type's, and GNU's aligned, which can't lower it.
+            "__auto_type: an _Alignas the deduced type allows",
+            "_Alignas(2) __auto_type g = (short)1;\n"
+            "void f(void) {\n"
+            "    _Alignas(1) __auto_type c = (char)0;\n"
+            "    _Alignas(double) __auto_type d = (char)1;\n"
+            "    __auto_type e __attribute__((aligned(1))) = 1.0;\n"
+            "    (void)c; (void)d; (void)e;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // Below the deduced type's alignment, though not int's: at the _Alignas.
+            "__auto_type: an _Alignas below the deduced type's",
+            "void f(void) {\n"
+            "    _Alignas(4)\n"
+            "        __auto_type x = 1.0;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "__auto_type: an _Alignas below a decayed pointer's",
+            "void f(void) {\n"
+            "    char a[3];\n"
+            "    _Alignas(1)\n"
+            "        __auto_type p = a;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // The specifiers' const and volatile on the deduced type, which _Generic of its address sees.
+            "__auto_type: the specifiers' qualifiers",
+            "void f(void) {\n"
+            "    volatile __auto_type y = 1.0;\n"
+            "    _Static_assert(_Generic(&y, volatile double *: 1, default: 0), \"volatile\");\n"
+            "    const __auto_type x = 1;\n"
+            "    _Static_assert(_Generic(&x, const int *: 1, default: 0), \"const\");\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            "__auto_type: an assignment to a const one",
+            "void f(void) {\n"
+            "    const __auto_type x = 1;\n"
+            "    x = 2;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {
@@ -3391,6 +3851,41 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // C23's bit-precise constants (#768): their types and values, in each radix, with digit separators and in each
+            // order and case of their suffixes, past 64 bits too.
+            "bit-precise constants",
+            "_Static_assert(_Generic(0wb, _BitInt(2): 1, default: 0) && _Generic(1wb, _BitInt(2): 1, default: 0) && _Generic(2WB, _BitInt(3): 1, default: 0), \"s\");\n"
+            "_Static_assert(_Generic(0uwb, unsigned _BitInt(1): 1, default: 0) && _Generic(5Uwb, unsigned _BitInt(3): 1, default: 0), \"u\");\n"
+            "_Static_assert(_Generic(5wbU, unsigned _BitInt(3): 1, default: 0) && _Generic(5WBu, unsigned _BitInt(3): 1, default: 0) && 5uWB == 5, \"o\");\n"
+            "_Static_assert(_Generic(0777wb, _BitInt(10): 1, default: 0) && _Generic(0b1010'1010wb, _BitInt(9): 1, default: 0) && 0777wb == 511, \"r\");\n"
+            "_Static_assert(_Generic(0x8000'0000'0000'0000wb, _BitInt(65): 1, default: 0) && _Generic(0xffffffffffffffffuwb, unsigned _BitInt(64): 1, default: 0), \"x\");\n"
+            "_Static_assert(_Generic(18446744073709551616wb, _BitInt(66): 1, default: 0) && 18446744073709551616wb == (_BitInt(66))1 << 64, \"w\");\n"
+            "_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffuwb, unsigned _BitInt(128): 1, default: 0) &&\n"
+            "               0xffffffffffffffffffffffffffffffffuwb == (unsigned _BitInt(128))-1, \"m\");\n"
+            "_Static_assert(_Generic(0x7fffffffffffffffffffffffffffffffwb, _BitInt(128): 1, default: 0) && -1wb < 0 && _Generic(-1wb, _BitInt(2): 1, default: 0), \"n\");\n"
+            "unsigned _BitInt(100) a = 0xf'ffff'ffff'ffff'ffff'ffff'ffffuwb;\nint f(void) { return (int)(a >> 90) + (int)0x1ffffffffffffffffuwb; }\n",
+            false,
+            false,
+            false,
+            2023
+        },
+        {
+            "a bit-precise constant past 128 bits refused",
+            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n",
+            true,
+            true,
+            false,
+            2023
+        },
+        {
+            "a bit-precise suffix of mixed case",
+            "int a;\n_BitInt(8) b = 5wB;\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
             "no_builtin on definitions",
             "__attribute__((no_builtin(\"memset\"))) void f(void) {}\n__attribute__((no_builtin)) void g(void) {}\n__attribute__((no_builtin(\"memset\", \"memcpy\"))) void h(void) {}\n__attribute__((no_builtin(\"not_a_builtin\"))) void k(void) {}\nint x __attribute__((no_builtin(\"memset\")));\n",
             false,
@@ -3521,6 +4016,47 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(2147483648)\n while (n--) s += 1; return s; }\n",
             true,
             false
+        },
+        {
+            // #830's review: a bit-precise pack value's low 64 bits alone made 0x10000000000000001uwb an alignment of 1, and
+            // one past 128 bits wrapped to its low bits. clang ignores both, with its alignment warning, and takes small ones.
+            "a pack pragma's bit-precise values: small ones apply, past 64 and past 128 bits ignored",
+            "#pragma pack(push, 8uwb)\nstruct A { char c; double d; };\n#pragma pack(pop)\n"
+            "#pragma pack(push, 2wb)\nstruct B { char c; int i; };\n#pragma pack(pop)\n"
+            "#pragma pack(4)\n#pragma pack(0x10000000000000001uwb)\nstruct C { char c; double d; };\n"
+            "#pragma pack(0x1000000000000000000000000000000001uwb)\nstruct D { char c; double d; };\n#pragma pack()\n"
+            "_Static_assert(sizeof(struct A) == 16 && sizeof(struct B) == 6, \"small values apply\");\n"
+            "_Static_assert(sizeof(struct C) == 12 && sizeof(struct D) == 12, \"wide values leave pack(4)\");\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            // #830's review: a bit-precise count is its value, accepted where it is an int's and refused past 64 bits and
+            // past 128 bits, whatever its low bits.
+            "a loop hint's bit-precise counts accepted",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(4uwb) interleave_count(2wb)\n while (n--) s += 1; return s; }\n",
+            false,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 64 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0x10000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
+        },
+        {
+            "a loop hint's bit-precise count past 128 bits refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count(0x1000000000000000000000000000000002uwb)\n while (n--) s += 1; return s; }\n",
+            true,
+            false,
+            false,
+            2023,
         },
         {
             "a loop hint's floating count refused",
@@ -4378,19 +4914,15 @@ static __attribute__((noinline)) void check_test_member_scaling(CheckTest* test,
                     .name = name,
                     .source = (const char*)text.base,
                     .capacity = &capacity,
+                    .check_seconds = timing ? &seconds[c - 1] : NULL,
                 };
-                struct timespec start;
-                struct timespec stop;
-                clock_gettime(CLOCK_MONOTONIC, &start);
                 check_test_source(test, &fixture, path, &outcome);
-                clock_gettime(CLOCK_MONOTONIC, &stop);
-                seconds[timing ? c - 1 : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : seconds[0];
             }
             unlink(path);
             arena_release(&text);
         }
         char description[200];
-        snprintf(description, sizeof(description), "%s: %u checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
+        snprintf(description, sizeof(description), "%s: %u read and checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", name, timed[form], seconds[1],
                  timed[form] / 10, seconds[0]);
         check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
         printf("test-checker: %s\n", description);
@@ -4554,6 +5086,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_cleanup_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -4637,6 +5170,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_initializers = false;
     bool const_values = false;
     bool program_vectors = false;
+    bool program_overloads = false;
     bool embed_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -4657,6 +5191,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             const_values = true;
         }
+        else if (strcmp(argv[i], "--program-overloads") == 0)
+        {
+            program_overloads = true;
+        }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
             program_vectors = true;
@@ -4676,7 +5214,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-overloads|--embed-initializers|--const-values]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -4697,6 +5235,11 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_initializers)
         {
             check_test_program_initializers(&test, clang);
+        }
+        else if (initialized && program_overloads)
+        {
+            check_test_program_overloads(&test, clang);
+            check_test_data_sources(&test);
         }
         else if (initialized && program_vectors)
         {
@@ -4791,6 +5334,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_attributes(&test, clang);
             check_test_attribute_sources(&test, clang);
             check_test_programs(&test, clang);
+            check_test_cleanups(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
@@ -4800,6 +5344,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
+        // The program harness's build directory, which the sections' programs share: removed after the last of them,
+        // whichever sections ran.
+        check_test_program_build_release();
         check_test_types_close(&types);
     }
     oracle_cache_report(oracle, "test-checker");

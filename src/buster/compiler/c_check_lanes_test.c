@@ -699,8 +699,8 @@ struct CheckLanesTestFailure
     CheckProgramStatus status;
 };
 
-// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt), Tier 0's
-// refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
+// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a bit-field of a _BitInt past 128 bits), Tier
+// 0's refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
 // BUSTER_TIER0_MAX_DEPTH, where it takes the values past its depth tables, #780), and fine bodies around them.
 // Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever
 // it is.
@@ -723,14 +723,14 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "int deep(int a)\n{\n    g = 1.0L;\n"
         BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
-        "int refused(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
     {
         "lowering before Tier 0",
         "long double g;\n"
-        "int refused(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
         BUSTER_CHECK_LANES_TEST_DEEP
@@ -740,9 +740,9 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
     {
         "two lowering refusals",
         "int fine0(int a) { return a + 1; }\n"
-        "int refused0(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused0(int a) { struct { unsigned _BitInt(200) x : 150; } w; w.x = a; return (int)w.x; }\n"
         "int fine1(int a) { return a * 2; }\n"
-        "int refused1(int a) { _BitInt(41) y = a; return (int)y; }\n"
+        "int refused1(int a) { struct { unsigned _BitInt(300) y : 250; } v; v.y = a; return (int)v.y; }\n"
         "int main(void) { return fine0(1) + refused0(2) + fine1(3) + refused1(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
@@ -1529,6 +1529,16 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
     check_lanes_test_expect(tally, check_lanes_test_run(capped, errors) == 0, "the driver takes an explicit calling-thread-only worker budget", NULL);
     char* budget_missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--worker-budget", NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(budget_missing, errors) == 1, "the driver refuses --worker-budget without its value", NULL);
+    static const char* const non_dry_flags[] = { "MAKEFLAGS= -I/usr/include", "MAKEFLAGS= -Onone", "MAKEFLAGS= -I/opt/inc -j2" };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(non_dry_flags); f += 1)
+    {
+        unlink(object);
+        char* compile[] = { "env", (char*)non_dry_flags[f], (char*)executable, "-c", "-o", object, source, NULL };
+        struct stat output_stat;
+        const int status = check_lanes_test_run(compile, errors);
+        check_lanes_test_expect(tally, status == 0 && stat(object, &output_stat) == 0 && output_stat.st_size > 0,
+                                "make option arguments containing n still compile an object", non_dry_flags[f]);
+    }
     static const char* const dry_routes[] = { "-c", "-E", "parse" };
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(dry_routes); r += 1)
     {

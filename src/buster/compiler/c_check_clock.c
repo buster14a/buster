@@ -7,14 +7,17 @@
 // to the clock's whole span, from the driver's first instruction to its final stage mark; what the process spends outside
 // it (exec, the loader, main's dispatch and exit) is the difference between the process's wall time and that span.
 // The clock reads the TSC, whose rate the report measures against CLOCK_MONOTONIC over the same span. A mark is a lap
-// that also reads the process's resource use (getrusage), charging the system time, minor page faults and growth of
-// the peak resident set since the last mark to its stage; a lap alone reads only the TSC, for the passes that run per
+// that also reads getrusage's system time and minor faults and /proc/self/status's approximate, post-exec VmHWM,
+// charging their growth since the last mark to its stage. RSS availability is explicit; it never falls back to
+// getrusage's inherited high-water mark. A lap alone reads only the TSC, for the passes that run per
 // function (lowering, Tier 0, sizing, encoding, rows and unwind), whose resource use the mark after them charges to its
 // stage. Those laps run only when the functions compile on the calling thread alone (one lane, #151): on several
 // lanes their time is one stage, `lanes`, the lanes' span, since the stages of a thread don't add up across threads.
 // docs/compile-time.md has the stages and the 9700X's numbers.
 
 #include <sys/resource.h>
+
+#include "c_check_clock_rss.c"
 
 typedef enum CheckStage
 {
@@ -50,7 +53,8 @@ typedef enum CheckStage
     // and symbols, and an executable's bind_begin.
     CHECK_STAGE_EMIT_SETUP,
     // On several lanes (#151), the lanes' run: every function's lowering, Tier 0 code, sizing, encoding, rows and frame
-    // at once, which the stages from `lower` to `unwind` take on one lane.
+    // at once, which the stages from `lower` to `unwind` take on one lane. With several source files (#152), the units'
+    // run, every unit compiled on the lanes.
     CHECK_STAGE_LANES,
     // On one lane, branch_sizing_validate and size_branches of every function (with --verify, x86_validate).
     CHECK_STAGE_BRANCH_SIZING,
@@ -59,7 +63,8 @@ typedef enum CheckStage
     // On one lane, every function's frame for its unwind table; and the tables written.
     CHECK_STAGE_UNWIND,
     // Every function's atom, symbol, labels and fixups added to the link, the helpers' code, the switches' jump
-    // tables, and on one lane each function's labels' offsets.
+    // tables, and on one lane each function's labels' offsets. With several source files, the units' links merged
+    // (check_units_merge, its bind_begin among it).
     CHECK_STAGE_CODE_ATOMS,
     // -g: on one lane each function's source rows; and the DWARF (check_debug_build).
     CHECK_STAGE_DEBUG,
@@ -69,9 +74,16 @@ typedef enum CheckStage
     CHECK_STAGE_OBJECT_BUILD,
     // object_write_file.
     CHECK_STAGE_OBJECT_WRITE,
-    // The direct path after its emission: binding, the static data, and the executable's write.
+    // The direct path's runtime: its snapshot opened (runtime_open), the libraries -l names imported, and the link's
+    // memory reserved, before the emission (with several source files, before the units' merge).
+    CHECK_STAGE_RUNTIME,
+    // The direct path after its emission: binding's end (bind_end), link_check, the dynamic inputs and the symbol table's
+    // selection.
     CHECK_STAGE_EXECUTABLE,
-    // The arenas', the parser's, the preprocessor's and the intern table's release.
+    // The direct path's write (executable_write, on its lanes), and its errors' report.
+    CHECK_STAGE_WRITE,
+    // The arenas', the parser's, the preprocessor's and the intern table's release; and the direct path's link's memory
+    // and runtime.
     CHECK_STAGE_RELEASE,
     CHECK_STAGE_COUNT,
 } CheckStage;
@@ -100,7 +112,9 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_PUBLISH_DATA] = "publish-data",
     [CHECK_STAGE_OBJECT_BUILD] = "object-build",
     [CHECK_STAGE_OBJECT_WRITE] = "object-write",
+    [CHECK_STAGE_RUNTIME] = "runtime",
     [CHECK_STAGE_EXECUTABLE] = "executable",
+    [CHECK_STAGE_WRITE] = "write",
     [CHECK_STAGE_RELEASE] = "release",
 };
 
@@ -110,6 +124,12 @@ static const char* const check_clock_phase_names[] = { "preprocess.read", "prepr
                                                        "preprocess.main-loop" };
 
 #define BUSTER_CHECK_CLOCK_PHASES (sizeof(check_clock_phase_names) / sizeof(check_clock_phase_names[0]))
+
+// The direct path's write's phases (executable_write's, EXECUTABLE_PHASES of them, in their order), which the report
+// gives as `time-write` lines after the stages: what the `write` stage's time went to, on the writer's lane 0 (#778).
+static const char* const check_clock_write_names[] = { "count", "layout", "symbols", "dynamic", "open", "chunks", "finish" };
+
+#define BUSTER_CHECK_CLOCK_WRITE_PHASES (sizeof(check_clock_write_names) / sizeof(check_clock_write_names[0]))
 
 typedef struct CheckClock CheckClock;
 struct CheckClock
@@ -123,26 +143,35 @@ struct CheckClock
     // The process's system time, minor faults and peak resident set at the last mark, and what each stage's marks added.
     uint64_t system_us;
     uint64_t minor_faults;
+    // Current address space's approximate high-water mark, clamped monotonically across marks.
     uint64_t peak_kb;
+    uint64_t initial_peak_kb;
+    // Latched false if any RSS read fails: no gap can be attributed to the following stage.
+    bool peak_available;
     uint64_t stage_system_us[CHECK_STAGE_COUNT];
     uint64_t stage_minor_faults[CHECK_STAGE_COUNT];
     uint64_t stage_peak_kb[CHECK_STAGE_COUNT];
+    // The write's phases' nanoseconds, from executable_write's result, when it wrote.
+    bool wrote;
+    uint64_t write_nanoseconds[BUSTER_CHECK_CLOCK_WRITE_PHASES];
 };
 
-// The process's system time in microseconds, minor faults and peak resident set in KB, or zeros.
-static void check_clock_usage(uint64_t* system_us, uint64_t* minor_faults, uint64_t* peak_kb)
+// System microseconds and minor faults remain getrusage counters. RSS is the current address space's
+// approximate peak in KiB; the return value says whether it was read, independently of getrusage.
+static bool check_clock_usage(uint64_t* system_us, uint64_t* minor_faults, uint64_t* peak_kb)
 {
     struct rusage usage = { 0 };
     const bool read = getrusage(RUSAGE_SELF, &usage) == 0;
     *system_us = read ? (uint64_t)usage.ru_stime.tv_sec * 1000000u + (uint64_t)usage.ru_stime.tv_usec : 0;
     *minor_faults = read ? (uint64_t)usage.ru_minflt : 0;
-    *peak_kb = read ? (uint64_t)usage.ru_maxrss : 0;
+    return check_clock_peak_read("/proc/self/status", peak_kb);
 }
 
 static void check_clock_start(CheckClock* stage_clock)
 {
     *stage_clock = (CheckClock){ 0 };
-    check_clock_usage(&stage_clock->system_us, &stage_clock->minor_faults, &stage_clock->peak_kb);
+    stage_clock->peak_available = check_clock_usage(&stage_clock->system_us, &stage_clock->minor_faults, &stage_clock->peak_kb);
+    stage_clock->initial_peak_kb = stage_clock->peak_kb;
     clock_gettime(CLOCK_MONOTONIC, &stage_clock->monotonic);
     stage_clock->start = __rdtsc();
     stage_clock->last = stage_clock->start;
@@ -168,14 +197,16 @@ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
         uint64_t system_us = 0;
         uint64_t minor_faults = 0;
         uint64_t peak_kb = 0;
-        check_clock_usage(&system_us, &minor_faults, &peak_kb);
+        const bool peak_available = check_clock_usage(&system_us, &minor_faults, &peak_kb);
+        stage_clock->peak_available = stage_clock->peak_available && peak_available;
         stage_clock->stage_system_us[stage] += system_us > stage_clock->system_us ? system_us - stage_clock->system_us : 0;
         stage_clock->stage_minor_faults[stage] += minor_faults > stage_clock->minor_faults ? minor_faults - stage_clock->minor_faults : 0;
-        stage_clock->stage_peak_kb[stage] += peak_kb > stage_clock->peak_kb ? peak_kb - stage_clock->peak_kb : 0;
+        const uint64_t added = stage_clock->peak_available && peak_kb > stage_clock->peak_kb ? peak_kb - stage_clock->peak_kb : 0;
+        stage_clock->stage_peak_kb[stage] += added;
         stage_clock->system_us = system_us;
         stage_clock->minor_faults = minor_faults;
-        stage_clock->peak_kb = peak_kb;
-        // The mark's own getrusage is its stage's time, not the next stage's.
+        stage_clock->peak_kb += added;
+        // Both resource reads belong to this stage's time, not the next stage's.
         check_clock_lap(stage_clock, stage);
     }
 }
@@ -197,9 +228,16 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
     {
         const double milliseconds = (double)stage_clock->ticks[s] / ticks_per_millisecond;
-        fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\t%.3f\t%llu\t%llu\n", check_stage_names[s], milliseconds, total > 0 ? milliseconds * 100.0 / total : 0.0,
-                (double)stage_clock->stage_system_us[s] / 1e3, (unsigned long long)stage_clock->stage_minor_faults[s],
-                (unsigned long long)stage_clock->stage_peak_kb[s]);
+        fprintf(stream, "time-stage\t%s\t%.3f\t%.1f\t%.3f\t%llu\t", check_stage_names[s], milliseconds, total > 0 ? milliseconds * 100.0 / total : 0.0,
+                (double)stage_clock->stage_system_us[s] / 1e3, (unsigned long long)stage_clock->stage_minor_faults[s]);
+        if (stage_clock->peak_available)
+        {
+            fprintf(stream, "%llu\n", (unsigned long long)stage_clock->stage_peak_kb[s]);
+        }
+        else
+        {
+            fputs("-1\n", stream);
+        }
         if (s == CHECK_STAGE_PREPROCESS && pp_ticks != NULL)
         {
             uint64_t phase_sum = 0;
@@ -216,13 +254,31 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         }
     }
     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
+    for (uint32_t p = 0; stage_clock->wrote && p < BUSTER_CHECK_CLOCK_WRITE_PHASES; p += 1)
+    {
+        fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
+    }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
+    fprintf(stream, "time-process\tpeak-rss-source\tproc-self-status-vmhwm\n");
+    fprintf(stream, "time-process\tpeak-rss-scope\tpost-exec-through-last-mark\n");
+    fprintf(stream, "time-process\tpeak-rss-precision\tapproximate\n");
+    fprintf(stream, "time-process\tpeak-rss-status\t%s\n", stage_clock->peak_available ? "available" : "unavailable");
+    if (stage_clock->peak_available)
+    {
+        fprintf(stream, "time-process\tpeak-rss-kb\t%llu\n", (unsigned long long)stage_clock->peak_kb);
+        fprintf(stream, "time-process\tpeak-rss-start-kb\t%llu\n", (unsigned long long)stage_clock->initial_peak_kb);
+    }
+    else
+    {
+        fprintf(stream, "time-process\tpeak-rss-kb\t-1\n");
+        fprintf(stream, "time-process\tpeak-rss-start-kb\t-1\n");
+    }
     struct rusage usage = { 0 };
     if (getrusage(RUSAGE_SELF, &usage) == 0)
     {
         fprintf(stream, "time-process\tuser-ms\t%.3f\n", (double)usage.ru_utime.tv_sec * 1e3 + (double)usage.ru_utime.tv_usec / 1e3);
         fprintf(stream, "time-process\tsystem-ms\t%.3f\n", (double)usage.ru_stime.tv_sec * 1e3 + (double)usage.ru_stime.tv_usec / 1e3);
-        fprintf(stream, "time-process\tpeak-rss-kb\t%ld\n", usage.ru_maxrss);
+        fprintf(stream, "time-process\trusage-peak-rss-kb\t%ld\n", usage.ru_maxrss);
         fprintf(stream, "time-process\tminor-faults\t%ld\n", usage.ru_minflt);
         fprintf(stream, "time-process\tmajor-faults\t%ld\n", usage.ru_majflt);
         fprintf(stream, "time-process\tvoluntary-switches\t%ld\n", usage.ru_nvcsw);
@@ -233,10 +289,15 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's
 // milliseconds into `stages` (by CheckStage), the preprocessor's rows into `phases` (by check_clock_phase_names) and the
 // total into `*total`, and unless `usage` is null each stage's system milliseconds, minor faults and peak KB added into
-// usage[3 * stage] to usage[3 * stage + 2]. Whether every one of them was there once, each a number no less than zero.
+// usage[3 * stage] to usage[3 * stage + 2]. Every row must occur once. Values are nonnegative except
+// that every stage's RSS may be -1 together, with an explicit unavailable status. Legacy numeric reports
+// remain readable, but cannot claim an unavailable reading by silently substituting zero.
 static bool check_clock_read(const char* text, double* stages, double* phases, double* total, double* usage)
 {
     uint32_t seen[CHECK_STAGE_COUNT + BUSTER_CHECK_CLOCK_PHASES + 1] = { 0 };
+    uint32_t missing_peaks = 0;
+    uint32_t peak_status_count = 0;
+    bool peak_unavailable = false;
     bool valid = text != NULL;
     const char* at = text;
     while (valid && at != NULL && *at != 0)
@@ -245,6 +306,12 @@ static bool check_clock_read(const char* text, double* stages, double* phases, d
         const size_t length = end != NULL ? (size_t)(end - at) : strlen(at);
         char line[256] = { 0 };
         memcpy(line, at, length < sizeof(line) - 1 ? length : sizeof(line) - 1);
+        if (strncmp(line, "time-process\tpeak-rss-status\t", sizeof("time-process\tpeak-rss-status\t") - 1) == 0)
+        {
+            peak_status_count += 1;
+            peak_unavailable = strcmp(line, "time-process\tpeak-rss-status\tunavailable") == 0;
+            valid = valid && (peak_unavailable || strcmp(line, "time-process\tpeak-rss-status\tavailable") == 0);
+        }
         char name[128] = { 0 };
         double value = -1;
         double percent = 0;
@@ -262,7 +329,8 @@ static bool check_clock_read(const char* text, double* stages, double* phases, d
                 matches += match;
                 for (uint32_t u = 0; match && u < 3; u += 1)
                 {
-                    valid = valid && fields == 6 && used[u] >= 0;
+                    valid = valid && fields == 6 && (used[u] >= 0 || (u == 2 && used[u] == -1));
+                    missing_peaks += u == 2 && used[u] == -1;
                     if (usage != NULL)
                     {
                         usage[3 * s + u] = used[u];
@@ -288,5 +356,7 @@ static bool check_clock_read(const char* text, double* stages, double* phases, d
     {
         valid = seen[i] == 1;
     }
+    valid = valid && peak_status_count <= 1 &&
+            (missing_peaks == 0 ? !peak_unavailable : missing_peaks == CHECK_STAGE_COUNT && peak_unavailable);
     return valid;
 }

@@ -134,6 +134,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     bool floating = false;
     bool complex = false;
     bool pointer = false;
+    bool quad = false;
     if (status == CHECK_DATA_OK)
     {
         const TypeId stripped = type_strip_aligned(types, object->type);
@@ -143,12 +144,15 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
+        // A __float128 object's bytes are zeros without an initializer (#137); the checker folds none of its constants, so
+        // that one with an initializer is refused below as not constant.
+        quad = base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
         const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
         const uint64_t scalar_size = type_size(types, base);
         const bool shape = size != 0 && size <= sizeof(plan->bytes) && size >= scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
-        if ((!integer && !floating && !complex && !pointer) || !shape || (pointer && size != 8) || (integer && width > size * 8))
+        if ((!integer && !floating && !complex && !pointer && !quad) || !shape || (pointer && size != 8) || (integer && width > size * 8))
         {
             status = CHECK_DATA_UNSUPPORTED;
         }
@@ -641,8 +645,11 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     }
     const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
     const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, type_conversion_operand(types, base)) : 0;
+    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one: the
+    // checker folds none of their constants, so that one with an initializer is refused as not constant.
     const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
-                           kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+                           kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
+                           (kind == BUSTER_TYPE_KIND_BIT_INT && type_size(types, base) > 16) || (kind == BUSTER_TYPE_KIND_COMPLEX && type_size(types, base) > 32);
     if (status == CHECK_DATA_OK)
     {
         const uint32_t natural = type_alignment_log2(types, object->type);
