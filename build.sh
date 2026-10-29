@@ -82,7 +82,10 @@ if [ "${BUSTER_FUZZ_AVAILABLE:-0}" = 1 ]; then
     [ "${BUSTER_SANITIZER:-none}" != thread ] || { echo 'build.sh: libFuzzer cannot be combined with ThreadSanitizer' >&2; exit 1; }
     fuzz_entry=$(realpath "${BUSTER_FUZZ_ENTRY:-src/buster/compiler/fuzz.c}")
     [[ -f "$fuzz_entry" && "$fuzz_entry" != *[\"\\]* && "$fuzz_entry" != *$'\n'* ]] || { echo 'build.sh: BUSTER_FUZZ_ENTRY must name a C file without quotes, backslashes or newlines' >&2; exit 1; }
-    fuzz_runtime=$(clang -print-file-name=libclang_rt.fuzzer_no_main-x86_64.a)
+    # Clang's per-target runtime directory holds it (the official releases' only layout); older layouts name the
+    # architecture in the file.
+    fuzz_runtime="$(clang -print-runtime-dir)/libclang_rt.fuzzer_no_main.a"
+    [[ -f "$fuzz_runtime" ]] || fuzz_runtime=$(clang -print-file-name=libclang_rt.fuzzer_no_main-x86_64.a)
     [[ "$fuzz_runtime" = /* && -f "$fuzz_runtime" ]] || { echo 'build.sh: Clang libFuzzer no-main runtime is missing' >&2; exit 1; }
     flags+=(-fsanitize=fuzzer-no-link -DBUSTER_FUZZ_AVAILABLE=1 "-DBUSTER_FUZZ_ENTRY=\"$fuzz_entry\"")
     fuzz_libraries=("$fuzz_runtime" -lstdc++ -pthread)
