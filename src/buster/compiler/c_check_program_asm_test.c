@@ -101,6 +101,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     {
         printf("  asm-xgetbv: skipped execution (XSAVE or OSXSAVE unavailable)\n");
     }
+    // The x87's, MMX's and SSE's state of 512 bytes, saved and restored by fxsave and fxrstor and their 64-bit forms, in
+    // aligned arrays, as main.c's test of DAZ saves it: MXCSR's control bits and its mask, which the state holds at bytes
+    // 24 and 28, against stmxcsr's.
+    check_test_program_source(test,
+        "int tested(int n){unsigned char s[512] __attribute__((aligned(16))),t[512] __attribute__((aligned(16)));"
+        "__asm__ volatile(\"fxsave %0\" : \"=m\"(s));__asm__ volatile(\"fxrstor %0\" : : \"m\"(s));"
+        "__asm__ volatile(\"fxsave64 %0\" : \"=m\"(t));__asm__ volatile(\"fxrstor64 %0\" : : \"m\"(t));"
+        "unsigned csr,mask,wide,now;__builtin_memcpy(&csr,s+24,4);__builtin_memcpy(&mask,s+28,4);__builtin_memcpy(&wide,t+24,4);"
+        "__asm__ volatile(\"stmxcsr %0\" : \"=m\"(now));return ((csr^now)&0xffc0)==0?(int)(csr&0xffc0)+((wide^now)&0xffc0?1:2)+(int)((mask>>6)&1)*4+n:-1;}",
+        "asm-fx-state", clang);
     // XMM operands of double and float.
     check_test_program_source(test,
         "int tested(int n){double d=n*0.5,e=n+0.25;__asm__(\"addpd %1, %0\" : \"+x\"(d) : \"x\"(e));float f=(float)n,g;"
@@ -214,6 +224,41 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
         "asm-naked-intel-avx512", clang, wide_native);
+    // Vectors in vector registers' constraints in templates of no instructions, main.c's compiler barriers (c_lexer.c's
+    // and x86_64_encoder.c's `__asm__("" : "+v"(x))`): a `+` operand keeps its value, an output through a call's pointer
+    // is evaluated once, and an input's value is evaluated once and dropped, a call's that returns a vector and one loaded
+    // through a call's pointer in a statement of no outputs, both calls counting their evaluations (#773's review); for
+    // x86-64-v4, run where the host has its features.
+    X86Target vectors = { 0 };
+    const bool vectors_parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &vectors);
+    check_test_expect(test, vectors_parsed, "the vector barriers' target, x86-64-v4");
+    static const char asm_vector_types[] =
+        "typedef long long v8di __attribute__((vector_size(64)));typedef int v8si __attribute__((vector_size(32)));"
+        "typedef float v4sf __attribute__((vector_size(16)));";
+    static const char asm_vector_program[] =
+        "int count;int inputs;v8di saved[3];static v8di* next(void){count+=1;return &saved[count%3];}"
+        "static v8di twice(v8di x){inputs+=1;return x+x;}static v8di* held(void){inputs+=10;return &saved[2];}"
+        "int tested(int n){v8di a={n,n+1,n+2,n+3,n+4,n+5,n+6,n+7};__asm__(\"\" : \"+v\"(a));v8si b={n*2,1,2,3,4,5,6,7};"
+        "__asm__ volatile(\"\" : \"+x\"(b) : \"v\"(twice(a)));__asm__ volatile(\"\" : : \"x\"(*held()));"
+        "v4sf c={1.5f,(float)n,2.5f,3.5f};__asm__(\"# no instructions\" : \"+v\"(c) : : \"memory\");"
+        "saved[1]=a;__asm__(\"\" : \"+v\"(*next()));long long s=0;for(int i=0;i<8;i++)s+=a[i]*(i+1)+saved[1][i]+b[i];"
+        "return (int)(s+(long long)c[1]*5+count*7+inputs*11);}";
+    if (vectors_parsed)
+    {
+        const bool vectors_native = (native.features & vectors.features) == vectors.features;
+        if (!vectors_native)
+        {
+            printf("  asm-vector-barriers: native execution skipped (the host lacks x86-64-v4's features or their saved state)\n");
+        }
+        char source[2048];
+        const int length = snprintf(source, sizeof(source), "%s%s", asm_vector_types, asm_vector_program);
+        check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "the vector barriers' source fits its buffer");
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64-v4";
+        check_test_program_source_native_limits(test, source, "asm-vector-barriers", clang, false, -1, 0, &vectors, vectors_native);
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64";
+    }
     // A naked function whose attribute isn't on its first declaration (#565's review): an unannotated prototype before a
     // naked definition that returns by its own ret, and a naked redeclaration between a prototype and an unannotated
     // definition, both naked as clang takes them; and a naked redeclaration after a definition, which clang ignores with
@@ -309,6 +354,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
     check_test_program_boundary_reason(test, "int tested(int n){long a;__asm__(\"leaq 1f(%%rip), %0\\n1:\" : \"=r\"(a));return n+(int)a;}",
                                        "asm-numeric-data", true, false, 0, 0, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
+    // A vector in a vector register's constraint where the template has instructions, refers to it, or it is a volatile
+    // output (whose load and store clang's code makes), which the helper doesn't place yet.
+    static const char* const held[][2] = {
+        { "asm-vector-instructions", "int tested(int n){v8di a={n};__asm__(\"vpaddq %0, %0, %0\" : \"+v\"(a));return (int)a[0];}" },
+        { "asm-vector-other-instructions", "int tested(int n){v8di a={n};__asm__(\"nop\" : \"+v\"(a));return (int)a[0];}" },
+        { "asm-vector-input-instructions", "int tested(int n){v8di a={n};__asm__ volatile(\"nop\" : : \"v\"(a));return (int)a[0];}" },
+        { "asm-vector-referred", "int tested(int n){v8di a={n};__asm__(\"# %0\" : \"+v\"(a));return (int)a[0];}" },
+        { "asm-vector-volatile", "int tested(int n){volatile v8di a={n};__asm__(\"\" : \"+v\"(a));return (int)a[0];}" },
+        { "asm-vector-matched", "int tested(int n){v8di a={n},b;__asm__(\"\" : \"=v\"(b) : \"0\"(a));return (int)b[0];}" },
+    };
+    for (uint32_t i = 0; vectors_parsed && i < BUSTER_ARRAY_LENGTH(held); i += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "%s%s", asm_vector_types, held[i][1]);
+        const char* reason = i + 1 == BUSTER_ARRAY_LENGTH(held) ? "inline assembly inputs matching an output that isn't a register's of its own" :
+                                                                  "inline assembly operands of this type in their constraint's registers";
+        check_test_program_boundary_target(test, source, held[i][0], true, false, 0, 1, reason, &vectors);
+    }
 }
 
 #endif
