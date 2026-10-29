@@ -645,11 +645,11 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     }
     const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
     const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, type_conversion_operand(types, base)) : 0;
-    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are: the checker folds none of its
-    // constants, so that one with an initializer is refused as not constant.
+    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one: the
+    // checker folds none of their constants, so that one with an initializer is refused as not constant.
     const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
                            kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
-                           (kind == BUSTER_TYPE_KIND_BIT_INT && type_size(types, base) > 16);
+                           (kind == BUSTER_TYPE_KIND_BIT_INT && type_size(types, base) > 16) || (kind == BUSTER_TYPE_KIND_COMPLEX && type_size(types, base) > 32);
     if (status == CHECK_DATA_OK)
     {
         const uint32_t natural = type_alignment_log2(types, object->type);
