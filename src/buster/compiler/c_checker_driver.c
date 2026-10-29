@@ -89,6 +89,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
     }
     return result;
 }
@@ -861,6 +862,20 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0)
+                        {
+                            const uint32_t start = parser->tokens.pragma_sources[input->reports[index].pragma - 1];
+                            const CheckInputReader names = { .pp = pp, .parser = parser };
+                            const String8 first = check_driver_warning_name(pp, check_input_pragma_name(&names, start + 2));
+                            const bool vendor = pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "GCC") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "clang") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "STDC");
+                            const String8 second = vendor && start + 3 < pp->output.count ?
+                                check_driver_warning_name(pp, check_input_pragma_name(&names, start + 3)) : (String8){ .pointer = "" };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
+                                "unsupported semantic '#pragma %.*s%s%.*s' directive",
+                                (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
                         else
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
@@ -882,8 +897,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
         }
     }
+    const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
+    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
-    return ready;
+    return pragma_ready;
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -1805,6 +1823,10 @@ struct CheckDriverCommand
     // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
     // with a pattern, before the next unit reuses them (c_checker_units.c).
     bool poison_arenas;
+    // --shared-parts, #777's test option: a unit's emission that shares its functions' parts on the units' board pauses
+    // after each part it takes itself, so that the lanes without units take some, and the command reports how many
+    // they took, after the units' diagnostics (c_checker_units.c).
+    bool shared_parts;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2053,6 +2075,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     uint32_t promoted_source = BUSTER_CHECK_NONE;
                     const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                     const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
+                    promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
@@ -2208,6 +2231,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
                 check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                {
+                    fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                }
             }
             if (!pp->fatal)
             {
@@ -2310,8 +2337,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
-    // --poison-arenas: #152's test option (CheckDriverCommand.poison_arenas).
+    // --poison-arenas and --shared-parts: #152's and #777's test options (CheckDriverCommand's).
     bool poison_arenas = false;
+    bool shared_parts = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -2477,6 +2505,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         {
             poison_arenas = true;
         }
+        else if (strcmp(arguments[i], "--shared-parts") == 0)
+        {
+            shared_parts = true;
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -2569,6 +2601,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .id_ordered = id_ordered,
         .id_order = id_order,
         .poison_arenas = poison_arenas,
+        .shared_parts = shared_parts,
         .emit_object = emit_object,
         .link = link,
         .source_rows = source_rows,
@@ -2594,7 +2627,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)

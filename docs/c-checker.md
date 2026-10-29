@@ -3225,3 +3225,33 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+## Ignorable and unsupported pragmas
+
+The checker consumes retained pragmas after their existing semantic handlers. An
+unknown directive is not an unsupported C construct: it is ignored, with
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
+Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
+`#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
+is not an implementation of COFF linker directives or automatic library loading.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
+`optimize` use the unknown-pragma policy, as in the Clang oracle.
+
+OpenMP directives are ignored when OpenMP was not requested, with the separately
+enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
+not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
+active `-fopenmp` request, including alternate runtime selections, is refused
+until execution semantics are implemented; it must not silently produce serial
+code. A subsequent `-fno-openmp` restores the ignore behavior.
+
+Known unsupported semantic effects remain hard, named errors, including
+`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
+`align=packed`. Warning suppression cannot approve these directives. Already
+supported directives keep their original handlers and syntax validation.
+
+Directive warnings are sparse lexical facts with independent preprocessing
+source coordinates. Command-line policy, source-ordered diagnostic push/pop,
+macro invocation locations, system headers, parser recovery, and EOF directives
+use the same warning machinery. A warning promoted to an error prevents object
+emission. Neither classification nor warning policy changes `-E` output.

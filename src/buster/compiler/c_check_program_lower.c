@@ -92,8 +92,36 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_FIXTFBITINT,
     CHECK_LOWER_RUNTIME_MULTC3,
     CHECK_LOWER_RUNTIME_DIVTC3,
+    CHECK_LOWER_RUNTIME_MEMCPY_CHK,
+    CHECK_LOWER_RUNTIME_MEMMOVE_CHK,
+    CHECK_LOWER_RUNTIME_MEMPCPY_CHK,
+    CHECK_LOWER_RUNTIME_MEMSET_CHK,
+    CHECK_LOWER_RUNTIME_STRCPY_CHK,
+    CHECK_LOWER_RUNTIME_STPCPY_CHK,
+    CHECK_LOWER_RUNTIME_STRNCPY_CHK,
+    CHECK_LOWER_RUNTIME_STPNCPY_CHK,
+    CHECK_LOWER_RUNTIME_STRCAT_CHK,
+    CHECK_LOWER_RUNTIME_STRNCAT_CHK,
+    CHECK_LOWER_RUNTIME_SPRINTF_CHK,
+    CHECK_LOWER_RUNTIME_SNPRINTF_CHK,
+    CHECK_LOWER_RUNTIME_VSPRINTF_CHK,
+    CHECK_LOWER_RUNTIME_VSNPRINTF_CHK,
+    CHECK_LOWER_RUNTIME_MEMPCPY,
+    CHECK_LOWER_RUNTIME_MEMSET,
+    CHECK_LOWER_RUNTIME_STRCPY,
+    CHECK_LOWER_RUNTIME_STPCPY,
+    CHECK_LOWER_RUNTIME_STRNCPY,
+    CHECK_LOWER_RUNTIME_STPNCPY,
+    CHECK_LOWER_RUNTIME_STRCAT,
+    CHECK_LOWER_RUNTIME_STRNCAT,
+    CHECK_LOWER_RUNTIME_SPRINTF,
+    CHECK_LOWER_RUNTIME_SNPRINTF,
+    CHECK_LOWER_RUNTIME_VSPRINTF,
+    CHECK_LOWER_RUNTIME_VSNPRINTF,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
+
+_Static_assert(CHECK_LOWER_RUNTIMES <= 128, "the runtime mask has two 64-bit words");
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
@@ -107,6 +135,32 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__fixtfsi", "__fixunstfsi", "__fixtfdi", "__fixunstfdi", "__fixtfti", "__fixunstfti",
     "__mulbitint3", "__divmodbitint4", "__floatbitintsf", "__floatbitintdf", "__floatbitintxf", "__floatbitinttf",
     "__fixsfbitint", "__fixdfbitint", "__fixxfbitint", "__fixtfbitint", "__multc3", "__divtc3",
+    "__memcpy_chk",
+    "__memmove_chk",
+    "__mempcpy_chk",
+    "__memset_chk",
+    "__strcpy_chk",
+    "__stpcpy_chk",
+    "__strncpy_chk",
+    "__stpncpy_chk",
+    "__strcat_chk",
+    "__strncat_chk",
+    "__sprintf_chk",
+    "__snprintf_chk",
+    "__vsprintf_chk",
+    "__vsnprintf_chk",
+    "mempcpy",
+    "memset",
+    "strcpy",
+    "stpcpy",
+    "strncpy",
+    "stpncpy",
+    "strcat",
+    "strncat",
+    "sprintf",
+    "snprintf",
+    "vsprintf",
+    "vsnprintf",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -4772,16 +4826,21 @@ static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t nod
     check_lower_operand(writer, node, operand, false, member);
 }
 
-static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime runtime);
+
+// A normal source call, or an exactly typed fortified libc call. A removed interval contains only certified
+// effect-free constants; source argument indices and conversions remain unchanged for every retained argument.
+static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit, uint32_t omitted)
 {
     const CheckGraph* graph = &writer->program->input->graph;
     const CheckStream* stream = writer->program->stream;
     const TypeTable* types = writer->program->types;
-    const uint32_t callee = graph->operand0[node];
+    const bool builtin = runtime != CHECK_LOWER_RUNTIMES;
+    const uint32_t callee = builtin ? node : graph->operand0[node];
     // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
     // parenthesis, which a call across lines ends on).
     check_lower_source(writer, graph->tokens[callee]);
-    CheckValue value = stream->values[callee];
+    CheckValue value = builtin ? (CheckValue){ .type = graph->types[node], .category = CHECK_FUNCTION } : stream->values[callee];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     if (overload != BUSTER_CHECK_NONE)
     {
@@ -4789,7 +4848,8 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         value = (CheckValue){ .type = selected->type, .category = CHECK_FUNCTION, .constant_kind = CHECK_CONSTANT_ADDRESS,
                               .object = selected->object, .flags = BUSTER_CHECK_STATIC_OBJECT };
     }
-    const uint32_t count = graph->argument_counts[node];
+    const uint32_t source_count = graph->argument_counts[node];
+    const uint32_t count = source_count - omitted;
     const uint32_t first = graph->argument_offsets[node];
     TypeId type = type_strip_aligned(types, value.type);
     if (type_kind(types, type) == BUSTER_TYPE_KIND_POINTER)
@@ -4810,8 +4870,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     {
         passed = check_lower_passed(writer, parameter_types[a]);
     }
-    for (uint32_t a = 0; a < count && passed == NULL; a += 1)
+    for (uint32_t kept = 0; kept < count && passed == NULL; kept += 1)
     {
+        const uint32_t a = kept + (kept >= omit ? omitted : 0);
         passed = check_lower_passed(writer, stream->argument_conversions[first + a].type);
     }
     // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
@@ -4822,9 +4883,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(writer, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
-    const bool direct = value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
+    const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
-                        (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+                        (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
     if (passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
         check_lower_unsupported(writer, count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
@@ -4846,7 +4907,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
                                 wide_result      ? check_lower_temporary_of(writer, result) :
                                                    BUSTER_CHECK_NONE;
-        writer->call_targets[call] = direct ? writer->program->object_symbols[value.object] : 0;
+        writer->call_targets[call] = builtin ? check_lower_runtime(writer, runtime) : direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;
         writer->call_variadic[call] = variadic;
@@ -4855,12 +4916,13 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         abi->first[abi->count] = abi->argument_count;
         abi->results[abi->count] = result;
         abi->counts[abi->count] = count;
-        abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters : count;
+        abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters - omitted : count;
         abi->variadic[abi->count++] = variadic;
         // Whether an argument is a transparent union's, which the operands' loop asks again only then.
         bool transparent = false;
-        for (uint32_t a = 0; a < count; a += 1)
+        for (uint32_t kept = 0; kept < count; kept += 1)
         {
+            const uint32_t a = kept + (kept >= omit ? omitted : 0);
             // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made, and a
             // vector's an object of its bytes.
             const CheckConversion* conversion = stream->argument_conversions + first + a;
@@ -4899,8 +4961,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, result_class, object);
         }
         check_lower_instruction(writer, BUSTER_TYPED_CALL, aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
-        for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t kept = count; kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
+            const uint32_t a = kept + (kept >= omit ? omitted : 0);
             const CheckConversion* conversion = stream->argument_conversions + first + a;
             const TypeId argument = conversion->type;
             const bool atomic = a < parameters && check_action_kind(types, parameter_types[a]) == BUSTER_TYPE_KIND_ATOMIC;
@@ -4940,6 +5003,11 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
             check_lower_operand(writer, node, 0, false, 0);
         }
     }
+}
+
+static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+{
+    check_lower_call_to(writer, node, CHECK_LOWER_RUNTIMES, 0, 0);
 }
 
 static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
@@ -6905,6 +6973,8 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+#include "c_check_program_fortify.c"
+
 // An x86 builtin's call: a leaf's (c_builtin_x86_helpers.c) where the helpers planned one for it, the generic
 // __builtin_unpredictable's operand (its hint is the branch's, which Tier 0 doesn't take) and __builtin_assume's nothing
 // (its operand isn't evaluated), or its row (check_lower_x86_row_builtin).
@@ -6916,7 +6986,12 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const uint32_t first = program->input->graph.argument_offsets[node];
     const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
-    if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
+    const CBuiltinFortifyId fortify = info != NULL ? cbuiltin_fortify_id(info->name, info->name_length) : CBUILTIN_FORTIFY_COUNT;
+    if (fortify != CBUILTIN_FORTIFY_COUNT)
+    {
+        check_lower_fortify(writer, node, fortify);
+    }
+    else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
         // The leaf's instructions' features (c_builtin_x86_helpers.c), which the target must have.
         const CBuiltinX86HelperKind leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;

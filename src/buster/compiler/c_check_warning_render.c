@@ -22,13 +22,22 @@ static const char* check_warning_text(Arena* arena, const char* format, ...)
     return result;
 }
 
-static CheckWarningSeverity check_driver_warning_severity(const Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
+static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
         (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
-    const CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ||
-        (!command.system_headers && check_graph_system_token(&input->graph, event->token)) ?
-        CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+        check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
+    {
+        bool system = check_graph_system_token(&input->graph, event->token);
+        if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
+        {
+            pp_history_ensure(pp);
+            system = pp_system_level_at(pp, pp_expansion_location(pp, event->source, pp_history_at(pp, event->source))) != BUSTER_PP_USER_FILE;
+        }
+        severity = system ? CHECK_WARNING_IGNORE : severity;
+    }
     return severity;
 }
 
@@ -39,7 +48,7 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
-static bool check_driver_warning_promoted(const Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
+static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* input, const CheckWarningEvents* view, const CheckRepair* repair)
 {
     bool promoted = false;
     for (uint32_t i = 0; !promoted && i < view->count; i += 1)
@@ -155,7 +164,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        const bool retained = event->kind != CHECK_WARNING_EVENT_MESSAGE && event->token < parser->tokens.count &&
+        const bool retained = event->kind != CHECK_WARNING_EVENT_MESSAGE &&
+                              (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                               (repair == NULL || check_repair_warning_token(repair, event->token));
         if (retained)
         {
@@ -194,7 +204,14 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     const uint32_t boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? pp->output.count + 1 :
                         check_driver_publication_position(parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                    if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
+                    {
+                        pp_diagnose_output_phase(pp, disposition, source, event->payload.token, PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
+                    }
+                    else
+                    {
+                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     valid = !pp->diagnostic_collection_failed;
                 }
                 arena_pop_to(scratch, mark);

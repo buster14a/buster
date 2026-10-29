@@ -660,8 +660,36 @@ static uint64_t lane_wait_ticks(uint64_t now)
     return result;
 }
 
+// Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0: sets bit 0, so that whoever
+// changes the word wakes it, and sleeps on a futex while the word is unchanged. lane_wait's last step, and on its own a
+// wait that is likely long (#777's board, whose lanes without units wait for parts while the others compile), during
+// which a core that spun or waited in mwaitx would draw power that the cores at work lack for their clocks.
+static uint32_t lane_sleep(uint32_t* word, uint32_t value)
+{
+    uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    while ((current & ~1u) == value)
+    {
+        if ((current & 1u) == 0)
+        {
+            // If the word changed meanwhile, the exchange fails and loads its new value into current.
+            if (__atomic_compare_exchange_n(word, &current, current | 1u, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+            {
+                current |= 1u;
+            }
+        }
+        else
+        {
+            // Returns at once if the word is no longer `current`, and on a wake or a signal.
+            syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, current, 0, 0, 0);
+            thread_context.sleeps += 1;
+            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        }
+    }
+    return current & ~1u;
+}
+
 // Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
-// mwaitx; then sets bit 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
+// mwaitx; then sleeps (lane_sleep).
 static uint32_t lane_wait(uint32_t* word, uint32_t value)
 {
     uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
@@ -698,25 +726,7 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
             waited = __rdtsc() - begin;
         }
     }
-    while ((current & ~1u) == value)
-    {
-        if ((current & 1u) == 0)
-        {
-            // If the word changed meanwhile, the exchange fails and loads its new value into current.
-            if (__atomic_compare_exchange_n(word, &current, current | 1u, false, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
-            {
-                current |= 1u;
-            }
-        }
-        else
-        {
-            // Returns at once if the word is no longer `current`, and on a wake or a signal.
-            syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, current, 0, 0, 0);
-            thread_context.sleeps += 1;
-            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
-        }
-    }
-    return current & ~1u;
+    return (current & ~1u) == value ? lane_sleep(word, value) : current & ~1u;
 }
 
 // Sets *word to `value`, whose bit 0 is clear, and wakes the lanes sleeping on it in lane_wait. The exchange returns the
@@ -727,6 +737,20 @@ static void lane_publish(uint32_t* word, uint32_t value)
     const uint32_t previous = __atomic_exchange_n(word, value, __ATOMIC_RELEASE);
     if ((previous & 1u) != 0)
     {
+        syscall(SYS_futex, word, FUTEX_WAKE_PRIVATE, INT_MAX, 0, 0, 0);
+    }
+}
+
+// Adds two to *word, its bit 0 cleared, and wakes the lanes sleeping on it in lane_wait: for a word that several threads
+// advance at once, whose advances lane_publish's exchanges could set back (#777's board). A lane waiting on the old
+// value sees the change, and one asleep on it is woken; one that already waits on the new value, if this clears its bit
+// 0, finds the word changed under its futex and sets the bit again before it sleeps.
+static __attribute__((unused)) void lane_advance(uint32_t* word)
+{
+    const uint32_t previous = __atomic_fetch_add(word, 2, __ATOMIC_RELEASE);
+    if ((previous & 1u) != 0)
+    {
+        __atomic_fetch_and(word, ~1u, __ATOMIC_RELAXED);
         syscall(SYS_futex, word, FUTEX_WAKE_PRIVATE, INT_MAX, 0, 0, 0);
     }
 }

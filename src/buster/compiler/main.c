@@ -1105,6 +1105,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-fortify") == 0)
+    {
+        result = run_check_fortify_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
     {
         result = run_check_debug_tests(argc - 2, argv + 2);
