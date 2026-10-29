@@ -3861,9 +3861,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     // __divmodbitint4 for products, quotients and remainders, shifts by constant and variable counts of other types (a
     // _BitInt's past 128 bits among them), compares of the top limbs signed or not, conversions to and from the
     // integers of every width, _Bool and the floating types (libgcc's __floatbitint* and __fix*bitint), between widths,
-    // compound assignments (of floating values too, computed in their types and converted back), increments,
-    // zero-initialized globals, members and arrays, and calls passing and returning them in memory, va_arg among them.
-    // It is clean under clang's UBSan on every input.
+    // compound assignments (of real and complex floating values too, computed in their types and converted back),
+    // increments, zero-initialized globals, members and arrays, and calls passing and returning them in memory, va_arg
+    // among them. It is clean under clang's UBSan on every input.
     check_test_program_source(test,
         "typedef _BitInt(129) S129;typedef unsigned _BitInt(129) U129;typedef _BitInt(200) S200;typedef unsigned _BitInt(200) U200;\n"
         "typedef _BitInt(256) S256;typedef unsigned _BitInt(256) U256;typedef _BitInt(300) S300;typedef unsigned _BitInt(511) U511;typedef unsigned _BitInt(2100) U2100;\n"
@@ -3900,7 +3900,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "gs+=a;gs*=3;gs-=b;gw=w;gw>>=2;gw=(S256)((U256)gw<<1);gw-=x;gw|=1;gw^=x;gw&=~(S256)7;gw%=1000003;gw/=7;FOLD(gs,200);FOLD(gw,256);\n"
         "S200 c=a;c++;++c;c--;S200 old=c++;--c;FOLD(c,200);FOLD(old,200);U200 e=u;e<<=n&63;e>>=3;e+=v;e*=7;FOLD(e,200);\n"
         "S200 fa=b;fa+=2.5;fa*=1.5f;fa-=(long double)n*1e30L;fa/=-3.0;U256 fu=(U256)v;fu+=(__float128)n*1e40;fu*=(__float128)0.5;S200 fr=(fa-=0.25);\n"
-        "FOLD(fa,200);FOLD(fu,256);FOLD(fr,200);\n"
+        "FOLD(fa,200);FOLD(fu,256);FOLD(fr,200);S200 fz=b;fz+=1.5+2.0i;fz*=2.0-1.0i;U256 fv=(U256)v;fv-=(_Complex long double)(1e30L+3.0iL);\n"
+        "FOLD(fz,200);FOLD(fv,256);\n"
         "int k=5;k+=b;k/=7;long m2=3;m2-=w;m2=(long)(m2%1000);_Bool flag=0;flag|=(_Bool)(w!=0);h+=(unsigned long)k*7+(unsigned long)m2*11+flag;\n"
         "FOLD(add(a,b),200);FOLD(mix(n,p,2.5,-7,p+1,'x'),129);FOLD(sum(3,w,x,w),256);\n"
         "struct P sp={'q',a,{p,p+3}};struct P rp=pass(sp,n);FOLD(rp.v,200);FOLD(rp.w[1],129);U129 arr[3]={p,p*2,p*3};FOLD(arr[n&1?1:2],129);\n"
