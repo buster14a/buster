@@ -6,8 +6,10 @@
 // reparsing or dependence on target features. Unknown conditions retain both edges. Scratch has exactly one byte
 // and one u64 slot per control/node; no padding is read. Failure publishes no partially resolved events.
 // Code generation's check of target features walks the same way (#775, c_check_target_feature.c): with `calls`, the
-// walk also appends each call it reaches to that arena, a uint32_t node each, `call_count` of them, in a run nothing else
-// pushes into while it walks; `call_room` turns false if one had no room.
+// walk also appends each call it reaches to that arena, a uint64_t each of its node in the low half and the walk's `tag`
+// in the high, `call_count` of them, in a run nothing else pushes into while it walks; `call_room` turns false if one had
+// no room. Each item pushed carries `tag` in its high half too, for the check's loop to set it from (the statement whose
+// control reached an expression); this walk's is 0, so that its items are the bare indices.
 
 typedef struct CheckX86DiagnosticWalk CheckX86DiagnosticWalk;
 struct CheckX86DiagnosticWalk
@@ -20,6 +22,7 @@ struct CheckX86DiagnosticWalk
     Arena* calls;
     uint32_t call_count;
     bool call_room;
+    uint32_t tag;
 };
 
 static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t index, bool control)
@@ -30,7 +33,7 @@ static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t ind
     if (valid && walk->seen[item] == 0)
     {
         walk->seen[item] = 1;
-        walk->stack[walk->depth++] = item;
+        walk->stack[walk->depth++] = item | (uint64_t)walk->tag << 32;
     }
 }
 
@@ -178,11 +181,11 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     {
         if (op == CHECK_OP_CALL && walk->calls != NULL)
         {
-            uint32_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint32_t, 1) : NULL;
+            uint64_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint64_t, 1) : NULL;
             walk->call_room = call != NULL;
             if (call != NULL)
             {
-                *call = node;
+                *call = (uint64_t)walk->tag << 32 | node;
                 walk->call_count += 1;
             }
         }

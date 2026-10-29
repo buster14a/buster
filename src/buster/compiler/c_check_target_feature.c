@@ -18,9 +18,10 @@
 // not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits no top-level function
 // after the first that has one, nor the static and inline functions it defers to the unit's end; where no top-level
 // function has one, it emits every deferred function, past their errors. So this reports the first externally visible
-// function's errors alone, or else every deferred function's, each function's in the order of its calls' ends (an
-// argument's call before its own, as clang emits them; but where clang evaluates out of source order, an assignment's
-// right side first). Clang emits the externally visible functions in source order, and the deferred ones depth first
+// function's errors alone, or else every deferred function's, each function's in clang's emission order: by statement,
+// in the lowering's order of them (a for loop's increment after its body), and in a statement by the calls' ends (an
+// argument's call before its own; but where clang evaluates out of source order, an assignment's right side first).
+// Clang emits the externally visible functions in source order, and the deferred ones depth first
 // from where its emission first referred to them; this takes those in source order too. Where the feature an error
 // names is the first of the rest of a function's map (an attribute's arch= CPU's, or a caller's attribute that turns
 // several off), clang's order is its StringMap's and this one predefines_features', so the two may name another feature
@@ -262,8 +263,8 @@ static uint32_t check_target_feature_callee(const CheckProgram* program, uint32_
     return object < program->object_count ? object : 0;
 }
 
-// Checks body `b`'s calls, which its walk reached (`calls`, `count` keys of a call's node in the low half, sorted by the
-// calls' ends): appends each error. Returns false without room.
+// Checks body `b`'s calls, which its walk reached (`calls`, `count` keys of a call's node in the low half, in clang's
+// emission order): appends each error. Returns false without room.
 static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeatureMaps* maps, uint32_t b, bool deferred,
                                        const CheckTargetFeatureAttributes* caller, PredefinesFeatures caller_map, const uint64_t* calls,
                                        uint32_t count, Arena* output, CheckTargetFeatureError** errors, uint32_t* error_count)
@@ -391,46 +392,70 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                 }
                 if (valid && candidate)
                 {
-                    // The body's calls, as the walk reaches them, into a run of scratch.
+                    // The body's calls, as the walk reaches them, into a run of scratch, each with its statement: the control,
+                    // one more than its index, whose expression holds it, which a statement expression's own controls take
+                    // from the expression that reaches them (they follow the body's, but clang emits them where they are).
                     const uint64_t calls_mark = scratch->length;
-                    const uint32_t* calls = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 0);
+                    const uint64_t* calls = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 0);
                     walk.body = body;
                     walk.call_count = 0;
                     walk.call_room = calls != 0;
+                    walk.tag = 0;
                     check_x86_diagnostic_push(&walk, 0, true);
                     while (walk.depth != 0 && program->status == CHECK_PROGRAM_OK)
                     {
-                        const uint64_t item = walk.stack[--walk.depth];
+                        const uint64_t entry = walk.stack[--walk.depth];
+                        const uint64_t item = entry & UINT32_MAX;
+                        const uint32_t control = item >= input->graph.count ? (uint32_t)(item - input->graph.count) - body->first : UINT32_MAX;
+                        walk.tag = control < body->entry_count ? control + 1 : (uint32_t)(entry >> 32);
                         if (item < input->graph.count)
                         {
                             check_x86_diagnostic_expression(&walk, (uint32_t)item);
                         }
                         else
                         {
-                            check_x86_diagnostic_control(&walk, (uint32_t)(item - input->graph.count) - body->first);
+                            check_x86_diagnostic_control(&walk, control);
                         }
                     }
                     walk.depth = 0;
+                    walk.tag = 0;
                     valid = walk.call_room && program->status == CHECK_PROGRAM_OK;
-                    // The calls by their ends (a call's node is its closing parenthesis), so that arguments' calls come before
-                    // their call's, as clang emits them: keys of the token in the high half and the node in the low.
-                    uint64_t* keys = valid && walk.call_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, walk.call_count) : 0;
-                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, walk.call_count) : 0;
-                    valid = valid && (walk.call_count == 0 || temporary != 0);
-                    const uint64_t* sorted = 0;
-                    if (valid && walk.call_count != 0)
+                    // The calls in clang's emission order: by their statements, whose controls are in the lowering's order,
+                    // as clang emits them (a for loop's increment after its body), and in one statement by their ends (a
+                    // call's node is its closing parenthesis), so that arguments' calls come before their call's. Two stable
+                    // passes of the radix kernel, by end then by statement, of keys of the sort's key in the high half and
+                    // the call's place in `calls` in the low; then the calls' nodes in the low half, in that order.
+                    const uint32_t call_count = walk.call_count;
+                    uint64_t* keys = valid && call_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
+                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
+                    valid = valid && (call_count == 0 || temporary != 0);
+                    uint64_t* sorted = 0;
+                    if (valid && call_count != 0)
                     {
                         uint32_t varying = 0;
-                        for (uint32_t c = 0; c < walk.call_count; c += 1)
+                        for (uint32_t c = 0; c < call_count; c += 1)
                         {
-                            const uint32_t end = input->graph.tokens[calls[c]];
-                            keys[c] = ((uint64_t)end << 32) | calls[c];
-                            varying |= end ^ input->graph.tokens[calls[0]];
+                            const uint32_t end = input->graph.tokens[(uint32_t)calls[c]];
+                            keys[c] = ((uint64_t)end << 32) | c;
+                            varying |= end ^ input->graph.tokens[(uint32_t)calls[0]];
                         }
-                        sorted = c_bindings_sort(keys, temporary, walk.call_count, !scalar, varying);
+                        uint64_t* by_end = c_bindings_sort(keys, temporary, call_count, !scalar, varying);
+                        uint64_t* other = by_end == keys ? temporary : keys;
+                        varying = 0;
+                        for (uint32_t j = 0; j < call_count; j += 1)
+                        {
+                            const uint32_t statement = (uint32_t)(calls[(uint32_t)by_end[j]] >> 32);
+                            other[j] = ((uint64_t)statement << 32) | (uint32_t)by_end[j];
+                            varying |= statement ^ (uint32_t)(calls[(uint32_t)by_end[0]] >> 32);
+                        }
+                        sorted = c_bindings_sort(other, by_end, call_count, !scalar, varying);
+                        for (uint32_t j = 0; j < call_count; j += 1)
+                        {
+                            sorted[j] = (uint32_t)calls[(uint32_t)sorted[j]];
+                        }
                     }
                     valid = valid &&
-                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, walk.call_count, output, errors, count);
+                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, call_count, output, errors, count);
                     arena_pop_to(scratch, calls_mark);
                 }
             }

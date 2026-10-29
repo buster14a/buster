@@ -322,26 +322,30 @@ first one that has any, nor the static and inline functions it defers to the
 unit's end; where no top-level function has an error, it emits every deferred
 one, past their errors. So the driver reports the first externally visible
 function's errors alone, or else every deferred function's: each function's in
-its calls' order of ends (an argument's call before its own), after its closing
-brace, as clang reports them when it emits the function, or at the unit's end
-for a deferred one. Clang emits the deferred functions depth first from where
-its emission first referred to them, and the driver in source order; and
-where an error's feature is the first of the rest of a map (an `arch=` CPU's, or
-a caller's attribute that turns several features off), clang's order is its
-`StringMap`'s and the driver's `predefines_features`', so the two may name
-different features. `--lower-all`, #129's test option, checks every definition
-it lowers, those clang never emits among them.
+clang's emission order, by statement in the lowering's order of them (a for
+loop's increment after its body) and in a statement by the calls' ends (an
+argument's call before its own), after its closing brace, as clang reports them
+when it emits the function, or at the unit's end for a deferred one. Clang emits
+the deferred functions depth first from where its emission first referred to
+them, and the driver in source order; where clang evaluates a statement out of
+source order (an assignment's right side first), the order of several errors in
+it may differ; and where an error's feature is the first of the rest of a map
+(an `arch=` CPU's, or a caller's attribute that turns several features off),
+clang's order is its `StringMap`'s and the driver's `predefines_features`', so
+the two may name different features. `--lower-all`, #129's test option, checks
+every definition it lowers, those clang never emits among them.
 
 `test-checker-driver` compares each fixture's first error at `-c` with clang
 `-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes
 it: callees' attributes before and after the call, callers' that add and turn
 off features, `flatten`, calls through the address, dead branches, which
 function's errors clang reports and in which order, and `<immintrin.h>`'s
-`_bzhi_u32` at targets with BMI2 and without. Four fixtures' every error, line
+`_bzhi_u32` at targets with BMI2 and without. Five fixtures' every error, line
 for line, must be clang's: the first external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
-deferred one's unreported, and two deferred functions', where no external
-function has any.
+deferred one's unreported, two deferred functions', where no external function
+has any, and loops' and a statement expression's, a for loop's increment after
+its body.
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

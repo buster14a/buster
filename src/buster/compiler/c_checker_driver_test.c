@@ -2976,6 +2976,11 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         { "an external function's errors before a static one's",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
           "int e(int x) { return s(x) + h(x + 1); }\n" },
+        { "loops' errors in clang's emission order: a for loop's increment after its body",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int x) { return x + 2; }\n"
+          "int e(int n)\n{\n    int s = 0;\n    for (int i = h(n); i < g(n); i = h(i)) { s += g(i); }\n    while (h(s) < n) { s += g(s); }\n"
+          "    do { s += g(s); } while (h(s) < n);\n    return ({ int t = g(s); t; }) + h(s);\n}\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
