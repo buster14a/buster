@@ -569,6 +569,71 @@ static bool type_deferred_unit(TypeTestTally* tally, TypeDeferredCoverage* cover
     return valid;
 }
 
+// A copy's index (type_copy): the source's slots copied as they are where its index has room for the copy's slack (no
+// more than BUSTER_TYPE_COPY_INDEX_SLACK and than the source's own types, BUSTER_TYPE_COPY_INDEX_MINIMUM at least), and
+// the source's types placed again with room for the slack otherwise. Chains of 100 pointers (their slack the minimum,
+// past the 64 buckets their index has), 7,000 (BUSTER_TYPE_COPY_INDEX_SLACK, which the 4,096 buckets theirs grew to
+// have room for) and 9,000 (whose don't). The copy finds every type of the source's at its id, and grows past its room
+// as any index does.
+static void type_deferred_index_copies(TypeTestTally* tally)
+{
+    static const uint32_t lengths[] = { 100, 7000, 9000 };
+    static const bool copied[] = { false, true, false };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lengths); c += 1)
+    {
+        TypeTestTable source = { 0 };
+        TypeTestTable copy = { 0 };
+        bool valid = type_test_table_open(&source, lengths[c] + 64);
+        TypeId last = BUSTER_TYPE_INT;
+        for (uint32_t i = 0; valid && i < lengths[c]; i += 1)
+        {
+            last = type_pointer(&source.table, last);
+            valid = last != 0;
+        }
+        copy.arena = arena_reserve(UINT64_C(1) << 28);
+        copy.index_arena = arena_reserve(UINT64_C(1) << 26);
+        const TypeCapacity extra = { .types = 16384, .parameters = 64, .tags = 64, .members = 64 };
+        valid = valid && type_copy(&copy.table, &source.table, &copy.arena, &copy.index_arena, extra);
+        type_test_expect(tally, valid, "deferred index copies", "a copy couldn't be made");
+        if (valid)
+        {
+            const TypeIndex* index = &source.table.index;
+            const uint64_t own = index->count > BUSTER_TYPE_COPY_INDEX_MINIMUM ? index->count : BUSTER_TYPE_COPY_INDEX_MINIMUM;
+            const uint64_t slack = own < BUSTER_TYPE_COPY_INDEX_SLACK ? own : BUSTER_TYPE_COPY_INDEX_SLACK;
+            uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
+            while (buckets * 3 < (uint64_t)source.table.types.count + slack + 1)
+            {
+                buckets *= 2;
+            }
+            const bool same = copied[c] ? copy.table.index.bucket_count == index->bucket_count &&
+                                              memcmp(copy.table.index.slots, index->slots, (uint64_t)index->bucket_count * BUSTER_TYPE_BUCKET_BYTES) == 0 :
+                                          copy.table.index.bucket_count == buckets && buckets > index->bucket_count;
+            type_test_expect(tally, same && copy.table.index.count == index->count, "deferred index copies",
+                             copied[c] ? "the source's slots weren't copied as they are" : "the index wasn't made again with room for the slack");
+            // Every type of the source's at its id, none made again.
+            TypeId found = BUSTER_TYPE_INT;
+            for (uint32_t i = 0; found != 0 && i < lengths[c]; i += 1)
+            {
+                const TypeId next = type_pointer(&copy.table, found);
+                found = next != 0 && type_index(next) < source.table.types.count && source.table.types.base[type_index(next)] == found ? next : 0;
+            }
+            type_test_expect(tally, found == last && copy.table.types.count == source.table.types.count, "deferred index copies",
+                             "the copy doesn't find the source's types at their ids");
+            // Past its room, one type more than it holds: the index doubled, and the source's types still found.
+            const uint32_t room = copy.table.index.bucket_count;
+            TypeId more = last;
+            for (uint64_t i = (uint64_t)copy.table.index.count; more != 0 && i <= 3ull * room; i += 1)
+            {
+                more = type_pointer(&copy.table, more);
+            }
+            type_test_expect(tally, more != 0 && copy.table.index.bucket_count == room * 2 && type_pointer(&copy.table, BUSTER_TYPE_INT) == type_pointer(&source.table, BUSTER_TYPE_INT),
+                             "deferred index copies", "the copy's index didn't grow past its room");
+        }
+        type_test_table_close(&copy);
+        type_test_table_close(&source);
+    }
+}
+
 // A view's batch requests pass its hidden types over, as one at a time; a replay refuses an incomplete record; and a
 // view whose index grew is taken back as it was.
 static void type_deferred_fixtures(TypeTestTally* tally, Arena* arena)
@@ -643,6 +708,7 @@ static bool type_test_deferred(uint64_t seed, uint32_t count)
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     uint64_t random = seed * 0x9E3779B97F4A7C15ull + 113;
     type_deferred_fixtures(&tally, &arena);
+    type_deferred_index_copies(&tally);
     static const uint32_t lane_counts[4] = { 1, 2, 3, 8 };
     for (uint32_t u = 0; u < count && tally.failures == 0; u += 1)
     {
