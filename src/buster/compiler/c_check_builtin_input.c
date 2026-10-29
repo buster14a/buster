@@ -23,7 +23,9 @@ static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t 
         const bool first_type = builtin == CBUILTIN_BIT_CAST;
         const uint32_t type_first = first_type ? opening + 1 : separator + 1;
         const uint32_t type_end = first_type ? separator : closing;
+        check_input_rare_claim(reader, &reader->builtins[closing]);
         reader->builtins[closing] = builtin;
+        check_input_rare_claim(reader, &reader->builtin_type_ends[type_first]);
         reader->builtin_type_ends[type_first] = closing;
         check_input_visit(reader, type_first, BUSTER_CHECK_RESOLVE_QUERY);
         reader->ignored[keyword] = true;
@@ -113,11 +115,14 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
             .argument_count = arguments,
             .second_argument = second,
         };
+        check_input_rare_claim(reader, &reader->builtins[closing]);
         reader->builtins[closing] = builtin;
+        check_input_rare_claim(reader, &reader->vararg_calls[closing]);
         reader->vararg_calls[closing] = index + 1;
         reader->ignored[keyword] = true;
         if (builtin == CBUILTIN_VA_ARG && second < closing)
         {
+            check_input_rare_claim(reader, &reader->vararg_types[second]);
             reader->vararg_types[second] = index + 1;
             check_input_visit(reader, second, BUSTER_CHECK_RESOLVE_QUERY);
             memset(reader->ignored + second, 1, closing - second);

@@ -770,6 +770,149 @@ static void check_test_driver_mmx(CheckTest* test, const char* clang, const char
 }
 
 
+// Half-precision scalars' intrinsics by the driver (#136): a program of the clang 23 headers' functions that pass and
+// return _Float16 and __bf16 values (AVX512-FP16's sets of 8, 16 and 32 of them, their first elements, the scalar
+// arithmetic, conversions from integers, loads, stores and moves of them, F16C's _cvtsh_ss and AVX512-BF16's
+// conversions), linked for sapphirerapids by both paths into the same bytes, and printing, where the host has AVX512-FP16
+// and AVX512-BF16, what clang -O0's build of it prints.
+static void check_test_driver_halves(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <immintrin.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <string.h>\n"
+                                  "static void show(const char* name, const void* p, unsigned long n) { const unsigned short* x = p; printf(\"%s\", name); for (unsigned long i = 0; i < n / 2; i++) printf(\" %04x\", x[i]); printf(\"\\n\"); }\n"
+                                  "static void showh(const char* name, _Float16 h) { show(name, &h, 2); }\n"
+                                  "int main(int argc, char** argv)\n"
+                                  "{\n"
+                                  "    (void)argv;\n"
+                                  "    int n = argc + 6;\n"
+                                  "    _Float16 a = (_Float16)n / (_Float16)3, b = (_Float16)-2.5, c = (_Float16)(n * 1000);\n"
+                                  "    __m128h v = _mm_set_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
+                                  "    __m128h s = _mm_set_sh(b);\n"
+                                  "    show(\"set\", &v, 16);\n"
+                                  "    __m128h r = _mm_setr_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
+                                  "    show(\"setr\", &r, 16);\n"
+                                  "    __m128h one = _mm_set1_ph(a);\n"
+                                  "    show(\"set1\", &one, 16);\n"
+                                  "    __m128h zero = _mm_setzero_ph();\n"
+                                  "    show(\"zero\", &zero, 16);\n"
+                                  "    show(\"set_sh\", &s, 16);\n"
+                                  "    showh(\"cvtsh_h\", _mm_cvtsh_h(v));\n"
+                                  "    __m128h t = _mm_add_sh(v, s);\n"
+                                  "    show(\"add_sh\", &t, 16);\n"
+                                  "    t = _mm_sub_sh(v, s);\n"
+                                  "    show(\"sub_sh\", &t, 16);\n"
+                                  "    t = _mm_mul_sh(v, s);\n"
+                                  "    show(\"mul_sh\", &t, 16);\n"
+                                  "    t = _mm_div_sh(v, s);\n"
+                                  "    show(\"div_sh\", &t, 16);\n"
+                                  "    t = _mm_cvti32_sh(v, -n * 77);\n"
+                                  "    show(\"cvti32_sh\", &t, 16);\n"
+                                  "    t = _mm_cvti64_sh(v, (long long)n * 999999);\n"
+                                  "    show(\"cvti64_sh\", &t, 16);\n"
+                                  "    t = _mm_cvtu32_sh(v, (unsigned)n * 3001u);\n"
+                                  "    show(\"cvtu32_sh\", &t, 16);\n"
+                                  "    t = _mm_cvtu64_sh(v, (unsigned long long)n << 40);\n"
+                                  "    show(\"cvtu64_sh\", &t, 16);\n"
+                                  "    _Float16 memory[2] = { c, a };\n"
+                                  "    t = _mm_load_sh(&memory[1]);\n"
+                                  "    show(\"load_sh\", &t, 16);\n"
+                                  "    _mm_store_sh(&memory[0], v);\n"
+                                  "    show(\"store_sh\", memory, 4);\n"
+                                  "    t = _mm_move_sh(v, s);\n"
+                                  "    show(\"move_sh\", &t, 16);\n"
+                                  "    __m256h w = _mm256_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
+                                  "    show(\"set256\", &w, 32);\n"
+                                  "    w = _mm256_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
+                                  "    show(\"setr256\", &w, 32);\n"
+                                  "    w = _mm256_set1_ph(b);\n"
+                                  "    show(\"set1_256\", &w, 32);\n"
+                                  "    showh(\"cvtsh_h256\", _mm256_cvtsh_h(_mm256_set1_ph(c)));\n"
+                                  "    w = _mm256_setzero_ph();\n"
+                                  "    show(\"zero256\", &w, 32);\n"
+                                  "    __m512h z = _mm512_set1_ph(c);\n"
+                                  "    show(\"set1_512\", &z, 64);\n"
+                                  "    z = _mm512_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
+                                  "    show(\"set512\", &z, 64);\n"
+                                  "    z = _mm512_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
+                                  "    show(\"setr512\", &z, 64);\n"
+                                  "    showh(\"cvtsh_h512\", _mm512_cvtsh_h(z));\n"
+                                  "    z = _mm512_setzero_ph();\n"
+                                  "    show(\"zero512\", &z, 64);\n"
+                                  "    float f = _cvtsh_ss((unsigned short)(0x3c00 + n));\n"
+                                  "    show(\"cvtsh_ss\", &f, 4);\n"
+                                  "    __bf16 bf = _mm_cvtness_sbh((float)n / 3.0f);\n"
+                                  "    show(\"cvtness_sbh\", &bf, 2);\n"
+                                  "    float back = _mm_cvtsbh_ss(bf);\n"
+                                  "    show(\"cvtsbh_ss\", &back, 4);\n"
+                                  "    __m512h u = _mm512_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, (_Float16)-n, (_Float16)n);\n"
+                                  "    showh(\"reduce_add_ph\", _mm_reduce_add_ph(v));\n"
+                                  "    showh(\"reduce_mul_ph\", _mm_reduce_mul_ph(v));\n"
+                                  "    showh(\"reduce_max_ph\", _mm_reduce_max_ph(v));\n"
+                                  "    showh(\"reduce_min_ph\", _mm_reduce_min_ph(v));\n"
+                                  "    showh(\"reduce_add_ph256\", _mm256_reduce_add_ph(_mm512_castph512_ph256(u)));\n"
+                                  "    showh(\"reduce_mul_ph256\", _mm256_reduce_mul_ph(_mm512_castph512_ph256(u)));\n"
+                                  "    showh(\"reduce_max_ph256\", _mm256_reduce_max_ph(_mm512_castph512_ph256(u)));\n"
+                                  "    showh(\"reduce_min_ph256\", _mm256_reduce_min_ph(_mm512_castph512_ph256(u)));\n"
+                                  "    showh(\"reduce_add_ph512\", _mm512_reduce_add_ph(u));\n"
+                                  "    showh(\"reduce_mul_ph512\", _mm512_reduce_mul_ph(u));\n"
+                                  "    showh(\"reduce_max_ph512\", _mm512_reduce_max_ph(u));\n"
+                                  "    showh(\"reduce_min_ph512\", _mm512_reduce_min_ph(u));\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char outputs[3][256];
+    snprintf(source, sizeof(source), "%s/halves.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/halves", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/halves-scalar", directory);
+    snprintf(outputs[2], sizeof(outputs[2]), "%s/halves-clang", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the half-precision intrinsics' program written");
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=sapphirerapids", "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=sapphirerapids", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "the half-precision intrinsics link" : "the half-precision intrinsics link, scalar");
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        linked = linked && status == 0;
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable of the half-precision intrinsics");
+    const X86Target native = x86_target_native();
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) |
+                              BUSTER_X86_FEATURE(AVX512BF16) | BUSTER_X86_FEATURE(F16C);
+    if (linked && (native.features & required) == required && (native.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0)
+    {
+        char* text = NULL;
+        char* const reference[] = { (char*)clang, "-O0", "-march=sapphirerapids", "-o", outputs[2], source, NULL };
+        const int built = check_test_driver_spawn(reference, &text);
+        free(text);
+        static char expected[8192];
+        static char captured[8192];
+        const bool ran = built == 0 && check_test_driver_capture(outputs[2], expected, sizeof(expected)) &&
+                         check_test_driver_capture(outputs[0], captured, sizeof(captured));
+        check_test_expect(test, ran && strlen(expected) > 1000 && strcmp(captured, expected) == 0, "the half-precision intrinsics compute what clang's build of them does");
+        if (ran && strcmp(captured, expected) != 0)
+        {
+            fprintf(stderr, "half-precision intrinsics:\n%s\nclang's build:\n%s\n", captured, expected);
+        }
+    }
+    else if (linked)
+    {
+        printf("  half-precision intrinsics: native execution skipped (the host lacks AVX512-FP16 or AVX512-BF16); the program links\n");
+    }
+    unlink(source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(outputs[2]);
+}
+
 // The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
 // driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
 // diagnostic into an executable that names libgcc_s.so.1 (its DT_NEEDED entry and version need), the same bytes by
@@ -4679,6 +4822,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_sockets(&test, clang, executable, directory);
             check_test_driver_target_selection(&test, executable, directory);
             check_test_driver_mmx(&test, clang, executable, directory);
+            check_test_driver_halves(&test, clang, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
