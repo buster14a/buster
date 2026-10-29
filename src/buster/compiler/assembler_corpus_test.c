@@ -6,9 +6,22 @@
 
 static bool asm_test_corpus_program(const char* object, char* executable, const char* output, const char* errors)
 {
-    char* link[] = {"clang", "-O2", "-fno-pie", "-no-pie", "examples/assembler/compiler-caller.c", (char*)object, "-o", executable, 0};
+    char caller[PATH_MAX];
+    const int length = snprintf(caller, sizeof(caller), "%s-caller.o", executable);
+    const bool bounded = length > 0 && (size_t)length < sizeof(caller);
+    char* compile[] = {"clang", "-O2", "-fno-pie", "-c", "examples/assembler/compiler-caller.c", "-o", caller, 0};
+    char* link[] = {"clang", "-O2", "-fno-pie", "-no-pie", caller, (char*)object, "-o", executable, 0};
     char* run[] = {executable, 0};
-    return object_test_run(link, output, errors) == 0 && object_test_run(run, output, errors) == 0;
+    if (bounded)
+    {
+        unlink(caller);
+    }
+    const bool result = bounded && asm_test_tool(compile, caller, output, errors) == 0 && object_test_run(link, output, errors) == 0 && object_test_run(run, output, errors) == 0;
+    if (bounded)
+    {
+        unlink(caller);
+    }
+    return result;
 }
 
 static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool keep)
@@ -85,7 +98,7 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                         compiler == 1 ? "-fno-integrated-as" : 0,
                         0,
                     };
-                    bool okay = paths_fit && object_test_run(generate, output, errors) == 0;
+                    bool okay = paths_fit && asm_test_tool(generate, assembly, output, errors) == 0;
                     const String8 source = okay ? object_test_read_file(&files, assembly) : (String8){0};
                     okay = okay && source.pointer != 0 && source.length != 0;
                     asm_test_check(test, okay, name, "generate compiler assembly");
@@ -95,7 +108,7 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                         char* vector[] = {"/proc/self/exe", "assemble", "-o", object_path, assembly, 0};
                         char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-o", scalar_path, assembly, 0};
                         // Validate the fixture's expected results independently even when Buster rejects the source.
-                        okay = object_test_run(gas, output, errors) == 0 && asm_test_corpus_program(reference_path, executable, output, errors);
+                        okay = oracle_epoch_file(assembly) && asm_test_tool(gas, reference_path, output, errors) == 0 && asm_test_corpus_program(reference_path, executable, output, errors);
                         asm_test_check(test, okay, name, "GNU object execution/unwind");
                         const AsmResult result = asm_test_pair(test, source, 1, X86_ARCH_BASELINE);
                         okay = okay && result.error == 0;

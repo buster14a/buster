@@ -616,6 +616,22 @@ static bool check_builtin_atomic_rmw_test_process(char* const* arguments, int* e
     return result;
 }
 
+// Cache only the independent compiler. Execution of its generated program uses the direct runner above.
+static bool check_builtin_atomic_rmw_test_clang_process(char* const* arguments, const char* artifact, int* exit_code, char diagnostics[4096])
+{
+    const char* files[] = { artifact };
+    OracleRun run = {
+        .purpose = "checker atomic RMW Clang oracle",
+        .arguments = arguments,
+        .files = files,
+        .file_count = artifact != 0,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    *exit_code = oracle_test_run(&run, 0, 0, diagnostics, 4096);
+    return *exit_code >= 0 && *exit_code < 125;
+}
+
 #define BUSTER_ATOMIC_RMW_TEST_STRINGIFY_(value) #value
 #define BUSTER_ATOMIC_RMW_TEST_STRINGIFY(value) BUSTER_ATOMIC_RMW_TEST_STRINGIFY_(value)
 
@@ -699,7 +715,7 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         char diagnostics[4096] = { 0 };
         int exit_code = -1;
         qualified = parse_test_write(path, version_source, sizeof(version_source) - 1) &&
-            check_builtin_atomic_rmw_test_process(arguments, &exit_code, diagnostics) && exit_code == 0;
+            check_builtin_atomic_rmw_test_clang_process(arguments, 0, &exit_code, diagnostics) && exit_code == 0;
         check_builtin_atomic_rmw_test_expect(test, qualified, "external oracle matches the build Clang version", 0);
         if (!qualified && test->failures < 24)
         {
@@ -722,7 +738,7 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         arguments[count] = NULL;
         char diagnostics[4096] = { 0 };
         int exit_code = -1;
-        ran = ran && check_builtin_atomic_rmw_test_process(arguments, &exit_code, diagnostics);
+        ran = ran && check_builtin_atomic_rmw_test_clang_process(arguments, 0, &exit_code, diagnostics);
         const bool matched = ran && (exit_code != 0) == cases[i].rejected;
         if (!matched && test->failures < 24)
         {
@@ -735,12 +751,17 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
     {
         char source[160];
         char program[160];
+        char object[160];
         snprintf(source, sizeof(source), "%s/native.c", directory);
         snprintf(program, sizeof(program), "%s/native", directory);
-        char* compiler_arguments[] = { (char*)clang, "-std=gnu17", "-O2", "-march=x86-64", "-fno-strict-aliasing", "-o", program, source, NULL };
+        snprintf(object, sizeof(object), "%s/native.o", directory);
+        char* compiler_arguments[] = { (char*)clang, "-std=gnu17", "-O2", "-march=x86-64", "-fno-strict-aliasing", "-c", "-o", object, source, NULL };
+        char* link_arguments[] = { (char*)clang, "-march=x86-64", "-o", program, object, NULL };
         char diagnostics[4096] = { 0 };
         int exit_code = -1;
-        const bool built = parse_test_write(source, native_source, sizeof(native_source) - 1) && check_builtin_atomic_rmw_test_process(compiler_arguments, &exit_code, diagnostics) && exit_code == 0;
+        const bool built = parse_test_write(source, native_source, sizeof(native_source) - 1) &&
+                           check_builtin_atomic_rmw_test_clang_process(compiler_arguments, object, &exit_code, diagnostics) && exit_code == 0 &&
+                           check_builtin_atomic_rmw_test_process(link_arguments, &exit_code, diagnostics) && exit_code == 0;
         check_builtin_atomic_rmw_test_expect(test, built, "independent native expression-evaluation contract oracle built", 0);
         if (built)
         {
@@ -754,6 +775,7 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         }
         unlink(source);
         unlink(program);
+        unlink(object);
     }
     if (ready)
     {
@@ -766,6 +788,7 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
 
 static int run_check_builtin_atomic_rmw_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinAtomicRmwTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -799,5 +822,7 @@ static int run_check_builtin_atomic_rmw_tests(int argc, char** argv)
         check_builtin_atomic_rmw_test_clang(&test, clang);
     }
     printf("test-check-builtins-atomic-rmw: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-atomic-rmw");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }

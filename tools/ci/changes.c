@@ -397,7 +397,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
         .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
-                   "object_writer|x86_64_encoder|x86_match|x86_target[a-z0-9_]*",
+                   "object_writer|x86_64_encoder|x86_match|x86_semantics|x86_target[a-z0-9_]*",
     },
     {
         .name = "backend",
@@ -407,7 +407,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "backend-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
@@ -427,7 +427,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-debug",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|branch_sizing|calling_convention|debug|foreign_test|lane|link|object_writer|"
+                   "c_types_transparent|branch_sizing|calling_convention(_builtins)?|debug|foreign_test|lane|link|object_writer|"
                    "object_writer_test|tier0|unwind[a-z0-9_]*|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
                    "x86_match|assembler[a-z0-9_]*|bind|import|runtime",
     },
@@ -435,7 +435,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "check-lanes",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -510,7 +510,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "ir-lowering",
         .sources = "ir|ir_validate|ir_benchmark|ir_lower[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z0-9_]*|"
-                   "c_types|calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics",
+                   "c_types|calling_convention(_builtins)?|link|object_writer|lane|x86_64_encoder|x86_semantics",
     },
     {
         .name = "ir-optimize",
@@ -519,6 +519,16 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "ir-optimize-passes",
         .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|lane",
+    },
+    {
+        // The IR of the functions -c compiles of real C (#131): their preparation's, as benchmark-backend-source's,
+        // which decides the typed streams it lowers, and the IR's lowering, verification and promotion.
+        .name = "ir-source",
+        .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
+                   "c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|"
+                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|"
+                   "tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|"
+                   "x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
     {
         .name = "lanes",
@@ -540,7 +550,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "lowering-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
-                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention(_builtins)?|"
                    "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
                    "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
@@ -581,7 +591,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "streaming",
         .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
-                   "c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
+                   "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
         .name = "types",
@@ -589,7 +599,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "unwind",
-        .sources = "unwind[a-z0-9_]*|debug[a-z0-9_]*|c_types|calling_convention|lane|tier0|tier0_generate|"
+        .sources = "unwind[a-z0-9_]*|debug[a-z0-9_]*|c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|"
                    "x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
@@ -1600,6 +1610,13 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the shared IR",
         .files = "src/buster/compiler/ir.c",
         .outputs_true = "ir ir_lowering ir_optimize",
+        .measured = "ir ir-lowering ir-source",
+    },
+    {
+        .name = "the IR of real C's functions",
+        .files = "src/buster/compiler/ir_source_benchmark.c",
+        .measured = "ir-source",
+        .unmeasured = "ir ir-lowering backend-source",
     },
     {
         .name = "the per-file jobs",
@@ -1664,6 +1681,12 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the compiler's code outside the attribution's sources",
         .files = "src/buster/compiler/tier0.c src/buster/compiler/c_checker_driver_test.c",
         .outputs_false = "compile_time",
+    },
+    {
+        .name = "immutable builtin ABI facts reach their consumers",
+        .files = "src/buster/compiler/calling_convention_builtins.c",
+        .measured = "calling-convention backend backend-source check-debug check-lanes ir-lowering lowering-source "
+                    "streaming unwind",
     },
     {
         .name = "a checker source with a digit in its name",
@@ -2272,6 +2295,96 @@ static void changes_test_split(ChangesTest* test)
     changes_expect(test, none.count == 0, "an empty workflow has no steps", (Text){ 0 });
 }
 
+// Reuse on the persistent host is safe only behind independent correctness on both hosted variants of this revision.
+// Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
+static bool changes_oracle_policy(Text workflow)
+{
+    uint32_t job = 0;
+    bool hosted_check = false;
+    bool hosted_variants = false;
+    bool hosted_revision = false;
+    bool native_needs = false;
+    bool native_success = false;
+    bool native_modes = false;
+    bool native_revision = false;
+    size_t offset = 0;
+    Text line;
+    while (text_next_line(workflow, &offset, &line))
+    {
+        if (text_equal_c(line, "  test:"))
+        {
+            job = 1;
+        }
+        else if (text_equal_c(line, "  benchmarks:"))
+        {
+            job = 2;
+        }
+        else if (line.length > 2 && line.data[0] == ' ' && line.data[1] == ' ' && line.data[2] != ' ' && line.data[2] != '#')
+        {
+            job = 0;
+        }
+        hosted_check |= job == 1 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
+        hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
+        hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test]");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' }}");
+        native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
+        native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+    }
+    return hosted_check && hosted_variants && hosted_revision && native_needs && native_success && native_modes && native_revision;
+}
+
+static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
+{
+    changes_expect(test, changes_oracle_policy(workflow), "oracle policy: independent hosted checks, gated native reuse and periodic checks", (Text){ 0 });
+    static const struct
+    {
+        const char* before;
+        const char* after;
+    } mutants[] = {
+        { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
+        { "        host_arch: [x86-64, native]", "        host_arch: [native]" },
+        { "        host_arch: [x86-64, native]", "        host_arch: [x86-64]" },
+        { "    needs: [changes, test]", "    needs: changes" },
+        { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
+          "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'schedule' && 'check' || 'use' }}" },
+        { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
+          "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'workflow_dispatch' && 'check' || 'use' }}" },
+        { "&& 'check' || 'use'", "&& 'use' || 'use'" },
+    };
+    const char* original = text_terminated(workflow);
+    for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
+    {
+        const char* found = strstr(original, mutants[i].before);
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(mutants[i].before);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c(mutants[i].after)),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
+    }
+    const char* jobs[] = { "\n  test:\n", "\n  benchmarks:\n" };
+    const char* revision = "          ref: ${{ github.sha }}";
+    for (uint32_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i += 1)
+    {
+        const char* job = strstr(original, jobs[i]);
+        const char* found = job != NULL ? strstr(job, revision) : NULL;
+        Text changed = workflow;
+        if (found != NULL)
+        {
+            const size_t prefix = (size_t)(found - original);
+            const size_t suffix = prefix + strlen(revision);
+            changed = text_concat(text_concat((Text){ .data = workflow.data, .length = prefix }, text_c("          ref: main")),
+                                  (Text){ .data = workflow.data + suffix, .length = workflow.length - suffix });
+        }
+        changes_expect(test, found != NULL && !changes_oracle_policy(changed), "oracle policy rejects a different tested revision", text_c(jobs[i]));
+    }
+}
+
 static int changes_self_test(const char* root)
 {
     ChangesTest test = { 0 };
@@ -2286,6 +2399,7 @@ static int changes_self_test(const char* root)
         changes_test_workflow(&test, workflow, root);
         changes_test_mutation(&test, workflow, root);
         changes_test_sources(&test, root);
+        changes_test_oracle_policy(&test, workflow);
     }
     printf("changes --self-test: %u checks, %u failures\n", test.checks, test.failures);
     return test.failures != 0 ? 1 : 0;

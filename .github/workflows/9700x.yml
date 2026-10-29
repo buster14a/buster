@@ -322,7 +322,9 @@ jobs:
         shell: bash
     env:
       BUSTER_HOST_ARCH: znver5
-      BUSTER_ORACLE_CACHE: check
+      # Hosted correctness independently checks both variants of this exact revision before this job can start.
+      # The persistent native cache reuses ordinary runs; daily/manual runs execute and check every oracle again.
+      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
     steps:
       - name: Verify benchmark host
@@ -1163,6 +1165,30 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the IR of the frozen SQLite source's functions
+        # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
+        # largest functions' shares, then lowering, verification and promotion per typed entry by both paths, after both
+        # lowerings agree on every function and both promotions verify. benchmark-backend-source's options.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-source,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-source "${source[@]}"
+
+      - name: Benchmark the IR lowering of the frozen SQLite source's functions after scalar work
+        # Where `changes` doesn't rule it out (the lowering's sources).
+        if: needs.changes.outputs.ir_lowering != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower --after-scalar 200 "${source[@]}"
 
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')

@@ -1646,6 +1646,10 @@ static void parse_scalar_complete_declarator(ParseScalar* parser, ParseFrame* fr
     {
         parser->kept_count = 0;
     }
+    if (definition && parser->binding_trace != NULL)
+    {
+        parser->binding_trace->pending_definition = frame->name;
+    }
     frame->name = BUSTER_PARSE_NONE;
     frame->name_frame = BUSTER_PARSE_NONE;
     frame->derivation = PARSE_DERIVATION_NONE;
@@ -3273,6 +3277,17 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
 // began, which it ends): the parameters its declarator kept are bound again in it, as the body is their scope.
 static void parse_scalar_open_body(ParseScalar* parser, uint32_t i, uint32_t scope, ParseStep* step)
 {
+    if (parser->binding_trace != NULL)
+    {
+        ParseBindingTrace* trace = parser->binding_trace;
+        const bool valid = trace->body_count < trace->body_capacity && trace->pending_definition < parser->count;
+        trace->bindings->valid &= valid;
+        if (valid)
+        {
+            trace->body_declarations[trace->body_count++] = trace->pending_definition;
+        }
+        trace->pending_definition = BUSTER_PARSE_NONE;
+    }
     if (parser->typeless_function != 0)
     {
         const uint8_t message = parser->language.standard >= 2023 ? PARSE_MESSAGE_TYPE_SPECIFIER_REQUIRED : PARSE_MESSAGE_TYPE_SPECIFIER_MISSING;

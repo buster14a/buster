@@ -101,12 +101,13 @@ static void cbuiltin_misc_lower_test_emit(CBuiltinMiscLowerTestStream* stream, u
 
 static CBuiltinMiscLowerCall cbuiltin_misc_lower_test_call(CBuiltinId id)
 {
-    const bool unary = id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR || id == CBUILTIN_STRLEN;
+    const bool unary = id == CBUILTIN_EXTRACT_RETURN_ADDR || id == CBUILTIN_FROB_RETURN_ADDR || id == CBUILTIN_STRLEN || id == CBUILTIN_ALLOCA;
+    const bool frame = id == CBUILTIN_FRAME_ADDRESS || id == CBUILTIN_RETURN_ADDRESS;
     const CBuiltinMiscLowerCall result =
     {
         .id = id,
         .arguments = { 0, 1, 2 },
-        .argument_count = unary ? 1 : id == CBUILTIN_EXPECT ? 2 : 3,
+        .argument_count = frame ? 0 : unary ? 1 : id == CBUILTIN_EXPECT ? 2 : 3,
     };
     return result;
 }
@@ -655,13 +656,43 @@ static void cbuiltin_misc_lower_test_guards(CBuiltinMiscLowerTestTally* tally)
         const CBuiltinLowerResult null_call = path == 0 ? cbuiltin_misc_lower_scalar(&stream.buffer, 0) : cbuiltin_misc_lower(&stream.buffer, 0);
         cbuiltin_misc_lower_test_expect(tally, null_buffer.error == CBUILTIN_LOWER_ARGUMENT && null_call.error == CBUILTIN_LOWER_ARGUMENT &&
             memcmp(&stream, &snapshot, sizeof(stream)) == 0, "null requests leave columns unchanged", path);
-        static const CBuiltinId unsupported[] = { CBUILTIN_ALLOCA, CBUILTIN_FRAME_ADDRESS, CBUILTIN_RETURN_ADDRESS, CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
+        static const CBuiltinId unsupported[] = { CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
         for (uint32_t i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i += 1)
         {
             CBuiltinMiscLowerCall request = call;
             request.id = unsupported[i];
             const CBuiltinLowerResult lowered = path == 0 ? cbuiltin_misc_lower_scalar(&stream.buffer, &request) : cbuiltin_misc_lower(&stream.buffer, &request);
-            cbuiltin_misc_lower_test_expect(tally, lowered.error == CBUILTIN_LOWER_UNSUPPORTED && memcmp(&stream, &snapshot, sizeof(stream)) == 0, "frame and terminator operations refuse explicitly", path * 10 + i);
+            cbuiltin_misc_lower_test_expect(tally, lowered.error == CBUILTIN_LOWER_UNSUPPORTED && memcmp(&stream, &snapshot, sizeof(stream)) == 0, "terminator operations refuse explicitly", path * 10 + i);
+        }
+        // The stack's and the frame's builtins: their arguments' counts (a size; no level, which the producer checked
+        // was 0), each other count refused with the columns unchanged, and their entries exactly.
+        static const CBuiltinId stack[] = { CBUILTIN_ALLOCA, CBUILTIN_FRAME_ADDRESS, CBUILTIN_RETURN_ADDRESS };
+        static const uint8_t expected_kinds[3][4] = {
+            { BUSTER_TYPED_LOCAL, BUSTER_TYPED_ALLOCA },
+            { BUSTER_TYPED_FRAME_ADDRESS },
+            { BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_ADD, BUSTER_TYPED_LOAD },
+        };
+        static const uint64_t expected_values[3][4] = { { 0, 0 }, { 0 }, { 0, 8, 0, 0 } };
+        static const uint32_t expected_counts[3] = { 2, 1, 4 };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(stack); i += 1)
+        {
+            for (uint32_t count = 0; count <= 3; count += 1)
+            {
+                CBuiltinMiscLowerCall request = cbuiltin_misc_lower_test_call(stack[i]);
+                const bool valid = count == request.argument_count;
+                request.argument_count = count;
+                cbuiltin_misc_lower_test_stream(&stream, stack[i]);
+                const CBuiltinMiscLowerTestStream before = stream;
+                const CBuiltinLowerResult lowered = path == 0 ? cbuiltin_misc_lower_scalar(&stream.buffer, &request) : cbuiltin_misc_lower(&stream.buffer, &request);
+                bool exact = valid ? lowered.error == CBUILTIN_LOWER_OK && lowered.first == 0 && lowered.count == expected_counts[i] &&
+                                     lowered.result_class == BUSTER_TYPED_CLASS_U64 && lowered.temporary_count == 0 && stream.buffer.count == expected_counts[i]
+                                   : lowered.error == CBUILTIN_LOWER_ARGUMENT && memcmp(&stream, &before, sizeof(stream)) == 0;
+                for (uint32_t e = 0; valid && exact && e < expected_counts[i]; e += 1)
+                {
+                    exact = stream.kinds[e] == expected_kinds[i][e] && stream.classes[e] == BUSTER_TYPED_CLASS_U64 && stream.values[e] == expected_values[i][e];
+                }
+                cbuiltin_misc_lower_test_expect(tally, exact, "stack and frame recipes take their arguments' counts, and their entries exactly", path * 100 + i * 10 + count);
+            }
         }
         for (uint32_t id = 0; id < 2; id += 1)
         {
@@ -677,6 +708,43 @@ static void cbuiltin_misc_lower_test_guards(CBuiltinMiscLowerTestTally* tally)
         }
         cbuiltin_misc_lower_test_stream(&stream, CBUILTIN_MEMCPY);
     }
+}
+
+// ALLOCA's and FRAME_ADDRESS's programs run natively, by both paths, from this function, whose own frame address their
+// frames are below: an allocation's address is a multiple of 16 below it, by no more than its size rounded up to 16 and
+// a page for the frames between, and so is a frame's address, by no more than a page. (RETURN_ADDRESS's value, a word of
+// the frame, is the C programs' to check against clang's: c_check_program_test.c's frame-builtins.)
+static __attribute__((noinline)) void cbuiltin_misc_lower_test_frames(CBuiltinMiscLowerTestTally* tally)
+{
+    static const uint64_t sizes[] = { 0, 1, 15, 16, 17, 4095, 65539 };
+    const uint64_t frame = (uintptr_t)__builtin_frame_address(0);
+    Arena arena = arena_reserve(UINT64_C(1) << 26);
+    const bool reserved = cbuiltin_misc_lower_test_expect(tally, arena.base != 0, "frame arena", 0);
+    for (uint32_t k = 0; reserved && k < 2; k += 1)
+    {
+        CBuiltinMiscLowerTestProgram programs[2] = { 0 };
+        const CBuiltinId id = k == 0 ? CBUILTIN_ALLOCA : CBUILTIN_FRAME_ADDRESS;
+        const bool valid = cbuiltin_misc_lower_test_program(tally, &arena, cbuiltin_misc_lower_test_call(id), programs, 700 + k);
+        for (uint32_t path = 0; valid && path < 2; path += 1)
+        {
+            for (uint32_t s = 0; s < (k == 0 ? BUSTER_ARRAY_LENGTH(sizes) : 1); s += 1)
+            {
+                const uint64_t address = cbuiltin_misc_lower_test_invoke(programs + path, sizes[s], 0, 0);
+                const uint64_t below = k == 0 ? ((sizes[s] + 15) & ~UINT64_C(15)) + BUSTER_CBUILTIN_MISC_TEST_PAGE : BUSTER_CBUILTIN_MISC_TEST_PAGE;
+                cbuiltin_misc_lower_test_expect(tally, address % 16 == 0 && address < frame && frame - address <= below,
+                                                k == 0 ? "native alloca: aligned, on the stack below its caller" : "native frame address: aligned, below its caller's",
+                                                path * 100 + s);
+            }
+        }
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            if (programs[path].bytes != 0 && programs[path].bytes != MAP_FAILED)
+            {
+                munmap(programs[path].bytes, programs[path].mapping_bytes);
+            }
+        }
+    }
+    arena_release(&arena);
 }
 
 static int run_builtin_misc_lower_tests(int argc, char** argv)
@@ -720,6 +788,7 @@ static int run_builtin_misc_lower_tests(int argc, char** argv)
             {
                 alarm(30);
                 cbuiltin_misc_lower_test_constants(shared);
+                cbuiltin_misc_lower_test_frames(shared);
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
                     cbuiltin_misc_lower_test_hints(shared, native[path], path);

@@ -456,6 +456,73 @@ static void check_test_driver_libgcc(CheckTest* test, const char* executable, co
     unlink(outputs[1]);
 }
 
+// A function's target attribute in the bodies -c and the direct path select (#180, check_program_select): each selected
+// body keeps its own instruction set though bodies before it aren't selected. A BMI2 function after an unselected one, in
+// a baseline unit, must get BMI2 (an executable that runs where the host has it, by both paths into the same bytes); and
+// a function with vectors after an unselected one whose attribute turns AVX-512VL off, in a znver5 unit, the unit's.
+static void check_test_driver_target_selection(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char bmi2[] =
+        "static int unused(int x){return x*3;}\n"
+        "__attribute__((target(\"bmi2\"))) static unsigned deposit(unsigned x,unsigned m){return __builtin_ia32_pdep_si(x,m);}\n"
+        "static int also_unused(int x){return x+1;}\n"
+        "int main(void){volatile unsigned x=0x5u,m=0xf0f0u;return deposit(x,m)==0x50u?0:1;}\n";
+    static const char vectors[] =
+        "typedef int v4si __attribute__((vector_size(16)));\n"
+        "__attribute__((target(\"no-avx512vl\"))) static int scalar_only(int x){return x*5;}\n"
+        "static int sum(int n){v4si a={n,1,2,3},b={4,5,6,7};a=a+b;return a[0]+a[3];}\n"
+        "int main(void){volatile int n=1;return sum(n)==15?0:1;}\n";
+    char sources[2][256];
+    char outputs[3][256];
+    snprintf(sources[0], sizeof(sources[0]), "%s/target-selection-bmi2.c", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/target-selection-vectors.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/target-selection", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/target-selection-scalar", directory);
+    snprintf(outputs[2], sizeof(outputs[2]), "%s/target-selection-vectors.o", directory);
+    const bool written = parse_test_write(sources[0], bmi2, sizeof(bmi2) - 1) && parse_test_write(sources[1], vectors, sizeof(vectors) - 1);
+    check_test_expect(test, written, "the target attributes' selection programs written");
+    bool linked = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=x86-64", "-o", outputs[0], sources[0], NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=x86-64", "-o", outputs[1], sources[0], NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "a selected BMI2 function after an unselected one links with BMI2" :
+                                                         "a selected BMI2 function after an unselected one, scalar");
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        linked = linked && status == 0;
+        free(text);
+        char* const vector_object[] = { (char*)executable, "-march=znver5", "-c", "-o", outputs[2], sources[1], NULL };
+        char* const scalar_object[] = { (char*)executable, "--scalar", "-march=znver5", "-c", "-o", outputs[2], sources[1], NULL };
+        text = NULL;
+        const int compiled = check_test_driver_spawn(path == 0 ? vector_object : scalar_object, &text);
+        check_test_expect(test, compiled == 0, path == 0 ? "a selected function's vectors after an unselected no-avx512vl one compile" :
+                                                           "a selected function's vectors after an unselected no-avx512vl one, scalar");
+        if (compiled != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+    }
+    check_test_expect(test, linked && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same BMI2 executable");
+    if (linked && (x86_target_native().features & BUSTER_X86_FEATURE(BMI2)) != 0)
+    {
+        char* text = NULL;
+        char* const run[] = { outputs[0], NULL };
+        check_test_expect(test, check_test_driver_spawn(run, &text) == 0, "the selected BMI2 function deposits as PDEP does");
+        free(text);
+    }
+    unlink(sources[0]);
+    unlink(sources[1]);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(outputs[2]);
+}
+
 static bool check_test_driver_capture(const char* path, char* captured, size_t capacity);
 static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* length);
 
@@ -2744,6 +2811,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
@@ -2836,6 +2904,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
 #include "c_check_cleanup_driver_test.c"
+#include "c_checker_driver_const_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -3372,6 +3441,67 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "K&R definition emits its deprecated-non-prototype warning",
+            .source = "int f(a)float a;{return (int)a;}\n",
+            .warnings = 1,
+        },
+        {
+            .name = "K&R arity warnings do not block object emission",
+            .source = "int f(a)int a;{return a;}int g(void){return f()+f(1,2); }\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R deprecation suppression leaves the independent arity warning",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}int g(void){return (&f)(1,2); }\n",
+            .warnings = 1,
+        },
+        {
+            .name = "promoted K&R definition warning blocks object emission",
+            .source = "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "K&R indirect call warning follows source-ordered diagnostic policy",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\nint g(void){return (*f)(1,2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "quiet K&R warnings still emit an object",
+            .source = "int f(a)int a;{return a;}int g(void){return f(1,2);}\n",
+            .quiet = true,
+        },
+        {
+            .name = "K&R source-only sizeof call retains its arity warning",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof(f(1,2));}\n",
+            .warnings = 2,
+        },
+        {
+            .name = "K&R source-only grouped and addressed calls retain arity warnings",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((f)(1,2))+sizeof((&f)(1,2));}\n",
+            .warnings = 3,
+        },
+        {
+            .name = "K&R source-only addressed call retains known argument constraints",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((&f)((int*)0));}\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "source-only implicit calls do not add non-prototype warnings",
+            .source = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+                      "#pragma clang diagnostic error \"-Wdeprecated-non-prototype\"\n"
+                      "int g(void){int i=missing(1);return i+sizeof((&missing)(2))+sizeof((missing)(3));}\n",
+        },
+        {
+            .name = "K&R source-only call obeys warning promotion",
+            .source = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
+                      "int f(a)int a;{return a;}\n#pragma clang diagnostic error \"-Weverything\"\n"
+                      "int g(void){return sizeof(f(1,2));}\n",
+            .rejected = true,
+        },
+        {
             "valid functions and relocatable static storage",
             "static int value=7; int *pointer=&value; int f(int x){return x+value;}\n",
             false,
@@ -3728,7 +3858,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
-            check_test_expect(&test, warnings == fixtures[i].warnings, "driver renders each semantic warning once");
+            snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
+                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
+            check_test_expect(&test, warnings == fixtures[i].warnings, description);
             FILE* emitted = fopen(object, "rb");
             unsigned char magic[4] = { 0 };
             const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&
@@ -3762,6 +3894,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
         check_test_driver_cleanup_errors(&test, clang, executable, directory);
+        check_test_driver_const(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
@@ -3776,9 +3909,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_target_selection(&test, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);

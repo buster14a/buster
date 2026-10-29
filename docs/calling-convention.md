@@ -34,7 +34,7 @@ Data, not instructions:
 - **Classes, per `TypeId`, in a column.** `abi_initialize` pushes the table's
   columns from an arena, sized for the type table's capacity
   (`abi_capacity_bytes`: 42 bytes a type, and 448 for the columns' alignment),
-  and classifies the builtin types; it fails, leaving the arena as it was, if
+  and copies the immutable builtin ABI facts; it fails, leaving the arena as it was, if
   the arena can't hold them. `abi_classify_all` then classifies every complete
   type the table has that isn't classified yet. Each type gets its row of
   classes, its pass bits, its stack slot's size, its canonical alignment, its
@@ -293,13 +293,18 @@ members' own:
   second, or none: an eightbyte each, one vector register for a `VECTOR`, two
   general registers for a `PAIR`.
 - **`STACK`:** the whole value at `stack_offset`. With `HIGH`, the value's
-  high eightbyte alone, in an 8-byte slot.
+  high eightbyte alone, in an 8-byte slot; with `LOW`, its low eightbyte alone,
+  in an 8-byte slot, though the value is larger (rule 6, below): the next
+  argument's slot starts 8 bytes after it, which a copy of the value would run
+  into.
 - **`SPLIT`:** one part in its register and the other, `NONE` in its place, in
   the 8-byte slot at `stack_offset`, where clang's count runs ahead of LLVM's
   registers (see "Two counts").
 
-The flags are `SIGN` and `ZERO` (the caller extends the value to 32 bits) and
-`HIGH` (the parts are the value's high eightbyte alone).
+The flags are `SIGN` and `ZERO` (the caller extends the value to 32 bits),
+`HIGH` (the parts are the value's high eightbyte alone) and `LOW` (the part is
+the low eightbyte alone of a value larger than 8 bytes, in a `STACK`
+location's slot).
 
 `AbiCall`, 16 bytes: `stack_bytes` (the argument area's size, a multiple of
 8, whose start is rsp at the call), `stack_alignment_log2` (4, or more when an
@@ -705,7 +710,13 @@ argument in order:
    the low eightbyte (unless it is padding) and then the high one each take
    LLVM's next register of its class (a general one for a `LOW_GENERAL` low
    eightbyte), or an 8-byte slot. The location is `REGISTERS`, `STACK` (both
-   on the stack) or `SPLIT`.
+   on the stack) or `SPLIT`. A value larger than 8 bytes whose high eightbyte
+   is NO_CLASS that goes on the stack so is `STACK` with `LOW`: its low
+   eightbyte alone, an `i64` or a `double`, in one 8-byte slot (clang copies
+   the whole value only once its own count has no register: rule 4's slot of
+   its size). That NO_CLASS eightbyte may hold bytes of a scalar that starts in
+   the low one, which clang classifies by its start (an 8-byte enum at offset 2
+   of a packed record), and which neither register nor slot passes.
 
 For `f(long, long, long, long, nullptr_t, struct {long, long}, long)` the
 struct is `SPLIT` between r9 and the stack's first slot, and the last `long`,
@@ -1219,6 +1230,10 @@ files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
+- **Builtin projection:** independently recomputed scalar rows and all metadata
+  at each supported width and both char modes, including zero and partial
+  builtin prefixes, reserved holes, small/requested capacities and refusals,
+  poisoned padding and tails, and the first derived type's ordinary scheduling.
 - **Fixtures** (3,158 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
@@ -1308,10 +1323,12 @@ files. The counts below are the defaults'
   after five `long`s, with r9 left for the `long` after it, and an `i8` after
   six; and after a result of two `__int128`s in a vector, which LLVM demotes
   to a hidden pointer clang doesn't count (`DEMOTED`), and five `long`s, a
-  struct aligned to 16 that clang counts in a register, an `i64` at stack 0,
-  and the `long` after it at 8; and 513 bools after six `long`s, a copy of 80
-  bytes aligned to 128, the `long` after it at 80, and as a result, whose
-  hidden pointer clang doesn't count, the sixth `long` on the stack. And
+  struct aligned to 16 that clang counts in a register, an `i64` at stack 0
+  (`LOW`), and the `long` after it at 8; and 513 bools after six `long`s, a
+  copy of 80 bytes aligned to 128, the `long` after it at 80, and as a result,
+  whose hidden pointer clang doesn't count, the sixth `long` on the stack; and
+  that struct aligned to 16 after six `long`s, a copy of its 16 bytes at stack 0
+  (not `LOW`: clang's count has no register), the `long` after it at 16. And
   `va_arg`'s plans for a `long` aligned to 32, which reads the overflow area
   aligned to 8, and for that union, from two general registers' slots. Last
   the levels across four calls by each path: a struct of 101 bytes ending in
@@ -1381,8 +1398,13 @@ locations from `abi_assign`. clang's first five are directed
 R of runs of bit-fields wider than an eightbyte (an `i128`, packed, followed
 by a `char`, two bit-fields in one run, and a packed `_BitInt(128)` one),
 which the uncounted `nullptr_t` leaves one general register where clang counts
-two; the rest are random, with up to 21 named arguments and 6 unnamed, a fifth
-of the results `void`:
+two; in the compiled runs against clang, the first is `(nullptr_t, long × 5, U,
+long)` (`abi_test_world_directed_compiled`) for a union U of 16 bytes whose high
+eightbyte is padding, an `int` beside an empty struct aligned to 16, which clang
+passes as its low eightbyte alone, an `i64`, there with a general register left
+in its count and none in LLVM's: in one 8-byte stack slot, the last `long`'s
+after it. The rest are random, with up to 21 named arguments and 6 unnamed, a
+fifth of the results `void`:
 
 - **The C file** has the world's typedefs, written by `c_types_test.c`'s
   oracle, every signature's argument and result bytes (each value a valid
@@ -1452,40 +1474,62 @@ own bytes), which the fixtures' `SIGN` and `ZERO` check instead. The files go
 in a directory under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a
 failure.
 
-**The compiled runs** (#137): two more runs, against clang and against GCC at
-16 bytes, put C that this compiler compiles on our side. Their worlds
-(`AbiTestWorld.compiled`) hold what its C passes: integers of up to 64 bits,
-`__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128 and U128),
-enums, pointers, `float`, `double` and `long double` (#136's item 8),
-`_Complex float`, `double` and `long double` (#133's lowering, as aggregates of
-their two parts), and the structs, unions, arrays and aligned typedefs made of
+**The compiled runs** (#137): four more runs, against clang and against GCC at
+16 bytes and at 64 (`-march=x86-64-v4`, both sides), put C that this compiler
+compiles on our side. Their worlds (`AbiTestWorld.compiled`,
+`abi_test_compiled_passes`) hold what its C passes: integers of up to 64 bits,
+and `_BitInt`s of 2 to 128 bits (#534's lowering, in the classes of 8 to 64
+bits, and the 128-bit classes for 65 to 128), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
+and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
+`long double` (#136's item 8), `_Complex float`, `double` and `long double`
+(#133's lowering, as aggregates of their two parts), at 64 bytes the vectors
+the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
+`char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
+clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
+and the structs, unions, arrays and aligned typedefs made of
 them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
-no `nullptr_t`, `_BitInt`, vector, complex integer or `_Atomic` type, and none of
-clang's directed records. C23's enums of a fixed underlying type, structs
+no `_BitInt` past 128 bits, vector of another size or of `bool`, complex integer
+or `_Atomic` type, and none of the record runs' directed records, whose
+bit-fields span more than 8 bytes, but a directed record of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
 clang and GCC write them. Tier 0 holds a call's arguments on its stacks at once (15
 integer and 16 floating values, 14 integer ones in a realigned frame, whose
-rbp is the table's last) and copies its aggregates through each stack's first
-free register, and our caller's `r = c_callee(...)` holds `r`'s address under
+rbp is the table's last), and takes those past them to its frame's deep slots
+(#712), but not in a function with values of a memory class (long double's,
+the 128-bit integers' and the vectors'), whose slots its depths index; and our
+caller's `r = c_callee(...)` holds `r`'s address under
 the arguments when the result is a struct, a union, a `long double` or a
-128-bit integer, so a compiled world's signature passes at most 12 integer
-values (an aggregate is its address, and a `long double` or a 128-bit integer
-takes an integer depth) and 15 floating ones,
-an argument past them becoming one of the other stack's. Our side is C (`abi_test_write_ours`): per signature, a callee
-that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
-returns the result's from the signature's data, and a caller that copies each
+128-bit integer. So a compiled world's signature with a `long double`, a
+128-bit integer (a `_BitInt` of 65 to 128 bits too) or a vector among its
+arguments or as its result
+(`abi_test_tier0_memory`) passes at most 12 integer values (an aggregate is
+its address, and a `long double` or a 128-bit integer takes an integer depth)
+and 15 floating ones, an argument past them becoming one of the other stack's,
+and the others pass their 21 named and 6 unnamed arguments as drawn. A
+`_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
+as it loads (the convention leaves the bits past it unspecified), through
+128-bit shifts whose count takes the depth above it, one more than a
+128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
+that stores each named parameter's bytes as it arrived (its incoming copy's,
+which the C caller checks against the data), its unnamed ones read with
+`va_arg`, then writes each named parameter's bytes from the signature's data,
+the last first, and stores them again, which the C caller checks too (a
+parameter kept in a home shorter than its object would overwrite the
+parameters after it), and returns the result's from the data, and a caller that copies each
 argument's bytes into a local of its type, calls the C callee with them and
 stores the result's bytes. This executable (or `--buster PATH`) compiles it
-with `--verify -std=gnu23 -w -c`, the vector paths' records checked by
-`x86_validate`, and again with `--scalar`, whose object must be the same
-bytes; the compiler's driver links the object with the C side, which checks
-every argument and result both ways as in the record runs. C names neither the
-al our caller sets nor the hidden pointer our callee gets back, so those
-checks are the record runs' alone.
+with `--verify -std=gnu23 -w -c` and the run's `-march`, the vector paths'
+records checked by `x86_validate`, and again with `--scalar`, whose object
+must be the same bytes; the compiler's driver links the object with the C
+side, which checks every argument and result both ways as in the record runs.
+C names neither the al our caller sets nor the hidden pointer our callee gets
+back, so those checks are the record runs' alone. The runs at 64 bytes execute
+where the host has x86-64-v4's features (AVX-512F, BW, CD, DQ and VL), and
+elsewhere compile and link, as the record runs at 32 and 64 bytes do.
 
 On the cloud VM (not the 9700X: Intel, clang 23.1.5, this compiler under
 Intel SDE for its AVX-512), the compiled runs pass at seeds 1 to 11, with both
@@ -1499,22 +1543,22 @@ compiled ones) make 320,000 signatures and 4,465,433 checks, of which the
 compiled runs' are 80,000 signatures and 1,080,346 checks; the two extension
 runs ("Extension", below) pass as well.
 
-With the defaults (seed 1), each run of random signatures has 400 of 2,200 to
-2,600 arguments, and the eight make about 45,000 checks, besides the two
+With the defaults (seed 1), each run of random signatures has 400 of 2,100 to
+2,600 arguments, and the ten make about 55,000 checks, besides the two
 extension runs' 1,004 each; on the 9700X the six record runs took 4.8 s, about
-a clang run's time. The ten runs are independent and nearly all of each one's
+a clang run's time. The twelve runs are independent and nearly all of each one's
 time is its compiler's, so they go at once, a child process each (the six
 record runs one after another took 18.1 s); the test prints their lines and
 adds their counts in the runs' order (clang's, then GCC's, each at 16, 32 and
-64 bytes, then the compiled runs against clang and against GCC, then the
-extension runs), and a run that fails keeps its files. The record runs passed
+64 bytes, then the compiled runs against clang and against GCC at 16 bytes,
+then at 64, then the extension runs), and a run that fails keeps its files. The record runs passed
 seeds 1 to 100 with clang 23.1.3 and GCC 16.2.1, before the compiled runs.
 
 Capture descriptors stay above stderr, even when the command starts with
 standard streams closed. Before the ordinary cross-check, bounded child
 processes exercise all eight combinations of open/closed standard descriptors
 with `/bin/false` as every compiler. Each must exit 1, preserve the standard
-descriptors' state and retain all ten runs' failure files; the regression
+descriptors' state and retain all twelve runs' failure files; the regression
 then removes its own files. A 10-second alarm and an 8 MiB file-size limit
 bound a replay that regresses into writing back into its capture. Two more
 children exhaust the descriptor limit at duplication and at the second
@@ -1752,13 +1796,65 @@ are implemented; source-to-function construction is still an integration.
 
 The ABI table is caller-owned arena storage tied to the same live TypeTable;
 IDs from another table are invalid. `abi_initialize` sizes columns from type
-capacity, classifies builtins and accepts vector widths 16, 32 or 64 bytes;
+capacity, seeds builtins and accepts vector widths 16, 32 or 64 bytes;
 failure restores its arena. Rows and metadata include u8 class/alignment/storage,
 u32 pass/stack bytes, u64 layout and `AbiReturn` records. One writer classifies;
 readers cannot race classification or tag completion. `abi_assign` is a trusted
 consumer: all referenced types must already be classified, pass must not have
 `BUSTER_ABI_PASS_UNSUPPORTED` set, and stack bytes must not be `UINT32_MAX`. Its producer
 must reject unsupported types before assignment.
+
+### Immutable builtin facts (#442)
+
+`calling_convention_builtins.c` is an original projection of this project's
+builtin type and ABI rules, not a cache of another unit's TypeIds. Its 64 reserved
+indices contain 42 present builtin types and zeroed holes. Initialization copies
+all seven columns (classes, pass bits, stack bytes, canonical alignment, storage,
+layout and results) and the class-merge table. Plain char's signedness is the one
+builtin configuration choice: unsigned-char mode patches its pass extension and
+result flags. The builtins contain no vector kinds, so these facts are the same
+at vector widths 16, 32 and 64; the chosen width still governs derived types.
+
+Copies are bounded by the logical type count, including a zero or partial builtin
+prefix. Existing capacity and width validation runs before any copy. Pass, storage
+and layout remain zero through the requested capacity, while other unclassified
+tails remain untouched. No derived row is shared: incomplete tags, dependency
+levels, completion and the larger/rare summaries retain their caller-owned rules.
+There is no mutable global initialization, lock or TypeTable lifetime assumption.
+
+The facts were first projected from `e7f89091648f68940b595aadd648841c1ffc3ec5`'s
+`c_types.c` and `calling_convention.c`. `tools/generate_builtin_abi.c` recomputes
+the facts from those modules' current scalar rules before writing them. It includes
+the existing projection while compiling, so build the generator first, write to a
+temporary file, check its status, and then compare or replace the source. Never
+redirect its compiler command onto the included source. From the repository root:
+
+```sh
+clang -O3 -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing \
+  -Wno-unused-function -pthread tools/generate_builtin_abi.c -o build/generate-builtin-abi
+./build/generate-builtin-abi > build/calling-convention-builtins.c
+cmp src/buster/compiler/calling_convention_builtins.c build/calling-convention-builtins.c
+```
+
+Run each command only after the preceding command succeeds. A nonzero generator
+status leaves the tracked projection untouched. When rules deliberately change,
+review the generated difference, replace the tracked file with the completed
+temporary output, and run `test-calling-convention`. Its builtin test clears all
+seven columns and recomputes every present row by the scalar classifier and
+finisher. It checks both char modes, all supported widths, reserved holes,
+zero/small prefixes, capacities below and around 64, rejected widths/capacities,
+poisoned padding/tails and the first derived type's unchanged scheduling.
+
+The [frozen #442 record](https://github.com/buster14a/buster-performance/tree/d8adf0e6e8cd7eb0c33f49c3df03fced471cb0e7/docs/measurements/builtin-abi-init-442-2026-10-28)
+compares `73b6ba60` with `e7f89091` on the locked 9700X: repeated 64-row
+initialization takes 486.55–503.23 ns before and 18.18–19.42 ns after, excluding
+allocation, type construction and the rest of compilation. The local ELF has
+five 2,752-byte copies, 13,760 bytes of read-only data in total. This trades
+repeated computation for static data and a maintained projection/oracle pair.
+The whole-process controls establish neither a general CLI speedup nor neutral
+equivalence; their mismatched local screens and first-image faults are retained.
+These frozen results do not qualify later main compositions or a demand-driven
+classifier.
 
 Natural typed-column strides and explicit counts/capacities apply;
 assignment's masked tails do not require caller padding. Its padded internal

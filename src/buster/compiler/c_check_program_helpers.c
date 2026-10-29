@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Per-unit native helpers for reached atomic, terminal and floating-environment builtin nodes. Include after CheckProgram and the
+// Per-unit native helpers for reached atomic, terminal, floating-environment and x86 builtin nodes (the x86 ones no row
+// takes, c_builtin_x86_helpers.c). Include after CheckProgram and the
 // standalone builtin helper emitters. The program's sorted active-node list is the execution consumer's input;
 // unselected source expressions never reserve helpers. Signatures are deduplicated in first-use order, and
 // symbols follow the program's ordinary symbols. This planner never mutates Link or publishes code atoms.
@@ -17,8 +18,10 @@
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 
 #define BUSTER_CHECK_PROGRAM_HELPER_FIXED 28u
-// A read/modify/write signature's key follows the others': its rule's, its width's and its format's.
-#define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES (BUSTER_CHECK_PROGRAM_HELPER_FIXED + (uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules) * 16u)
+// A read/modify/write signature's key follows the others': its rule's, its width's and its format's; and an x86 leaf's
+// the read/modify/write ones', its kind's.
+#define BUSTER_CHECK_PROGRAM_HELPER_X86 (BUSTER_CHECK_PROGRAM_HELPER_FIXED + (uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules) * 16u)
+#define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES (BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)CBUILTIN_X86_HELPER_COUNT)
 
 typedef struct CheckProgramHelper CheckProgramHelper;
 struct CheckProgramHelper
@@ -44,6 +47,8 @@ struct CheckProgramHelper
     uint32_t required_alignment;
     // An asm statement's helper (c_check_program_asm.c): the statement's index plus one; 0 for a builtin's.
     uint32_t assembly;
+    // An x86 builtin's leaf (c_builtin_x86_helpers.c), or CBUILTIN_X86_HELPER_NONE.
+    CBuiltinX86HelperKind x86;
 };
 
 typedef struct CheckProgramHelperUse CheckProgramHelperUse;
@@ -65,6 +70,16 @@ struct CheckProgramHelpers
     // What an UNSUPPORTED status lacks, or NULL.
     const char* reason;
 };
+
+// Whether a type is a 16-byte vector of elements other than bool, as a vector leaf's parameters and result are
+// (CBuiltinX86HelperInfo.vector): a value Tier 0 passes in an XMM register.
+static bool check_program_helper_vector(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_conversion_operand(types, type);
+    const uint8_t kind = type_kind(types, base);
+    const bool vector = (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && type_size(types, base) == 16;
+    return vector && type_unqualified(type_strip_aligned(types, type_element(types, base))) != BUSTER_TYPE_BOOL;
+}
 
 static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes, bool rmw, CBuiltinAtomicRmwFormat format)
 {
@@ -325,7 +340,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         valid = stream->status == CHECK_STATUS_OK && stream->report_count == 0 && stream->count == graph->count &&
                 (program->builtin_count == 0 || (program->builtin_nodes != 0 && graph->ops != 0 && graph->members != 0 && graph->tokens != 0)) &&
                 (stream->atomic_count == 0 || stream->atomics != 0) && (stream->misc_count == 0 || stream->misc != 0) &&
-                (stream->floating_count == 0 || stream->floating != 0);
+                (stream->floating_count == 0 || stream->floating != 0) && (stream->x86_count == 0 || stream->x86 != 0);
     }
     if (!valid)
     {
@@ -416,6 +431,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     uint32_t atomic = 0;
     uint32_t misc = 0;
     uint32_t floating = 0;
+    uint32_t x86 = 0;
     for (uint32_t i = 0; result->status == CHECK_PROGRAM_OK && i < program->builtin_count; i += 1)
     {
         const CheckGraph* graph = &program->input->graph;
@@ -432,11 +448,52 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
             const bool terminal = op == CHECK_OP_BUILTIN_MISC && (id == CBUILTIN_TRAP || id == CBUILTIN_UNREACHABLE);
             const bool rounds = op == CHECK_OP_BUILTIN_FLOAT && id == CBUILTIN_FLT_ROUNDS;
             const bool math = op == CHECK_OP_BUILTIN_FLOAT && check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE;
-            if (op == CHECK_OP_BUILTIN_ATOMIC || terminal || rounds || math)
+            // An x86 builtin's leaf, by its name.
+            CBuiltinX86HelperKind leaf = CBUILTIN_X86_HELPER_NONE;
+            if (op == CHECK_OP_BUILTIN_X86)
+            {
+                while (x86 < stream->x86_count && stream->x86[x86].node < node)
+                {
+                    x86 += 1;
+                }
+                const BuiltinIntrinsicInfo* info = x86 < stream->x86_count && stream->x86[x86].node == node ? stream->x86[x86].info : NULL;
+                leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;
+            }
+            if (op == CHECK_OP_BUILTIN_ATOMIC || terminal || rounds || math || leaf != CBUILTIN_X86_HELPER_NONE)
             {
                 CheckProgramHelper helper = { 0 };
                 bool folded = false;
-                if (terminal)
+                if (leaf != CBUILTIN_X86_HELPER_NONE)
+                {
+                    // Its arguments as unsigned longs, its result one or none; a vector leaf's, its builtin's 16-byte
+                    // vectors, the arguments' types at the builtin's prototype's (one for every use).
+                    const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + leaf;
+                    if (graph->argument_counts == 0 || graph->argument_counts[node] != info->parameter_count)
+                    {
+                        result->status = CHECK_PROGRAM_INVALID;
+                    }
+                    else
+                    {
+                        const uint32_t first = graph->argument_offsets[node];
+                        helper = (CheckProgramHelper){
+                            .id = id,
+                            .parameter_count = info->parameter_count,
+                            .result_type = info->vector ? stream->values[node].type : info->result ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
+                            .compiler_barrier = true,
+                            .x86 = leaf,
+                        };
+                        bool vectors = !info->vector || check_program_helper_vector(program->types, helper.result_type);
+                        for (uint32_t a = 0; a < 3; a += 1)
+                        {
+                            const bool parameter = a < info->parameter_count;
+                            const TypeId type = !parameter ? BUSTER_TYPE_VOID : info->vector ? stream->argument_conversions[first + a].type : BUSTER_TYPE_ULONG;
+                            helper.parameter_types[a] = type;
+                            vectors &= !parameter || !info->vector || check_program_helper_vector(program->types, type);
+                        }
+                        result->status = vectors ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+                    }
+                }
+                else if (terminal)
                 {
                     while (misc < stream->misc_count && stream->misc[misc].node < node)
                     {
@@ -542,7 +599,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                 }
                 if (result->status == CHECK_PROGRAM_OK && !folded)
                 {
-                    const uint32_t key = check_program_helper_key(helper.id, helper.bytes, helper.rmw, helper.rmw_format);
+                    const uint32_t key = helper.x86 != CBUILTIN_X86_HELPER_NONE ? BUSTER_CHECK_PROGRAM_HELPER_X86 + (uint32_t)helper.x86 :
+                                                                                   check_program_helper_key(helper.id, helper.bytes, helper.rmw, helper.rmw_format);
                     if (key >= BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES)
                     {
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
@@ -592,7 +650,20 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     for (uint32_t i = 0; result->status == CHECK_PROGRAM_OK && i < result->count; i += 1)
     {
         CheckProgramHelper* helper = planned + i;
-        if (helper->terminates)
+        if (helper->x86 != CBUILTIN_X86_HELPER_NONE)
+        {
+            const CBuiltinX86Helper native = cbuiltin_x86_helper(helper->x86, output);
+            helper->code = native.code;
+            const uint32_t result_class = helper->result_type == BUSTER_TYPE_VOID  ? BUSTER_TYPED_CLASS_VOID :
+                                          helper->result_type == BUSTER_TYPE_ULONG ? BUSTER_TYPED_CLASS_U64 :
+                                                                                     BUSTER_TYPED_CLASS_VECTOR;
+            if (native.code.error == TIER0_OK && (native.parameter_count != helper->parameter_count || native.result_class != result_class))
+            {
+                result->status = CHECK_PROGRAM_INVALID;
+                result->token = program->input->graph.tokens[first_nodes[i]];
+            }
+        }
+        else if (helper->terminates)
         {
             const CBuiltinTerminalHelper native = cbuiltin_terminal_helper(helper->id, output);
             helper->code = native.code;

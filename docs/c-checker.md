@@ -508,24 +508,59 @@ definition's parameters, in the list's order, without a prototype
 (`CheckDeclaratorPart.identifier_list`), and its scan ends before the
 declaration list, since no specifier follows a group in a declarator. The
 declaration list (`check_input_kr_declarations`) gives each name its type,
-adjusted as a parameter's, under C17 6.9.1p6's constraints, each refused where
-clang reports it:
+adjusted as a parameter's, under C17 6.9.1p6's constraints:
 - no storage class but `register`, no function specifier or typedef;
 - only the list's names, each declared once, and none with an initializer;
-- every listed name declared (clang refuses the implicit `int`).
+- every listed name declared in C99 and later; a name left undeclared in C89
+  receives `int`.
 
-A struct, union or enum defined in the list, and a variably modified
-parameter there, are refused by name. The definition's type is the prototype of
-its parameters' default argument promotions, as clang types it (`float a`
-makes `float (double)`). So a later prototype must agree with them, and its
-calls convert their arguments as a prototype's do. Where clang only warns about
-a call with the wrong number of arguments, the checker refuses it.
+The list's struct, union and enum definitions use the ordinary tag reader.
+Their tags and enumerators remain visible throughout the declaration list,
+then their header scope ends before the function body, as Clang treats an
+old-style definition. The completed parameter types remain; an outer tag or
+ordinary name becomes visible again in the body and following file scope.
+These declarations are not republished into the body as prototype-definition
+tags are. The extra visibility/redefinition warning sequence is not reproduced.
+Variably modified parameters remain refused by name. An identifier list
+outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
+as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,
+including typedefs and nested type queries; invalid atomic inner types retain
+the ordinary constraint checks. Statement-expression type specifiers that
+need the ordered declaration reader remain outside this list reader.
 
-An identifier list outside a definition is refused, as C17 6.7.6.3p3 has it.
-The producer lowers a K&R definition whose parameters' types the promotions
-leave alone. It refuses by name one with a `char`, `short`, `_Bool` or `float`
-parameter, which would convert from its promoted type on entry
-(`CHECK_INPUT_FUNCTION_KR`).
+The definition retains a prototype of its parameters' default argument
+promotions for compatibility checking and ABI lowering, as clang types it
+(`float f(a) float a; { ... }` has that internal signature `float (double)`).
+As in clang, `_Atomic` parameters retain their declared ABI types instead:
+`_Atomic float` is not promoted to double, and an atomic aggregate keeps its
+storage padding. Known calls retain these ABI types as well as their value conversions.
+At expression uses its designator instead has a no-prototype type. Known
+direct calls, including an addressed function, retain the definition's
+argument conversions, but a wrong argument count is a warning rather than
+a hard constraint failure. A later prototype or a pointer declared with a
+prototype still checks its own argument count. Other no-prototype calls use
+default argument promotions. The call graph carries the known signature and
+source token explicitly; the type table does not grow a new function kind.
+
+The producer receives all incoming parameters in their promoted ABI types,
+then converts changed ones into separate locals of their declared types.
+That two-pass layout keeps the incoming ABI-local prefix contiguous, including
+a hidden aggregate-result pointer, while body accesses and address-taking
+use the declared local's type, alignment and volatile semantics. The reader's
+`kr_parameter_count` bounds extra locals and entry instructions, including
+unused parameters and `_Bool` truncation. Ordinary units reserve none of
+this extra room. No throughput improvement is claimed by this correctness fix.
+
+Definitions and no-prototype calls carry `-Wdeprecated-non-prototype`;
+known direct calls with a wrong count have a separate arity warning.
+Source-ordered diagnostic pragmas control them, including promotion to errors,
+and quiet mode suppresses warnings. Calls in source-only `sizeof`/`typeof`
+queries publish sparse source diagnostics; their deferred-lane path retries
+in source order rather than mutating another lane's diagnostic storage. Executable oracle fixtures cover signed
+and unsigned narrowing, float rounding, register and stack arguments, aligned
+and volatile locals, hidden result pointers and prototype transitions. Source
+fixtures check C89, C99, C17 and C23 against the matching Clang language mode.
 
 Where clang takes a construct C's constraints exclude, the checker takes it
 too:
@@ -1277,7 +1312,12 @@ What the lowering covers past scalars (#145's programs):
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is NO_CLASS passes as its low eightbyte alone, an
+  `i64` or a `double` in clang's code, in a register or, when clang's count of
+  registers has one left and LLVM's none, in one 8-byte stack slot, the next
+  argument's after it (`abi_assign`'s `BUSTER_ABI_FLAG_LOW`), which Tier 0
+  copies as one part (#137). A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
@@ -1310,7 +1350,11 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area, and
+  `va_arg` of a vector takes the path of a struct of its bytes, as a 128-bit
+  integer's does (a 16-byte one from its XMM register's slot of the save area,
+  a wider one in the overflow area, where the call puts it), and loads the
+  vector from their address. Named
   arguments aligned past 16 bytes align the incoming area to them, which
   Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
@@ -1368,9 +1412,10 @@ What the lowering covers past scalars (#145's programs):
   (`Tier0Function.vectors`), from the classes its entries have, which one
   bitmask gathers with long double's and the 128-bit integers'. Their entries
   are AVX-512 forms: the target needs AVX-512F and AVX-512VL, which the lowering
-  takes from the preprocessor's target (`CheckProgramOptions.target_features`,
-  from `-march` and the `-m` flags), and without them a vector's first entry is
-  refused by name. The convention passes a vector in a register as wide as the
+  takes from the preprocessor's target (`CheckProgramOptions.target`, from
+  `-march` and the `-m` flags), the unit's and the function's (its target
+  attribute's, below), and without them a vector's first entry is refused by
+  name. The convention passes a vector in a register as wide as the unit's
   target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
   passes and returns one as the 128-bit integers are passed, through a frame
   object of its bytes. An operator is an X86 entry of its row
@@ -1379,7 +1424,21 @@ What the lowering covers past scalars (#145's programs):
   and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
-  type. `op=` loads, computes and stores back. An element is read and written at
+  type. `op=` loads, computes and stores back. Half-precision elements'
+  (`_Float16`'s) arithmetic and compares are AVX512-FP16's (VADDPH, VCMPPH and
+  the others), which the function's target must have (its extension:
+  `X86Target.extensions`), and their negation flips the sign bits. Where the
+  unit's target hasn't the extension, clang gives `_Float16` excess precision,
+  even in a function whose target attribute adds it: it computes `+ - * /` and
+  negation in float and rounds to half precision only where a value leaves the
+  chain of those operators (a store, a cast, a compare, a call's argument, a
+  conditional's or a comma's operand). One operator's row rounds as clang's does
+  (float's 24 bits are at least twice half's 11 and 2 more, so rounding twice
+  rounds as once), and a negation's quiets signaling NaNs as clang's float
+  conversions do (VCVTPH2PS and VCVTPS2PH after the flip); a chain, an operand
+  of those operators that is one of them or a unary plus, is refused by name
+  (`check_lower_vector_half_chain`). A unit whose target has the extension
+  computes chains in half precision, as clang does. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
   (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
   same bytes changes no bits. Integer division and remainder, and 8-bit
@@ -1394,6 +1453,39 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **`_BitInt(N)` of up to 64 bits (#148).** It takes the narrowest class of 8,
+  16, 32 or 64 bits that holds it (`check_lower_type_class`), its values extended
+  from N bits in it, as clang stores them (`check_lower_bit_int_shift`). What
+  may leave other bits is extended again after it by a pair of shifts
+  (`check_lower_bit_int_extend`): a sum, a difference, a product, a left shift,
+  a negation, a complement, an update, a conversion to it, and a value from
+  memory or a call (an update's old value too), whose bits past N the convention
+  leaves unspecified and clang's loads ignore. Tier 0 computes, compares and
+  shifts in I32, U32, I64 and U64 alone, so an operation of class I8, U8, I16 or
+  U16 (a `_BitInt`'s alone, as C promotes the other narrow types) converts its
+  operands to I32 or U32, by their signedness, and its result back
+  (`check_lower_computed`), and so does a switch on one, its cases too. A
+  constant extends from N bits. An expression of a `_BitInt` goes first to
+  `check_lower_bit_int_node`, out of line, by its value's kind, which the
+  expansion reads for every expression anyway, and the batch's templates
+  (`c_check_program_batch.c`) take none, by its type's fact
+  (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
+  `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
+  conversion's or constant's type for one, and its tasks' loop
+  (`check_lower_drain`) is a copy without the expansion's and the
+  conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
+  3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts (a constant comes
+  folded to its width and extended so).
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1409,20 +1501,201 @@ What the lowering covers past scalars (#145's programs):
   the elements' top bits and vectors of a mask's, truncating conversions of a
   low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
   VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
-  VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
-  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
-  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
-  integers. A builtin the table doesn't name is refused by name ("this x86
-  builtin"), and so are one whose instructions the target hasn't, a gather's or
-  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
-  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
-  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
-  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  VPTERNLOG, VPERMT2 and VNNI's dot products (VPDPBUSD, VPDPBUSDS, VPDPWSSD and
+  VPDPWSSDS), gathers and scatters, VPBLENDVB and VPSHUFBITQMB. And #129's
+  intrinsics:
+  - the floating selects, which are the integer selects of their elements'
+    bytes, and the scalar ones (`selectss_128`, `selectsd_128`: VMOVSS and
+    VMOVSD under the mask, over a copy of w);
+  - VPMOV's, VPMOVS's and VPMOVUS's truncations under a mask at every width,
+    into a register and into memory;
+  - the masked moves of their own forms: VMOVUPS, VMOVUPD, VMOVAPS, VMOVAPD,
+    VMOVDQA32 and VMOVDQA64 (the aligned ones fault on an unaligned address,
+    as clang's code does), the scalar ones (`loadss128_mask` and the others,
+    which clang lowers as the vector's masked load or store under the mask's
+    low bits) and the expanding loads;
+  - the floating compresses and expands, into a vector and into memory;
+  - the SSE and AVX-512 operations of two vectors: the packs, averages,
+    multiplies, signs and horizontal sums and differences, the permutes by a
+    vector, the variable shifts and the shifts by an XMM register's count, the
+    AES rounds, GF(2^8)'s products, BF16's conversions, max and min, and the
+    SSE compares by the predicates their names spell (VEX's VCMP into
+    vectors);
+  - one vector's conversions and approximations, and the scalar ones of its
+    first element (VRCPSS, VRSQRTSS); FMA's addsub, VPERMT2's and the BF16 and
+    IFMA products; the blends by a vector's signs;
+  - operations into w under a mask, of one vector (MASK_UNARY: every
+    conversion's pair of widths, VGETEXP, VRCP14 and VRSQRT14) and of two
+    (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's);
+  - compares and tests into an int, from the flags (FLAGS and KTEST): the SSE
+    compares (`comieq` and the others, of each kind, the parity giving
+    unordered operands' equal and not equal), PTEST, VTEST, KORTEST and KTEST,
+    then CMOVcc's of the condition into the result, which MOV's 0 and 1 leave
+    the flags for;
+  - KNOT and the other widths' opmask operations;
+  - the general registers' and memory's instructions (SYSTEM): CRC32, BEXTR,
+    the FS and GS bases, RDPID, the shadow stack's, the cache lines', FXSAVE,
+    the non-temporal and direct stores, PREFETCHI, INVPCID, WBINVD, WBNOINVD and
+    EMMS; RDRAND's and RDSEED's steps (the value stored, and the carry an int);
+    ADC's and SBB's sums and differences with carries, the carry in set by NEG;
+  - VMASKMOV's loads and stores under a vector's signs, VLDDQU, SSE4A's EXTRQ,
+    INSERTQ and non-temporal scalar stores, MASKMOVDQU (VPMOVB2M's mask and
+    VMOVDQU8 under it) and SHA's messages and rounds of SHA-1;
+  - the masked FMAs merged into a, zeroed and merged into c, each rounding
+    control's; the scalar conversions to integers, each rounding control's;
+    AVX's lane extraction; VRNDSCALE under a mask; bf16's scalar select (by
+    KANDN of the mask and 1, as no scalar move of 16 bits is AVX-512F's);
+  - the floating reductions of 64 bytes, two rows in clang's order: the
+    halvings to 16 bytes, then to the element, the start the last operation's
+    first operand where the reduction has one;
+  - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
+  - AVX512-FP16's, whose rules name its extension (`CheckX86LowerRule.extensions`),
+    which the function's target must have too: the half-precision elements'
+    exponents, reciprocals and conversions to and from floats, doubles and 16-,
+    32- and 64-bit integers under a mask (MASK_UNARY); two vectors' scales and
+    the scalars' operations and conversions under a mask (MASK_MERGE); the
+    complex products, plain and conjugate (VFMADDCPH, VFCMULCSH and the others,
+    of 32-bit lanes), merged as clang's code merges them
+    (`CheckX86LowerMerge`: into w, zeroed, into a, a's first lane by the mask's
+    first bit, or c's other lanes after its first); the masked FMAs at 64 bytes
+    and of the scalars, and the alternating ones without a mask; max and min;
+    the scalar select (VMOVSH); the scalar's masked loads and stores (the
+    vector's, under the mask, as clang's are); the scalar conversions to
+    integers; and `vcomish`, VCMPSH's compare into k1 by the predicate, whose
+    bit 0 is the int (SCALAR_COMPARE), as clang's code compares.
+
+  A rounding control, a builtin's last immediate (CheckX86LowerRounding),
+  picks the rule's form for 4 (`_MM_FROUND_CUR_DIRECTION`), its form that
+  suppresses exceptions for 8 and 12, and its form of embedded rounding in the
+  low bits' direction for 8 to 11, as clang's code does.
+
+  A function with an X86
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
+  opmask's are integers. A builtin the table doesn't name is refused by name
+  ("this x86 builtin"), and so are one whose instructions the target hasn't and
+  a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
+  instructions name fixed registers, or would write the vector registers
+  Tier 0 keeps floating values in across rows (the state's restores), are calls
+  of per-unit leaves, as the atomic builtins' are (`c_builtin_x86_helpers.c`,
+  planned by `c_check_program_helpers.c`), their arguments and result unsigned
+  longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`, `mwaitx` (whose leaf saves
+  rbx, as its unwind table says), `tzcnt_u16`, `_u32` and `_u64` (bsf and cmov,
+  the width for 0, as clang's code gives it), `lzcnt_u32` and `_u64` (bsr and
+  cmov, the width for 0), the rotates of each width (rol and ror by cl), the
+  XSAVE family's saves and restores and FXRSTOR, RDPKRU and WRPKRU, RDPMC,
+  RDPRU and RDTSCP, the flags' read and write (pushfq and popfq in a frame of
+  rbp, whose CFA the pushes don't move), CLZERO, MONITOR, MWAIT, VZEROALL and
+  VZEROUPPER. `sha256rnds2`, whose round keys are xmm0's, is a leaf of
+  vectors: its arguments and result are its builtin's 16-byte vectors, which
+  its calls pass and return as a function's (frame objects, in xmm0 to xmm2
+  and xmm0). Each leaf requires its instructions' features of the output
+  target (XGETBV XSAVE's, MONITORX and MWAITX MWAITX's, the others theirs);
+  the baseline target still takes PAUSE, RDTSC, the BSF- and BSR-based counts
+  and the rotates.
+  `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
+  nothing: its operand isn't evaluated, as clang's isn't. clang's header
+  builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
+  functions, which its calls take for the builtins) are still calls of those
+  functions, which no library defines. `test-checker`'s x86 programs
+  (`c_check_program_x86_test.c`) call each family's builtins at their
   prototypes' types, the masks' and the vectors' from the call's argument, with
   every result folded into the program's hash, by both paths against clang
   -O0's code for znver5; they run where the host has the rows' features
-  (`x86_target_native`), and compile and link elsewhere. `test-checker
-  --program-vectors` runs them and the vector programs alone.
+  (`x86_target_native`), and compile and link elsewhere. The AVX512-FP16
+  programs (`c_check_program_fp16_test.c`) are a znver5 unit's functions with
+  the headers' `target("avx512fp16")`, and one in a unit whose target has the
+  extension (x86-64-v4's, against clang's for sapphirerapids), of modest values
+  where the forms clang chooses could choose among NaNs and random bits
+  elsewhere; they run where the host has AVX512-FP16 too (not on Zen 5).
+  `test-checker --program-vectors` runs them and the vector programs alone.
+- **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
+  `__builtin_convertvector`, the `__builtin_elementwise_*` functions,
+  `__builtin_reduce_*` of integer elements and `__builtin_nontemporal_load` and
+  `_store` of vectors are X86 entries of rows of their own
+  (`c_check_program_vector_builtins.c`):
+  - a shuffle by constant indices is VPERMT2 of its two vectors by an index
+    vector, a constant (`Tier0Function.vector_constants`), at the wider of the
+    operands' and the result's widths, or nothing where every defined element
+    stays at its place. Its second vector is left out where none of its
+    elements is read and its evaluation has no effects, and
+    `__builtin_nondeterministic_value`'s isn't evaluated;
+  - a conversion is VPMOVSX or VPMOVZX at the result's width, VPMOV's
+    truncation at the operand's, or nothing between elements of one size. One
+    of a shuffle's first elements (a vector's low half, as the intrinsics widen
+    one) converts that shuffle's first vector in place;
+  - a conversion with floating elements is the pair's instruction, as clang
+    -O0's code is: from 32- and 64-bit integers by their signedness (VCVTDQ2PS,
+    VCVTUDQ2PD, VCVTQQ2PS and the rest, DQ's for 64-bit ones), to them truncated
+    as C converts (VCVTTPS2DQ, VCVTTPD2UQQ and the rest), between floats and
+    doubles, from half-precision elements to floats (VCVTPH2PS) and from floats
+    to them (VCVTPS2PH at the current rounding), between them and 16-, 32- and
+    64-bit integers or doubles with AVX512-FP16 (VCVTW2PH, VCVTTPH2DQ,
+    VCVTPD2PH and the rest), from bf16 elements to floats
+    (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), and nothing
+    within one format. A widening one is at the result's width, so that it reads
+    a shuffle's first elements in place (`_mm_cvtps_pd`'s);
+  - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
+    shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
+    has no class for, with a compound literal of constants) are VPMOV's
+    truncation, which zeroes the rest of its register, where every element past
+    the conversion's is a zero of the literal's; else that, then VPERMT2 with
+    the literal's bytes as its second table. This requires a nonvolatile literal
+    whose initializer values have no effects. A nonconstant or effectful second
+    operand is refused by name. Such a literal has no local and isn't evaluated,
+    and one evaluated anywhere else is refused by name;
+  - max and min, the saturating sums and differences of 8- and 16-bit elements,
+    abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
+    blended in where an element is zero) and the funnel shifts (VPSHLDV and
+    VPSHRDV, with VBMI2) are an instruction each, and so are sqrt and fma of
+    floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
+    rounding, as llvm.sqrt and llvm.fma are), of vectors and of scalars, whose
+    operands are floating values (`check_vector_scalar_row`, with AVX-512F),
+    and of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH);
+  - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
+    elements and a nontemporal load VMOVNTDQA, at an address the pointer's
+    element type aligns to the vector's bytes, as clang's code needs them;
+  - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
+    and VPSRLW) and applies its operation at each step, then moves the element
+    into a general register, in two rows where that is more than a row's 8
+    records.
+
+  `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
+  `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
+  floating constant the checker folded is its bytes; between integers or
+  pointers, or between vectors, the value's bits are the result; and between an
+  integer and a float or a double they go through a frame temporary, as clang
+  -O0's go through memory. The other floating elementwise functions and
+  conversions (of 8-bit integers, of 16-bit ones but to and from half-precision
+  elements, to bf16 elements, and between half-precision elements and other
+  types than floats without AVX512-FP16), the bf16 elements' elementwise
+  functions and the half-precision ones' without AVX512-FP16, floating
+  reductions, a shuffle by a vector of indices,
+  bit reversal, 8-bit multiplication, the funnel shifts of 8-bit elements, the
+  leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
+  at underaligned addresses, bit casts of other types, and the rows whose
+  extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
+  BITALG, VPOPCNTDQ, VBMI2, DQ) are refused by name. `test-checker`'s vector
+  builtin programs (`c_check_program_vector_builtins_test.c`) call each at every
+  width, the narrowing conversions and the floating intrinsics as the headers
+  write them, with the masked truncating stores and the leaves (monitorx and
+  mwaitx where the host has MWAITX), by both paths against clang -O0's code for
+  znver5.
+- **A function's target attribute (#180).** A function's
+  `__attribute__((target("...")))` gives its rows and leaves its own
+  instruction set (`CheckProgram.body_targets`, made by
+  `check_program_targets`): the static functions' declarations with a target
+  or `target_clones` attribute, found by the static objects' pass (scalar per
+  declaration, as the pass is), sorted by object with the radix kernel's twins,
+  and each body's found by a binary search where its object is in their range,
+  the attribute that applies being the first on the definition or a declaration
+  before it, as clang merges it. Each string resolves once against the unit's
+  options (`c_predefines.c`'s `predefines_function_target`, [the target
+  guide](x86-target.md)), and an attribute of the string before it, as a
+  header's functions have, is read as that one was. A unit without one, the
+  usual one, makes no column. A function of several versions
+  (GNU's function multiversioning: `target_clones`, or two strings) is refused by
+  name, and so are vector values in a function whose attribute turns AVX-512F or
+  AVX-512VL off; the convention stays the unit's, as clang's does.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -1715,7 +1988,7 @@ What the lowering covers past scalars (#145's programs):
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
+`_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -1917,8 +2190,21 @@ The test command fails if the oracle cannot run. It covers:
   per distinct text, with `-c` and the flags of the one-step build they
   replaced, and a path whose checked object and oracle are byte for byte the
   last linked program's takes that program's run: the same files would link
-  into the same executable (#465). A program that fails is linked and run, and
-  its directory kept with `driver.c` and `oracle.c`.
+  into the same executable (#465). A control's oracle is clang's build of
+  another source of the same names (`check_test_program_against`): a model of
+  what the program computes, or a mutant of it. The program must agree with
+  it, or with `mismatch` differ from it on some input (the harness's status
+  1). A run is taken from the last program only if that run expected the same
+  outcome. fpclassify's selector programs have both kinds (#148). Their
+  models, for a double, run the normal and subnormal selectors in an order
+  that C's sequencing fixes. The programs agree with the model that runs the
+  subnormal selector first, as a GCC-built clang does. With the
+  order-recording encoding they had, ours must agree with the model that runs
+  the normal selector first and differ from the other, so a change to
+  `check_lower_floating_prepare`'s order must change these two controls. Their
+  mutants evaluate the normal selector twice, the subnormal one never or the
+  argument twice. A program that fails is linked and run, and its directory
+  kept with `driver.c` and `oracle.c`.
 - The passes after checking that visit a unit's few records rather than every
   token (#592), on every program fixture by both paths
   (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
@@ -2030,12 +2316,12 @@ fixed with its fixture there:
     evaluation").
 - **Accepted, where clang refuses them:** the `_Noreturn` keyword on an object, and an `inline main`.
 
-One difference stays, recorded with the line the checker refuses the violation at. It's GNU's folding of a
-`const` object's value in an integer constant expression: `const int k = 3; enum { E = k };`, which clang folds,
-silently but for `-Wgnu-folding-constant`. The checker reads an object's value only as an address constant's
-place, not its initializer's value. It refuses the enumerator as clang refuses a non-`const` object's. Clang
-reads the initializers of `const` objects of every type there (members of a `const` struct's too), and this
-would need their values at the declaration.
+The remaining const-object difference is covered by declaration-time initializer receipts (#704).
+`const int k = 3; enum { E = k };` reads the completed initializer as GNU constant evidence, independently
+of the standard ICE flag. Typed sparse writes retain scalar values, implicit zero coverage, aggregate
+subobjects, symbolic pointers and active union selections. Each lookup checks the use's source boundary;
+volatile, incomplete and effectful initializers supply no value proof. Runtime loads retain their effects,
+including const atomic loads. An enumerator publishes ordinary ICE evidence after its definition.
 
 The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
 declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
@@ -2185,6 +2471,31 @@ they do per token where little of it was per declaration or expression:
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
   instructions fewer, about 70 a token. The scalar path computes each bit with
   the walk's own tests (`check_input_syntax_of`).
+- **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
+  roles at a time, then visits only separators and statement terminators.
+  Non-separators' contexts depend directly on their roles; separators inherit
+  a parent's context. Reverse source order completes later parents first. An
+  earlier parent with a fixed context is computed directly; an earlier
+  separator parent asks the unchanged reverse-postorder scalar pass to replay
+  the whole view. This keeps dependency order for nonidentity traversals
+  without another retained column, allocation or ancestor walk. Loads and
+  stores are masked at the logical token count. The count is the parser
+  view's complete token count: a prefix has its own complete postorder, and
+  a repair includes its synthetic closers even beyond `original_end`, which
+  limits later publication. The scalar host and `--scalar` use the original
+  pass. Guard-page tests cover every tail through 257 tokens, shuffled
+  dependency orders, deep chains and unknown role bytes; real prefix and
+  repair views compare every output byte with the scalar oracle. This is a
+  bounded residual of #529; general literal preparation and graph
+  construction remain separate work. It does not repeat #646's sparse walks,
+  #640's traversal derivation, #628's retained parser buffers, #658's compact
+  integer tables or #641's post-check work.
+  The [frozen qualification](https://github.com/buster14a/buster-performance/blob/e227084cbe0f9b064b9a506ca3e34c9826f49965/docs/measurements/check-input-comma-529-2026-10-28/README.md)
+  compares `e7f89091` with `b8ee2900`: three six-placement SQLite cohorts improve
+  whole-process wall time 1.16–1.31%, with pooled RSS +22–56KiB. Tiny startup
+  cost remains unresolved and individual copy tails are retained. These are
+  frozen measurements, separate from later composition correctness; they
+  establish no current-main or general-corpus speedup.
 - **Scans for few tokens.** The passes that act on few tokens test 64 of them
   at once (16 or 8, by the column's width) and visit only those
   (`check_input_scan_*`): the constant contexts (static objects, static
