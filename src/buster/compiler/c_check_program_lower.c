@@ -5259,7 +5259,10 @@ static void check_lower_complex_emit(CheckLowerWriter* writer, uint32_t node, ui
 // `destination op= value` (check_lower_complex_update), the value and the destination's address in temporaries `locals`
 // (the value's in the low 32 bits): the destination read in the calculation's type, the result computed
 // (check_lower_complex_compute) and stored back, converted: a complex destination's parts, whose address is the
-// expression's value, or a real one's value (a _Bool one's the result's truth), which STORE leaves.
+// expression's value, or a real one's value (a _Bool one's the result's truth), which STORE leaves. A _BitInt
+// destination past 128 bits, or such a part of a complex one, is an aggregate (check_lower_limb_type): read through its
+// conversion from its address, and written by a copy of its converted value's bytes, the destination's address the
+// expression's value.
 static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t node, uint64_t locals)
 {
     const CheckProgram* program = writer->program;
@@ -5274,6 +5277,8 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     const TypeId element = check_lower_complex_element(types, calculated);
     const uint8_t class = check_lower_class(writer, element);
     const bool stored_complex = check_lower_complex(writer, stored);
+    const TypeId stored_element = stored_complex ? check_lower_complex_element(types, stored) : stored;
+    const bool stored_aggregate = check_lower_aggregate(writer, stored_element);
     const bool value_complex = check_lower_complex(writer, stream->values[graph->operand1[node]].type);
     const uint8_t current_class = stored_complex ? BUSTER_TYPED_CLASS_U64 : class;
     const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = value_complex };
@@ -5286,13 +5291,15 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
     }
     else
     {
-        check_lower_emit(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, stored), 0);
-        check_lower_bit_int_extend(writer, stored, false, false);
+        if (!stored_aggregate)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, stored), 0);
+            check_lower_bit_int_extend(writer, stored, false, false);
+        }
         check_lower_scalar_conversion(writer, stored, element);
     }
     check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, current_class, current.local);
     const uint32_t result = check_lower_complex_compute(writer, computed, calculated, current, value);
-    const TypeId stored_element = stored_complex ? check_lower_complex_element(types, stored) : stored;
     for (uint32_t part = 0; stored_complex && result != BUSTER_CHECK_NONE && part < 2; part += 1)
     {
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
@@ -5300,7 +5307,14 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
         check_lower_complex_place(writer, result, part, type_size(types, element));
         check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
         check_lower_scalar_conversion(writer, element, stored_element);
-        check_lower_emit(writer, BUSTER_TYPED_SET, check_lower_class(writer, stored_element), 0);
+        if (stored_aggregate)
+        {
+            check_lower_copy(writer, type_size(types, stored_element), false, false);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_SET, check_lower_class(writer, stored_element), 0);
+        }
     }
     if (stored_complex)
     {
@@ -5311,7 +5325,15 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
         check_lower_complex_conversion(writer, calculated, stored);
-        check_lower_emit(writer, BUSTER_TYPED_STORE, check_lower_class(writer, stored), 0);
+        if (stored_aggregate)
+        {
+            check_lower_copy(writer, type_size(types, stored), false, false);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_STORE, check_lower_class(writer, stored), 0);
+        }
     }
 }
 
