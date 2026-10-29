@@ -347,7 +347,27 @@ before the call (the callee's) or up to the definition (the caller's), as clang
 inherits them; `CheckProgram.attribute_keys` keeps them, in a unit with a target
 attribute alone. The calls are those clang emits: the walk of the x86 builtins'
 range errors (#487) reaches what a constant condition leaves running, and a
-direct callee is the function's name alone, not `(*f)` or `(&f)`.
+direct callee is the function's name alone, not `(*f)` or `(&f)`. A `cleanup`
+attribute's call (#147, `CallCleanupFunction::Emit`) is one too, of the function
+its argument names, by that function's declarations before the argument. Clang
+emits it where the variable's scope ends, as it pops the cleanup: once, however
+many exits from the scope reach it, after the scope's statements and the
+innermost variable's first, and reports it at the attribute
+(`[[gnu::cleanup(f)]]`'s at its scope, `gnu`). So the walk marks each variable
+whose cleanup it reaches at any exit (a statement expression's end marks its
+block's own, which run once its value is computed), and the check places the
+call at the CLEANUP control of its scope's closing token, in that control's
+statement, or in a statement expression's, the statement that reached it.
+
+That walk is Sema's reachability, its CFG's (#487's range warnings follow it,
+as clang's do), which code generation's emission differs from in a few shapes,
+so the two may report different errors there. Clang emits a `while` or `for`
+loop's body whatever its condition (`while (0)`'s), what follows
+`do ... while (1)`, and dead code that holds a label (a dead `if` arm's whole,
+or, after a `return`, the code from the label on), which the walk doesn't reach;
+and it emits nothing after a statement that ends in a noreturn call (`exit(0);`,
+`__builtin_unreachable();`), which the walk goes on past (`EmitStmt` drops the
+empty block such a call leaves).
 
 Clang's errors are unrecoverable. It emits the functions it must emit where the
 unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
@@ -387,9 +407,12 @@ clang never emits among them.
 `-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes it:
 callees' attributes before and after the call, callers' that add and turn off
 features, `flatten`, calls through the address, dead branches, which function's
-errors clang reports and in which order, and `<immintrin.h>`'s `_bzhi_u32` at
-targets with BMI2 and without. Twenty-six fixtures' every error, line for
-line, must be clang's: the first external function's alone, calls in their
+errors clang reports and in which order, `<immintrin.h>`'s `_bzhi_u32` at
+targets with BMI2 and without, and a cleanup's call, with its controls: the
+unit's features or the caller's attribute holding the cleanup function's, its
+attributes declared after the cleanup, and cleanups that no exit reaches, in
+dead code and after an endless loop. Thirty-seven fixtures' every error, line
+for line, must be clang's: the first external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
 deferred one's unreported, two deferred functions', where no external function
 has any, loops' and a statement expression's, a for loop's increment after its
@@ -404,7 +427,13 @@ earlier `extern` declaration, which makes the definition external where it is;
 the same for GNU89's `extern inline` and a later or an earlier plain `inline`
 declaration, and an earlier `gnu_inline` attribute, which the definition
 inherits; and `used`, `constructor` and `destructor` on a later declaration (no
-effect) and on an earlier one (as on the definition).
+effect) and on an earlier one (as on the definition). And cleanups' calls: at
+their scopes' ends among the calls, once where returns, breaks, continues and a
+goto leave the scope (also where no path reaches its end), a statement
+expression's after its value and a return out of one, a for statement's own
+variable's after its increment, the innermost first, a `flatten` caller's (both
+messages), a standard attribute's at its scope, one among other attributes and
+two from a macro, and those no exit reaches in deferred functions.
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

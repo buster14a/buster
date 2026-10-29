@@ -3490,6 +3490,28 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
         { "an intrinsic of a feature its caller's attribute adds", "-march=x86-64",
           "#include <immintrin.h>\n__attribute__((target(\"bmi2\"))) unsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
+        // #147's cleanup attribute calls its function where its variable's scope ends (#863's review).
+        { "a cleanup's call", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          true, true },
+        { "a cleanup's call of a feature the unit has", "-march=x86-64-v3",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          false, true },
+        { "a cleanup's call of a feature its caller's attribute adds", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "__attribute__((target(\"avx2\"))) int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          false, true },
+        { "a cleanup function's attributes declared after the cleanup", "-march=x86-64",
+          "void k(int *p);\nint caller(void) { int x __attribute__((cleanup(k))) = 0; return x; }\n"
+          "__attribute__((always_inline, target(\"avx2\"))) inline void k(int *p) { *p = 1; }\n",
+          false, true },
+        { "cleanups no exit reaches: dead code's and an endless loop's", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int dead(void) { return 0; { int x __attribute__((cleanup(h))) = 0; } }\n"
+          "void endless(void) { int x __attribute__((cleanup(h))) = 0; for (;;) { x += 1; } }\n",
+          false, true },
     };
     const uint32_t routes = executable != NULL ? 4 : 2;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -3659,6 +3681,63 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         { "an earlier plain inline declaration of a C99 inline definition leaves it inline-only",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int);\ninline int a(int x) { return h(x); }\n"
           "int b(int x) { return h(x + 1); }\n" },
+        // #147's cleanup attribute (#863's third review): clang calls a variable's cleanup function where its scope ends,
+        // once whichever exits reach it, after the scope's statements and the innermost variable's first, and reports the
+        // call at the attribute.
+        { "cleanups' calls at their scopes' ends, among the calls",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = g(n);\n    {\n        int y __attribute__((cleanup(h))) = g(1);\n        n += g(2);\n    }\n"
+          "    return x + g(3);\n}\n" },
+        { "a cleanup that returns and breaks reach, once at its scope's end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n    if (n)\n        return g(1);\n    for (int i = 0; i < n; i++)\n    {\n"
+          "        int y __attribute__((cleanup(h))) = i;\n        if (g(i))\n            break;\n        if (i == 3)\n            continue;\n    }\n"
+          "    return x + g(2);\n}\n" },
+        { "a goto out of a scope whose end no path reaches",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "void f(int n)\n{\n    {\n        int x __attribute__((cleanup(h))) = 0;\n        if (n)\n            goto out;\n        g(1);\n        for (;;)\n"
+          "            g(2);\n    }\nout:\n    g(3);\n}\n" },
+        { "a statement expression's cleanups after its value, and a return out of one",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"lzcnt\"))) void k(int *p) { *p = 2; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n"
+          "    int v = ({ int y __attribute__((cleanup(h))) = g(1); int z __attribute__((cleanup(k))) = g(6); y + z; }) + g(2);\n"
+          "    int w = ({ if (n) return g(3); g(4); }) + g(5);\n    return v + w + x;\n}\n" },
+        { "a for statement's own variable's cleanup after its increment",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    for (int i __attribute__((cleanup(h))) = g(0); i < n; i += g(1))\n    {\n        if (g(2))\n            break;\n"
+          "        if (g(3))\n            return 1;\n        g(4);\n    }\n    return g(5);\n}\n" },
+        { "variables' cleanups innermost first, a loop body's at its end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "void f(int n)\n{\n    int a __attribute__((cleanup(h))) = 0;\n    int b __attribute__((cleanup(h))) = 0;\n    while (1)\n    {\n"
+          "        int c __attribute__((cleanup(h))) = g(1);\n        if (g(2))\n            break;\n        g(3);\n    }\n    g(4);\n}\n" },
+        { "a flatten caller's cleanups",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "__attribute__((target(\"avx2\"))) void k(int *p) { *p = 2; }\n"
+          "__attribute__((flatten, target(\"sse4.2\"))) int f(int n)\n{\n    int x __attribute__((cleanup(h))) = n;\n"
+          "    int y __attribute__((cleanup(k))) = n;\n    return x + y;\n}\n" },
+        { "a standard attribute's cleanup, at its scope",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\nvoid f(void)\n{\n"
+          "    [[gnu::cleanup(h)]] int x = 0;\n    [[gnu::__cleanup__(h)]] int y = 0;\n}\n", "-std=gnu23" },
+        { "a cleanup among other attributes, and one from a macro",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n#define AUTO __attribute__((cleanup(h)))\n"
+          "void f(void)\n{\n    int x __attribute__((unused, __cleanup__(h))) = 0;\n    int y AUTO = 0, z AUTO = 1;\n}\n" },
+        { "cleanups no exit reaches: an endless loop's and dead code's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "static void endless(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n    for (;;)\n        g(n);\n}\n"
+          "static int dead(int n)\n{\n    return g(n);\n    {\n        int x __attribute__((cleanup(h))) = 0;\n        g(x);\n    }\n}\n"
+          "int e(int n)\n{\n    endless(n);\n    return dead(n);\n}\n" },
+        { "an external function's cleanup alone, as clang emits no deferred function after it",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static int s(void) { int x __attribute__((cleanup(h))) = 0; return x; }\nint b(void) { return s(); }\n"
+          "int e(void) { int z __attribute__((cleanup(h))) = 0; return z; }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {

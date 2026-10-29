@@ -15,7 +15,12 @@
 // definition (the caller's), as a declaration's inherited attributes are. The calls are those clang emits: the walk
 // of #487's diagnostics (c_check_x86_diagnostic.c) reaches what a constant condition leaves running, not a dead
 // branch's or operand's, sizeof's or what follows a return; a callee is direct where it is the function's name alone,
-// not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits the functions it must
+// not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). A cleanup attribute's call is one too
+// (CallCleanupFunction::Emit, #147's CHECK_CONTROL_CLEANUP): of the function its argument names, with that function's
+// attributes from its declarations before the argument, reported at the attribute (its first token:
+// [[gnu::cleanup(f)]]'s scope's), and once for each variable whose scope an exit the walk reaches leaves: at the
+// scope's end, where clang pops the cleanup and emits its call, after the scope's statements, the innermost variable's
+// first, whichever exits reach it. Clang's errors are unrecoverable: it emits the functions it must
 // emit where the unit defines them (ASTContext::DeclMustBeEmitted: an external definition, by GNU's and C99's rules of
 // inline functions, or one with a used, constructor or destructor attribute, both by the declarations up to the
 // definition, as the parser has them when it hands the definition over), and none after the first that has one, nor
@@ -31,6 +36,10 @@
 // depth first; this takes those in source order. Where the feature an error names is the first of the rest of a
 // function's map (an attribute's arch= CPU's, or a caller's attribute that turns several off), clang's order is its
 // StringMap's and this one predefines_features', so the two may name another feature for the same call.
+//
+// The walk is Sema's reachability, its CFG's, which clang's emission differs from in a few shapes, where the two may
+// report different errors (docs/x86-target.md): clang emits a while or for loop's body whatever its condition, what
+// follows do ... while (1), and dead code that holds a label, and nothing after a statement that ends in a noreturn call.
 //
 // The pass is cold and scalar: it runs in a unit with a target attribute alone (CheckProgram.attribute_keys), and walks
 // only a body that refers to a callee that may fail, whose call sites it then finds (clang's headers give every intrinsic
@@ -268,20 +277,42 @@ static uint32_t check_target_feature_callee(const CheckProgram* program, uint32_
     return object < program->object_count ? object : 0;
 }
 
-// Checks body `b`'s calls, which its walk reached (`calls`, `count` keys of a call's node in the low half, in clang's
-// emission order): appends each error. Returns false without room.
+// Where clang reports cleanup `record`'s call (CallCleanupFunction::Emit, at its attribute's location): the applied
+// attribute's first token, the scope's of [[gnu::cleanup(f)]], or else its argument.
+static uint32_t check_target_feature_cleanup_token(const CheckInput* input, const CheckInputCleanup* record)
+{
+    const CheckInputAttributes* attributes = record->declaration < input->token_count ? input->attributes[record->declaration] : 0;
+    uint32_t result = record->argument;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool applied = attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->ignored && attribute->argument_first == record->argument;
+        result = applied ? attribute->first : result;
+    }
+    return result;
+}
+
+// Checks body `b`'s calls, which its walk reached (`calls`, `count` of them in clang's emission order: a call's node in
+// the low half, or with the high half 1, a cleanup's scope's end, its CHECK_CONTROL_CLEANUP's index in the body):
+// appends each error. Returns false without room.
 static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeatureMaps* maps, uint32_t b, bool deferred,
                                        const CheckTargetFeatureAttributes* caller, PredefinesFeatures caller_map, const uint64_t* calls,
                                        uint32_t count, Arena* output, CheckTargetFeatureError** errors, uint32_t* error_count)
 {
-    const CheckGraph* graph = &program->input->graph;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
     bool valid = true;
     for (uint32_t c = 0; valid && c < count; c += 1)
     {
         const uint32_t node = (uint32_t)calls[c];
-        const uint32_t object = check_target_feature_callee(program, node);
-        const uint32_t token = graph->tokens[graph->operand0[node]];
-        const CheckTargetFeatureAttributes callee = object != 0 ? check_target_feature_attributes(program, object, token) : (CheckTargetFeatureAttributes){ 0 };
+        const bool cleanup = (calls[c] >> 32) != 0;
+        // A cleanup's function, by its declarations before the attribute's argument, where the argument looks it up.
+        const CheckInputCleanup* record = cleanup ? input->cleanups + program->controls[program->bodies[b].first + node].target : 0;
+        const uint32_t function = cleanup && record->function < input->token_count ? input->objects[record->function] : 0;
+        const uint32_t object = cleanup ? (function < program->object_count ? function : 0) : check_target_feature_callee(program, node);
+        const uint32_t token = cleanup ? check_target_feature_cleanup_token(input, record) : graph->tokens[graph->operand0[node]];
+        const uint32_t limit = cleanup ? record->argument : token;
+        const CheckTargetFeatureAttributes callee = object != 0 ? check_target_feature_attributes(program, object, limit) : (CheckTargetFeatureAttributes){ 0 };
         const CheckTargetFeatureError base = {
             .token = token,
             .caller = program->bodies[b].object,
@@ -389,10 +420,15 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                 {
                     walk.seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, items);
                     walk.stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, items);
-                    valid = walk.seen != 0 && walk.stack != 0;
+                    walk.cleanup_tags = input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
+                    valid = walk.seen != 0 && walk.stack != 0 && (input->cleanup_count == 0 || walk.cleanup_tags != 0);
                     if (valid)
                     {
                         memset(walk.seen, 0, items);
+                    }
+                    if (valid && walk.cleanup_tags != 0)
+                    {
+                        memset(walk.cleanup_tags, 0, (uint64_t)input->cleanup_count * sizeof(uint32_t));
                     }
                 }
                 if (valid && candidate)
@@ -425,42 +461,70 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                     walk.depth = 0;
                     walk.tag = 0;
                     valid = walk.call_room && program->status == CHECK_PROGRAM_OK;
+                    // The cleanups' calls, each where clang emits it, once, whichever exits the walk reached it by: at its
+                    // scope's end, the CLEANUP control at its scope's closing token, after the run's calls, the innermost
+                    // variable's first, with that control's statement, or in a statement expression the one that reached it.
+                    const uint32_t call_count = walk.call_count;
+                    uint32_t item_count = call_count;
+                    for (uint32_t i = 0; valid && walk.cleanup_count != 0 && i < body->count; i += 1)
+                    {
+                        const CheckControl* control = program->controls + body->first + i;
+                        const uint32_t record = control->kind == CHECK_CONTROL_CLEANUP ? control->target : BUSTER_CHECK_NONE;
+                        const uint32_t scope = record < input->cleanup_count ? input->cleanups[record].scope : BUSTER_CHECK_NONE;
+                        if (scope < program->parser->tokens.count && walk.cleanup_tags[record] != 0 && control->token == program->parser->tree.parents[scope])
+                        {
+                            uint64_t* item = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 1);
+                            valid = item != 0;
+                            if (valid)
+                            {
+                                const uint32_t statement = i < body->entry_count ? i + 1 : walk.cleanup_tags[record];
+                                *item = ((uint64_t)statement << 32) | i;
+                                item_count += 1;
+                            }
+                            walk.cleanup_tags[record] = 0;
+                            walk.cleanup_count -= 1;
+                        }
+                    }
+                    // Every variable reached has its scope's end, as the controls are written.
+                    valid = valid && walk.cleanup_count == 0;
                     // The calls in clang's emission order: by their statements, whose controls are in the lowering's order,
                     // as clang emits them (a for loop's increment after its body), and in one statement by their ends (a
-                    // call's node is its closing parenthesis), so that arguments' calls come before their call's. Two stable
-                    // passes of the radix kernel, by end then by statement, of keys of the sort's key in the high half and
-                    // the call's place in `calls` in the low; then the calls' nodes in the low half, in that order.
-                    const uint32_t call_count = walk.call_count;
-                    uint64_t* keys = valid && call_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
-                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
-                    valid = valid && (call_count == 0 || temporary != 0);
+                    // call's node is its closing parenthesis, a cleanup's its scope's closing token), so that arguments'
+                    // calls come before their call's. Two stable passes of the radix kernel, by end then by statement, of
+                    // keys of the sort's key in the high half and the item's place in `calls` in the low; then the calls'
+                    // nodes in the low half, and the cleanups' controls with the high half 1, in that order.
+                    uint64_t* keys = valid && item_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, item_count) : 0;
+                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, item_count) : 0;
+                    valid = valid && (item_count == 0 || temporary != 0);
                     uint64_t* sorted = 0;
-                    if (valid && call_count != 0)
+                    if (valid && item_count != 0)
                     {
                         uint32_t varying = 0;
-                        for (uint32_t c = 0; c < call_count; c += 1)
+                        for (uint32_t c = 0; c < item_count; c += 1)
                         {
-                            const uint32_t end = input->graph.tokens[(uint32_t)calls[c]];
+                            const uint32_t value = (uint32_t)calls[c];
+                            const uint32_t end = c < call_count ? input->graph.tokens[value] : program->controls[body->first + value].token;
                             keys[c] = ((uint64_t)end << 32) | c;
-                            varying |= end ^ input->graph.tokens[(uint32_t)calls[0]];
+                            varying |= end ^ (uint32_t)(keys[0] >> 32);
                         }
-                        uint64_t* by_end = c_bindings_sort(keys, temporary, call_count, !scalar, varying);
+                        uint64_t* by_end = c_bindings_sort(keys, temporary, item_count, !scalar, varying);
                         uint64_t* other = by_end == keys ? temporary : keys;
                         varying = 0;
-                        for (uint32_t j = 0; j < call_count; j += 1)
+                        for (uint32_t j = 0; j < item_count; j += 1)
                         {
                             const uint32_t statement = (uint32_t)(calls[(uint32_t)by_end[j]] >> 32);
                             other[j] = ((uint64_t)statement << 32) | (uint32_t)by_end[j];
                             varying |= statement ^ (uint32_t)(calls[(uint32_t)by_end[0]] >> 32);
                         }
-                        sorted = c_bindings_sort(other, by_end, call_count, !scalar, varying);
-                        for (uint32_t j = 0; j < call_count; j += 1)
+                        sorted = c_bindings_sort(other, by_end, item_count, !scalar, varying);
+                        for (uint32_t j = 0; j < item_count; j += 1)
                         {
-                            sorted[j] = (uint32_t)calls[(uint32_t)sorted[j]];
+                            const uint32_t place = (uint32_t)sorted[j];
+                            sorted[j] = ((uint64_t)(place >= call_count) << 32) | (uint32_t)calls[place];
                         }
                     }
                     valid = valid &&
-                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, call_count, output, errors, count);
+                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, item_count, output, errors, count);
                     arena_pop_to(scratch, calls_mark);
                 }
             }
