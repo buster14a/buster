@@ -1767,6 +1767,10 @@ What the lowering covers past scalars (#145's programs):
   as clang's `xorps` does. A compound assignment reads its destination in
   `__float128`, computes and copies the result back, or converts and stores it
   into a real destination; a global without an initializer is 16 zero bytes.
+  A real `__float128`'s `__imag__` is a frame object of zeros: the checker
+  folds it to a constant zero of its type where its operand has no effect
+  (`check_lower_quad_constant` writes a folded constant's bits), and after the
+  operand where it has (`check_lower_aggregate_zero`).
   The checker folds no `__float128` constant (`check_action_float_supported`):
   a static one with an initializer is refused as not constant, an increment by
   name ("increments of __float128 values"), and the `q` suffix's literals as
