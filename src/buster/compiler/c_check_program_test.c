@@ -824,10 +824,10 @@ static const char check_test_program_harness[] =
 // signedness of plain char that the programs are read with, and the last oracle, which the scalar and vector paths' programs of one source share, compiled once per distinct text. Each
 // compiles with -c and the flags of the one-step build, which gives the code that build's compiles give, so a program
 // links the same harness, oracle and checked object as before. The oracle's key is its text and plain char's
-// signedness. And the last program that linked and ran as the oracle
-// did: its checked object's bytes. A program whose checked object and oracle are that one's links the same files into
-// the same executable, which runs alike, so it takes that run's result (the vector path's program, mostly, after the
-// scalar path's).
+// signedness. And the last program that linked and ran as expected against its oracle (alike, or with `mismatch`
+// differently): its checked object's bytes. A program whose checked object, oracle and expectation are that one's links
+// the same files into the same executable, which runs alike, so it takes that run's result (the vector path's program,
+// mostly, after the scalar path's).
 typedef struct CheckTestProgramBuild CheckTestProgramBuild;
 struct CheckTestProgramBuild
 {
@@ -838,6 +838,7 @@ struct CheckTestProgramBuild
     bool oracle_unsigned;
     uint8_t* object;
     uint64_t object_size;
+    bool mismatch;
 };
 
 static CheckTestProgramBuild check_test_program_build;
@@ -967,9 +968,11 @@ static void check_test_program_build_release(void)
 }
 
 // Compile and link every fixture. A CPU-ineligible fixture omits only the final launch and must not publish an
-// execution-result cache entry that a later eligible comparison could mistake for a successful run.
-static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle,
-                                                       bool run_native, Arena* scratch)
+// execution-result cache entry that a later eligible comparison could mistake for a successful run. The oracle is
+// clang's build of `oracle_source`, or of the program's own source where it is null; with `mismatch`, the run must find
+// the two different on some input rather than alike.
+static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* oracle_source, bool mismatch, const char* clang,
+                                                       bool char_unsigned, bool alignment_oracle, bool run_native, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -1004,11 +1007,12 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     }
     else if (valid)
     {
-        valid = check_test_program_oracle(link, source, &text, &length);
+        valid = check_test_program_oracle(link, oracle_source != 0 ? oracle_source : source, &text, &length);
     }
     valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
-    const bool same = run_native && valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
+    const bool same = run_native && valid && same_oracle && build->object != 0 && build->mismatch == mismatch && build->object_size == size &&
+                      memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -1029,12 +1033,15 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         executable,
         0,
     };
-    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && (!run_native || object_test_run(run, out, err) == 0)));
+    // The harness's status: 0 when the program and its oracle agree on every input, 1 at the first input they don't.
+    const int status = mismatch ? 1 : 0;
+    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && (!run_native || object_test_run(run, out, err) == status)));
     if (!same)
     {
         free(build->object);
         build->object = valid && run_native ? bytes : 0;
         build->object_size = valid && run_native ? size : 0;
+        build->mismatch = mismatch;
         bytes = valid && run_native ? 0 : bytes;
     }
     if (!valid && created)
@@ -1075,7 +1082,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
 
 static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
-    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, true, scratch);
+    return check_test_program_execute_with_alignment(link, source, 0, false, clang, char_unsigned, false, true, scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1465,9 +1472,12 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 }
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
-// x86-64's), against clang's build of it with the same; its executable runs where `run_native` says the host can run it.
+// x86-64's), against clang's build of it with the same, or of `oracle_source` where it isn't null, which must differ
+// from it with `mismatch` (check_test_program_execute_with_alignment); its executable runs where `run_native` says the
+// host can run it.
 static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit)
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit,
+                                                    const char* oracle_source, bool mismatch)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1628,7 +1638,11 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 arena_pop_to(&scratch, access_mark);
             }
             const bool alignment_oracle = strcmp(name, "hidden-result-direct-temporary-alignment") == 0;
-            if (run_native)
+            if (run_native && mismatch)
+            {
+                snprintf(description, sizeof(description), "%s: generated executable differs from %s's build of its oracle on some input", name, clang);
+            }
+            else if (run_native)
             {
                 snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
                          alignment_oracle ? "the independent alignment expectation" : clang);
@@ -1637,7 +1651,10 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             {
                 snprintf(description, sizeof(description), "%s: generated object and oracle compile and link; native execution is unavailable on this CPU", name);
             }
-            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, run_native, &scratch), description);
+            check_test_expect(test,
+                              check_test_program_execute_with_alignment(&code.link, source, oracle_source, mismatch, clang, char_unsigned, alignment_oracle,
+                                                                        run_native, &scratch),
+                              description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -1654,13 +1671,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
 static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                                     int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0, NULL, false);
 }
 
 static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                             int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
 {
-    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit);
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit, NULL, false);
 }
 
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
@@ -1683,6 +1700,14 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
 {
     check_test_program_source_char(test, source, name, clang, false);
+}
+
+// A program fixture with plain char signed, x86-64's, against clang's build of another source of the same names, a
+// model of what the program computes or a mutant of it: the program must agree with it, or with `mismatch` differ from
+// it on some input.
+static void check_test_program_against(CheckTest* test, const char* source, const char* oracle_source, bool mismatch, const char* name, const char* clang)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, false, -1, 0, NULL, true, 0, oracle_source, mismatch);
 }
 
 static void check_test_program_initializer_facts(CheckTest* test)
@@ -2208,6 +2233,78 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "int tested(int n){long double x=make(n);clear_fp();int a=__builtin_fpclassify(11,22,33,44,55,x);int f=fp_state();"
         "clear_fp();int b=__builtin_isinf_sign(x);int g=fp_state();clear_fp();int c=__builtin_isnan(x);int h=fp_state();"
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
+}
+
+// fpclassify's selectors (#148), on a double that is each category in turn and on one known to be normal after the
+// argument's own effect. mark counts each selector's evaluations in a 3-bit field of its own (the argument's seen++ in
+// the lowest), not their order, since clang evaluates the normal and subnormal ones in an order its own build decides
+// (check_lower_floating_prepare). The order-recording mark, whose decimal digits are the selectors in the order they ran,
+// is the encoding these programs had, kept for the controls below.
+#define BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS "int seen;int mark(int n){seen+=1<<(3*n);return n;}"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_ORDER "int seen;int mark(int n){seen=seen*10+n;return n;}"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES \
+    "int tested(int n){seen=0;" \
+    "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;" \
+    "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY \
+    "int tested(int n){seen=0;" \
+    "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}"
+
+// The controls' oracles, each __builtin_fpclassify for clang's build of a program: what clang's code computes for a
+// double alone (the model compares with a double's smallest normal value), with the normal and subnormal selectors in
+// the order C's sequencing gives it (the normal one first, as check_lower_floating_prepare emits them, or the subnormal
+// one first, as a GCC-built clang runs them); and mutants that evaluate the normal selector twice, the subnormal one
+// never or the argument twice.
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL(first, second) \
+    "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) ({double v_=(value);int z_=(zero);v_==0?z_:" \
+    "({int n_=(nan);v_!=v_?n_:({int i_=(infinite);__builtin_fabs(v_)==__builtin_inf()?i_:" \
+    "({int " first ";int " second ";__builtin_fabs(v_)>=0x1p-1022?m_:s_;});});});})\n"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_NORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL("m_=(normal)", "s_=(subnormal)")
+#define BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_MODEL("s_=(subnormal)", "m_=(normal)")
+#define BUSTER_CHECK_TEST_FPCLASSIFY_NORMAL_TWICE \
+    "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) " \
+    "__builtin_fpclassify(nan,infinite,((normal),(normal)),subnormal,zero,value)\n"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_NEVER \
+    "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) __builtin_fpclassify(nan,infinite,normal,4,zero,value)\n"
+#define BUSTER_CHECK_TEST_FPCLASSIFY_ARGUMENT_TWICE \
+    "#define __builtin_fpclassify(nan,infinite,normal,subnormal,zero,value) " \
+    "__builtin_fpclassify(nan,infinite,normal,subnormal,zero,((value),(value)))\n"
+
+// fpclassify's selector programs against clang's build, and the controls of their encoding: both agree with the model
+// that runs the subnormal selector first, and neither with a mutant. With the order-recording encoding, ours must agree
+// with the model that runs the normal selector first and differ from the other, so that a change to
+// check_lower_floating_prepare's order changes these two controls.
+static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                              "fpclassify-conditional-selector-effects", clang);
+    check_test_program_source(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                              "fpclassify-known-category-effects", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               false, "fpclassify-conditional-selector-effects-subnormal-first", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS
+                               BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                               false, "fpclassify-known-category-effects-subnormal-first", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_ORDER BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_NORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_ORDER
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               false, "fpclassify-selector-order-normal-first", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_ORDER BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_DOUBLE_SUBNORMAL_FIRST BUSTER_CHECK_TEST_FPCLASSIFY_ORDER
+                               BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               true, "fpclassify-selector-order-subnormal-first", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_NORMAL_TWICE BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               true, "fpclassify-normal-selector-twice", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_SUBNORMAL_NEVER BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_CATEGORIES,
+                               true, "fpclassify-subnormal-selector-never", clang);
+    check_test_program_against(test, BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                               BUSTER_CHECK_TEST_FPCLASSIFY_ARGUMENT_TWICE BUSTER_CHECK_TEST_FPCLASSIFY_COUNTS BUSTER_CHECK_TEST_FPCLASSIFY_KNOWN_CATEGORY,
+                               true, "fpclassify-argument-twice", clang);
 }
 
 // A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
@@ -3141,18 +3238,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",
         "floating-builtin-runtime-classification", clang);
-    // Which of fpclassify's selectors run for each category, and how often, and its argument's effect: mark counts each
-    // selector's evaluations in a 3-bit field of its own (the argument's seen++ in the lowest), not their order, since
-    // clang evaluates the normal and subnormal ones in an order its own build decides (check_lower_floating_prepare).
-    check_test_program_source(test,
-        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
-        "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
-        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}",
-        "fpclassify-conditional-selector-effects", clang);
-    check_test_program_source(test,
-        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
-        "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
-        "fpclassify-known-category-effects", clang);
+    check_test_program_fpclassify(test, clang);
     // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the
     // identifier list's, a struct and a register parameter, a call through the prototype of their promoted types, which
     // converts its arguments as clang's does, and an empty list's definition after its declaration.
@@ -3161,6 +3247,64 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}"
         "int tested(int n){struct P q={n,3};return add(n,7)*3+at(\"abcdef\",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}",
         "kr-definitions", clang);
+    // #659: the ABI receives promoted values; reads, writes and addresses in the body use the declared objects.
+    // The integer and SSE banks both overflow onto the stack, and the aggregate result reserves the hidden prefix.
+    check_test_program_source(test,
+        "int narrow(a,b,c,d,e,f,g,h) signed char a;unsigned char b;short c;unsigned short d;_Bool e;int f;char g;short h;"
+        "{signed char *pa=&a;short *ph=&h;*pa+=1;*ph-=2;return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){unsigned u=(unsigned)n;return narrow((int)(u&255),513,(int)(u&65535),65539,n,7,130,32769);}",
+        "kr-promoted-integers-addressed-and-stack", clang);
+    check_test_program_source_char(test,
+        "int f(x,y)char x;volatile unsigned char y;{char *p=&x;*p+=1;y+=2;return x+y;}"
+        "int tested(int n){return f(128+(n&127),257);}", "kr-promoted-unsigned-char", clang, true);
+    check_test_program_source(test,
+        "double f(a,b,c,d,e,f,g,h,i,j)float a,b,c,d,e,f,g,h,i,j;"
+        "{float *p=&j;*p+=1;return a+b+c+d+e+f+g+h+i+j;}"
+        "int roundtrip(x)float x;{float *p=&x;return (int)(*p-16777216.0f);}"
+        "int tested(int n){return (int)f(0.1,1.2,2.3,3.4,4.5,5.6,6.7,7.8,8.9,(double)(n&255)+0.1)+roundtrip(16777217.0);}",
+        "kr-float-entry-rounding-and-stack", clang);
+    check_test_program_source(test,
+        "struct R{long a,b,c;};struct R f(a,b,c,d,e,f,g)char a;float b;short c;_Bool d;int e;float f;short g;"
+        "{struct R r={a+c+g,(long)(b+f),d+e};return r;}"
+        "int tested(int n){struct R r=f(257,3.7,65539,n,5,7.9,32769);return (int)(r.a+r.b+r.c);}",
+        "kr-promoted-parameters-hidden-result", clang);
+    check_test_program_source(test,
+        "int f(x,y)volatile float x;short y __attribute__((aligned(32)));"
+        "{float a=x;short *p=&y;*p+=1;return (int)(a*10)+y+((unsigned long)p&31);}"
+        "int tested(int n){return f((double)(n&255)+0.125,65539);}", "kr-promoted-aligned-and-volatile", clang);
+    check_test_program_source(test,
+        "int f(int,double);int f(x,y)char x;float y;{return x+(int)(y*10);}"
+        "int before(int n){return f(n,3.7);}int f(int,double);"
+        "int tested(int n){int (*p)(int,double)=f;int (*q)()=f;return before(n&255)+p(n&255,3.7)+q((char)(n&255),3.7);}",
+        "kr-prior-later-prototypes-and-pointers", clang);
+    check_test_program_source(test,
+        "int f(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t)"
+        "_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}"
+        "int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}",
+        "kr-unused-promoted-parameter-capacity", clang);
+    check_test_program_source(test,
+        "int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}"
+        "int tested(int n){return f(n&127,(short)(n&63));}", "kr-promoted-atomic-parameter-objects", clang);
+    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+    check_test_program_source(test,
+        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+        "kr-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct T{int a,b,c;};int take(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,p,d)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10)+*p;}"
+        "int tested(int n){struct T t={n&127,5,7};int v=n&63;return f(65539,259,1.25,&v,3.7)+take(t);}",
+        "kr-parenthesized-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct S{long outer;};enum{A=19};"
+        "int tags(x,p,q)enum E{A=3}x;struct S{char a;long b;}*p;union U{char a;long b;}*q;"
+        "{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}"
+        "int tested(int n){return tags(n&127,0,0);}",
+        "kr-header-tag-layout-enum-abi-and-outer-scope", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
@@ -3925,10 +4069,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, true, 0, 1);
     check_test_program_boundary_reason(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, false, 0, 3,
                                        "complex integer types of __int128 and _BitInt");
-    // A K&R definition (#154's decision: as clang): its callers pass its parameters' promoted types, which a parameter of a
-    // type the promotions change would convert from on entry, not lowered yet.
-    check_test_program_boundary_reason(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true,
-                                       false, 1, 0, "K&R parameters the default argument promotions change");
+    // A promoted K&R parameter now converts from double to its declared float on entry.
+    check_test_program_boundary(test, "float half(x)float x;{return x/2;}int tested(int n){return (int)half(n);}", "kr-promoted-parameter", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, false, 0, 1,
                                        "complex types other than _Complex float, double and long double");
     check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,

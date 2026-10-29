@@ -1329,6 +1329,17 @@ static void tier0_test_vector_placed(Tier0TestVectorProgram* program, uint32_t k
     for (uint32_t j = 0; j < kind->operand_count; j += 1)
     {
         tier0_test_vector_simple_leaf(program, kind->operands[j], state);
+        if (k == BUSTER_TIER0_TEST_VECTOR_ADD_S && !program->overflow)
+        {
+            // The placement leaves are arbitrary bits. Make each lane a finite normal float so the scalar model and
+            // vaddps have a bit-exact result even on machines that choose different NaN payloads.
+            const uint32_t constant = program->constant_count - 1;
+            for (uint32_t w = 0; w < 8; w += 1)
+            {
+                uint64_t* word = &program->constants[8 * constant + w];
+                *word = (*word & 0x807fffff807fffffull) | 0x3e8000003e800000ull;
+            }
+        }
     }
     tier0_test_vector_emit(program, BUSTER_TYPED_X86, result, k);
     if (result != BUSTER_TYPED_CLASS_VOID)
