@@ -2492,7 +2492,9 @@ report completeness and matching workload identities are checked.
 the oracle: a harness runs records in the test's process, loading every
 general register, the flags, ZMM0 to ZMM31, K0 to K7 and the x87's state
 (FXRSTOR64 of a random one, every exception masked; the C code's saved around
-the run) from a state, then storing them back. Memory operands are RIP-relative into a data
+the run) from a state, then storing them back; a host without AVX512F and
+AVX512BW (`kmovq`'s) gets XMM0 to XMM15 alone, and its VEX and EVEX forms aren't
+run. Memory operands are RIP-relative into a data
 page, RSP is its own stack, and a fault names the record. The checks:
 
 - the effects table: every covered form but those that branch or trap, from

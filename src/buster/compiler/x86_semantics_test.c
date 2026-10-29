@@ -3369,10 +3369,13 @@ static int run_x86_semantics_tests(int argc, char** argv)
         }
         // RORX's substitution fixture executes it even though the effects table does not cover it.
         x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = (native.features & BUSTER_X86_FEATURE(BMI2)) != 0;
-        x86_semantics_test_wide = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
+        // The wide trampoline moves ZMM0 to ZMM31 (AVX512F) and the eight opmasks whole, with kmovq (AVX512BW): an
+        // AVX512F host without BW takes the 128-bit state, as one without AVX-512 does.
+        const uint64_t wide = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW);
+        x86_semantics_test_wide = (native.features & wide) == wide;
         if (!x86_semantics_test_wide)
         {
-            printf("x86 semantics: native vector state checked through 128 bits (AVX-512 unavailable)\n");
+            printf("x86 semantics: native vector state checked through 128 bits (AVX512F and AVX512BW unavailable)\n");
         }
         printf("x86 semantics: seed %llu, %u choice rows, initialization %s\n", (unsigned long long)seed, x86_choice_row_count, initialized ? "ok" : "failed");
         result = initialized;
