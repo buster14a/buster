@@ -161,6 +161,10 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
 // Exercise the real reservation failure in a child so its address-space limit cannot affect the test process.
 static void check_test_driver_reservation_failure(CheckTest* test)
 {
+#if (__has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)) && !defined(BUSTER_SANITIZER_RESOURCES)
+    // Until the resource-failure injection is available, a detector's shadow memory must not be constrained.
+    (void)test;
+#else
     for (uint32_t command = 0; command < 2; command += 1)
     {
         FILE* errors = tmpfile();
@@ -172,9 +176,16 @@ static void check_test_driver_reservation_failure(CheckTest* test)
             child = fork();
             if (child == 0)
             {
+                const bool prepared = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO && unsetenv("MAKEFLAGS") == 0;
+#if defined(BUSTER_SANITIZER_RESOURCES) && BUSTER_SANITIZER_RESOURCES
+                lane_test_resources.arena_limited = true;
+                lane_test_resources.arena_limit = 0;
+                const bool limited = true;
+#else
                 const struct rlimit limit = { 0, 0 };
-                const bool ready = dup2(fileno(errors), STDERR_FILENO) == STDERR_FILENO &&
-                                   unsetenv("MAKEFLAGS") == 0 && setrlimit(RLIMIT_AS, &limit) == 0;
+                const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
+                const bool ready = prepared && limited;
                 char* arguments[] = { (char*)"-fsyntax-only", (char*)"missing.c" };
                 const int code = ready ? run_check_command(2, arguments, command != 0) : 126;
                 fflush(stderr);
@@ -200,6 +211,7 @@ static void check_test_driver_reservation_failure(CheckTest* test)
             fclose(errors);
         }
     }
+#endif
 }
 
 // Whether the files at `a` and `b` can be read and have the same bytes.
