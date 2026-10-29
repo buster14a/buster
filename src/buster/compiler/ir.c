@@ -619,6 +619,14 @@ typedef enum IrRule
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
 #undef BUSTER_IR_OPERAND_ROW
+// The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
+// a return's value (a) and a call's destination for its aggregate result (c).
+static const uint8_t ir_optional_table[64] = {
+    [IR_ADDRESS] = 2,
+    [IR_RET] = 1,
+    [IR_CALL] = 4,
+    [IR_CALL_INDIRECT] = 4,
+};
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
 #undef BUSTER_IR_FIELD_ROW
@@ -1185,19 +1193,13 @@ struct IrOperand
 
 static uint32_t ir_value_mask(const IrFunction* f, uint32_t i)
 {
-    uint32_t result = ir_operand_table[f->op[i]];
-    if (f->op[i] == IR_ADDRESS && f->b[i] != BUSTER_IR_NONE)
+    const uint32_t op = f->op[i];
+    uint32_t result = ir_operand_table[op];
+    const uint32_t optional = ir_optional_table[op];
+    if (optional != 0)
     {
-        result |= 2;
-    }
-    if (f->op[i] == IR_RET && f->a[i] != BUSTER_IR_NONE)
-    {
-        result |= 1;
-    }
-    // A call's destination for its aggregate result (IrAbiCall.result_size).
-    if ((f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT) && f->c[i] != BUSTER_IR_NONE)
-    {
-        result |= 4;
+        const uint32_t present = (uint32_t)(f->a[i] != BUSTER_IR_NONE) | (uint32_t)(f->b[i] != BUSTER_IR_NONE) << 1 | (uint32_t)(f->c[i] != BUSTER_IR_NONE) << 2;
+        result |= optional & present;
     }
     return result;
 }
