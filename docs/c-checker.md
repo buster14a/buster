@@ -1743,8 +1743,8 @@ What the lowering covers past scalars (#145's programs):
   The complex types it doesn't take are refused by what they need: the
   complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
   bits"), and the complex types of the other floating types, `_Complex
-  _Float16` and `_Complex __float128` ("complex types other than _Complex
-  float, double and long double"). A
+  _Float16` ("complex types other than _Complex float, double, long double
+  and __float128"). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
@@ -1772,6 +1772,32 @@ What the lowering covers past scalars (#145's programs):
   name ("increments of __float128 values"), and the `q` suffix's literals as
   invalid. `test-checker`'s `float128` program, against clang -O0's build of
   it, has each of them, clean under clang's UBSan on every input.
+- **Complex values of aggregate parts (#137).** `_Complex __float128`, and
+  the complex `_BitInt`s past 128 bits that the usual arithmetic conversions
+  make, are frame objects of two parts, the real one then the imaginary one,
+  whose parts are values as their element's are: an aggregate's, each part's
+  value its bytes' address (`check_lower_complex_parts`), which `__real__` and
+  `__imag__` read without a load. Their operations take each part through the
+  element's (`__float128`'s, or the `_BitInt`'s a limb at a time), a part's
+  result copied into the object (`check_lower_complex_parts_compute`): sums,
+  differences, negations and the conjugate, and products with and quotients
+  by a real value, a real operand kept real as for the other complex types.
+  As clang -O0's code has them, a `__float128` product and quotient of two
+  complex values are libgcc's `__multc3` and `__divtc3`, and a `_BitInt`'s
+  are the integer types' formulas, (ac − bd) + (ad + bc)i and
+  ((ac + bd) + (bc − ad)i) / (cc + dd) whatever the domains, its parts'
+  products and quotients libgcc's. Equality and truth go by parts, and
+  conversions to and from the other complex and real types convert each part,
+  an aggregate part by its address (`check_lower_complex_parts_conversion`).
+  Compound assignments convert a complex or real destination to it, compute
+  and convert back. The convention passes and returns them in memory; a
+  global without an initializer is zeros. clang stores a `_BitInt` part as
+  its width's bytes, leaving the bits past it as they were, which the
+  operations extend again as they read them. clang's compiled worlds draw
+  both (GCC can't spell `_Complex __float128`). `test-checker`'s
+  `complex-float128`, `complex-bit-int-past-128-bits` and
+  `complex-aggregate-parts` programs, against clang -O0's builds of them, have
+  each of them, clean under clang's UBSan on every input.
 - **`_BitInt` past 128 bits (#137).** A value is an aggregate's: a frame object
   of its 64-bit limbs, the least significant first, `ceil(N / 64)` of them
   aligned to 8 as clang lays one out, which the stream carries by its address

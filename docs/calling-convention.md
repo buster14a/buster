@@ -1493,10 +1493,11 @@ classes of 8 to 64 bits, the 128-bit classes for 65 to 128, and past 128 bits
 frame objects of their limbs, #137), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
 and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
 `long double` (#136's item 8), `_Complex float`, `double` and `long double`
-(#133's lowering, as aggregates of their two parts), GNU's complex integer
+(#133's lowering, as aggregates of their two parts) and, in clang's runs,
+`_Complex __float128` (#137), GNU's complex integer
 types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
 `__int128` spelled as the usual arithmetic conversions make them, #137) and,
-in clang's runs, complex `_BitInt`s of 13 to 128 bits, spelled so too,
+in clang's runs, complex `_BitInt`s of 13 to 200 bits, spelled so too,
 `__float128` (an aggregate's value in this compiler's C, whose arithmetic and
 conversions are libgcc's, #137), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
