@@ -2168,6 +2168,11 @@ struct CheckCorpusOutcome
     uint64_t deferred_parts;
     uint32_t deferred_lane_tokens;
     uint32_t deferred_active;
+    uint32_t deferred_planned;
+    // Whether the deferred path's arena of rare columns was base pages throughout, and whether the scalar or the vector
+    // path's was (CheckInput.rare_columns_shared).
+    bool deferred_shared;
+    bool source_shared;
     uint64_t deferred_copies;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
@@ -2239,6 +2244,9 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_parts = outcome->deferred ? paths[2].deferred->parts : 0;
     outcome->deferred_lane_tokens = outcome->deferred ? paths[2].deferred->lane_tokens : 0;
     outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
+    outcome->deferred_planned = outcome->deferred ? paths[2].deferred->planned : 0;
+    outcome->deferred_shared = outcome->deferred && paths[2].input.rare_columns_shared;
+    outcome->source_shared = paths[0].input.rare_columns_shared || paths[1].input.rare_columns_shared;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;

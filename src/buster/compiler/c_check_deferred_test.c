@@ -9,8 +9,10 @@
 // whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
 // in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 8 lanes through each
 // resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
-// lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
-// group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
+// lanes, the lanes the reader planned from the parser's tree before its top level's walk (CheckDeferred.planned, by
+// which check_input_run's arena of rare columns is base pages or huge: #764), its reader be copied by one of them at
+// least and by no more (#432's review), and its parts be as many as a group of them cuts. Each fixture is read again
+// on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
 // the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
 // known tokens are read by the rule alone: on each side of a second lane and of an
@@ -27,7 +29,8 @@
 // must survive; the entry's dispatch and the wake-up must fall within the lanes' span. Then
 // benchmark-checker-deferred's --cpus parser, the difference report on a deferred path that made no input, which must
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
-// unmapped by check_deferred_release.
+// unmapped by check_deferred_release; and the arena of rare columns' pages, base pages throughout where more than one
+// lane writes it, and otherwise huge past its prefix (check_input_sparse_arena, by the kernel's advice for the mapping).
 //
 //   ./build/compiler test-checker-deferred [--id-order N] [--keep]
 //
@@ -458,9 +461,10 @@ static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
     return result;
 }
 
-// #764's fresh sparse arena: base pages throughout for deferred bodies, but source order keeps its small
-// prefix and huge-page tail. Check the kernel's advice, not timing or whether THP happened to be allocated.
-// Repeat with fresh mappings, including byte-sized and non-page-sized capacities and both sides of the prefix.
+// #764's fresh arena of rare columns (check_input_sparse_arena): base pages throughout where more than one lane reads the
+// deferred bodies, but source order and a deferred reading on one lane keep its small prefix and huge-page tail. Checks
+// the kernel's advice, not timing or whether a huge page happened to be allocated, with fresh mappings each time,
+// byte-sized and non-page-sized capacities among them, on both sides of the prefix.
 static bool check_deferred_test_sparse_pages(void)
 {
     const uint64_t capacities[] =
@@ -488,8 +492,8 @@ static bool check_deferred_test_sparse_pages(void)
                 {
                     const uint64_t bytes = capacities[c];
                     const uint64_t small = prefixes[p] > BUSTER_ARENA_SMALL_BYTES ? prefixes[p] : BUSTER_ARENA_SMALL_BYTES;
-                    const bool deferred = mode != 0;
-                    Arena arena = check_input_sparse_arena(bytes, prefixes[p], deferred);
+                    const bool shared = mode != 0;
+                    Arena arena = check_input_sparse_arena(bytes, prefixes[p], shared);
                     valid = arena.base != 0 && arena.capacity == bytes && arena.length == 0;
                     // Reserving must not eagerly clear or commit the columns on the calling thread.
                     valid = valid && !check_deferred_test_resident(arena.base, 1) && !check_deferred_test_resident(arena.base + bytes - 1, 1);
@@ -502,7 +506,7 @@ static bool check_deferred_test_sparse_pages(void)
                     };
                     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
                     {
-                        const bool huge = !deferred && offsets[i] >= small;
+                        const bool huge = !shared && offsets[i] >= small;
                         const uintptr_t address = (uintptr_t)arena.base + offsets[i];
                         bool found = false;
                         const bool no_huge_flag = lane_test_vm_flag(address, "nh", &found);
@@ -1073,25 +1077,29 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 // The parts a group of the bodies' lanes cuts, made before the lanes started (parts_by_cost).
                 const uint64_t group = most == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * most;
                 const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
-                const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
+                const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
+                                                          outcome.deferred_shared == (most > 1) && outcome.deferred_copies >= (most != 0) &&
                                                           outcome.deferred_copies <= most && outcome.deferred_parts == parts &&
                                                           outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(top));
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
                                                        outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
-                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right;
+                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right &&
+                                    !outcome.source_shared;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
-                            copied ? "" : " (not the rule's lanes, their parts or tokens, or its reader copied by too many of them or by none)",
-                            sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
+                            copied ? "" : " (not the rule's lanes, those it planned before the top level's walk, the rare columns' pages for "
+                                          "them, their parts or tokens, or its reader copied by too many of them or by none)",
+                            sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)",
+                            outcome.source_shared ? " (source order's rare columns in base pages)" : "");
                 }
             }
         }
@@ -1131,7 +1139,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
             const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
                                                             outcome.deferred_largest_body, outcome.deferred_second_body, 8, false);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected &&
-                                (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
+                                (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_planned == most &&
+                                                       outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
             checks += 1;
             failures += !passed;
             if (!passed)
@@ -1139,7 +1148,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on 8 lanes by the reader's rule: %s\n", name,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : outcome.deferred != expected ? (expected ? "not merged" : "merged") :
-                        "not the rule's lanes, or its reader copied by too many of them or by none");
+                        "not the rule's lanes or those it planned before the top level's walk, or its reader copied by too many of them or by none");
             }
         }
         // A side of the rule of more than one body, on every lane its bodies can take of 8 with the first lane starting once
@@ -1158,7 +1167,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
             check_corpus_deferred_every_lane = true;
             const uint64_t most = policy == 0 ? (size->bodies < 8 ? size->bodies : 8) : size->lanes;
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
-                                outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
+                                outcome.deferred_planned == most && outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
             checks += 1;
             failures += !passed;
             if (!passed)
@@ -1166,7 +1175,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on %" PRIu64 " lanes with the first lane starting last: %s\n", name, most,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
-                        outcome.deferred_active != most ? "not every lane" : "the largest body not the first lane's");
+                        outcome.deferred_active != most || outcome.deferred_planned != most ? "not every lane, or not the lanes it planned" :
+                        "the largest body not the first lane's");
             }
         }
         // A unit that merges, with its first lane taking every part: no other lane copies the reader. (The rule's sides,

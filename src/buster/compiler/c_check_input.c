@@ -283,6 +283,9 @@ struct CheckInput
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;
+    // Whether the reader's arena of rare columns was base pages throughout, as where more than one lane reads the deferred
+    // bodies (check_input_sparse_arena, #764): the tests require it of those readings and of no other.
+    bool rare_columns_shared;
     bool resource;
 };
 
@@ -450,6 +453,9 @@ typedef struct CheckInputReader CheckInputReader;
 typedef struct CheckDeferred CheckDeferred;
 static void check_deferred_cut(CheckInputReader* reader, uint32_t opening);
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader);
+// Whether the deferred reader's rule gives the bodies more than one lane, which write their entries of the token columns
+// at once (#764).
+static bool check_deferred_shared(const CheckDeferred* deferred);
 // The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
 // body's opening.
 static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
@@ -5785,13 +5791,17 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
 
 #include "c_check_comma_input.c"
 
-// #764: deferred bodies first-touch disjoint entries in shared huge-page regions. Give their fresh sparse
-// arena base pages before any walk, including on one lane and on a state's later readings. Source order,
-// including the fallback and lazy bodies that are never read, keeps its small prefix and huge-page tail.
-static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool deferred)
+// check_input_run's arena of rare columns: its first `small_bytes` (a multiple of BUSTER_ARENA_PAGE_BYTES) in base pages
+// and the rest in huge pages, or with `shared` all of it in base pages. `shared` is for a deferred reading whose bodies
+// more than one lane reads (check_deferred_shared, #764): the lanes write their bodies' entries of the arena's token
+// columns at once, and lanes that write a 2 MB region of them which has no page yet, or the huge zero page, each
+// allocate and clear a huge page for it, of which the kernel maps one. A deferred reading on one lane, as source order,
+// keeps the huge pages.
+static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool shared)
 {
-    const uint64_t small = deferred ? bytes : small_bytes > BUSTER_ARENA_SMALL_BYTES ? small_bytes : BUSTER_ARENA_SMALL_BYTES;
-    return arena_reserve_small(bytes, small);
+    const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uint64_t small = shared ? pages : small_bytes;
+    return arena_reserve_small(bytes, small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES);
 }
 
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
@@ -6035,10 +6045,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // zero, so a column that is zero where nothing is written needs no clearing, and takes memory only where the walk
     // writes it: where the walk only reads it, the kernel maps its zero page. In the scratch, which the later stages take
     // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
-    // are huge in source order, since the walk reads most of these columns at every token, which in base pages would
-    // fault each one; but the scope stacks and the enumeration constants' values, which only the tokens that write
-    // them read, are in base pages at the arena's start. Deferred bodies use base pages throughout: lanes otherwise
-    // race to allocate and clear the same huge-page region before one of their pages is installed (#764).
+    // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
+    // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
+    // base pages at the arena's start. Where more than one lane reads the deferred bodies, the arena is base pages
+    // throughout (check_input_sparse_arena, #764).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
@@ -6078,7 +6088,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
 #undef BUSTER_CHECK_SPARSE_BYTES
-    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, deferred != 0) : (Arena){ 0 };
+    input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
+    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
 #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
