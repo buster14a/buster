@@ -198,7 +198,7 @@ struct CheckProgram
     // unit defines it rather than when its emission first refers to it (ASTContext::DeclMustBeEmitted): an external
     // definition, by the selection's rules of GNU's and C99's inline functions, or a function with a used, constructor
     // or destructor attribute. Code generation's check of target features takes clang's order of emission from it
-    // (#775); null in a program that no selection made.
+    // (#775); null in a program that no selection made, or in a unit without a target attribute, which the check skips.
     uint8_t* body_eager;
 };
 
