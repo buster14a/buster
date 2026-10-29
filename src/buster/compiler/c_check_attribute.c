@@ -800,6 +800,18 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     return valid;
 }
 
+// Declaration attributes clang drops when first added after a definition. Unscoped [[noreturn]] and [[_Noreturn]]
+// are declaration attributes; GNU noreturn (including [[gnu::noreturn]]) changes the function type instead, and C's
+// _Noreturn keyword is explicitly allowed after a definition. A scoped list item keeps first at its namespace and
+// name_token at its name, so standard syntax alone does not identify the declaration attribute.
+static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute)
+{
+    const CheckInputAttributeKind kind = attribute->kind;
+    const bool standard_noreturn = kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword &&
+                                  attribute->first == attribute->name_token;
+    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR || standard_noreturn;
+}
+
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
 {
     const Parser* parser = reader->parser;
@@ -855,7 +867,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.schema = rule->schema;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
             reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
-            reader->late_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || rule->kind == CHECK_ATTRIBUTE_DESTRUCTOR;
+            reader->late_attributes |= check_input_attribute_late_kind(&attribute);
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)
@@ -1298,8 +1310,10 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
 
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
 // declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
-// weak, constructor and destructor, which then make no symbol weak or array entry (#147). A specifier's list is each
-// declarator's: one declarator's is copied before its records are marked.
+// weak, constructor and destructor, which then make no symbol weak or array entry (#147), and unscoped standard
+// noreturn, which must not stop code generation's target-feature walk (#775). An earlier accepted noreturn remains in
+// that earlier declaration's records. A specifier's list is each declarator's: one declarator's is copied before its
+// records are marked.
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
     const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
@@ -1307,16 +1321,14 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {
-        const CheckInputAttributeKind kind = attributes->records[i].kind;
-        late |= !attributes->records[i].ignored && (kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+        late |= !attributes->records[i].ignored && check_input_attribute_late_kind(&attributes->records[i]);
     }
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
     reader->output->resource |= late && !copied;
     for (uint32_t i = 0; copied && i < copy->count; i += 1)
     {
-        const CheckInputAttributeKind kind = copy->records[i].kind;
-        copy->records[i].ignored |= kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR;
+        copy->records[i].ignored |= check_input_attribute_late_kind(&copy->records[i]);
     }
     if (copied)
     {

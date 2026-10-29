@@ -303,7 +303,10 @@ designs and the compilers already built this way.
   scalar/vector table builders. `test-x86-target` checks the policy and Clang
   predefines; `benchmark-x86-target` measures table construction.
   `docs/x86-target.md` records the API, current catalogue coverage and the
-  selector/corpus acceptance still pending for #180.
+  selector/corpus acceptance still pending for #180. Its "A function's target
+  attribute" has #772's per-function features and code generation's check of
+  them, which `-c` and the direct path make after selection as clang does
+  (`c_check_target_feature.c`, #775; `test-checker-driver` against clang `-c`).
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
   AVX-512 and scalar paths and shared form matching in `x86_match.c`, whose
