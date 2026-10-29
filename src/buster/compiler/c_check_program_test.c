@@ -2832,7 +2832,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "#if __has_attribute(overloadable) && __has_attribute(__overloadable__)\n"
         "#define O __attribute__((overloadable))\n"
-        "int pick(int x) O{return x+5;}double pick(double x) O{return x+0.5;}"
+        "static int pick(int x) O{return x+5;}static double pick(double x) O{return x+0.5;}"
         "static int(*selected)(int)=pick;"
         "int tested(int n){int x=n&1023;return pick(x)+(int)(pick((double)(n%9))*2)+selected(x);}\n"
         "#else\nint tested(int n){return n-991;}\n#endif\n",
