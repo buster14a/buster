@@ -160,7 +160,8 @@ static __attribute__((noinline)) int cbuiltin_rounds_test_clang(void)
     return result;
 }
 
-static void cbuiltin_rounds_test_native(CBuiltinRoundsTestTally* tally, CBuiltinRoundsTestProgram direct[2], CBuiltinRoundsTestProgram callers[2])
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native(CBuiltinRoundsTestTally* tally, CBuiltinRoundsTestProgram direct[2], CBuiltinRoundsTestProgram callers[2])
 {
     const uint16_t original_control = cbuiltin_rounds_test_control();
     const uint32_t original_mxcsr = _mm_getcsr();

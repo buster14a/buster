@@ -620,8 +620,18 @@ static void check_builtin_bit_cast_test_pages(CheckBuiltinBitCastTest* test, Typ
             }
             check_builtin_bit_cast_test_expect(test, memcmp(expected, results, count * sizeof(*results)) == 0, "legal batch partitions preserve every output field and representation byte");
         }
-        check_builtin_bit_cast_test_expect(test, memcmp(saved_actions, actions, count * sizeof(*actions)) == 0 &&
-            memcmp(saved_arguments, arguments, count * sizeof(*arguments)) == 0 && memcmp(saved_payload, payload, count * 4) == 0 &&
+        // By field: the actions' and the values' padding is no part of them.
+        bool same_inputs = true;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const CheckBuiltinBitCastAction* x = saved_actions + i;
+            const CheckBuiltinBitCastAction* y = actions + i;
+            same_inputs &= x->id == y->id && x->destination_type == y->destination_type && x->arguments == y->arguments && x->argument_count == y->argument_count &&
+                x->node == y->node && x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count &&
+                x->source_position == y->source_position && x->source_proof == y->source_proof && x->source_bytes == y->source_bytes &&
+                x->source_byte_count == y->source_byte_count && check_test_value_equal(saved_arguments + i, arguments + i);
+        }
+        check_builtin_bit_cast_test_expect(test, same_inputs && memcmp(saved_payload, payload, count * 4) == 0 &&
             memcmp(saved_history, history, history_count * sizeof(*history)) == 0,
             "all borrowed input slices remain unchanged");
         for (uint32_t i = 1; i <= 16; i += 1)

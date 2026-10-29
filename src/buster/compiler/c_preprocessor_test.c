@@ -7602,6 +7602,61 @@ static bool pp_test_pragma_origins(const char* directory, bool with_clang)
     return result;
 }
 
+// The in-memory fuzz boundary must refuse existing absolute files too, for
+// includes, embeds and both existence queries. The enabled control proves that
+// each fixture really can read the file without the option.
+static bool pp_test_no_external_files(const char* directory)
+{
+    char path[PATH_MAX];
+    const int written = snprintf(path, sizeof(path), "%s/fuzz-external.h", directory);
+    bool result = written > 0 && written < (int)sizeof(path);
+    FILE* file = result ? fopen(path, "w") : 0;
+    result = result && file != 0;
+    if (file != 0)
+    {
+        result = fputs("42\n", file) >= 0 && result;
+        result = fclose(file) == 0 && result;
+    }
+    static const char* const formats[] = {
+        "#include \"%s\"\n",
+        "#embed \"%s\"\n",
+        "#if !__has_include(\"%s\")\n#error missing\n#endif\n",
+        "#if !__has_embed(\"%s\")\n#error missing\n#endif\n",
+    };
+    for (uint32_t kind = 0; result && kind < BUSTER_ARRAY_LENGTH(formats); kind += 1)
+    {
+        for (uint32_t blocked = 0; result && blocked < 2; blocked += 1)
+        {
+            char source[PATH_MAX + 128];
+            const int length = snprintf(source, sizeof(source), formats[kind], path);
+            static InternTable table;
+            static Preprocessor pp;
+            const PPOptions options = {
+                .language = { .standard = 2023 },
+                .no_standard_includes = true,
+                .no_external_files = blocked != 0,
+                .quiet = true,
+                .timing = true,
+            };
+            const bool ready = length > 0 && length < (int)sizeof(source) && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+            const bool accepted = ready && pp_run_source(&pp, "memory-fuzz.c", (const uint8_t*)source, (uint32_t)length);
+            result = ready && accepted == (blocked == 0);
+            if (blocked != 0)
+            {
+                result = result && pp.probes.opens == 0 && pp.probes.fstats == 0 && pp.statistics.embed_stats == 0;
+            }
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    unlink(path);
+    if (!result)
+    {
+        fprintf(stderr, "in-memory include/embed boundary failed\n");
+    }
+    return result;
+}
+
 static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
@@ -7762,6 +7817,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
                (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
         passed_all &= pp_test_case_retention(directory);
+        passed_all &= pp_test_no_external_files(directory);
         passed_all &= test_process_test() == 0;
         passed_all &= pp_test_system_case_levels(directory);
         passed_all &= pp_test_macro_batches(directory, with_clang);

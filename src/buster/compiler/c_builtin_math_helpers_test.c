@@ -246,7 +246,8 @@ static uint64_t cbuiltin_math_test_oracle(const CBuiltinMathTestNative* native, 
     return result;
 }
 
-static void cbuiltin_math_test_values(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_math_test_values(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
 {
     static const uint32_t singles[] =
     {
@@ -383,7 +384,8 @@ static void cbuiltin_math_test_signal(int signal, siginfo_t* info, void* context
     _exit(0);
 }
 
-static void cbuiltin_math_test_traps(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_math_test_traps(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
 {
     CBuiltinMathTestTrap* shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (cbuiltin_math_test_expect(tally, shared != MAP_FAILED, "trap result mapping", 0))
@@ -481,7 +483,8 @@ static void cbuiltin_math_test_refusals(CBuiltinMathTestTally* tally)
     }
 }
 
-static void cbuiltin_math_test_errno_tail(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_math_test_errno_tail(CBuiltinMathTestTally* tally, const CBuiltinMathTestNative* native)
 {
     uint8_t* storage = mmap(NULL, 2 * BUSTER_CBUILTIN_MATH_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (cbuiltin_math_test_expect(tally, storage != MAP_FAILED, "errno tail mapping", 0))
