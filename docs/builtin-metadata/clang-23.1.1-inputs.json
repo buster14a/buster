@@ -30,7 +30,7 @@
     "build_arguments": "clang -std=c17 -O2 -march=native -Wall -Wextra -Werror -pedantic clang_builtin_metadata.c -o clang_builtin_metadata",
     "base_arguments": "--builtins /usr/include/clang/Basic/Builtins.inc --x86 /usr/include/clang/Basic/BuiltinsX86.inc --x86-64 /usr/include/clang/Basic/BuiltinsX86_64.inc --version /usr/include/clang/Basic/Version.inc",
     "host_policy": "Each build and each generation invocation ran under its own ordinary exclusive.sh lock; all three generation exits were zero.",
-    "regeneration": "2026-10-26 (#126): the generator rebuilt with build_arguments to binary_sha256 again, the same four inputs, own-main.names.txt with 28 names this compiler's build calls added; the three invocations exited zero, the full catalogue's output was byte-identical to its recorded sha256, and the own-main outputs added exactly those 28 rows. 2026-10-28 (#619): the same again with __builtin_ia32_ucmpd128_mask added, which c_check_program_batch.c reaches through _mm_cmplt_epu32_mask; the full catalogue byte-identical again, and the own-main outputs added exactly that row."
+    "regeneration": "2026-10-26 (#126): the generator rebuilt with build_arguments to binary_sha256 again, the same four inputs, own-main.names.txt with 28 names this compiler's build calls added; the three invocations exited zero, the full catalogue's output was byte-identical to its recorded sha256, and the own-main outputs added exactly those 28 rows. 2026-10-28 (#619): the same again with __builtin_ia32_ucmpd128_mask added, which c_check_program_batch.c reaches through _mm_cmplt_epu32_mask; the full catalogue byte-identical again, and the own-main outputs added exactly that row. 2026-10-28 (#148): the same again with the 8 SSE builtins that stb_image, dr_flac, dr_mp3 and minimp3 call and the scope lacked added (__builtin_ia32_palignr128, pshufd, pshufhw, pshuflw, psrldqi128_byteshift, shufps, vec_ext_v8hi and vec_set_v8hi); the full catalogue byte-identical again, and the own-main outputs added exactly those 8 rows."
   },
   "outputs": [
     {
@@ -42,20 +42,20 @@
     {
       "path": "own-main.tsv",
       "additional_arguments": "--names own-main.names.txt",
-      "rows": 1535,
-      "sha256": "aa4fe999939349175b1e776c8c082dda81e7e1586805e4a8ed090fc971785c9f",
+      "rows": 1543,
+      "sha256": "0b8ff89f0e0fb79f4bb0d367a17eb52bb11ae32d5971d244b8216095738a9c40",
       "name_filter": "own-main.names.txt",
-      "name_filter_sha256": "61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21",
-      "scope": "1484 x86/x86_64 records (1483 ia32 spellings and __rdtsc) and 51 others from the own-main identifier inventory; bit_cast and va_list are explicit non-prototype gap rows. #126 added 28 names this compiler's build calls to the first 1506-row inventory, and #619 one more."
+      "name_filter_sha256": "1b7a7b317e4b48db4d7d684cf84fcc1a90e18b4ffa638cd5e94852df74ab9920",
+      "scope": "1492 x86/x86_64 records (1491 ia32 spellings and __rdtsc) and 51 others from the own-main identifier inventory; bit_cast and va_list are explicit non-prototype gap rows. #126 added 28 names this compiler's build calls to the first 1506-row inventory, #619 one more, and #148 the 8 SSE builtins the corpora call."
     },
     {
       "path": "../../src/buster/compiler/generated/clang_builtin_own_main_23_1_1.inc",
       "additional_arguments": "--names own-main.names.txt --format c",
-      "rows": 1535,
-      "sha256": "7c281d3b3f97fb29cc999e101f89b04cbc951afab34cf1f8470263b3a63bd30f",
+      "rows": 1543,
+      "sha256": "47328ed9e198f220d1fa876f7cde1cbdbcec3fd51e10022fbe9ee7257fc7cfeb",
       "name_filter": "own-main.names.txt",
-      "name_filter_sha256": "61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21",
-      "scope": "The same 1535-row inventory in C record format supplies exact audited membership, including 1484 x86/x86_64 records and the two explicit gap rows. No ordinary prototype or source capability is implied."
+      "name_filter_sha256": "1b7a7b317e4b48db4d7d684cf84fcc1a90e18b4ffa638cd5e94852df74ab9920",
+      "scope": "The same 1543-row inventory in C record format supplies exact audited membership, including 1492 x86/x86_64 records and the two explicit gap rows. No ordinary prototype or source capability is implied."
     }
   ],
   "qualification_limit": "Metadata is not implementation, ordinary typing of custom signatures, source ICE acceptance, complete target-feature closure, source dispatch or runtime support. Handwritten Sema constraints remain a separate audited scope."

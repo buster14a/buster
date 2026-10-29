@@ -361,10 +361,8 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .source = "int x; void f(void) { char x; enum { N=sizeof x }; _Static_assert(N==1, \"inner\"); } enum { N=sizeof x }; _Static_assert(N==4, \"outer\");\n",
         },
         {
-            .name = "declaration object is not ICE",
+            .name = "declaration const object folds as a GNU enumerator value",
             .source = "const int x=2; enum { N=x };\n",
-            .rejected = true,
-            .extension = true,
         },
         {
             .name = "declaration alignof callback array",

@@ -2012,13 +2012,29 @@ mode: `use` takes an entry rather than run the tool and writes an entry for
 each run; `check` runs every one and writes it, and where the entry it would
 have taken, found before it runs, holds another result reports it as stale,
 which fails the run; anything else, or unset, keeps nothing (local runs). The
-9700X job's test step uses `use` on a push and a pull request's run, and
-`check` on the daily and dispatched runs, which then remove the entries no
+hosted native and baseline correctness jobs use `check` on every revision.
+Only after both succeed does Benchpress run native correctness: its persistent
+cache uses `use` on pushes and pull requests, and `check` on daily and
+dispatched runs. Thus reuse never replaces the triggering revision's independent
+hosted oracles. Check runs then remove the entries no
 test has written for two days, and the keys left without one. An entry is only
 as right as the run that wrote it: the daily check finds one a pull request's
 run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
 to, and a test prints them at its end (`oracle_cache_report`).
+
+The twelve standalone `test-check-builtins` commands (the base command and
+`-misc`, `-query`, `-bit-cast`, `-float`, `-x86`, `-vector`, `-math`, `-atomic`,
+`-atomic-rmw`, `-typed-overflow`, `-rounds`) run their cheap references freshly
+in `use`: native qualification found validation cost more than execution.
+`main_unit_check_builtins` applies this exact-name policy before dispatch and
+restores the prior mode after success, failure or argument rejection. It does
+not affect other commands or timed competitors. `check` is unchanged, so both
+hosted variants and daily/manual native runs still execute and validate these
+oracles independently. Backend capture/status/cache plumbing is retained for
+that path. An inactive scope prints no cache counters; the independent tools
+still execute. Assembler reuse remains separate, with its cold/check costs
+retained in #542's evidence rather than inferred from hit counts.
 
 The tool runs in a process group of its own: what it leaves running there is
 killed when it ends, and the whole group at its time limit
@@ -2048,6 +2064,22 @@ Its users:
   sources given the epoch's time for GCC's runs);
 - test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
   in `--self-test`, which turns the cache off.
+- the standalone checker-builtin commands, including their diagnostic-preserving
+  Clang boundaries (atomic/float warnings, vector constraints, x86 ranges and
+  atomic RMW). Each command fixes the epoch only when absent and restores that
+  ambient state on return. Existing parser-oracle calls therefore cache too;
+- the assembler's independent Clang/GCC assembly generation and C harness
+  object compiles, Clang's `.S` preprocessing, and GNU as's object oracles.
+  Test-authored assembly inputs receive the epoch's mtime for tools whose
+  `__TIMESTAMP__` ignores the epoch. Repeated fixtures have stable distinct
+  source paths to avoid churning one key's 32 variants.
+
+These adapters cache object/text bytes. Links and generated-program execution
+always run fresh, observing the current runtime. The cache does not store an
+artifact's executable permission, so an executable must not be a cached output.
+The standalone adapter preserves normal nonzero statuses and bounded diagnostic
+prefixes, but launcher, timeout, capture and stale-entry failures remain failures
+(`oracle_test_run`). Timed benchmark competitors are not routed through it.
 
 Each of these tests prints a line of what its runs did (`oracle_cache_report`).
 
@@ -4992,8 +5024,13 @@ bodies, take the rest in the remaining cost order from the counter
 and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
+A lane copies the top level's table but none of its per-name columns, which are
+the lane's own at places they keep from one reading to the next
+(`check_deferred_lane_names`), each set for the names a body spells before its
+walk, nor its binding events: a body's stream starts with proxies of the file
+scope's events its heads reach (`check_deferred_proxy`).
 
-`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 86
+`./build/compiler test-checker-deferred [--id-order N] [--keep]` checks 96
 fixtures of the issue's cases through the scalar path, the vector path and the
 deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
 resolution, and on 8 with the identifiers' ids in another order (#153):
@@ -5008,13 +5045,19 @@ first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
 that lane delayed under the reader's rule and with all lanes forced. Each that
 merges must give source
 order's result again with its merge failing after the replay and when a state
-that read it before reads it again (its memory poisoned or as left, and kept),
+that read it before reads it again (its memory poisoned or as left, and kept,
+or its lanes' stamps then at their last, which its bodies wrap),
 and count as a resource failure with its state's allocation failing; timed, one
 lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+A lane's per-name columns must be laid out with their names' entries
+committed, kept, cleared after a poisoned reading and laid out again for more
+names, cleared where the kernel keeps their old pages
+(`check_deferred_test_lane_names`), and the lanes' mappings and the
+state's own arenas must be base pages (`check_deferred_test_memory`).
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
 opening must be selected. The merge's scans of the token columns

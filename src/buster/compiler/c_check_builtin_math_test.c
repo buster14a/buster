@@ -329,12 +329,16 @@ static void check_builtin_math_test_clang(CheckBuiltinMathTest* test, const char
         char source[1024];
         snprintf(source, sizeof(source), "%s f(int x) { return __builtin_%s(x%s); }\n_Static_assert(_Generic(__builtin_%s(4%s),%s:1,default:0),\"declared math type\");\n",
             type, names[i], copy ? ", -1" : "", names[i], copy ? ", -1" : "", type);
+        snprintf(path, sizeof(path), "%s/prototype-%u.c", directory, i);
         ready = parse_test_write(path, source, strlen(source));
         bool rejected = false;
         ready = ready && check_builtin_float_test_clang_run(clang, path, &rejected);
         check_builtin_math_test_expect(test, ready && !rejected, "Clang accepts each ordinary math prototype and its integer argument conversion");
+        unlink(path);
         snprintf(source, sizeof(source), "%s x=__builtin_%s(4.0%s);\n", type, names[i], copy ? ", -0.0" : "");
+        snprintf(path, sizeof(path), "%s/initializer-%u.c", directory, i);
         ready = ready && parse_test_write(path, source, strlen(source)) && check_builtin_float_test_clang_run(clang, path, &rejected);
+        unlink(path);
         check_builtin_math_test_expect(test, ready && rejected == !copy, "Clang source initializers distinguish copysign folding from later optimizer math folding");
     }
     const char* sources[] =
@@ -353,7 +357,9 @@ static void check_builtin_math_test_clang(CheckBuiltinMathTest* test, const char
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
         bool failed = false;
+        snprintf(path, sizeof(path), "%s/constraint-%u.c", directory, i);
         ready = parse_test_write(path, sources[i], strlen(sources[i])) && check_builtin_float_test_clang_run(clang, path, &failed);
+        unlink(path);
         check_builtin_math_test_expect(test, ready && failed == rejected[i], "Clang math constraint/constant/environment fixture disagrees");
     }
     check_builtin_math_test_expect(test, ready, "independent Clang math source oracle could not run");
@@ -363,6 +369,7 @@ static void check_builtin_math_test_clang(CheckBuiltinMathTest* test, const char
 
 static __attribute__((unused)) int run_check_builtin_math_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinMathTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -395,5 +402,7 @@ static __attribute__((unused)) int run_check_builtin_math_tests(int argc, char**
     }
     printf("test-check-builtins-math: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int result = test.failures != 0;
+    oracle_cache_report(oracle_cache(), "test-check-builtins-math");
+    oracle_epoch_end(epoch);
     return result;
 }
