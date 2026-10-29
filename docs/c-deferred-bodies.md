@@ -1237,7 +1237,7 @@ merge's pass writes the merged stream's columns into the caller's scratch from
 its lanes: in a process's one reading those are fresh huge pages, which lanes
 that meet in a region would each clear, as the walks did; the benchmark reuses
 the caller's arenas, whose pages its first pass faulted in, and doesn't
-measure that. With the race gone, a state's later
+measure that (#874). With the race gone, a state's later
 readings can have a rule of their own (#697's item 3), fitted on a grid like
 campaign W5's, once a caller reads several units with one state.
 
