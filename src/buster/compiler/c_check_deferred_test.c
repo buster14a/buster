@@ -57,6 +57,17 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "kr-source-only-call", "int f(a)int a;{return a;}\nint g(void){return sizeof((&f)(1,2));}\n", true },
     { "kr-source-only-promoted-warning", "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
       "#pragma clang diagnostic error \"-Weverything\"\nint g(void){return sizeof(f(1,2));}\n", true },
+    { "const-initializer-receipt-type-replay",
+      "const int top=3;\n"
+      "int f(void){struct S{int x;char a[3];};const struct S s={top,{1,2,3}};const struct S t=s;"
+      "const int a[3]={2,5};enum{E=t.x+t.a[1]+a[1]+a[2]};_Static_assert(E==10,\"first\");return E;}\n"
+      "int g(void){struct S{long x;int a[2];};const struct S s={7,{11}};const struct S t=s;"
+      "enum{E=t.x+t.a[0]+t.a[1]};_Static_assert(E==18,\"second\");return E;}\n", true },
+    { "const-initializer-receipt-byte-lifetime",
+      "int f(void){const char a[]=\"abc\";const char* const p=\"xyz\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"first bytes\");return E;}\n"
+      "int g(void){const char a[]=\"def\";const char* const p=\"uvw\";enum{E=a[1]+p[2]};_Static_assert(E==220,\"second bytes\");return E;}\n", true },
+    { "const-initializer-receipt-future-definition-cutoff",
+      "extern const int later;int f(void){enum{E=later};return E;}const int later=3;int g(void){enum{E=later};return E;}\n", false },
     { "nested-selection-warnings",
       "#define C(X) __builtin_choose_expr(1,0,(X))\n"
       "#define N C(C(C(C(C(C(C(C(C(C(C(C((2147483647+1)))))))))))))\n"
