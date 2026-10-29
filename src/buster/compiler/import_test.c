@@ -2695,7 +2695,7 @@ static bool import_test_page_edges(const ImportTestInput* inputs, uint32_t count
                 {
                     import_test_describe(input->name, "with byte", position, values[v]);
                     memcpy(end - input->size, input->bytes, input->size);
-                    end[position - input->size] = values[v];
+                    (end - input->size)[position] = values[v];
                     import_test_expect(&tally, import_test_edge(end, input->size, arena), input->name, position);
                     changes += 1;
                 }

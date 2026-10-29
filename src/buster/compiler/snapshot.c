@@ -575,6 +575,13 @@ static bool snapshot_same_identity(const RuntimeProbe* a, const RuntimeProbe* b)
            a->modified_nanoseconds == b->modified_nanoseconds && a->changed_seconds == b->changed_seconds && a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
+// On-disk probes are byte records until their bool representations are checked.
+static bool snapshot_valid_probe(const RuntimeProbe* probe)
+{
+    const uint8_t* bytes = (const uint8_t*)probe;
+    return bytes[offsetof(RuntimeProbe, directory)] <= 1 && bytes[offsetof(RuntimeProbe, found)] <= 1 && bytes[offsetof(RuntimeProbe, deferred)] <= 1;
+}
+
 // This executable's identity: what stat gives of /proc/self/exe, the file it was run from. False if it can't be had.
 static bool snapshot_compiler(RuntimeProbe* compiler)
 {
@@ -1222,7 +1229,7 @@ static void snapshot_rebase(Runtime* runtime)
 static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, Runtime* runtime, SnapshotColumn* columns)
 {
     const SnapshotCounts* counts = &header->counts;
-    bool result = header->magic == BUSTER_SNAPSHOT_MAGIC && header->version == BUSTER_SNAPSHOT_VERSION && header->header_bytes == sizeof(SnapshotHeader) &&
+    bool result = snapshot_valid_probe(&header->compiler) && header->magic == BUSTER_SNAPSHOT_MAGIC && header->version == BUSTER_SNAPSHOT_VERSION && header->header_bytes == sizeof(SnapshotHeader) &&
                   header->file_bytes == bytes && counts->bucket_bits < 32 && counts->filter_bits < 32 && counts->kind < RUNTIME_KINDS &&
                   counts->archives <= BUSTER_RUNTIME_ARCHIVES && counts->pieces < UINT32_MAX && counts->pieces >= RUNTIME_OBJECTS &&
                   header->directory_bytes == header->regions[BUSTER_SNAPSHOT_PIECE_REGIONS].offset && header->directory_bytes <= bytes &&
@@ -1296,7 +1303,14 @@ static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, RuntimeK
             snapshot_hash(file, header->directory_bytes, hash);
             valid = memcmp(hash, header->hash, sizeof(hash)) == 0;
         }
-        const bool current = snapshot_same_identity(&header->compiler, compiler) && header->counts.kind == (uint32_t)kind;
+        for (uint32_t p = 0; valid && p < header->counts.probes; p += 1)
+        {
+            const RuntimeProbe* probes = (const RuntimeProbe*)(file + header->regions[SNAPSHOT_REGION_PROBES].offset);
+            valid = snapshot_valid_probe(&probes[p]);
+        }
+        // A damaged directory may contain an invalid bool representation.
+        // Do not inspect its typed identity before validating its bytes/hash.
+        const bool current = valid && snapshot_same_identity(&header->compiler, compiler) && header->counts.kind == (uint32_t)kind;
         result = !valid ? SNAPSHOT_STATUS_INVALID : current ? SNAPSHOT_STATUS_LOADED : SNAPSHOT_STATUS_STALE;
         snapshot_time(times, SNAPSHOT_PHASE_HASH, &start);
         if (result == SNAPSHOT_STATUS_LOADED)

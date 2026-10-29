@@ -13,6 +13,11 @@ static volatile unsigned probe_index = 1;
 static volatile unsigned probe_racy_value;
 static const volatile uint8_t* probe_escaped;
 
+static __attribute__((noinline)) unsigned probe_function(unsigned value)
+{
+    return value + 1;
+}
+
 static __attribute__((noinline)) void probe_escape(void)
 {
     volatile uint8_t bytes[16] = { 7 };
@@ -111,6 +116,13 @@ int main(int argc, char** argv)
     {
         unsigned values[4] = { 1, 2, 3, 4 };
         result = values[probe_index + 4] != 0;
+    }
+    else if (strcmp(argv[1], "function-type") == 0)
+    {
+        unsigned (*target)(unsigned) = probe_function;
+        unsigned (*function)(void);
+        memcpy(&function, &target, sizeof(function));
+        result = function() != 0;
     }
     else if (strcmp(argv[1], "race") == 0)
     {

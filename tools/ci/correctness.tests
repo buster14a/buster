@@ -256,6 +256,10 @@ mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 # load is observable. The compiler and its main refinement tests keep the matrix's optimization.
 clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" -O1 tests/sanitizers/refinement_tail.c -o build/test-refinement-tail
 ./build/test-refinement-tail
+== Test compiler-owned resource failure boundaries
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" tests/sanitizers/resources.c -o build/test-sanitizer-resources
+./build/test-sanitizer-resources
 == Test differential harness accounting, subprocesses and failure preservation
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror "${sanitizer_flags[@]}" tests/differential/lifecycle.c -o build/test-differential-lifecycle &&

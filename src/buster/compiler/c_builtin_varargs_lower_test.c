@@ -693,7 +693,8 @@ static void cbuiltin_va_lower_test_real_shapes(CBuiltinVaLowerTestTally* tally, 
     }
 }
 
-static void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
 {
     uint8_t save[BUSTER_ABI_SAVE_AREA_BYTES] __attribute__((aligned(16)));
     uint64_t overflow[8] __attribute__((aligned(16)));

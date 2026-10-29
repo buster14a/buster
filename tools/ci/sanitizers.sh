@@ -42,8 +42,8 @@ case "${1:-}" in
         "$directory/probe" clean
         tests=()
         case "$BUSTER_SANITIZER" in
-            address) tests=('heap-overflow|86|AddressSanitizer: heap-buffer-overflow' 'use-after-free|86|AddressSanitizer: heap-use-after-free' 'use-after-return|86|AddressSanitizer: stack-use-after-return' 'use-after-scope|86|AddressSanitizer: stack-use-after-scope' 'leak|86|LeakSanitizer: detected memory leaks' 'undefined-shift|86|runtime error:' 'bounds|86|runtime error:') ;;
-            undefined) tests=('undefined-shift|86|runtime error:' 'bounds|86|runtime error:') ;;
+            address) tests=('heap-overflow|86|AddressSanitizer: heap-buffer-overflow' 'use-after-free|86|AddressSanitizer: heap-use-after-free' 'use-after-return|86|AddressSanitizer: stack-use-after-return' 'use-after-scope|86|AddressSanitizer: stack-use-after-scope' 'leak|86|LeakSanitizer: detected memory leaks' 'undefined-shift|86|runtime error:' 'bounds|86|runtime error:' 'function-type|86|incorrect function type') ;;
+            undefined) tests=('undefined-shift|86|runtime error:' 'bounds|86|runtime error:' 'function-type|86|incorrect function type') ;;
             thread) tests=('race|86|ThreadSanitizer: data race') ;;
             memory) tests=('uninitialized|86|MemorySanitizer: use-of-uninitialized-value') ;;
             *) echo 'sanitizers: unknown probe mode' >&2; exit 1 ;;

@@ -1424,7 +1424,8 @@ static void tier0_test_int128_functions(Tier0TestTally* tally, const Tier0TestIn
 // ---------------------------------------------------------------------------------------------------------------------
 // The memory classes' slots
 
-static void tier0_test_int128_run_slots(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_slots(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef void (*F)(void*);
     F f = 0;

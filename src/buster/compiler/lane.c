@@ -46,6 +46,7 @@
 #include <string.h>
 #include <limits.h>
 #include <assert.h>
+#include <errno.h>
 
 // OS-dependent includes
 #include <pthread.h>
@@ -58,6 +59,16 @@
 // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
 // them where the build's target has mwaitx, __MWAITX__).
 #include <x86intrin.h>
+
+// Resource-exhaustion fixtures must leave the detector runtime free to allocate
+// shadow/fake-stack memory and start its own threads. Diagnostic builds inject
+// the same compiler-owned reservation/start failures instead of limiting the OS.
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define BUSTER_SANITIZER_RESOURCES 1
+static bool arena_test_reservation_allowed(uint64_t bytes);
+#else
+#define BUSTER_SANITIZER_RESOURCES 0
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Arenas
@@ -128,7 +139,15 @@ static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
     if (capacity != 0 && capacity <= BUSTER_ARENA_MAX_CAPACITY)
     {
         const uint64_t mapping_bytes = arena_mapping_bytes(capacity);
-        uint8_t* mapping = mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        bool allowed = true;
+#if BUSTER_SANITIZER_RESOURCES
+        allowed = arena_test_reservation_allowed(mapping_bytes);
+        if (!allowed)
+        {
+            errno = ENOMEM;
+        }
+#endif
+        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) : MAP_FAILED;
         if (mapping != MAP_FAILED)
         {
             // The advice only chooses page sizes, so the arena works whether or not the kernel takes it. Without
@@ -232,6 +251,11 @@ typedef struct ThreadContext ThreadContext;
 struct ThreadContext
 {
     Lane lane;
+#if BUSTER_SANITIZER_RESOURCES
+    bool test_no_threads;
+    bool test_arena_limited;
+    uint64_t test_arena_limit;
+#endif
     // A command's fixed team, or 0 for standalone calls. running also guards calls made after lane_alone.
     LaneTeam* team;
     bool running;
@@ -264,6 +288,13 @@ static _Thread_local ThreadContext thread_context = {
         .group = 0,
     },
 };
+#endif
+
+#if BUSTER_SANITIZER_RESOURCES
+static bool arena_test_reservation_allowed(uint64_t bytes)
+{
+    return !thread_context.test_arena_limited || bytes <= thread_context.test_arena_limit;
+}
 #endif
 
 typedef struct Scratch Scratch;
@@ -980,6 +1011,9 @@ static void lane_team_join(LaneTeam* team, uint32_t created)
 static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus)
 {
     bool result = team != 0 && capacity >= 1 && capacity <= BUSTER_LANE_MAX_COUNT && thread_context.team == 0 && !thread_context.running;
+#if BUSTER_SANITIZER_RESOURCES
+    result = result && (capacity == 1 || !thread_context.test_no_threads);
+#endif
     result = result && team->capacity == 0;
     if (result)
     {
@@ -1130,7 +1164,10 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     };
     LaneStart starts[BUSTER_LANE_MAX_COUNT];
     pthread_t threads[BUSTER_LANE_MAX_COUNT];
-    const bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0;
+    bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0;
+#if BUSTER_SANITIZER_RESOURCES
+    valid = valid && (count == 1 || !thread_context.test_no_threads);
+#endif
     uint32_t created = 1;
     for (uint32_t i = 1; valid && i < count && created == i; i += 1)
     {

@@ -346,6 +346,7 @@ static void foreign_gc_test_errors(ForeignTestTally* tally)
         ForeignGcRoots roots = {
             .entry = 1,
         };
+        const SymbolId invalid = 0;
         for (uint32_t path = FOREIGN_PATH_VECTOR; path <= FOREIGN_PATH_EXACT; path += 1)
         {
             roots.entry = test.link.symbols.count;
@@ -353,7 +354,6 @@ static void foreign_gc_test_errors(ForeignTestTally* tally)
             roots.entry = 1;
             roots.export_count = 1;
             foreign_gc_test_failure(&test, &roots, FOREIGN_GC_ERROR_INPUT, (ForeignPath)path, tally);
-            const SymbolId invalid = 0;
             roots.exports = &invalid;
             foreign_gc_test_failure(&test, &roots, FOREIGN_GC_ERROR_INPUT, (ForeignPath)path, tally);
             roots.export_count = 0;

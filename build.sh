@@ -140,7 +140,9 @@ cores()
 }
 capture()
 {
-    clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" "$1" -o "$2"
+    # This is the source call graph. Sanitizer/coverage-generated globals and
+    # runtime calls are not compiler state or source recursion.
+    clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" -fno-sanitize=all "$1" -o "$2"
 }
 # The temporary directories, removed on exit, and the processes each_source runs, which an interrupt stops too.
 temporary=()

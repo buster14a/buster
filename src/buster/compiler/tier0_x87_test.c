@@ -990,7 +990,8 @@ static bool tier0_test_x87_native(const uint8_t* code, uint32_t length, Tier0Tes
 }
 
 // The programs' body, called with the shared inputs and output.
-static void tier0_test_x87_run_body(const void* code, Tier0TestX87Shared* shared)
+// The generated entry points lack Clang's function-type metadata prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_body(const void* code, Tier0TestX87Shared* shared)
 {
     typedef void (*Body)(const void*, const void*, const void*, void*);
     Body body = 0;
@@ -1296,7 +1297,7 @@ static const long double tier0_test_x87_arguments[4][2] = {
     { 1.0e4000L, -1.0e-4000L },
 };
 
-static void tier0_test_x87_run_f(const void* code, Tier0TestX87Shared* shared)
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_f(const void* code, Tier0TestX87Shared* shared)
 {
     typedef long double (*F)(long double, int64_t, long double);
     F f = 0;
@@ -1307,7 +1308,7 @@ static void tier0_test_x87_run_f(const void* code, Tier0TestX87Shared* shared)
     }
 }
 
-static void tier0_test_x87_run_g(const void* code, Tier0TestX87Shared* shared)
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_g(const void* code, Tier0TestX87Shared* shared)
 {
     typedef Tier0TestX87Struct (*G)(long double);
     G g = 0;
@@ -1318,7 +1319,7 @@ static void tier0_test_x87_run_g(const void* code, Tier0TestX87Shared* shared)
     }
 }
 
-static void tier0_test_x87_run_one(const void* code, Tier0TestX87Shared* shared)
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_one(const void* code, Tier0TestX87Shared* shared)
 {
     typedef long double (*K)(long double);
     K k_function = 0;
@@ -1329,7 +1330,7 @@ static void tier0_test_x87_run_one(const void* code, Tier0TestX87Shared* shared)
     }
 }
 
-static void tier0_test_x87_run_two(const void* code, Tier0TestX87Shared* shared)
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_two(const void* code, Tier0TestX87Shared* shared)
 {
     typedef long double (*V)(long double, long double);
     V v = 0;
@@ -1483,7 +1484,7 @@ static void tier0_test_x87_functions(Tier0TestTally* tally, const Tier0TestX87Ab
 
 // Calls the boundaries' conversion (shared->boundary_signature) on each case, each under BUSTER_TIER0_TEST_X87_UPWARD,
 // recording its result and the control word after it.
-static void tier0_test_x87_run_boundary(const void* code, Tier0TestX87Shared* shared)
+static __attribute__((no_sanitize("function"))) void tier0_test_x87_run_boundary(const void* code, Tier0TestX87Shared* shared)
 {
     typedef uint64_t (*ToInteger)(long double);
     typedef long double (*FromInteger)(uint64_t);

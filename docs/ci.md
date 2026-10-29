@@ -104,6 +104,19 @@ UBSan run also avoids ASan's allocation layout and its earlier failure points.
 The checks cover the host compiler implementation. Generated machine code and
 external reference tools retain their own execution and validation contracts;
 bootstrap instrumentation does not instrument Buster's generated instructions.
+Generated entry points do not carry Clang's function-type metadata prefix.
+The native-call fixtures disable only the `function` check at their call
+boundaries; ASan, the other UBSan checks and MSan remain enabled there. A separate
+incorrect-function-type canary proves that normal host calls retain this check.
+The source call-graph capture omits bootstrap sanitizer/coverage instrumentation,
+whose runtime calls and generated globals are outside the source graph; its
+analyzer still runs inside the instrumented compiler.
+Resource-exhaustion fixtures retain their cases and output/fallback comparisons.
+ASan, MSan and TSan builds inject compiler-owned arena-reservation and lane-start
+failures in place of process-wide address-space/process limits, which can prevent
+the detector from allocating shadow/fake-stack memory or starting its own threads.
+Ordinary builds and standalone UBSan retain the actual OS-limit tests. No detector
+is disabled for these cases; the injection controls are absent from normal builds.
 
 `tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
 policy and matching symbolizer. Deliberate faults prove each enabled detector,

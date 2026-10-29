@@ -404,7 +404,8 @@ static bool tier0_test_deep_saved(const X86Instruction* records, uint32_t count,
     return (written & callee_saved & ~pushed) == 0;
 }
 
-static void tier0_test_deep(Tier0TestTally* tally)
+// This fixture calls generated entries without Clang function-type metadata.
+static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTally* tally)
 {
     static const uint64_t inputs[BUSTER_TIER0_TEST_DEEP_INPUTS] = { 0, 1, 5, 1000, (1ull << 40) + 3, UINT64_MAX - 7 };
     // x, then case 7's (and case 4's and 5's local 1): the saved rsp and the allocations' addresses; case 8's local 1 is
