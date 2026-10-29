@@ -838,7 +838,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .asms = &path->asms,
             .identifiers = pp->table,
             .scalar = BUSTER_SCALAR_PATH(scalar),
-            .target_features = pp->options.target.features,
+            .target = pp->options.target,
+            .predefines = &pp->options.predefines,
         };
         path->programmed = check_program(&path->program, view, &path->input, &path->stream, &path->types, options,
                                          &path->output_arena, &path->scratch);
@@ -1195,7 +1196,8 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
         .identifiers = pp->table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
-        .target_features = pp->options.target.features,
+        .target = pp->options.target,
+        .predefines = &pp->options.predefines,
     };
     valid = valid && check_program(&program, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&selected, &program, &data, false, &path->output_arena, &path->scratch);

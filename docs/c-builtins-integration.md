@@ -753,10 +753,11 @@ ranges; both rules for each `rndscale` spelling are retained.
 
 #148's SSE builtins lower through `c_check_program_x86.c`'s table, as the
 other x86 builtins do, where the target has AVX-512F and AVX-512VL, which the
-lowering requires of every vector. A row each in its EVEX form: the 8 above but
-`vec_ext_v8hi` and `vec_set_v8hi`, which had rows, and `packssdw128`,
-`packuswb128`, `pmulhw128`, `pmuldq128`, `pmuludq128`, `cvtps2dq`, `maxps` and
-`minps`, which the scope had. VPSHUFD, VPSHUFHW, VPSHUFLW, VSHUFPS, VPSRLDQ and
+lowering requires of every vector. A row each in its EVEX form for the 8 above
+but `vec_ext_v8hi` and `vec_set_v8hi`, which had rows; the packs,
+multiplications, `maxps`, `minps` and `cvtps2dq` their intrinsics reach too are
+rows of the families at every width (`BUSTER_CHECK_X86_BINARIES` and
+`BUSTER_CHECK_X86_SSE`). VPSHUFD, VPSHUFHW, VPSHUFLW, VSHUFPS, VPSRLDQ and
 VPALIGNR take the immediate's whole byte, as the instructions do: a byte shift
 or an align past the vector's bytes gives zeros. VMAXPS and VMINPS take the
 builtin's first operand in vvvv, so that a NaN or a pair of zeros gives the

@@ -920,6 +920,36 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
     arena_release(&arena);
 }
 
+// #221: every record of a function's code must have a covered form (x86_effects), which the effects' consumers (the
+// unwind tables' analyzer, a scheduler) need of each record Tier 0 emits, but an X86 entry's: the front end's row, any
+// VEX or EVEX form. A function with X86 entries needs its code's entries' first records (Tier0Function.entry_records)
+// to tell those apart; without them, its records go unchecked.
+static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, const Tier0Code* code)
+{
+    bool rows = false;
+    for (uint32_t e = 0; e < function->count; e += 1)
+    {
+        rows |= function->kinds[e] == BUSTER_TYPED_X86;
+    }
+    const bool entries = code->entry_records != 0 && code->entry_count == function->count;
+    bool result = true;
+    // The first entry whose first record is past record r: r is that entry's predecessor's (the prologue's before entry
+    // 0's first record, the epilogue's from the last entry's end).
+    uint32_t next = 0;
+    for (uint32_t r = 0; result && (!rows || entries) && r < code->count; r += 1)
+    {
+        while (entries && next <= function->count && code->entry_records[next] <= r)
+        {
+            next += 1;
+        }
+        const bool row = entries && next >= 1 && next <= function->count && function->kinds[next - 1] == BUSTER_TYPED_X86;
+        result = row || tier0_test_expect(tally, x86_effects(code->records[r].form)->operation != X86_OPERATION_NONE, check,
+                                          "%s: record %u (%s) has no covered form, which the effects' consumers need", name, r,
+                                          x86_semantics_test_name(code->records[r].form));
+    }
+    return result;
+}
+
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
@@ -971,6 +1001,9 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
             result = tier0_test_expect(tally, valid == scalar.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
                                        scalar.count);
+            char name[64];
+            snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
+            result = result && tier0_test_covered(tally, "effects", name, function, &scalar);
         }
         if (result)
         {
