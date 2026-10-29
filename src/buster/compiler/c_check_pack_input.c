@@ -117,7 +117,7 @@ static void check_input_pack_number(CheckInputReader* reader, CheckInputPackPrag
     {
         record->handled = 3;
     }
-    else if (literal.real || literal.imaginary || literal.integer > 16 ||
+    else if (literal.real || literal.imaginary || literal.integer > 16 || literal.high != 0 || literal.bit_width > 128 ||
              (literal.integer != 0 && (literal.integer & (literal.integer - 1)) != 0))
     {
         record->warnings |= CHECK_PACK_WARNING_ALIGNMENT;

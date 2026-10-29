@@ -46,6 +46,17 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "kr-promoted-parameters", "int f(a,b) char a; float b; {return a+(int)b;}\nint g(void){return f(258,3.5); }\n", true },
+    { "kr-parenthesized-atomic-parameters", "int f(a,b)_Atomic(short) a;_Atomic(float) b;{return a+(int)b;}\n"
+      "int g(void){return f(65539,3.5);}\n", true },
+    { "kr-header-tag-scope", "struct S{int z;};int f(x)struct S{int a;}x;{struct S t={3};return x.a+t.z;}\n"
+      "int g(void){struct S t={4};return t.z;}\n", true },
+    { "kr-header-enumerator-scope", "enum{A=9};int f(x,a)enum E{A=3}x;int a[A];{return x+a[0]+A;}\n"
+      "int g(void){return A;}\n", true },
+    { "kr-call-arity", "int f(a)int a;{return a;}\nint g(void){return f(1,2); }\n", true },
+    { "kr-source-only-call", "int f(a)int a;{return a;}\nint g(void){return sizeof((&f)(1,2));}\n", true },
+    { "kr-source-only-promoted-warning", "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\nint f(a)int a;{return a;}\n"
+      "#pragma clang diagnostic error \"-Weverything\"\nint g(void){return sizeof(f(1,2));}\n", true },
     { "const-initializer-receipt-type-replay",
       "const int top=3;\n"
       "int f(void){struct S{int x;char a[3];};const struct S s={top,{1,2,3}};const struct S t=s;"

@@ -15,13 +15,25 @@ typedef struct CheckLiteral CheckLiteral;
 struct CheckLiteral
 {
     TypeId type;
+    // A bit-precise constant's width (wb or uwb, #768), 0 for every other literal: its type is _BitInt(bit_width), or
+    // unsigned _BitInt(bit_width) with bit_unsigned, which the reader makes in its table (check_input_literal), as the
+    // literal leaves `type` 0. A width past BUSTER_CHECK_LITERAL_BIT_WIDTH, the most the checker's values hold, is one
+    // the reader refuses by name; UINT32_MAX is a value past 128 bits.
+    uint32_t bit_width;
     uint64_t integer;
     long double floating;
     bool real;
     bool imaginary;
     bool valid;
     bool resource;
+    bool bit_unsigned;
+    // A bit-precise constant's bits past 64, 0 for every other literal: in what was the literal's padding, so that it
+    // keeps its 48 bytes, which every literal is zeroed and copied in.
+    uint64_t high;
 };
+
+// The widest bit-precise constant the checker takes: its values (CheckValue.integer) hold 128 bits.
+#define BUSTER_CHECK_LITERAL_BIT_WIDTH 128u
 
 typedef struct CheckStringPart CheckStringPart;
 struct CheckStringPart
@@ -75,10 +87,80 @@ static uint32_t check_literal_digit(uint8_t c)
     return value;
 }
 
+// A bit-precise constant (#768: C23's wb or WB, alone or with u or U before or after it) into `result`, which the caller
+// zeroed: its value in 128 bits, the most the checker's values hold, and its width (CheckLiteral.bit_width: the smallest
+// above 1 that holds the value and a sign bit, or with u the smallest above 0 that holds it, or UINT32_MAX past 128
+// bits), or nothing for a spelling that isn't one. check_literal_integer reads every other integer constant and leaves
+// to this the spellings it can't, so that an ordinary constant's path is as it was; this reads its own digits again,
+// out of line and cold, as few constants are bit-precise.
+static __attribute__((noinline, cold)) void check_literal_bit_precise(const uint8_t* bytes, uint32_t length, CheckLiteral* result)
+{
+    uint32_t radix = 10;
+    uint32_t position = 0;
+    if (length >= 2 && bytes[0] == '0')
+    {
+        const uint8_t next = bytes[1] | 32u;
+        radix = next == 'x' ? 16 : next == 'b' ? 2 : 8;
+        position = next == 'x' || next == 'b' ? 2 : 0;
+    }
+    unsigned __int128 value = 0;
+    uint32_t digits = 0;
+    bool valid = length != 0;
+    bool fits = true;
+    bool previous_digit = false;
+    while (position < length)
+    {
+        const uint8_t c = bytes[position];
+        const uint32_t digit = check_literal_digit(c);
+        if (digit < radix)
+        {
+            fits &= value <= (~(unsigned __int128)0 - digit) / radix;
+            value = value * radix + digit;
+            digits += 1;
+            previous_digit = true;
+            position += 1;
+        }
+        else if (c == '\'')
+        {
+            valid &= previous_digit && position + 1 < length && check_literal_digit(bytes[position + 1]) < radix;
+            previous_digit = false;
+            position += 1;
+        }
+        else
+        {
+            break;
+        }
+    }
+    bool unsign = false;
+    if (position < length && (bytes[position] | 32u) == 'u')
+    {
+        unsign = true;
+        position += 1;
+    }
+    const bool suffix = position + 1 < length && ((bytes[position] == 'w' && bytes[position + 1] == 'b') || (bytes[position] == 'W' && bytes[position + 1] == 'B'));
+    position += suffix ? 2 : 0;
+    if (!unsign && position < length && (bytes[position] | 32u) == 'u')
+    {
+        unsign = true;
+        position += 1;
+    }
+    if (valid && suffix && digits != 0 && previous_digit && position == length)
+    {
+        const uint64_t high = (uint64_t)(value >> 64);
+        const uint32_t bits = high != 0 ? 128u - (uint32_t)__builtin_clzll(high) : (uint64_t)value != 0 ? 64u - (uint32_t)__builtin_clzll((uint64_t)value) : 0;
+        const uint32_t width = unsign ? bits : bits + 1;
+        result->bit_width = !fits ? UINT32_MAX : width > (unsign ? 1u : 2u) ? width : unsign ? 1u : 2u;
+        result->bit_unsigned = unsign;
+        result->integer = (uint64_t)value;
+        result->high = high;
+        result->valid = true;
+    }
+}
+
 // An integer constant's type and value, into `result`, which the caller zeroed (a literal that isn't valid leaves it so).
 // The literals' functions write into their caller's result rather than return a CheckLiteral: clang built each returned
 // one in a temporary and copied it up with loads wider than the stores that wrote it, a failed store-to-load forward on
-// every integer literal (#510).
+// every integer literal (#510). A spelling this can't read may be a bit-precise constant's (check_literal_bit_precise).
 static void check_literal_integer(const uint8_t* bytes, uint32_t length, CheckLiteral* result)
 {
     uint32_t radix = 10;
@@ -161,6 +243,10 @@ static void check_literal_integer(const uint8_t* bytes, uint32_t length, CheckLi
         result->type = type;
         result->integer = value;
         result->valid = true;
+    }
+    else
+    {
+        check_literal_bit_precise(bytes, length, result);
     }
 }
 
@@ -323,6 +409,8 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             memcpy(spelling, bytes, imaginary);
             memcpy(spelling + imaginary, bytes + imaginary + 1, length - imaginary - 1);
             check_literal_number_plain(spelling, length - 1, scratch, result);
+            // A bit-precise constant has no imaginary form: clang refuses 5wbi's suffix.
+            result->valid &= result->bit_width == 0;
             if (result->valid)
             {
                 result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));
@@ -341,7 +429,7 @@ static CheckValue check_literal_value(CheckLiteral literal)
         .flags = literal.imaginary ? 0 : literal.real ? BUSTER_CHECK_FLOAT_LITERAL : literal.type == BUSTER_TYPE_NULLPTR ? 0 : BUSTER_CHECK_ICE,
         .constant_kind = literal.imaginary ? CHECK_CONSTANT_COMPLEX : literal.real ? CHECK_CONSTANT_FLOATING :
                          literal.type == BUSTER_TYPE_NULLPTR ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
-        .integer = literal.imaginary ? (unsigned __int128)literal.integer << 64 : literal.integer,
+        .integer = literal.imaginary ? (unsigned __int128)literal.integer << 64 : (unsigned __int128)literal.high << 64 | literal.integer,
         .floating = literal.imaginary ? 0 : literal.floating,
         .imaginary = literal.imaginary ? literal.floating : 0,
     };

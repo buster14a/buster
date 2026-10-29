@@ -300,8 +300,10 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // NONE: eightbytes, or a vector register for a VECTOR, two general ones for a PAIR), STACK (the whole value at
 // stack_offset from rsp at the call) or SPLIT (a part LLVM couldn't give a register, where clang's count runs ahead of
 // LLVM's registers: the register of the part that has one, NONE for the one in the 8-byte slot at stack_offset).
-// flags: SIGN or ZERO (the caller extends the value to 32 bits) and HIGH (the parts are the value's high eightbyte
-// alone: its low one is padding).
+// flags: SIGN or ZERO (the caller extends the value to 32 bits), HIGH (the parts are the value's high eightbyte alone:
+// its low one is padding) and LOW (the part is the low eightbyte alone of a value larger than 8 bytes, whose high one is
+// NO_CLASS, in the 8-byte slot of a STACK location: an eightbyte at a time where clang's count has a general register
+// that LLVM hasn't, rather than a copy of the whole value, which takes a slot of its size).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -310,6 +312,7 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 #define BUSTER_ABI_FLAG_ZERO 0x02
 #define BUSTER_ABI_FLAG_HIGH 0x04
 #define BUSTER_ABI_FLAG_DEMOTED 0x08
+#define BUSTER_ABI_FLAG_LOW 0x10
 
 typedef struct AbiLocation AbiLocation;
 struct AbiLocation
@@ -3576,6 +3579,8 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
                 parts += classes[half] != 0 ? 1 : 0;
             }
             location.flags |= classes[0] == 0 ? BUSTER_ABI_FLAG_HIGH : 0;
+            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them.
+            location.flags |= classes[1] == 0 && stacked != 0 && bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
             location.kind = stacked == 0 ? BUSTER_ABI_LOCATION_REGISTERS : stacked == parts ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_SPLIT;
         }
         locations[i] = location;

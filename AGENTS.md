@@ -197,9 +197,14 @@ designs and the compilers already built this way.
 
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
   paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics.
+  `test-ir-reduce` checks deterministic structural reduction, exact failure classes,
+  allocation rollback and canonical replay; `reduce-ir` writes a new reproducer
+  bundle without requiring the C frontend. See [IR reduction](docs/ir-reduce.md).
   `interpreter.c` and `ir_interpreter.c` execute typed streams and shared IR
-  with explicit arena frames; `interpreter_native.c` supplies the SysV host
-  boundary and `interpreter_link.c` materializes data atoms. Their commands are
+  with explicit arena frames, the IR's calls with by-value aggregates' records
+  and variadic definitions' anchors among them (#788); `interpreter_native.c`
+  supplies the SysV host boundary and `interpreter_link.c` materializes data
+  atoms. Their commands are
   `test-interpreter`, `test-interpreter-native`, `test-interpreter-link`,
   `test-ir-interpreter`, and `interpret-ir`. [The tools guide](docs/ir-tools.md)
   records the API, text grammar and frontend-dependent acceptance. Run builds
@@ -924,14 +929,23 @@ designs and the compilers already built this way.
     and left undefined, its memory, control, faults and MXCSR, the x87's
     state and control word, and how its immediate's bits become a value.
     Every form Tier 0's emitter writes is covered (its x87, `shld`/`shrd`
-    and AVX forms among them), but the front end's X86 rows' (any VEX or
-    EVEX form). An uncovered form gets a conservative record, and a call has
-    only its architectural effects (its callee's clobbers are #137's);
+    and AVX forms among them), and so is every VEX and EVEX form of the front
+    end's X86 rows, with their families (#760: AVX-512's masked moves,
+    compares into opmasks, conversions, FMA, the AVX-512 extensions' forms,
+    gathers and scatters, the opmask registers' own forms, BMI's;
+    AVX512-FP16's by rule, unexecuted on hosts without it), but the rows'
+    legacy ones (#148's list). An uncovered form gets a conservative record,
+    and a call has only its architectural effects (its callee's clobbers are
+    #137's);
   - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
     and `x86_immediate_value`): a selector's value against a field's bits;
   - each record's resources read and written, its operands resolved
     (`x86_instructions_effects`, AVX-512, which leaves the rare records, the
-    x87's, vzeroupper's and a vvvv operand's, to its scalar twin);
+    x87's, vzeroupper's and those with an operand no role names, an /is4
+    register, a VSIB index or an opmask pair, to its scalar twin), and with
+    `x86_instructions_effects_opmasks` each record's opmask registers in a
+    column of their own (#760: without it, a record that touches one reads and
+    writes everything);
   - value-preserving form choice for an operation with an immediate
     (`x86_choice_row`, `x86_choose_forms`, AVX-512, its scalar twin
     `x86_choose_forms_scalar`, and `x86_choice_instruction`): the
@@ -942,11 +956,13 @@ designs and the compilers already built this way.
 
   Its consumers read it rather than keep copies of its rules: Tier 0 chooses
   its immediates' forms by it (its emitter's computed constants by
-  `x86_immediate_encodes`), Tier 1's selector by its rows, the scheduler and
+  `x86_immediate_encodes`) and asks it which VEX and EVEX forms a row may have
+  (`tier0_operation_form_valid`, #760), Tier 1's selector by its rows, the scheduler and
   the unwind analyzer by the resolved effects, and the assembler's matcher
   (`x86_match.c`) takes value immediates by `x86_immediate_encodes`: so
   `main.c` includes `x86_semantics.c` before it, and `x86_match_initialize`
-  needs `x86_semantics_initialize` first (`x86_semantics_initialized`).
+  needs `x86_semantics_initialize` first (`x86_semantics_initialized`), which
+  `tier0_initialize` runs where it hasn't run.
   `x86_semantics_test.c` holds its tests (`main.c` includes it after the
   assembler's, taking the encoder tests' printer and branch sizing tests'
   runner; `./build/compiler test-x86-semantics` runs them) and
@@ -1050,7 +1066,9 @@ designs and the compilers already built this way.
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
-  records (`tier0_select_deep`). The output is
+  records (`tier0_select_deep`); long double's, the 128-bit integers' and the
+  vectors' values keep their own slots there, by their true depths (#780). The
+  output is
   the records with #144's branch columns, `LinkReference`s, the frame
   (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`), for unwind
   tables, and, when asked for (`Tier0Function.entry_records`), each entry's
@@ -1726,7 +1744,7 @@ most of its 213 s, since most of its commands are single-threaded. Now each
 command holds one CPU, or the `[N CPUs]` its heading declares:
 
 - all 8 for the call-graph check's eight compiler captures, the calling
-  convention's ten runs, and the tests whose lanes wait for each other in
+  convention's twelve runs, and the tests whose lanes wait for each other in
   loops, which lose their time slices on CPUs they share: test-lanes, the
   executable writers' 8-lane groups, test-foreign's resolutions,
   `link-foreign --lanes=8` in test-foreign-corpus, test-link's checks and the
@@ -2487,17 +2505,22 @@ report completeness and matching workload identities are checked.
 `./build/compiler test-x86-semantics [--seed N] [--runs N] [--cross-check]
 [--keep]` (about 0.3 s on the 9700X) checks `x86_semantics.c`. The processor is
 the oracle: a harness runs records in the test's process, loading every
-general register, the flags, ZMM0 to ZMM15 and the x87's state (FXRSTOR64 of a
-random one, every exception masked; the C code's saved around the run) from a
-state, then storing them back. Memory operands are RIP-relative into a data
+general register, the flags, ZMM0 to ZMM31, K0 to K7 and the x87's state
+(FXRSTOR64 of a random one, every exception masked; the C code's saved around
+the run) from a state, then storing them back; a host without AVX512F and
+AVX512BW (`kmovq`'s) gets XMM0 to XMM15 alone, and its VEX and EVEX forms aren't
+run. Memory operands are RIP-relative into a data
 page, RSP is its own stack, and a fault names the record. The checks:
 
 - the effects table: every covered form but those that branch or trap, from
-  `--runs` random states (12), with register and memory operands in turn.
+  `--runs` random states (12), with register and memory operands in turn, and
+  where an EVEX form takes them XMM16 to XMM31 and an opmask half the time
+  (zeroing half of those), a gather's or scatter's elements in the data page
+  through a base and a vector index (#760).
   Each run checks that:
   - what the form doesn't write stays as it was: registers, vector registers
-    to bit 511, flags, the x87's state and control word, and the memory around
-    its operand and below the stack;
+    to bit 511, opmask registers, flags, the x87's state and control word, and
+    the memory around its operand and below the stack;
   - a narrower write keeps or zeroes the rest as its record says (a VEX or
     EVEX one zeroes it to bit 511), and vzeroupper zeroes ZMM0 to ZMM15 above
     bit 127;
@@ -2523,8 +2546,12 @@ page, RSP is its own stack, and a fault names the record. The checks:
     merges and legacy SSE's upper lanes;
   - a call's architectural effects, register and memory operands, zero
     idioms (vpxord's of its sources), shift counts (shld's and shrd's), the
-    x87's state and control word, vzeroupper, a masked EVEX record (every
-    resource) and AVX moves;
+    x87's state and control word, vzeroupper and AVX moves; and opmasks (#760),
+    by both paths: a masked move that merges and one that zeroes, a masked
+    store, a compare into an opmask, kand, kmov both ways, a gather and a
+    scatter (EVEX's opmask, VEX's vector mask), vpblendvb's /is4 register, a
+    masked zero idiom and vp2intersect's pair, each also everything without
+    the opmask column;
   - the substitutions' legality for every set of live flags;
   - uncovered forms, which must get the conservative record;
 - the immediate's contract on every covered form with an immediate and about
@@ -2560,7 +2587,7 @@ its directory under `$TMPDIR` (or `/tmp`). The 9700X job's test step runs it
 with `--cross-check`.
 
 Its consumers' tests check them against it: `test-tier0` that every record Tier 0
-emits but an X86 entry's has a covered form, `test-assembler --cross-check` the
+emits has a covered form, an X86 entry's too (#760), `test-assembler --cross-check` the
 matcher's value immediates against GNU as (the unsigned spellings among them),
 and test-checker's folds section (`c_check_program_folds_test.c`) where Tier 0
 folds loads, from its records' resolved effects: a volatile object read as often
@@ -2579,8 +2606,9 @@ vector paths agree with their scalar twins, then reports:
   chosen forms' bytes against an imm32 for every value;
 - operand-resolved effects per record, on `--functions` functions (2,048) of
   96 records shaped like clang's -O0 and -O2 code (branch sizing's generator),
-  by `effects-scalar` and `effects-avx512`, beside `encode` (`x86_encode` of
-  the same records);
+  by `effects-scalar`, `effects-avx512` and `effects-opmasks` (the AVX-512
+  path with the opmask registers' column, #760), beside `encode` (`x86_encode`
+  of the same records);
 - `code`: the run time and size of the choices that change the instruction
   sequence or its encoding (an imm8 against an imm32, inc, xor, test r, r, a
   narrower test, `mov r32` against movabs), in blocks of 64 over 8 registers.
@@ -5460,22 +5488,35 @@ result's bytes, a C callee and a C caller of ours) and as our side, a caller
 and a callee per signature as `X86Instruction` records through `x86_encode`,
 `link_add_code_fixups` and the object writer. The compiler's driver links them
 and the program runs: each side checks every argument, result, hidden pointer,
-`al` and `va_arg` value against the bytes, both ways. Two compiled runs
-(#137), against clang and against GCC at 16 bytes, put this compiler on our
-side: a world of what its C passes (integers to 64 bits, `__int128` and
-`unsigned __int128`, enums, pointers, `float`, `double`, `long double`, their
-complex types and the
+`al` and `va_arg` value against the bytes, both ways. Four compiled runs
+(#137), against clang and against GCC at 16 bytes and at 64 (x86-64-v4), put
+this compiler on our side: a world of what its C passes (integers to 64 bits,
+`_BitInt`s to 128 bits, `__int128` and `unsigned __int128`, enums, pointers,
+`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types,
+GNU's complex integer types (of `__int128` too) and in clang's complex
+`_BitInt`s to 128 bits, `__float128`, in clang's `_Atomic`s of those
+scalars and records (themselves, records holding them and aligned typedefs of
+them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
+AVX-512, and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
-signatures within Tier 0's depths (12 integer arguments, long doubles and
-128-bit integers among them, a realigned frame's rbp past them, and 15
-floating ones); our
-caller and callee per signature as C, which this executable (or `--buster
-PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
-and the C side checks every argument and result both ways (the al and the
-hidden pointer, which C doesn't name, are the record runs' checks). Two
+signatures with long doubles, 128-bit integers or vectors within Tier 0's
+depths (12 integer arguments, a `_BitInt` of 65 to 127 bits never the 12th,
+an `_Atomic` or an aligned typedef of one never past the 8th, a realigned frame's rbp
+past them, and 15 floating ones), and the others past
+them, in its deep slots (#712), the
+first against clang `(nullptr_t, long × 5, U, long)` for a union U whose high
+eightbyte is padding, which passes in one 8-byte stack slot before the last
+`long`; our caller and callee per signature as C, which this executable (or
+`--buster PATH`) compiles for the run's target with `--verify -c` and with
+`--scalar` into the same bytes, our callee storing each named parameter as it
+arrived, then writing each back from the data, the last first, and storing it
+again, and the C side checks both stores and every argument and result both
+ways (the al and the hidden pointer, which C doesn't
+name, are the record runs' checks); the 64-byte runs execute where the host has x86-64-v4's
+features, and elsewhere compile and link. Two
 extension runs (#475's review), with plain char signed and with it unsigned
 (`-funsigned-char`, `TypeTable.char_unsigned`), pass and return the types clang
 extends (the character types, enums of a fixed underlying char and signed char,
@@ -5486,7 +5527,7 @@ makes), that extend as the flags say before calling clang's callee, which takes
 the 32 bits as they come, and the other way round (the control), and C that
 this executable compiles with each signedness by both paths. clang's callee
 returns a narrow result unextended, though its IR says `signext` or `zeroext`,
-so a caller extends it itself, as Tier 0 does. The ten runs (clang's, then
+so a caller extends it itself, as Tier 0 does. The twelve runs (clang's, then
 GCC's, each at 16, 32 and 64 bytes, then the compiled ones, then the extension
 ones) go at once, a child process each, and the test prints their lines in that
 order; a run that fails keeps its files.
@@ -5609,14 +5650,14 @@ depths (the 15th value in its deep slot), and a function that allocates 64 KB an
 scope of its own, around calls with stack arguments, run natively; the frame's
 address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
 allocation, run natively; and the
-aggregates at locations written by hand, 13 fixtures (each kind of general and
+aggregates at locations written by hand, 14 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
-SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
+the low eightbyte alone of a larger one on the stack, SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
 misaligned, and results in each kind and order of register, short ones, a
 vector and through a hidden pointer), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 57 breaks of their
+copy their parameters out; and `tier0_validate` refusing 61 breaks of their
 rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, and registers outside
@@ -5659,8 +5700,10 @@ kind and conversion of the class and both arms of a `?:`. Any refusal except a
 random program's excess depth fails the check. Then the `int128`
 check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
 U128, against clang's `__int128`: each break of the classes' rules refused at
-its entry; a stack of a memory class's values up to the last 16-byte slot,
-which runs, and one past it, which both paths refuse (for long double too);
+its entry; stacks of a memory class's values to the last 16-byte slot of the
+integer table, one and two past it and 40, which run (past the table through
+the deep slots, #780), of 238, which compiles, and of 239, past the deep slots
+with the output's address, which both paths refuse (for long double too);
 functions of 128-bit parameters and results in register pairs and on the
 stack, called from C, and calling C; each class's compares and shifts on every
 pair of ten boundary values, against C's own operators too; and `--count`
@@ -5668,7 +5711,7 @@ random programs over every kind of the classes, frame objects as the x87
 check's, shifts by constant and variable counts and conversions to and from the
 other integers, under live values where
 `MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
-past the slots fails it, and only the entries that ran in the programs both
+past the deep slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
 both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
@@ -5681,7 +5724,7 @@ converted and two compared among them); each row under no
 live values, under 8 floats and 3 integers, and under as many floats as leave
 its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
 one past it and a scratch register past the integer table, which both paths
-refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads

@@ -614,7 +614,7 @@ typedef enum IrRule
     X(IR_ALLOCA,        1, 1, 1u << IR_PTR, IR_RULE_STACK, 0) \
     X(IR_STACK_SAVE,    0, 0, 1u << IR_I64, IR_RULE_NONE, 0) \
     X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0) \
-    X(IR_BR_INDIRECT,   1, 1, 1u << IR_VOID, IR_RULE_INDIRECT, 1)
+    X(IR_BR_INDIRECT,   1, 7, 1u << IR_VOID, IR_RULE_INDIRECT, 1)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -875,11 +875,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_RETURN: valid = f->result_type == IR_VOID ? a == BUSTER_IR_NONE : a < f->instruction_count && f->type[a] == f->result_type; break;
             case IR_RULE_INDIRECT:
             {
-                // An indirect branch goes to the label whose address it holds: every label must have its block.
-                valid = ta == IR_PTR;
-                for (uint32_t l = 0; valid && l < f->label_count; l += 1)
+                // An indirect branch goes to the label whose address it holds, one of its list's (label indices in
+                // extra[b..+c), a jump table's, #785) or, without a list, any of the function's: each must have its block.
+                const bool list = b != BUSTER_IR_NONE;
+                valid = ta == IR_PTR && (list ? c != 0 && ir_slice(b, c, f->extra_count) : c == BUSTER_IR_NONE);
+                for (uint32_t l = 0; valid && l < (list ? c : f->label_count); l += 1)
                 {
-                    valid = f->labels[l] != BUSTER_IR_NONE;
+                    const uint32_t label = list ? f->extra[b + l] : l;
+                    valid = label < f->label_count && f->labels[label] != BUSTER_IR_NONE;
                 }
             } break;
             // Validate the fixed-width stack rule outside the established explicit semantic cases.
@@ -1034,7 +1037,7 @@ static IrCheck ir_check_rows(const IrFunction* f, bool vector)
 static uint32_t ir_successor_count(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
-    return op == IR_BR ? 1 : op == IR_CBR ? 2 : op == IR_SWITCH ? f->c[i] + 1 : op == IR_BR_INDIRECT ? f->label_count : 0;
+    return op == IR_BR ? 1 : op == IR_CBR ? 2 : op == IR_SWITCH ? f->c[i] + 1 : op == IR_BR_INDIRECT ? (f->b[i] == BUSTER_IR_NONE ? f->label_count : f->c[i]) : 0;
 }
 
 static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
@@ -1050,7 +1053,7 @@ static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
     }
     else if (f->op[i] == IR_BR_INDIRECT)
     {
-        result = f->labels[edge];
+        result = f->labels[f->b[i] == BUSTER_IR_NONE ? edge : f->extra[f->b[i] + edge]];
     }
     return result;
 }
@@ -1757,6 +1760,15 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         }
                     } break;
                     case IR_BR: fprintf(output, " b%" PRIu32, a); break;
+                    case IR_BR_INDIRECT:
+                    {
+                        // Its labels, when it has a list of them.
+                        fprintf(output, " %%%" PRIu32, a);
+                        for (uint32_t p = 0; b != BUSTER_IR_NONE && p < c; p += 1)
+                        {
+                            fprintf(output, "%s#%" PRIu32 "%s", p == 0 ? " [" : ", ", f->extra[b + p], p + 1 == c ? "]" : "");
+                        }
+                    } break;
                     case IR_CBR: fprintf(output, " %%%" PRIu32 ", b%" PRIu32 ", b%" PRIu32, a, b, c); break;
                     case IR_SWITCH:
                     {

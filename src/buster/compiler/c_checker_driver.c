@@ -67,9 +67,11 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_KR_IMPLICIT_INT: result = "parameter was not declared; ISO C99 and later do not support implicit int"; break;
         case CHECK_INPUT_CONSTANT_INITIALIZER: result = "initializer element is not a compile-time constant"; break;
         case CHECK_INPUT_SECTION: result = "invalid '#pragma clang section' or section type conflict"; break;
         case CHECK_INPUT_OPTIMIZE: result = "invalid '#pragma clang optimize'"; break;
+        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
     }
     return result;
 }
@@ -442,6 +444,26 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
     }
 }
 
+static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, warning);
+    if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (warning == CHECK_WARNING_KR_TOO_FEW || warning == CHECK_WARNING_KR_TOO_MANY)
+        {
+            const uint32_t name = parser->tokens.names[token];
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s to '%.*s'",
+                               check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+        }
+        else
+        {
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(warning));
+        }
+    }
+}
+
 // The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
@@ -471,11 +493,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
-    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count + 1;
+    const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
+    const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
+    const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
-    const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
+    const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
@@ -523,6 +547,44 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
             }
         }
+        for (uint32_t i = 0; show_warnings && i < input->kr_diagnostic_count; i += 1)
+        {
+            const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+            const uint32_t token = diagnostic.token;
+            if (token < count && check_diagnostic_kr_severity(input, token, diagnostic.warning) != CHECK_WARNING_IGNORE &&
+                (repair == NULL || check_repair_warning_token(repair, token)))
+            {
+                report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
+            }
+        }
+        // Gather both warning families in one mask scan. Call diagnostics don't fit the arithmetic warnings'
+        // packed 16-bit keys; sort those with the sparse source reports, without an extra pass over the nodes.
+        uint32_t warning_total = 0;
+        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
+        {
+            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t source = input->graph.tokens[node];
+                const uint32_t packed = stream->warnings[node] & 0xffffu;
+                if (source < count && packed != 0)
+                {
+                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    warning_keys[warning_total++] = check_driver_warning_key(source, packed, packed & ~ignored);
+                }
+                const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
+                if (flags != 0)
+                {
+                    const uint32_t token = check_diagnostic_kr_call_token(input, node);
+                    if (token < count && check_diagnostic_kr_severity(input, token, flags) != CHECK_WARNING_IGNORE &&
+                        (repair == NULL || check_repair_warning_token(repair, token)))
+                    {
+                        report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)call_offset64 + node);
+                    }
+                }
+            }
+        }
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
@@ -548,7 +610,6 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         {
             firsts[first_count] = UINT64_MAX;
         }
-        uint32_t warning_total = 0;
         for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
             const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
@@ -572,21 +633,6 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 const uint32_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
                 if (flags != 0)
                 {
-                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
-                }
-            }
-        }
-        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
-        {
-            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
-            {
-                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t token = input->graph.tokens[node];
-                const uint32_t flags = stream->warnings[node];
-                if (token < count && flags != 0)
-                {
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
                 }
             }
@@ -705,7 +751,15 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
-                if (sequence >= offset)
+                if (sequence >= (uint32_t)call_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, stream->warnings[sequence - (uint32_t)call_offset64] & CHECK_WARNING_KR_CALLS);
+                }
+                else if (sequence >= (uint32_t)kr_offset64)
+                {
+                    check_driver_kr_report(parser, pp, input, token, input->kr_diagnostics[sequence - (uint32_t)kr_offset64].warning);
+                }
+                else if (sequence >= offset)
                 {
                     const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
@@ -747,6 +801,13 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
                                                  (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_KR_IMPLICIT_INT && token < count)
+                        {
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
+                                (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else
                         {
@@ -1172,6 +1233,87 @@ static const char* check_driver_fixup_origin(const Link* link, const Runtime* ru
     return buffer;
 }
 
+// Names an atom from a symbol attached to it, if it has one. This scan happens only after a failed link.
+static const char* check_driver_atom_name(const Link* link, AtomId atom, char* buffer, uint64_t capacity)
+{
+    NameId name = 0;
+    for (SymbolId symbol = 1; name == 0 && symbol < link->symbols.count; symbol += 1)
+    {
+        name = link->symbols.atom[symbol] == atom ? link->symbols.name[symbol] : 0;
+    }
+    return check_driver_link_name(link, name, buffer, capacity);
+}
+
+// Describe only the information the writer returned. A layout refusal without an atom can have several causes.
+static void check_driver_executable_failure(const Link* link, const Runtime* runtime, uint32_t unit_base, const char* path, const ExecutableResult* result, FILE* out)
+{
+    char name[256];
+    const bool atom = result->atom != 0 && result->atom < link->atoms.count;
+    const bool symbol = result->symbol != 0 && result->symbol < link->symbols.count;
+    if (result->error == EXECUTABLE_ERROR_UNDEFINED && symbol)
+    {
+        fprintf(out, "error: undefined reference to '%s'\n", check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
+    }
+    else if (result->error == EXECUTABLE_ERROR_FILE)
+    {
+        fprintf(out, "error: can't write %s: %s: %s\n", path, result->call != NULL ? result->call : "write", strerror(result->system_error));
+    }
+    else if ((result->error == EXECUTABLE_ERROR_RELOCATION || result->error == EXECUTABLE_ERROR_FIXUP) && result->fixup != 0 && result->fixup < link->fixups.count)
+    {
+        char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
+        fprintf(out, "error: can't link %s: %s: %s\n", path, check_driver_fixup_origin(link, runtime, unit_base, result->fixup, origin, sizeof(origin)),
+                result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "unsupported relocation");
+    }
+    else if (result->error == EXECUTABLE_ERROR_LAYOUT && atom)
+    {
+        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
+        const uint64_t size = link->atoms.size[result->atom];
+        if (size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
+        {
+            fprintf(out, "error: can't link %s: atom %u%s%s%s has %" PRIu64 " bytes; the maximum atom size is %" PRIu64 " bytes\n", path,
+                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size,
+                    (uint64_t)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
+        }
+        else
+        {
+            fprintf(out, "error: can't link %s: atom %u%s%s%s has unsupported size, alignment or section layout (size %" PRIu64 " bytes)\n", path,
+                    result->atom, atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "", size);
+        }
+    }
+    else if (result->error == EXECUTABLE_ERROR_LAYOUT)
+    {
+        fprintf(out, "error: can't link %s: image, TLS or section-name layout exceeds executable limits (image end: %" PRIu64
+                     " bytes; TLS block: %" PRIu64 " bytes)\n", path, (uint64_t)BUSTER_EXECUTABLE_MAX_ADDRESS, (uint64_t)BUSTER_EXECUTABLE_MAX_TLS_BYTES);
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNWIND && atom)
+    {
+        const char* atom_name = check_driver_atom_name(link, result->atom, name, sizeof(name));
+        fprintf(out, "error: can't link %s: unwind atom %u%s%s%s cannot be indexed in the unwind table\n", path, result->atom,
+                atom_name[0] ? " ('" : "", atom_name[0] ? atom_name : "", atom_name[0] ? "')" : "");
+    }
+    else if (result->error == EXECUTABLE_ERROR_ENTRY)
+    {
+        const char* entry = symbol ? check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)) : "";
+        fprintf(out, "error: can't link %s: entry point%s%s%s is not defined in code\n", path,
+                entry[0] ? " '" : "", entry[0] ? entry : "", entry[0] ? "'" : "");
+    }
+    else if (result->error == EXECUTABLE_ERROR_UNSUPPORTED && symbol)
+    {
+        fprintf(out, "error: can't link %s: unsupported symbol '%s'\n", path,
+                check_driver_link_name(link, link->symbols.name[result->symbol], name, sizeof(name)));
+    }
+    else
+    {
+        const char* reason = result->error == EXECUTABLE_ERROR_MEMORY ? "linker scratch memory exhausted" :
+                             result->error == EXECUTABLE_ERROR_UNWIND ? "unwind table cannot be indexed" :
+                             result->error == EXECUTABLE_ERROR_UNSUPPORTED ? "unsupported executable configuration" :
+                             result->error == EXECUTABLE_ERROR_UNDEFINED ? "undefined symbol" :
+                             result->error == EXECUTABLE_ERROR_RELOCATION ? "unsupported relocation" :
+                             result->error == EXECUTABLE_ERROR_FIXUP ? "relocation value does not fit" : "executable write failed";
+        fprintf(out, "error: can't link %s: %s (executable error %u)\n", path, reason, (uint32_t)result->error);
+    }
+}
+
 // The libraries the command line names, -lNAME (or -l NAME), and the directories it adds to their search, -LDIR (or
 // -L DIR), each in its order, for the direct path to link (runtime_libraries_import).
 typedef struct CheckDriverLibraries CheckDriverLibraries;
@@ -1240,7 +1382,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     {
         again = false;
         Runtime runtime;
-        const SnapshotResult opened = runtime_open(&runtime, cached ? cache : NULL);
+        const SnapshotResult opened = runtime_open_cache(&runtime, cached ? cache : NULL, RUNTIME_KIND_DYNAMIC);
         // The libraries -l names, imported for this runtime, whose version indices theirs follow.
         static RuntimeLibraries named;
         const bool naming = libraries->count != 0 && opened.error == RUNTIME_ERROR_NONE;
@@ -1446,27 +1588,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             // Several units' executable is written on their lanes (`lanes`' count), one unit's by its calling thread.
             const uint32_t write_lanes = units != NULL && lanes->lanes > 1 ? lanes->lanes : 1;
             valid = lane_run(write_lanes, check_driver_write_main, &write, 0) && write.succeeded;
-            const ExecutableError error = write.result.error;
-            if (!valid && error == EXECUTABLE_ERROR_UNDEFINED && write.result.symbol < code.link.symbols.count)
+            if (!valid)
             {
-                fprintf(stderr, "error: undefined reference to '%s'\n",
-                        check_driver_link_name(&code.link, code.link.symbols.name[write.result.symbol], name, sizeof(name)));
-            }
-            else if (!valid && error == EXECUTABLE_ERROR_FILE)
-            {
-                fprintf(stderr, "error: can't write %s: %s: %s\n", output_path, write.result.call != NULL ? write.result.call : "write",
-                        strerror(write.result.system_error));
-            }
-            else if (!valid && (error == EXECUTABLE_ERROR_RELOCATION || error == EXECUTABLE_ERROR_FIXUP) && write.result.fixup != 0)
-            {
-                // The fixup's origin and target, a runtime member's as libgcc.a(generic-morestack.o) names one.
-                char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
-                fprintf(stderr, "error: can't link %s: %s (executable error %u)\n", output_path,
-                        check_driver_fixup_origin(&code.link, &runtime, units != NULL ? unit_count : 1, write.result.fixup, origin, sizeof(origin)), (uint32_t)error);
-            }
-            else if (!valid)
-            {
-                fprintf(stderr, "error: can't link %s (executable error %u)\n", output_path, (uint32_t)error);
+                check_driver_executable_failure(&code.link, &runtime, units != NULL ? unit_count : 1, output_path, &write.result, stderr);
             }
         }
         if (again && cached)
@@ -2001,6 +2125,32 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     return result;
 }
 
+// These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
+// still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
+// differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
+static bool check_driver_unsupported_codegen_option(const char* argument)
+{
+    static const char* const exact[] = {
+        "-fstack-protector-explicit", "-fstack-clash-protection", "-fstack-check", "-pg", "-finstrument-functions",
+        "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-instr-generate", "-fcs-profile-generate",
+        "-fprofile-generate-cold-function-coverage", "--coverage", "-fprofile-arcs", "-ftest-coverage", "-mno-red-zone", "-fno-plt",
+        "-fpcc-struct-return", "-freg-struct-return", "-fshort-double",
+    };
+    static const char* const prefixes[] = { "-fstack-protector", "-fstack-check=", "-ftls-model=", "-fwide-exec-charset=",
+                                            "-fprofile-generate=", "-fprofile-instr-generate=", "-fcs-profile-generate=",
+                                            "-fprofile-generate-cold-function-coverage=" };
+    bool unsupported = false;
+    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(exact); i += 1)
+    {
+        unsupported = strcmp(argument, exact[i]) == 0;
+    }
+    for (uint32_t i = 0; !unsupported && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
+    {
+        unsupported = strncmp(argument, prefixes[i], strlen(prefixes[i])) == 0;
+    }
+    return unsupported;
+}
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -2065,6 +2215,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
     };
     bool missing_value = false;
+    const char* unsupported_codegen = NULL;
+    const char* unsupported_stack_protector = NULL;
+    const char* unsupported_cf_protection = NULL;
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
     // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them. With several
     // source files, the lanes their units compile on, one unit at a time each (check_driver_units).
@@ -2125,6 +2278,22 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             {
                 libraries.directories[libraries.directory_count++] = text;
             }
+        }
+        else if (strcmp(arguments[i], "-fno-stack-protector") == 0 || strcmp(arguments[i], "-fstack-protector") == 0 ||
+                 strcmp(arguments[i], "-fstack-protector-strong") == 0 || strcmp(arguments[i], "-fstack-protector-all") == 0)
+        {
+            unsupported_stack_protector = strcmp(arguments[i], "-fno-stack-protector") == 0 ? NULL : arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (strcmp(arguments[i], "-fcf-protection") == 0 || strncmp(arguments[i], "-fcf-protection=", 16) == 0)
+        {
+            unsupported_cf_protection = strcmp(arguments[i], "-fcf-protection=none") == 0 ? NULL : arguments[i];
+            filtered[filtered_count++] = arguments[i];
+        }
+        else if (check_driver_unsupported_codegen_option(arguments[i]))
+        {
+            // Values of options above are already consumed, so an output name like -pg is never treated as a flag.
+            unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : arguments[i];
         }
         else if (strcmp(arguments[i], "--verify") == 0)
         {
@@ -2205,6 +2374,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             }
         }
     }
+    // The last stack-protector and CET option decides whether these unsupported behaviors were requested.
+    unsupported_codegen = unsupported_codegen != NULL ? unsupported_codegen : unsupported_stack_protector != NULL ? unsupported_stack_protector : unsupported_cf_protection;
     // The default C command links unless -c, -fsyntax-only or a dump says otherwise.
     const bool link = executable && !emit_object && !syntax_only && !dump && !dump_static;
     // Zero until pp_parse_options fills them, which a failed allocation or an option without its value skips.
@@ -2212,7 +2383,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && unsupported_codegen == NULL && !missing_value && !invalid_lanes && !invalid_id_order && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -2256,6 +2427,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     else if (!reserved)
     {
         fprintf(stderr, "fatal error: can't reserve the driver's memory\n");
+    }
+    else if (unsupported_codegen != NULL)
+    {
+        fprintf(stderr, "error: unsupported code generation option '%s'\n", unsupported_codegen);
     }
     else if (!parsed)
     {
