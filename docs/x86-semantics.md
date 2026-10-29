@@ -780,12 +780,12 @@ the table compares the second ones. The instructions and cycles are one
   volatile and atomic accesses decide a fold; its tests of them belong with it,
   on the resolved effects. Its selector's requests could go to the vector
   choice in batches, as Tier 0's do.
-- **VEX and EVEX coverage:** the front end's X86 rows and the x86 builtins
-  (#725) emit any VEX or EVEX form. Covering them (#180's levels: BMI2's shlx,
-  VEX's three-operand scalar arithmetic, their merges from vvvv, zeroed upper
-  lanes and masks) would let `tier0_operation_form_valid` ask the tables for
-  the forms with implicit operands, rather than keep its own list, and the
-  resolved effects cover masked records with an opmask resource.
+- **VEX and EVEX coverage (#760):** the front end's X86 rows and the x86
+  builtins (#725) emit any VEX or EVEX form. Covering them (#180's levels:
+  BMI2's shlx, VEX's three-operand scalar arithmetic, their merges from vvvv,
+  zeroed upper lanes and masks) would let `tier0_operation_form_valid` ask the
+  tables for the forms with implicit operands, rather than keep its own list,
+  and the resolved effects cover masked records with an opmask resource.
 - **#181:** key its latencies by the same forms, and decide inc and dec.
 
 ## Boundary audit #298
