@@ -330,7 +330,14 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                     const IrCall descriptor = function->calls[bi];
                     const uint32_t symbol = op == IR_CALL ? ai : (uint32_t)(a - 65536);
                     const uint32_t callee = ir_inline_test_symbol(unit, symbol);
-                    if (descriptor.argument_count > 8 || depth >= 32)
+                    // A call with ABI records (#131): an aggregate argument is the address of its bytes, which the
+                    // fixtures' callees only read, and an aggregate result's bytes go where c points. A stub writes
+                    // them; the unit's callee returns their address (IrFunction.result_size, below) or takes c as its
+                    // parameter 0, a hidden pointer.
+                    const IrAbiCall* abi = descriptor.abi != 0 ? &function->abi_calls[descriptor.abi - 1] : 0;
+                    const uint32_t result_size = abi != 0 ? abi->result_size : 0;
+                    const uint32_t hidden = result_size != 0 && callee != UINT32_MAX && unit->functions[callee].parameter_passed != 0 && unit->functions[callee].result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
+                    if (descriptor.argument_count + hidden > 8 || depth >= 32)
                     {
                         execution.status = 1;
                     }
@@ -338,9 +345,24 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                     {
                         // A deterministic external stub makes retained call order and argument mapping observable.
                         value = symbol;
-                        for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
+                        for (uint32_t p = 0; execution.status == 0 && p < descriptor.argument_count; p += 1)
                         {
-                            value = value * 257 + values[function->extra[descriptor.argument_first + p]];
+                            const IrInlineTestValue argument = values[function->extra[descriptor.argument_first + p]];
+                            const uint32_t size = abi != 0 ? function->passed[abi->passed + p].size : 0;
+                            execution.status = size != 0 && (argument > 64 || size > 64 - argument) ? 2 : 0;
+                            value = value * 257 + (size == 0 ? argument : 0);
+                            for (uint32_t byte = 0; execution.status == 0 && byte < size; byte += 1)
+                            {
+                                value = value * 257 + execution.memory[(uint32_t)argument + byte];
+                            }
+                        }
+                        if (execution.status == 0 && result_size != 0)
+                        {
+                            execution.status = c > 64 || result_size > 64 - c ? 2 : 0;
+                            for (uint32_t byte = 0; execution.status == 0 && byte < result_size; byte += 1)
+                            {
+                                execution.memory[(uint32_t)c + byte] = (uint8_t)(value >> (byte % 16 * 8));
+                            }
                         }
                         execution.effects = execution.effects * 17 + (uint64_t)value;
                     }
@@ -353,9 +375,13 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                             .predecessor = UINT32_MAX,
                             .entering = true,
                         };
+                        if (hidden != 0)
+                        {
+                            next->arguments[0] = c;
+                        }
                         for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
                         {
-                            next->arguments[p] = values[function->extra[descriptor.argument_first + p]];
+                            next->arguments[hidden + p] = values[function->extra[descriptor.argument_first + p]];
                         }
                         memset(all_values + (uint64_t)depth * stride, 0, (uint64_t)stride * sizeof(*all_values));
                         depth += 1;
@@ -392,7 +418,24 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
                     }
                     else
                     {
-                        all_values[(uint64_t)(depth - 1) * stride + frame->destination] = value;
+                        IrInlineTestValue* caller_values = all_values + (uint64_t)(depth - 1) * stride;
+                        if (function->result_size != 0)
+                        {
+                            // An aggregate returned in registers: its bytes, at most the call's room, from the address
+                            // returned to where the call's c points.
+                            const IrFunction* caller = &unit->functions[frames[depth - 1].function];
+                            const IrCall call = caller->calls[caller->b[frame->destination]];
+                            const uint32_t into = caller->c[frame->destination];
+                            const uint32_t room = call.abi != 0 ? caller->abi_calls[call.abi - 1].result_size : 0;
+                            const uint32_t bytes = function->result_size < room ? function->result_size : room;
+                            const IrInlineTestValue target = into < caller->instruction_count ? caller_values[into] : 0;
+                            execution.status = room == 0 || into >= caller->instruction_count ? 1 : value > 64 || bytes > 64 - value || target > 64 || bytes > 64 - target ? 2 : 0;
+                            if (execution.status == 0)
+                            {
+                                memmove(execution.memory + (uint32_t)target, execution.memory + (uint32_t)value, bytes);
+                            }
+                        }
+                        caller_values[frame->destination] = value;
                     }
                 }
                 break;
@@ -424,6 +467,7 @@ static IrInlineTestExecution ir_inline_test_execute(const IrInlineUnit* unit, ui
 static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* b)
 {
     bool same = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count && a->constant_count == b->constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count && a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count;
+    same = same && a->label_count == b->label_count && a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count && a->parameter_passed == b->parameter_passed && a->result_size == b->result_size && memcmp(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) == 0 && a->variadic == b->variadic && memcmp(&a->incoming, &b->incoming, sizeof(AbiCall)) == 0;
     if (same)
     {
         const void* left[] = {
@@ -442,6 +486,9 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             a->calls,
             a->call_types,
             a->parameter_types,
+            a->labels,
+            a->abi_calls,
+            a->passed,
         };
         const void* right[] = {
             b->op,
@@ -459,6 +506,9 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             b->calls,
             b->call_types,
             b->parameter_types,
+            b->labels,
+            b->abi_calls,
+            b->passed,
         };
         const uint64_t bytes[] = {
             a->instruction_count,
@@ -476,6 +526,9 @@ static bool ir_inline_test_same_function(const IrFunction* a, const IrFunction* 
             (uint64_t)a->call_count * sizeof(IrCall),
             a->call_type_count,
             a->parameter_count,
+            (uint64_t)a->label_count * 4,
+            (uint64_t)a->abi_call_count * sizeof(IrAbiCall),
+            (uint64_t)a->passed_count * sizeof(IrPassed),
         };
         for (uint32_t column = 0; same && column < sizeof(bytes) / sizeof(bytes[0]); column += 1)
         {
@@ -950,6 +1003,304 @@ static void ir_inline_test_memory(IrInlineTest* test, Arena* input, Arena* outpu
         arena_pop_to(output, 0);
         arena_pop_to(twin, 0);
     }
+}
+
+// #783: a caller that keeps three calls with ABI records (#131) between two calls the inliner expands, which renumber
+// every value after them: one to a callee of the unit that returns 12 bytes in registers and takes a 16-byte
+// aggregate, one to a callee that returns 24 bytes through a hidden pointer and takes a 12-byte aggregate (the first
+// call's result), and one to a stub, which takes the second call's 24 bytes and returns a value. Each aggregate
+// result's destination (c) must follow the renumbering, and the records must stay the caller's and the callees'.
+static void ir_inline_test_aggregates(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
+{
+    IrFunction functions[4];
+    functions[0] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 14,
+                                                            .block_count = 1,
+                                                            .extra_count = 8,
+                                                            .constant_count = 1,
+                                                            .address_count = 2,
+                                                            .call_count = 5,
+                                                            .call_type_count = 8,
+                                                            .parameter_count = 1,
+                                                            .abi_call_count = 3,
+                                                            .passed_count = 6,
+                                                        },
+                                           IR_I64);
+    functions[1] = ir_inline_test_leaf(test, input, IR_I64);
+    functions[2] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 6,
+                                                            .block_count = 1,
+                                                            .constant_count = 1,
+                                                            .address_count = 1,
+                                                            .parameter_count = 2,
+                                                            .passed_count = 2,
+                                                        },
+                                           IR_PTR);
+    functions[3] = ir_inline_test_function(test, input, (IrSizes){
+                                                            .instruction_count = 16,
+                                                            .block_count = 1,
+                                                            .address_count = 2,
+                                                            .parameter_count = 3,
+                                                            .passed_count = 3,
+                                                        },
+                                           IR_I64);
+    if (functions[0].op != 0 && functions[2].op != 0 && functions[3].op != 0)
+    {
+        const AbiLocation stack = {
+            .registers = {
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+            },
+            .kind = BUSTER_ABI_LOCATION_STACK,
+        };
+        const AbiReturn pair = {
+            .kind = BUSTER_ABI_RESULT_REGISTERS,
+            .part_bytes = 8,
+            .registers = {
+                BUSTER_ABI_RAX,
+                BUSTER_ABI_RDX,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+            },
+        };
+        const AbiReturn memory = {
+            .kind = BUSTER_ABI_RESULT_MEMORY,
+            .registers = {
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+            },
+        };
+        const AbiReturn single = {
+            .kind = BUSTER_ABI_RESULT_REGISTERS,
+            .part_bytes = 8,
+            .registers = {
+                BUSTER_ABI_RAX,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+            },
+        };
+        const IrPassed pieces = {
+            .location = {
+                .registers = {
+                    BUSTER_ABI_RDI,
+                    BUSTER_ABI_RSI,
+                },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            },
+            .size = 16,
+        };
+        const IrPassed rdi = {
+            .location = {
+                .registers = {
+                    BUSTER_ABI_RDI,
+                    BUSTER_ABI_REGISTER_NONE,
+                },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            },
+        };
+        const IrPassed rsi = {
+            .location = {
+                .registers = {
+                    BUSTER_ABI_RSI,
+                    BUSTER_ABI_REGISTER_NONE,
+                },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            },
+        };
+        const IrPassed rdx = {
+            .location = {
+                .registers = {
+                    BUSTER_ABI_RDX,
+                    BUSTER_ABI_REGISTER_NONE,
+                },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            },
+        };
+        // The caller: x's leaf, A = (leaf & 7) as a pointer, G(A + 24, x) into A, H(x, A) into B = A + 32, the stub's
+        // value of (B, x), and the leaf of that plus A's first 8 bytes.
+        IrFunction* caller = &functions[0];
+        caller->parameter_types[0] = IR_I64;
+        caller->constants[0].low = 7;
+        caller->addresses[0] = (IrAddress){
+            .offset = 24,
+            .scale = 1,
+        };
+        caller->addresses[1] = (IrAddress){
+            .offset = 32,
+            .scale = 1,
+        };
+        const uint32_t extra[] = {
+            0,
+            5,
+            0,
+            0,
+            4,
+            7,
+            0,
+            11,
+        };
+        memcpy(caller->extra, extra, sizeof(extra));
+        ir_inline_test_node(caller, 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_call(caller, 1, 0, 2, 0, 1, IR_I64);
+        ir_inline_test_node(caller, 2, IR_CONST, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(caller, 3, IR_AND, IR_I64, 1, 2, UINT32_MAX);
+        ir_inline_test_node(caller, 4, IR_INTTOPTR, IR_PTR, 3, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(caller, 5, IR_ADDRESS, IR_PTR, 4, UINT32_MAX, 0);
+        ir_inline_test_call(caller, 6, 1, 3, 1, 2, IR_VOID);
+        ir_inline_test_node(caller, 7, IR_ADDRESS, IR_PTR, 4, UINT32_MAX, 1);
+        ir_inline_test_call(caller, 8, 2, 4, 3, 2, IR_VOID);
+        ir_inline_test_call(caller, 9, 3, 50, 5, 2, IR_I64);
+        ir_inline_test_node(caller, 10, IR_LOAD, IR_I64, 4, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(caller, 11, IR_ADD, IR_I64, 9, 10, UINT32_MAX);
+        ir_inline_test_call(caller, 12, 4, 2, 7, 1, IR_I64);
+        ir_inline_test_node(caller, 13, IR_RET, IR_VOID, 12, UINT32_MAX, UINT32_MAX);
+        caller->c[6] = 4;
+        caller->c[8] = 7;
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            caller->calls[k + 1].abi = k + 1;
+        }
+        caller->abi_calls[0] = (IrAbiCall){
+            .call = {
+                .stack_alignment_log2 = 4,
+                .integer_registers = 3,
+                .result = pair,
+            },
+            .passed = 0,
+            .result_size = 12,
+        };
+        caller->abi_calls[1] = (IrAbiCall){
+            .call = {
+                .stack_bytes = 16,
+                .stack_alignment_log2 = 4,
+                .integer_registers = 2,
+                .result = memory,
+            },
+            .passed = 2,
+            .result_size = 24,
+        };
+        caller->abi_calls[2] = (IrAbiCall){
+            .call = {
+                .stack_bytes = 24,
+                .stack_alignment_log2 = 4,
+                .integer_registers = 1,
+                .result = single,
+            },
+            .passed = 4,
+        };
+        caller->passed[0] = pieces;
+        caller->passed[1] = rdx;
+        caller->passed[2] = rsi;
+        caller->passed[3] = (IrPassed){
+            .location = stack,
+            .size = 12,
+        };
+        caller->passed[4] = (IrPassed){
+            .location = stack,
+            .size = 24,
+        };
+        caller->passed[5] = rdi;
+        // G(s, y): the 12 bytes at s + (y & 3), returned in registers.
+        IrFunction* registers = &functions[2];
+        registers->parameter_types[0] = IR_PTR;
+        registers->parameter_types[1] = IR_I64;
+        registers->constants[0].low = 3;
+        registers->addresses[0] = (IrAddress){
+            .scale = 1,
+        };
+        ir_inline_test_node(registers, 0, IR_PARAM, IR_PTR, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(registers, 1, IR_PARAM, IR_I64, 1, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(registers, 2, IR_CONST, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(registers, 3, IR_AND, IR_I64, 1, 2, UINT32_MAX);
+        ir_inline_test_node(registers, 4, IR_ADDRESS, IR_PTR, 0, 3, 0);
+        ir_inline_test_node(registers, 5, IR_RET, IR_VOID, 4, UINT32_MAX, UINT32_MAX);
+        registers->parameter_passed = 1;
+        registers->passed[0] = pieces;
+        registers->passed[1] = rdx;
+        registers->result_size = 12;
+        registers->result_abi = pair;
+        // H(d, x, t), d the hidden pointer: d's 24 bytes from t's 12 and x, and d returned.
+        IrFunction* hidden = &functions[3];
+        hidden->parameter_types[0] = IR_I64;
+        hidden->parameter_types[1] = IR_I64;
+        hidden->parameter_types[2] = IR_PTR;
+        hidden->addresses[0] = (IrAddress){
+            .offset = 8,
+            .scale = 1,
+        };
+        hidden->addresses[1] = (IrAddress){
+            .offset = 16,
+            .scale = 1,
+        };
+        ir_inline_test_node(hidden, 0, IR_PARAM, IR_I64, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 1, IR_PARAM, IR_I64, 1, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 2, IR_PARAM, IR_PTR, 2, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 3, IR_INTTOPTR, IR_PTR, 0, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 4, IR_LOAD, IR_I64, 2, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 5, IR_XOR, IR_I64, 4, 1, UINT32_MAX);
+        ir_inline_test_node(hidden, 6, IR_STORE, IR_VOID, 3, 5, UINT32_MAX);
+        ir_inline_test_node(hidden, 7, IR_ADDRESS, IR_PTR, 2, UINT32_MAX, 0);
+        ir_inline_test_node(hidden, 8, IR_LOAD, IR_I32, 7, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 9, IR_ZEXT, IR_I64, 8, UINT32_MAX, UINT32_MAX);
+        ir_inline_test_node(hidden, 10, IR_ADD, IR_I64, 9, 1, UINT32_MAX);
+        ir_inline_test_node(hidden, 11, IR_ADDRESS, IR_PTR, 3, UINT32_MAX, 0);
+        ir_inline_test_node(hidden, 12, IR_STORE, IR_VOID, 11, 10, UINT32_MAX);
+        ir_inline_test_node(hidden, 13, IR_ADDRESS, IR_PTR, 3, UINT32_MAX, 1);
+        ir_inline_test_node(hidden, 14, IR_STORE, IR_VOID, 13, 1, UINT32_MAX);
+        ir_inline_test_node(hidden, 15, IR_RET, IR_VOID, 0, UINT32_MAX, UINT32_MAX);
+        hidden->parameter_passed = 1;
+        hidden->passed[0] = rdi;
+        hidden->passed[1] = rsi;
+        hidden->passed[2] = (IrPassed){
+            .location = stack,
+            .size = 12,
+        };
+        hidden->result_abi = memory;
+        const uint32_t symbols[] = {
+            1,
+            2,
+            3,
+            4,
+        };
+        const uint8_t flags[] = {
+            0,
+            BUSTER_IR_INLINE_INTERNAL,
+            BUSTER_IR_INLINE_INTERNAL,
+            BUSTER_IR_INLINE_INTERNAL,
+        };
+        const IrInlineUnit unit = {
+            functions,
+            symbols,
+            flags,
+            4,
+            128,
+        };
+        IrInlineResult result = { 0 };
+        if (ir_inline_test_run(test, &unit, ir_inline_options(), output, twin, scratch, &result))
+        {
+            const uint8_t decisions[] = {
+                IR_INLINE_SELECTED,
+                IR_INLINE_ABI,
+                IR_INLINE_ABI,
+                IR_INLINE_UNKNOWN_SYMBOL,
+                IR_INLINE_SELECTED,
+            };
+            ir_inline_test_expect(test, result.inlined_calls == 2 && result.call_count == 5 && memcmp(result.decisions, decisions, sizeof(decisions)) == 0, "calls with ABI records stay calls");
+            // Each leaf adds two values (its constant and its result's copy): A is 6, B is 9.
+            const IrFunction* out = &result.functions[0];
+            const bool shape = out->instruction_count == 18 && out->op[8] == IR_CALL && out->a[8] == 3 && out->op[10] == IR_CALL && out->a[10] == 4 && out->op[11] == IR_CALL && out->a[11] == 50;
+            ir_inline_test_expect(test, shape && out->c[8] == 6 && out->c[10] == 9 && out->c[11] == UINT32_MAX && out->op[6] == IR_INTTOPTR && out->op[9] == IR_ADDRESS, "aggregate results' destinations follow the inlined values");
+            ir_inline_test_expect(test, shape && out->calls[out->b[8]].abi == 1 && out->calls[out->b[10]].abi == 2 && out->calls[out->b[11]].abi == 3 && out->abi_call_count == 3 && memcmp(out->abi_calls, caller->abi_calls, 3 * sizeof(IrAbiCall)) == 0 && out->passed_count == 6 && memcmp(out->passed, caller->passed, 6 * sizeof(IrPassed)) == 0, "the caller keeps its ABI records");
+            ir_inline_test_expect(test, ir_inline_test_same_function(&result.functions[2], registers) && ir_inline_test_same_function(&result.functions[3], hidden), "the callees keep their own records");
+            ir_inline_test_compare(test, &unit, &result, 0, scratch, 128);
+        }
+    }
+    arena_pop_to(input, 0);
+    arena_pop_to(output, 0);
+    arena_pop_to(twin, 0);
 }
 
 static void ir_inline_test_decisions(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch)
@@ -1516,6 +1867,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_nested(&test, &input, &output, &twin, &scratch);
         ir_inline_test_cfg(&test, &input, &output, &twin, &scratch);
         ir_inline_test_memory(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_aggregates(&test, &input, &output, &twin, &scratch);
         ir_inline_test_decisions(&test, &input, &output, &twin, &scratch);
         ir_inline_test_graphs(&test, &input, &output, &twin, &scratch);
         ir_inline_test_threshold_guards(&test);
