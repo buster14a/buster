@@ -126,9 +126,24 @@ bounded interpreter checks returns, termination or faults, calls, stores and
 volatile load order for constructed diamonds, loops, switches, jump chains
 and cycles, effects, mixed-width shifts and random arithmetic DAGs. It reads
 opcode meanings directly and does not consume the optimizer's CFG, use
-enumerator, opcode tables, lattice or fold functions. A separate i128 fixture
-checks a known cross-limb multiplication result. The interpreter is a test
-oracle for these fixtures, not the complete interpreter tracked by #176.
+enumerator, opcode tables, lattice or fold functions. It takes `br_indirect` to
+the label whose symbol's address it holds (label `k`'s symbol is 64 + `k`, the
+fixtures' producer's), and runs a call with ABI records by them: an aggregate
+argument's bytes, and an aggregate result's bytes, written where `c` points.
+A separate i128 fixture checks a known cross-limb multiplication result. The
+interpreter is a test oracle for these fixtures, not the complete interpreter
+tracked by #176.
+
+#131's labels and ABI records have fixtures of their own (#783): a label whose
+block, a jump alone, is threaded moves to the jump's target; labels keep their
+blocks beside a removed block that no label or edge reaches; a `br_indirect`
+that a constant branch leaves dead goes with its labels' blocks, whose labels
+then have none; and an aggregate call's destination follows dead-code
+removal's renumbering, its records the input's. Each runs through every pass
+mask on both paths, and with every pass the labels' blocks and the destination
+are checked. Leaving a threaded label at its old block, a dead label at its
+old block, the labels unrenumbered, or a call's destination unremapped each
+fails the test.
 
 `benchmark-ir-optimize [--instructions N] [--samples 1..21]
 [--only scalar|vector] [--pass all|sccp|dce|cfg] [--after-scalar MS]` measures
