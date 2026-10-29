@@ -3988,6 +3988,32 @@ static uint32_t abi_test_world_directed_compiled(AbiTestWorld* world, TypeId* di
     return count;
 }
 
+// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), and its integer and floating depths
+// (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS), within which a compiled world's calls with
+// memory-class values keep (abi_test_cross_signatures). tier0_test.c, which main.c includes after tier0.c and this file,
+// checks them.
+#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
+#define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
+#define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
+
+// Whether a compiled world makes an _Atomic of `base`: an integer of up to 8 bytes (not a _BitInt, which clang doesn't
+// make atomic), an enum, a pointer, a float or a double, a struct or a union, which this compiler's C loads and stores
+// atomically (#720: inline at 1, 2, 4, 8 and 16 bytes aligned to them, through libatomic otherwise). The signatures pass
+// them as the record runs do: themselves, as named arguments and results, records holding them and aligned typedefs of
+// them.
+static bool abi_test_compiled_atomic(const TypeTable* table, TypeId base)
+{
+    const uint32_t resolved = abi_resolved_index(table, base);
+    const uint8_t kind = table->types.kind[resolved];
+    const uint8_t code = table->types.code[resolved];
+    const uint64_t size = table->types.size[resolved];
+    const bool integer = kind == BUSTER_TYPE_KIND_INTEGER && size <= 8 && code != BUSTER_TYPE_CODE_BOOL;
+    const bool floating = kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_DOUBLE);
+    const bool record = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && size != 0;
+    return (integer || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER || floating || record) &&
+           type_alignment_log2(table, base) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
+}
+
 static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t count)
 {
     uint64_t random = seed;
@@ -4212,14 +4238,15 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
             abi_test_world_add(world, world->gcc && gcc_divergent ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
             table->last_error = TYPE_ERROR_NONE;
         }
-        else if (pick < 13 && !world->gcc && !world->compiled)
+        else if (pick < 13 && !world->gcc)
         {
             // Of a type of no size too, whose LLVM type is larger (LARGER: _Atomic(struct { __int128 x[0]; }) is 16 bytes
             // to LLVM), and of an ext_vector_type, which LLVM may split into its elements (UNSUPPORTED: an _Atomic <5 x
-            // i8> is five i8s, a general register each).
+            // i8> is five i8s, a general register each); in a compiled world, of what abi_test_compiled_atomic takes.
             const TypeId base = abi_test_world_pick(world, &random, true);
             const bool root = table->types.size[abi_resolved_index(table, base)] == 0;
-            abi_test_world_add(world, world->rootless && root ? 0 : type_atomic(table, type_unqualified(base)));
+            const bool refused = (world->rootless && root) || (world->compiled && !abi_test_compiled_atomic(table, base));
+            abi_test_world_add(world, refused ? 0 : type_atomic(table, type_unqualified(base)));
             table->last_error = TYPE_ERROR_NONE;
         }
         else if (pick < 14 || (world->compiled && !world->vectors))
@@ -4555,14 +4582,6 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
            kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && !half;
 }
 
-// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2), and its integer and floating depths
-// (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS), within which a compiled world's calls with
-// memory-class values keep (abi_test_cross_signatures). tier0_test.c, which main.c includes after tier0.c and this file,
-// checks them.
-#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
-#define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
-#define BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS 16
-
 // Whether a value of `type` has one of Tier 0's memory classes in this compiler's C: a long double's (F80, complex long
 // double's parts too), a 128-bit integer's or a _BitInt's of 65 to 128 bits (I128 and U128) or a vector's (VECTOR).
 static bool abi_test_tier0_memory(const TypeTable* table, TypeId type)
@@ -4600,7 +4619,9 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
                       ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && size == 16) || complex || vector ||
                       kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return (scalar || wide) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
+    // An _Atomic the world made (abi_test_compiled_atomic), behind an aligned typedef or in a record.
+    const bool atomic = kind == BUSTER_TYPE_KIND_ATOMIC;
+    return (scalar || wide || atomic) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -5599,7 +5620,10 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both). A
         // _BitInt of 65 to 127 bits, whose value extends from its width as it loads (the convention leaves the bits past it
         // unspecified) through shifts of 128 bits whose count takes the depth above it, takes one depth more than a 128-bit
-        // integer: it is never the last of the 12.
+        // integer: it is never the last of the 12. An _Atomic, or an aligned typedef of one, loads atomically as it passes,
+        // an exchange of 16 bytes in rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which take up to four
+        // depths more (on the 7940HS a 16-byte one follows 8 integer values at most, in a frame realigned for an argument
+        // aligned to 32, under a struct result's address): it is never past the 8th.
         bool memory = cross->compiled && abi_test_tier0_memory(table, signature->result);
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -5613,7 +5637,8 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
             const uint64_t width = type_kind(table, stripped) == BUSTER_TYPE_KIND_BIT_INT ? type_integer_width(table, stripped) : 0;
             const uint32_t extends = width > 64 && width < 128 ? 1 : 0;
-            const bool full = depths[floating] >= (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3 - extends);
+            const uint32_t atomic = type_kind(table, stripped) == BUSTER_TYPE_KIND_ATOMIC ? 4 : 0;
+            const bool full = depths[floating] >= (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3 - extends - atomic);
             const TypeId type = memory && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : cross->arguments[argument + a];
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;
@@ -6764,7 +6789,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
                 const bool spelled = world.types.spellings[index].spellable && world.types.spellings[index].number != UINT32_MAX;
                 const bool small = table->types.size[abi_resolved_index(table, type)] <= 256;
-                const bool atomic_result = table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC;
                 const bool wide_aggregate = (abi.pass[index] & (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE)) == (BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_AGGREGATE);
                 // GCC passes a LOW_GENERAL type's low eightbyte in a vector register, as the psABI says.
                 const bool low_general = (abi.pass[index] & BUSTER_ABI_PASS_LOW_GENERAL) != 0;
@@ -6784,7 +6808,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 const bool odd_vector_record = (resolved_kind == BUSTER_TYPE_KIND_STRUCT || resolved_kind == BUSTER_TYPE_KIND_UNION) &&
                                                (abi.pass[index] & BUSTER_ABI_PASS_VECTOR) != 0 && resolved_size != 16 && resolved_size != 32 && resolved_size != 64;
                 // clang's atomic loads of an _Atomic vector of bools crash its instruction selection (an aligned typedef
-                // of one's too, which the check above lets through).
+                // of one's too).
                 const uint32_t atomic_value = resolved_kind == BUSTER_TYPE_KIND_ATOMIC ? abi_resolved_index(table, table->types.base[abi_resolved_index(table, type)]) : 0;
                 const bool atomic_bits = atomic_value != 0 && table->types.kind[atomic_value] == BUSTER_TYPE_KIND_EXT_VECTOR &&
                                          abi_test_packed_bits(table, atomic_value) == 1;
@@ -6796,7 +6820,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
                 // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
                 const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
+                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !gcc_differs &&
                     !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
                     (!compiled || abi_test_compiled_passes(table, type)))
                 {
