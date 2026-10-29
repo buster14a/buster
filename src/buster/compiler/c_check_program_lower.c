@@ -1390,13 +1390,14 @@ static const char* check_lower_passed(CheckLowerWriter* writer, TypeId type)
 // check_lower_half_passed: a call that passes one is check_lower_call_halves', which a call without one doesn't reach.
 static const char check_lower_half_passed[] = "half-precision arguments";
 
-static const char* check_lower_call_passed(const CheckLowerWriter* writer, TypeId type)
+static const char* check_lower_call_passed(CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;
     const char* feature = NULL;
     if (check_lower_aggregate(writer, type))
     {
         feature = check_lower_by_value(writer, type, false);
+        feature = feature == NULL ? check_lower_transparent_passed(writer, type) : feature;
     }
     else if (check_lower_class(writer, type) >= BUSTER_TYPED_CLASSES)
     {
