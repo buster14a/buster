@@ -94,6 +94,18 @@ definitions as real `Link` atoms and prints their bytes and symbolic fixups.
 Preprocessor options include the
 existing language, include-path and macro-definition options.
 
+The semantic driver refuses unsupported hardening, instrumentation and ABI
+options by name rather than silently producing an object without them (#814).
+This includes stack protection, CET, stack-clash checking, `-pg`, function
+instrumentation and profile-generation forms, coverage flags, explicit TLS models, `-mno-red-zone`,
+`-fno-plt`, and the unsupported structure-return, short-double and
+wide-execution-character options. The last stack-protector and CET option
+decides those families, so `-fno-stack-protector` and `-fcf-protection=none`
+can turn them off. The other listed options are conservatively refused even if
+a later argument would disable them. The separate `-E` preprocessor retains
+its predefined-macro behavior; it emits no object. This list does not cover
+sanitizer options.
+
 Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
 bodies defined in system headers, identified by `-isystem` or system-header
@@ -180,6 +192,32 @@ each where clang reports it. An `aligned` attribute after its body, which clang
 applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
+
+**Bit-precise constants** (#768, `check_literal_integer`): C23's `wb` and `WB`
+suffixes, alone or with `u` or `U` before or after them, in every radix and with
+digit separators (where the mode lexes them), typed as C23 and clang 23 type
+them in every mode: `_BitInt(N)` of the smallest N above 1 that holds the value
+and a sign bit, or `unsigned _BitInt(N)` of the smallest N above 0 that holds
+it. An ordinary integer constant is read as before, in 64 bits: a spelling that
+reader can't take goes to a cold reader of bit-precise constants
+(`check_literal_bit_precise`), which reads the digits again in 128 bits, the
+most the checker's values hold (`BUSTER_CHECK_LITERAL_BIT_WIDTH`), so that
+every other constant's path is as it was. (A first version that read every
+constant's suffixes for these, with a 128-bit value in every literal, cost
+1.36 million more instructions on `sqlite3.c`'s `-fsyntax-only`, about 25 per
+integer constant; this one about 196,000, in the literal's two new fields.) A
+constant that needs more than 128 bits is refused by
+name, "bit-precise integer constants wider than 128 bits are not supported",
+where clang takes it: a `wb` one of 128 bits with its top bit set is
+`_BitInt(129)`. The literal leaves its type to the reader, which makes the
+`_BitInt` in its table (`CheckLiteral.bit_width`, `check_input_literal`); #658's
+literal tables leave such constants to the ordinary path. `#if` reads them as
+clang does, through the preprocessor's own constants. Two differences from clang
+remain:
+- before C23, clang warns that the suffix is a C23 extension
+  (`-Wc23-extensions`), and the checker doesn't;
+- clang takes an imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't
+  let a program spell otherwise), which the checker refuses, as GCC does.
 
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
@@ -1312,7 +1350,12 @@ What the lowering covers past scalars (#145's programs):
   aligned typedef's smaller alignment left out: a callee takes a hidden result
   pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
-  of its size and alignment, which Tier 0's prologue fills. A function that
+  of its size and alignment, which Tier 0's prologue fills. One of more than 8
+  bytes whose high eightbyte is NO_CLASS passes as its low eightbyte alone, an
+  `i64` or a `double` in clang's code, in a register or, when clang's count of
+  registers has one left and LLVM's none, in one 8-byte stack slot, the next
+  argument's after it (`abi_assign`'s `BUSTER_ABI_FLAG_LOW`), which Tier 0
+  copies as one part (#137). A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
@@ -1345,7 +1388,11 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area, and
+  `va_arg` of a vector takes the path of a struct of its bytes, as a 128-bit
+  integer's does (a 16-byte one from its XMM register's slot of the save area,
+  a wider one in the overflow area, where the call puts it), and loads the
+  vector from their address. Named
   arguments aligned past 16 bytes align the incoming area to them, which
   Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
@@ -1444,6 +1491,41 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **`_BitInt(N)` of up to 64 bits (#148).** It takes the narrowest class of 8,
+  16, 32 or 64 bits that holds it (`check_lower_type_class`), its values extended
+  from N bits in it, as clang stores them (`check_lower_bit_int_shift`). What
+  may leave other bits is extended again after it by a pair of shifts
+  (`check_lower_bit_int_extend`): a sum, a difference, a product, a left shift,
+  a negation, a complement, an update, a conversion to it, and a value from
+  memory or a call (an update's old value too), whose bits past N the convention
+  leaves unspecified and clang's loads ignore. Tier 0 computes, compares and
+  shifts in I32, U32, I64 and U64 alone, so an operation of class I8, U8, I16 or
+  U16 (a `_BitInt`'s alone, as C promotes the other narrow types) converts its
+  operands to I32 or U32, by their signedness, and its result back
+  (`check_lower_computed`), and so does a switch on one, its cases too. A
+  constant extends from N bits. An expression of a `_BitInt` goes first to
+  `check_lower_bit_int_node`, out of line, by its value's kind, which the
+  expansion reads for every expression anyway, and the batch's templates
+  (`c_check_program_batch.c`) take none, by its type's fact
+  (`BUSTER_CHECK_LOWER_TYPE_BIT_INT`); a program whose type table has no
+  `_BitInt` (`CheckLowerWriter.bit_ints`) tests no compare's, update's,
+  conversion's or constant's type for one, and its tasks' loop
+  (`check_lower_drain`) is a copy without the expansion's and the
+  conversions' tests, which `check_lower_drain_bit_ints` has (#137: they took
+  3.9 million of `-c sqlite3.c`'s 1.26 billion instructions). The overflow builtins store into a
+  `_BitInt` destination its value extended so.
+- **`_BitInt(65)` to `_BitInt(128)` (#137).** They take the 128-bit classes,
+  I128 and U128, as `__int128` and `unsigned __int128` do: values in memory,
+  passed as two eightbytes where the convention says (`_BitInt(65)` to
+  `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
+  stack), division, remainder and conversions to and from the floating types
+  by libgcc's functions. One of fewer than 128 bits is kept extended from its
+  width as a narrower one is, by a pair of 128-bit shifts. A constant comes
+  folded to its width's bits, which the lowering extends from the width, as a
+  narrower one's: a negative one's conversion to `__int128` or compare reads it
+  as it is.
+  The overflow builtins of one of 65 to 127 bits are refused by name (their
+  recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -1654,7 +1736,10 @@ What the lowering covers past scalars (#145's programs):
   (GNU's function multiversioning: `target_clones`, or two strings) is refused by
   name, and so are vector values in a function whose attribute turns AVX-512F or
   AVX-512VL off; the convention stays the unit's, as clang's does.
-- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+- **Complex values (#133, #137).** `_Complex float`, `double` and `long double`,
+  GNU's complex integer types (`_Complex char` to `_Complex unsigned
+  __int128`) and the complex `_BitInt`s of up to 128 bits that the usual
+  arithmetic conversions make, are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
   objects, the stream carries a value by its object's address, and copies,
@@ -1670,24 +1755,65 @@ What the lowering covers past scalars (#145's programs):
   of two complex values, and a real dividend's over a complex divisor, call
   libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
   `__divxc3`, runtime functions as the 128-bit integers' are, which give the
-  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  values clang -O0's inline product and its NaN recovery give. A complex
+  integer type's operation computes in its element's class, or in 32 bits for
+  one of 8 or 16 (`check_lower_computed`), each part wrapped back to the
+  element's width (a `_BitInt`'s extended from it, as its values are, and so
+  are its parts loaded from memory, where another compiler's argument leaves
+  the bits past the width as they come), and its product and quotient are
+  clang -O0's inline ones,
+  in the element's type whatever the operands' domains: (ac − bd) + (ad + bc)i,
+  and ((ac + bd) / (cc + dd)) + ((bc − ad) / (cc + dd))i, each product and sum
+  wrapped before the division (`check_lower_complex_quotient`; an `__int128`
+  part's, or a `_BitInt`'s of 65 to 128 bits, computes in Tier 0's 128-bit
+  classes, and its divisions are libgcc's `__divti3` and `__udivti3`). `==` and `!=`
   compare both parts; a value's truth is either part's; a conversion converts
   each part (to a real type the real part, to `_Bool` the truth); a compound
   assignment reads its destination in the calculation's type through its
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
-  parts are a floating constant's (a `long double`'s in the function's table).
+  parts are a floating constant's (a `long double`'s in the function's table),
+  or a complex integer constant's halves, each its part's bits.
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: GNU's
-  complex integer types ("complex integer types") and the complex types of
-  the other floating types, `_Complex _Float16` and `_Complex __float128`
-  ("complex types other than _Complex float, double and long double"). A
+  The complex types it doesn't take are refused by what they need: the
+  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
+  bits"), and the complex types of the other floating types, `_Complex
+  _Float16` and `_Complex __float128` ("complex types other than _Complex
+  float, double and long double"). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
+- **`__float128` (#137).** A value is an aggregate's: a frame object of its
+  16 bytes, aligned to 16, which the stream carries by its address
+  (`check_lower_quad`), so that copies, calls, returns and `va_arg` take it as
+  the convention classifies it (SSE, SSEUP: a vector register's 16 bytes,
+  which Tier 0 moves with `movups`). Tier 0 has no entry of its arithmetic,
+  and as clang -O0's code its sums, differences, products and quotients are
+  libgcc's `__addtf3`, `__subtf3`, `__multf3` and `__divtf3`
+  (`check_lower_quad_compute`), its comparisons `__lttf2` to `__netf2`'s int
+  against 0 (unordered operands make each false but `!=`), a value's truth
+  `__netf2`'s against +0.0, and its conversions `__extendsftf2` to
+  `__trunctfxf2` for the floating types and `__floatsitf` to `__fixunstfti`
+  for the integers, through `int`, `unsigned int`, `long`, `unsigned long`,
+  `__int128` or `unsigned __int128`, the first that holds the integer's values,
+  a signed one where one does, as LLVM promotes a narrower unsigned
+  conversion (`check_lower_quad_conversion`, from the scalar conversions' rare
+  branch, an aggregate against a scalar); a negation flips a copy's sign bit,
+  as clang's `xorps` does. A compound assignment reads its destination in
+  `__float128`, computes and copies the result back, or converts and stores it
+  into a real destination; a global without an initializer is 16 zero bytes.
+  A real `__float128`'s `__imag__` is a frame object of zeros: the checker
+  folds it to a constant zero of its type where its operand has no effect
+  (`check_lower_quad_constant` writes a folded constant's bits), and after the
+  operand where it has (`check_lower_aggregate_zero`).
+  The checker folds no `__float128` constant (`check_action_float_supported`):
+  a static one with an initializer is refused as not constant, an increment by
+  name ("increments of __float128 values"), and the `q` suffix's literals as
+  invalid. `test-checker`'s `float128` program, against clang -O0's build of
+  it, has each of them, clean under clang's UBSan on every input.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -1806,7 +1932,10 @@ What the lowering covers past scalars (#145's programs):
   difference from the lowest case's, unsigned, is past the last entry goes to
   the default or the switch's end, and any other to the table's address plus
   the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
-  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. Its labels and
+  that jump are the function's next table in Tier 0's columns
+  (`label_tables`, `table_jumps`, #785), so that the IR's `br_indirect` for it
+  goes to its own labels alone. The table is a
   `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
   label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
   record as it does `&&label`'s) with the entry's offset as its addend, as
@@ -1849,8 +1978,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: increments of `__float128`
+values, `_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -2029,6 +2158,13 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Bit-precise constants (#768): their widths, signedness and values from the
+  literal reader (`check_literal_number`) in each radix, case and order of
+  suffix, with digit separators, past 64 bits and at 128 and 129, and the
+  spellings C23 doesn't have; their types by `_Generic` and their values by
+  static assertions in a C23 source fixture, by both paths and against clang,
+  and at run time in a program against clang -O0's
+  (`bit-precise-constants`); and a 129-bit one refused by name.
 - Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
@@ -2151,8 +2287,9 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 `test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
 every Constraints paragraph of C17's 6.4 to 6.10 it has a violation of each of the paragraph's rules and a valid
 twin. Fixtures of the conversions (6.3), the constant expressions (6.6) and the initializers (6.7.9) join them:
-322 fixtures and 644 sources in all, 21 of 6.3, 14 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
-6.9 and 20 of 6.10.
+325 fixtures and 650 sources in all, 21 of 6.3, 17 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
+6.9 and 20 of 6.10. Three of 6.4's are C23's bit-precise suffixes (#768: `wB`, `uwbu` and `wbl`, which clang
+refuses in every mode, beside valid twins).
 
 Each source is checked as the corpus check checks a file (`check_corpus_file`): preprocessing, the parse, the
 checker and the program's control flow, as the driver checks it, by both paths alike. A directive's source (6.10)
@@ -2160,7 +2297,7 @@ runs through the preprocessor's two kernels instead (`check_test_constraint_prep
 from the diagnostics, since the corpus check gives a preprocessing error no place. Every source is also checked by
 `clang -fsyntax-only -std=gnu17`. The acceptance and the first error's line must be clang's and the fixture's own
 record of them. A fixture records clang's verdict on its violation:
-- an error, for 263;
+- an error, for 266;
 - acceptance with a warning clang gives by default, for 33;
 - acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
 
