@@ -322,6 +322,18 @@ driver as a process, in a directory of its own:
   exit with its message as with a clean stack: a local the driver read before
   setting it would release an arena of that address and unmap the child's
   code.
+- **Reservations:** two units that include one header, with `-c` by one lane,
+  in children whose address space may grow a page less than a run reached (as
+  `test-parser` fails its driver's): the run's last reservation or mapping
+  fails, then, a page below the peak that run reached, the one before it, down
+  to the first. Each run must exit with status 1 having said why in an
+  error, or, where the reservation has a fallback (the emission's columns,
+  which take the caller's scratch then), write the same objects as without a
+  limit; and either way leave the address space and the descriptors as they
+  were. Among them a lane's setup fails at its reservations (and says so:
+  `can't reserve the lane's memory`), its file cache's after its intern table
+  and the cache's first arrays were reserved, which the lane releases with the
+  rest.
 - **The jobserver:** four units by `--lanes 4` under a GNU make jobserver of
   three tokens, linked into an executable of more than a megabyte whose path
   is a FIFO, which the test reads: while the writer writes, the jobserver

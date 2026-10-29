@@ -5200,8 +5200,10 @@ and by 8 with `--poison-arenas`, and by each path, is the same bytes, runs as
 `clang -O0`'s build does, and defines the symbols `cc`'s link of the units'
 objects defines, and each of whose units' `-c` objects is the unit's alone;
 diagnostics, each unit's alone in the command line's order; refusals, one
-of them over a poisoned stack; the jobserver's tokens held while the link
-writes; and lanes that don't start. With `--corpus DIR` it compiles DIR's
+of them over a poisoned stack; every reservation of two units' `-c` failed in
+turn, each run reported and its memory released (a lane's partial setup
+among them); the jobserver's tokens held while the link writes; and lanes
+that don't start. With `--corpus DIR` it compiles DIR's
 `.c` files at
 once with `-c`, plainly and poisoned, against each alone, and with
 `--generate DIR` it writes a program of synth's shape (512 units of 200

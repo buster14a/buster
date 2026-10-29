@@ -32,6 +32,14 @@
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
 //   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
 //   driver read before setting it would release an arena of that address and unmap the child's code.
+// - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
+//   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
+//   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
+//   Each run must exit with status 1 having said why in an error, or, where the reservation has a fallback (the
+//   emission's columns, which take the caller's scratch then), write the same objects as without a limit; and either way
+//   leave the address space and the descriptors as they were. Among them a lane's setup fails at its reservations
+//   (which it says: can't reserve the lane's memory), its file cache's after its intern table and the cache's first
+//   arrays were reserved.
 // - The jobserver: four units by --lanes 4 under a GNU make jobserver of three tokens (MAKEFLAGS' fifo form), linked into
 //   an executable of more than a megabyte whose path is a FIFO, which the test reads: while the writer writes, the
 //   jobserver holds none of the tokens, which the command's lanes took; once the command ends, it holds every one
@@ -818,6 +826,175 @@ static void check_units_test_refusals(CheckUnitsTestTally* tally, const char* ex
     printf("  refusals: %u commands refused, and one over a poisoned stack\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
 }
 
+// The most runs check_units_test_limits makes, past which its sweep has gone wrong.
+#define BUSTER_CHECK_UNITS_TEST_LIMIT_RUNS 10000
+
+// A run of the driver's `arguments` (run_check_command's) in a child whose address space may grow `limit` bytes past
+// `base` (this process's), in `directory` and with its standard error into `capture`: its exit status (-1 if it didn't
+// report), how far past `base` its address space grew, and whether it left the address space and the descriptors as
+// they were. The child writes them to `shared`, a page both see.
+typedef struct CheckUnitsTestProbe CheckUnitsTestProbe;
+struct CheckUnitsTestProbe
+{
+    int status;
+    uint64_t peak;
+    bool clean;
+};
+
+static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
+                                                  CheckUnitsTestProbe* shared)
+{
+    *shared = (CheckUnitsTestProbe){ .status = -1 };
+    fflush(stdout);
+    fflush(stderr);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const struct rlimit core = { 0 };
+        struct rlimit space;
+        bool limited = getrlimit(RLIMIT_AS, &space) == 0 && base + limit <= space.rlim_max;
+        space.rlim_cur = base + limit;
+        limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
+        alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        const int before = parse_test_lowest_descriptor();
+        const int status = limited ? run_check_command(count, arguments, true) : -1;
+        const int after = parse_test_lowest_descriptor();
+        shared->peak = parse_test_status_bytes("VmPeak:") - base;
+        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        shared->status = status;
+        _exit(0);
+    }
+    int child_status = 0;
+    pid_t waited = child;
+    while (child > 0 && (waited = waitpid(child, &child_status, 0)) < 0 && errno == EINTR)
+    {
+    }
+    CheckUnitsTestProbe result = *shared;
+    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    return result;
+}
+
+// Every reservation and mapping of two units' -c by one lane failed in turn (see the file's comment), in a directory of
+// its own under `directory`. The command runs once in this process first, as the children's runs do, so that what only
+// a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's already.
+static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
+{
+    static const char header[] = "int limits_square(int value);\n";
+    static const char caller[] = "#include \"square.h\"\nint main(void)\n{\n    return limits_square(3) == 9 ? 0 : 1;\n}\n";
+    static const char callee[] = "#include \"square.h\"\nint limits_square(int value)\n{\n    return value * value;\n}\n";
+    char limits[PATH_MAX];
+    char path[PATH_MAX];
+    snprintf(limits, sizeof(limits), "%s/limits", directory);
+    bool written = mkdir(limits, 0755) == 0 || errno == EEXIST;
+    const struct
+    {
+        const char* name;
+        const char* text;
+    } files[] = { { "square.h", header }, { "caller.c", caller }, { "callee.c", callee } };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", limits, files[f].name);
+        written = written && parse_test_write(path, files[f].text, strlen(files[f].text));
+    }
+    snprintf(path, sizeof(path), "%s/errors.txt", limits);
+    const int capture = written ? open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600) : -1;
+    CheckUnitsTestProbe* shared = mmap(NULL, sizeof(CheckUnitsTestProbe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    check_units_test_expect(tally, capture >= 0 && shared != MAP_FAILED, "write the reservations' units", limits);
+    // The jobserver's tokens, which MAKEFLAGS would give the run, aren't what this checks.
+    const char* makeflags = getenv("MAKEFLAGS");
+    char* saved_makeflags = makeflags != NULL ? strdup(makeflags) : NULL;
+    unsetenv("MAKEFLAGS");
+    char* arguments[] = { "--lanes", "1", "-c", "caller.c", "callee.c", NULL };
+    const int count = (int)BUSTER_ARRAY_LENGTH(arguments) - 1;
+    char text[1024];
+    text[0] = 0;
+    int status = -1;
+    const int saved_directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    const int saved_errors = dup(2);
+    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && chdir(limits) == 0)
+    {
+        if (dup2(capture, 2) == 2)
+        {
+            status = run_check_command(count, arguments, true);
+            dup2(saved_errors, 2);
+        }
+        status = fchdir(saved_directory) == 0 ? status : -1;
+        parse_test_read_capture(capture, text, sizeof(text));
+    }
+    if (saved_errors >= 0)
+    {
+        close(saved_errors);
+    }
+    if (saved_directory >= 0)
+    {
+        close(saved_directory);
+    }
+    check_units_test_expect(tally, status == 0 && text[0] == 0, "the reservations' units compile in this process", text);
+    // The objects of a run without a limit, which a run whose failed reservation had a fallback must write again.
+    char objects[2][PATH_MAX];
+    char wholes[2][PATH_MAX];
+    for (uint32_t o = 0; o < 2; o += 1)
+    {
+        snprintf(objects[o], sizeof(objects[o]), "%s/%s", limits, o == 0 ? "caller.o" : "callee.o");
+        snprintf(wholes[o], sizeof(wholes[o]), "%s/%s", limits, o == 0 ? "whole_caller.o" : "whole_callee.o");
+        unlink(objects[o]);
+    }
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t base = parse_test_status_bytes("VmSize:");
+    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, shared) : (CheckUnitsTestProbe){ 0 };
+    parse_test_read_capture(capture, text, sizeof(text));
+    char detail[1400];
+    snprintf(detail, sizeof(detail), "status %d, peak %llu, %s, printed \"%s\"", whole.status, (unsigned long long)whole.peak,
+             whole.clean ? "clean" : "left memory or a descriptor behind", text);
+    bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
+                    rename(objects[1], wholes[1]) == 0;
+    check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
+    // From the last reservation to the first: a run with a page less than the last one reached fails where it grew to
+    // that, and reaches its own peak before it. A reservation that has a fallback (the emission's columns,
+    // CheckEmitRun.columns, in the caller's scratch) doesn't fail the run, which must then write the same objects.
+    uint64_t peak = whole.peak;
+    uint32_t runs = 0;
+    uint32_t setups = 0;
+    uint32_t fallbacks = 0;
+    while (released && peak != 0 && runs < BUSTER_CHECK_UNITS_TEST_LIMIT_RUNS)
+    {
+        const uint64_t limit = peak - page;
+        unlink(objects[0]);
+        unlink(objects[1]);
+        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, shared);
+        parse_test_read_capture(capture, text, sizeof(text));
+        const bool failed = probe.status == 1 && strstr(text, "error: ") != NULL;
+        const bool fallen_back = probe.status == 0 && text[0] == 0 && check_test_driver_same_files(objects[0], wholes[0]) &&
+                                 check_test_driver_same_files(objects[1], wholes[1]);
+        released = (failed || fallen_back) && probe.peak <= limit && probe.clean;
+        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, %s, printed \"%s\"", (unsigned long long)limit, probe.status,
+                 (unsigned long long)probe.peak, probe.clean ? "clean" : "left memory or a descriptor behind", text);
+        check_units_test_expect(tally, released, "a run whose reservation failed says why or writes the same objects, and releases what it reserved", detail);
+        // A lane's setup that failed fails both units, with its message.
+        setups += strstr(text, "can't reserve the lane's memory") != NULL;
+        fallbacks += fallen_back;
+        peak = probe.peak;
+        runs += 1;
+    }
+    check_units_test_expect(tally, !released || (peak == 0 && setups != 0), "every reservation failed in turn, a lane's setup's among them", limits);
+    if (saved_makeflags != NULL)
+    {
+        setenv("MAKEFLAGS", saved_makeflags, 1);
+        free(saved_makeflags);
+    }
+    if (shared != MAP_FAILED)
+    {
+        munmap(shared, sizeof(CheckUnitsTestProbe));
+    }
+    if (capture >= 0)
+    {
+        close(capture);
+    }
+    printf("  reservations: %u failed in turn (%u of them a lane's setup's, %u with a fallback), each reported or with the same objects, "
+           "and released\n",
+           runs, setups, fallbacks);
+}
+
 // The jobserver's tokens while the link writes (see the file's comment), in a directory of its own under `directory`.
 static void check_units_test_jobserver(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
@@ -1224,6 +1401,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_programs(&tally, executable, clang, directory, programs != 0 ? programs : 1);
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
+        check_units_test_limits(&tally, directory);
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
     }
