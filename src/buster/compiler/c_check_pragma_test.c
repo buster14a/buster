@@ -167,6 +167,54 @@ static void check_test_pragma_storage(CheckTest* test, const Parser* parser, Pre
     arena_release(&arena);
 }
 
+static void check_test_ignored_pragma_storage(CheckTest* test, const Parser* parser, Preprocessor* pp)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 16);
+    Arena scratch = arena_reserve(UINT64_C(1) << 16);
+    const bool ready = arena.base != NULL && scratch.base != NULL && parser->tokens.pragma_count == 4;
+    check_test_expect(test, ready, "ignored pragma storage fixture initializes");
+    if (ready)
+    {
+        memset(arena_push(&arena, arena.capacity, 1), 0xa5, arena.capacity);
+        const uint64_t capacity = arena.capacity;
+        uint64_t required = 0;
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            const uint64_t attempts = pass == 0 ? 1 : required - 31;
+            for (uint64_t limit = 0; limit < attempts; limit += 1)
+            {
+                arena.length = 31;
+                arena.capacity = pass == 0 ? capacity : 31 + limit;
+                scratch.length = 29;
+                uint8_t handled[4] = { 1, 2, 0, 1 };
+                CheckInput output = { 0 };
+                CheckInputReader reader = { .output = &output, .parser = parser, .pp = pp, .arena = &arena, .scratch = &scratch };
+                const bool valid = check_input_ignored_pragmas(&reader, handled);
+                check_test_expect(test, scratch.length == 29, "ignored pragma classification restores scratch");
+                if (valid)
+                {
+                    required = arena.length;
+                    const CheckWarningEvent* event = output.pragma_warnings.events;
+                    check_test_expect(test, pass == 0 && !output.resource && output.pragma_warnings.count == 1 && event != NULL &&
+                        event->id == CHECK_WARNING_ID_UNRECOGNIZED_PRAGMA && event->kind == CHECK_WARNING_EVENT_PRAGMA &&
+                        event->source == parser->tokens.pragma_sources[2] + 2 && event->token == parser->tokens.pragma_positions[2] &&
+                        handled[0] == 1 && handled[1] == 2 && handled[2] == 1 && handled[3] == 1,
+                        "ignored pragma facts initialize dirty storage without stealing an existing handler");
+                }
+                else
+                {
+                    check_test_expect(test, pass != 0 && output.resource && output.pragma_warnings.count == 0 &&
+                        output.pragma_warnings.events == NULL && arena.length == 31 && handled[2] == 0,
+                        "ignored pragma exhaustion publishes no partial facts or handled marks");
+                }
+            }
+        }
+        arena.capacity = capacity;
+    }
+    arena_release(&scratch);
+    arena_release(&arena);
+}
+
 static void check_test_pragma_history(CheckTest* test, const Parser* parser, Preprocessor* pp, const CheckPragmaFixture* fixture, bool first)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 20);
@@ -185,6 +233,10 @@ static void check_test_pragma_history(CheckTest* test, const Parser* parser, Pre
     valid = valid && check_input_diagnostic_pragmas(&reader, handled);
     valid = valid && check_input_nonnull_pragmas(&reader, handled);
     check_test_expect(test, valid && !output.resource && scratch.length == 0, "diagnostic pragma helper restores scratch without resource failure");
+    if (fixture->other == 2)
+    {
+        check_test_ignored_pragma_storage(test, parser, pp);
+    }
     const CheckInputDiagnosticPragmas* history = output.diagnostic_pragmas;
     check_test_expect(test, (history != 0 ? history->count : 0) == fixture->records, fixture->name);
     uint32_t handled_count = 0;
