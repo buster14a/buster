@@ -68,22 +68,32 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    (`check_deferred_lane_names`). Before its walk, a body sets them for the
    names it spells (step 4). After the walk it takes the ones that start as
    none back to none, so that no reading clears them. A reading with more
-   names than the places have room for lays them out again, on zero pages. A
-   lane's binding stream holds proxies of the file scope's events its heads
-   reach (step 4), then the body's own events. Before, it held a copy of every
-   one of the top level's events.
+   names than the places have room for lays them out again, on zero pages.
+   Before its bodies, the pages of its names' entries are committed, each
+   column's in one call (`MADV_POPULATE_WRITE`, `check_deferred_lane_commit`):
+   a body's position checks set a few entries of every column for the names
+   it spells, far apart, and their faults, a page at a time, took the position
+   checks to up to 7 times main's on one lane and 14 times on eight ("A
+   lane's copy at a first reading", below). A lane's binding stream holds
+   proxies of the file scope's events its heads reach (step 4), then the
+   body's own events. Before, it held a copy of every one of the top level's
+   events.
 
    The state (`CheckDeferred`) keeps its memory (`CheckDeferredMemory`) from one
    reading to the next: its own arena, the top level's table and index, and
    each lane's six arenas, one mapping a lane, which the calling thread
    reserves before the lanes start, the first time the state runs that lane
    (`check_deferred_lane_arenas`). Each reading takes the memory back to empty,
-   and `check_deferred_release` unmaps it. Before, each lane mapped and advised
-   its five arenas inside the lane at every reading, and lanes that did so at
-   once waited for each other on the address space's lock. A state's reading
-   after its first finds its pages in place, and a lane's copy is then a copy
-   alone; a process's first reading still faults in every page its lanes'
-   copies take.
+   and `check_deferred_release` unmaps it. All of it is base pages: the top
+   level's table has the caller's capacities, each column room for every type
+   the unit could make, and the state's arena room for two linked updates a
+   token, of which a reading touches a little at each one's start, where a
+   huge page was cleared whole the first time (`check_deferred_arena`).
+   Before, each lane mapped and advised its five arenas inside the lane at
+   every reading, and lanes that did so at once waited for each other on the
+   address space's lock. A state's reading after its first finds its pages in
+   place, and a lane's copy is then a copy alone; a process's first reading
+   still faults in every page its lanes' copies take.
 4. **A body** (`check_deferred_body`). The lane sets its reader to what source
    order's is at the body's opening, the position checks:
    - each name the body and its parameters spell, once (a stamp per name),
@@ -336,15 +346,19 @@ passes every checker test.
   refused without a write past the room, and so are malformed lists; and the
   state's memory (`check_deferred_test_memory`): a lane's six arenas in one
   mapping, end to end with their capacities, writable to their last byte and
-  kept with their pages when the state takes them back, and every mapping
-  gone after `check_deferred_release`. Then a lane's per-name columns
-  (`check_deferred_test_lane_names`): laid out from room for 4,096 names, in
-  order, each on a line of its own and clear of the next, those that start
-  as none zero; at the same places, with what the last reading left, for a
-  reading of fewer names; those that start as none cleared, with the stamp,
-  after a poisoned reading, and the others left to the bodies, which set them
-  before they read them; laid out again on zero pages for more names than the
-  room; and refused for more names than the arena holds.
+  kept with their pages when the state takes them back, the lanes' mappings
+  and the state's own three arenas in base pages to their last byte, and
+  every mapping gone after `check_deferred_release`. Then a lane's per-name
+  columns (`check_deferred_test_lane_names`): laid out from room for 4,096
+  names, in order, each on a line of its own and clear of the next, the pages
+  of the reading's names' entries resident before anything reads them and the
+  last page of each column's room not (where the kernel takes
+  `MADV_POPULATE_WRITE`), those that start as none zero; at the same places,
+  with what the last reading left, for a reading of fewer names; those that
+  start as none cleared, with the stamp, after a poisoned reading, and the
+  others left to the bodies, which set them before they read them; laid out
+  again on zero pages for more names than the room, their entries committed
+  again; and refused for more names than the arena holds.
   Mutants of the change, each built at `-O1` from it merged with main and run
   on the 9700X (the record's `logs/mutants2`), fail. Of the rule: the largest
   body counted twice, as #448's rule did, 27 checks; the largest body alone
@@ -368,7 +382,10 @@ passes every checker test.
   lane count. The stamps not cleared where they wrap fails the reread with
   the stamps at their last on 12 fixtures (6 results that differ, 6 not
   merged), and the test then faults on a head that a skipped name left. The
-  poisoned columns not cleared fails the per-name columns' check.
+  poisoned columns not cleared fails the per-name columns' check. So do its
+  pages' three, built the same way: the state's own arenas in huge pages fails
+  the memory test, and the names' entries not committed, or the heads' alone
+  not, the per-name columns' check.
   They are: the issue's three (a later declaration, a later completion, an
   enumerator from an initializer); typedefs shadowed and redeclared after a
   body; tags completed, redeclared and shadowed around bodies, and completed
@@ -619,7 +636,9 @@ Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
 that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
 eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
 rule puts 38 units within one percentage point of their best and forgoes
-10.7 points, where #448's rule puts 19 and forgoes 107.4.
+10.7 points, where #448's rule puts 19 and forgoes 107.4. Campaign A4, the same
+grid after #697's item 2, keeps the rule's constants ("A lane's copy at a first
+reading (#697)", below).
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -795,6 +814,80 @@ ms, so the lanes share the memory's bandwidth ("What is left"). A cursor over
 the bodies' parameters, in place of the owner lookup's walk, saved one lane 4%
 of its token columns and eight lanes nothing. It was left out.
 
+After items 2 and 4, on the same file, by the rule on eight lanes, six processes
+of 24 passes each (campaign S4 in
+[item 2's record](https://github.com/buster14a/buster-performance/tree/79c90346c27d937bb8dffb771be9d9fcca6995b6/docs/measurements/deferred-copies-697-2026-10-28)),
+in nanoseconds per token:
+
+| | Main (`abc6bf24`) | With item 2 |
+| --- | ---: | ---: |
+| source order's reader | 71.13 | 70.39 |
+| the deferred reader, one lane | 86.52 | 83.82 |
+| the deferred reader, eight lanes | 70.49 | 66.42 |
+| its top level | 23.34 | 22.67 |
+| the lanes' span | 5.50 | 5.24 |
+| its merge (its pass, on the lanes) | 2.61 (1.66) | 2.44 (1.55) |
+| `check_input_run`'s phases after the merge | 38.85 | 35.87 |
+| eight lanes against source order, each process's | −1.1% (−2.2 to −0.3) | −5.6% (−5.9 to −5.0) |
+
+On eight lanes the serial part, the top level, the history's index, the merge
+but its pass and the phases after it, takes 59.6 of the reading's 66.4
+ns/token: the lanes shorten 6.8 of it.
+
+### A lane's copy at a first reading (#697)
+
+At a process's first reading a lane's copy of the top level's reader was mostly
+the first touches of its pages: 69 µs on two lanes and 100 µs on eight on
+campaign A2 (the median of the 42 units but `sqlite3.c`), and 401 and 663 µs on
+`sqlite3.c`. A lane now copies none of the top level's per-name columns or
+binding events, and its type index keeps the top level's slots where they have
+the room (step 3). On the 9700X, on A2's grid and units, three rounds (campaign
+A4 in item 2's record), a lane's copy takes 41 and 71 µs (245 and 467 µs on
+`sqlite3.c`), main's 72 and 125 µs (450 and 787), and at a state's later
+reading (`--warm`) 3 and 4 µs (48 and 86), A2's 6 and 9 (140 and 457).
+
+Two costs that the copy hid came out with it. The state's own arenas were huge
+pages past their first 64 KB, of which a reading touches a little at each
+column's start: in base pages, main's reader read sixteen bodies of 993 tokens
+after three headers 27% faster on one lane and 43% faster on eight, and its
+threads cleared huge pages in 63 of 836 cycle samples of six passes, where they
+had in 414 of 1,299. And a lane's per-name entries faulted a page at a time in
+the position checks, up to 7 times main's on one lane and 14 times on eight,
+until the lane committed them (step 3). With both, the 43 units read 26.3%
+faster than main on eight lanes (the median; 5.2 to 42.9%) and 23.6% faster on
+one, and 1.9% and 1.3% faster than main with its state's arenas in base pages
+(from 8.4% faster to 10.7% slower on eight). By the rule, which gives every unit
+the same lanes in both, item 2 reads each unit 5.5% (`sqlite3.c`) to 43.1%
+faster than main, and the 31 units it gives more than one lane read 23.3% faster
+to 0.2% slower than one lane (the median −6.1%), where main's read them 20.2%
+faster to 7.1% slower (−1.5%) (campaign B4, five rounds). On c-testsuite's 220
+programs (CT4, three rounds), both rules read every program but `00204.c` on one
+lane, and item 2 reads them 30.5% faster than main (the median; 8.6 to 44.5%).
+`sqlite3.c` reads 1.2% slower on one lane than main with base-page arenas: a
+body's position checks set the lane's own columns and proxies for each name it
+spells, 6.5 ns/token on eight lanes, summed over the lanes, against main's 5.4
+(S4, above).
+
+The rule keeps its constants. On A4's grid it forgoes 48.5 points, the least of
+the grid, puts 26 of the 43 units within one point of their best, and reads its
+worst unit, sixteen bodies of 993 tokens after thirty headers, 1.7% slower on
+its two lanes than on one, where B4's five rounds read it 0.2% slower. 1,536
+tokens and a sixth of the top level's forgo 51.2 points (worst +0.7%), and
+4,096 and a third, A3's best before the last two commits, 79.9 (+0.0%). Most of
+what the rule forgoes is on units whose eight lanes read worse than four, where
+the lanes' walks write into `check_input_run`'s arena of rare columns (#572),
+huge pages past its scope stacks. Where the top level's walk only read a 2 MB
+region of it, or never touched it, a lane's write allocates and clears a huge
+page, and lanes that write a region at once each clear one, of which the kernel
+maps one; whether a woken lane comes to a region with the first lane or after
+it depends on the lanes' timing. On A4, eight lanes' walks of one unit took 57,
+66 and 36 ns/token in its three rounds, against 28, 23 and 25 by main's reader
+with base-page arenas, which runs into it too, and at a state's later readings,
+whose lanes reach their walks at once, they run into it in every round. In base
+pages that arena takes the race away but costs source order's reader, whose
+arena it is, up to 6.6% on the record's units, where it saves up to 4.2% on
+others: #764.
+
 ## One-lane pinning removed (#450)
 
 The exact `35f26f68` baseline and `1d2b12c6` candidate were compared on the
@@ -856,16 +949,16 @@ that report errors do since #697's item 4. Overloadable functions and a union
 of the top level's made transparent in a body are what the merge doesn't take
 yet.
 
-A lane's cost decides how many lanes pay, and a process's first reading pays
-most of it in its lanes' first touches of their copies' pages: on the laptop,
-545 of them on `sqlite3.c`, of which the binding events took 248, the table
-137 and the per-name columns 108. The copies hold the whole top level because
-a body's walk writes into the same columns it reads the top level's entries
-from. A lane that read the top level's columns where they are, and wrote only
-its own events, names and types apart, would copy next to nothing. A state's
-later readings pay none of it: a lane of theirs paid for 256 tokens on the warm
-grid ("How many lanes"), which a rule that knew the lanes' memory was in place
-could give them.
+A lane still copies the top level's type table, whose withdrawals a body's
+walk makes in place (step 4), and at a process's first reading the position
+checks fault in the lane's event columns as they write the proxies: on eight
+lanes, `sqlite3.c`'s position checks take 6.5 ns/token in all, against main's
+5.4 with each lane's copy of the top level's events. The lanes' walks write
+into the checker's rare columns' huge pages, which they race to clear (#764):
+a fix that keeps source order's huge pages would call for the rule to be fitted
+again, and would let a state's later readings, whose lanes run into the race in
+every round, have a rule of their own (#697's item 3), once a caller reads
+several units with one state.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
