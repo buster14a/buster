@@ -389,6 +389,15 @@ unchanged:
   each source label of the body outside statement expressions too
   (`CheckProgram.label_positions`, which the control writer records).
 
+An unscoped C23 `[[noreturn]]` or `[[_Noreturn]]` first added after a
+definition is ignored, as clang's declaration-attribute merge ignores it.
+The input marks that declaration's record ignored before this pass reads it;
+an earlier accepted standard record stays effective. GNU's `noreturn`,
+including `[[gnu::noreturn]]`, changes the function type instead, and the C
+`_Noreturn` keyword is explicitly allowed after a definition, so those keep
+their effect. A shared specifier list is copied per declarator before any
+record is marked ignored.
+
 It still differs where clang emits a statement that holds a label from its
 start: an `if`, loop or `switch` statement after a point where emission stops,
 and an `if`'s or a `switch`'s arm that a constant condition would leave out,
@@ -443,7 +452,7 @@ attributes declared after the cleanup, and cleanups that no exit reaches, in
 dead code and after an endless loop; and calls after calls that don't return
 (the shapes above that stop the code, `<stdlib.h>`'s `exit` and `abort`), with
 a `noreturn` attribute declared after the call as their control.
-Forty-two fixtures' every error, line for line, must be clang's: the first
+Forty-five fixtures' every error, line for line, must be clang's: the first
 external function's alone, calls in their
 arguments in the order of their ends, an external function's that leave a
 deferred one's unreported, two deferred functions', where no external function
@@ -473,7 +482,9 @@ and a `?:` of constants, a select, which isn't one, such calls in operands that
 constant conditions leave out, loops' blocks it emits whatever their conditions
 and bodies' code leave, code after labels (one that nothing names, one that
 only a goto after the call names, and after a `return`), and cleanups after
-calls that don't return.
+calls that don't return. C23 fixtures compare the ignored late unscoped
+standard spellings with effective earlier standard, late GNU, scoped GNU and
+keyword spellings, including a mixed attribute list and shared declarators.
 
 A builtin's own required features (`'__builtin_ia32_palignr128' needs target
 feature ssse3`) aren't checked yet.

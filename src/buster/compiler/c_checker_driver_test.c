@@ -3495,6 +3495,8 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
         const char* source;
         bool rejected;
         bool message;
+        // The fixture's -std=, or null for gnu17.
+        const char* standard;
     } fixtures[] = {
         { "an always_inline callee's target attribute", "-march=x86-64",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true, true },
@@ -3590,6 +3592,48 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nvoid late(void);\n"
           "int f(int x) { late(); return h(x); }\n__attribute__((noreturn)) void late(void);\n",
           true, true },
+        // Only an unscoped standard noreturn first added after a definition is ignored. GNU's function-type attribute
+        // (gnu:: syntax too), C's keyword and an earlier standard declaration must keep stopping emission.
+        { "C23 noreturn first added after a returning definition", "-march=x86-64",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          true, true, "-std=c23" },
+        { "C23 _Noreturn attribute first added after a returning definition", "-march=x86-64",
+          "void stop(void) {}\n[[_Noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          true, true, "-std=c23" },
+        { "C23 ignored late noreturn with the target feature enabled", "-march=x86-64-v3",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 noreturn on a definition remains after a redeclaration", "-march=x86-64",
+          "[[noreturn]] void stop(void) { for (;;) {} }\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 noreturn before a definition remains after a redeclaration", "-march=x86-64",
+          "[[noreturn]] void stop(void);\nvoid stop(void) { for (;;) {} }\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late GNU noreturn still changes the function type in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n__attribute__((noreturn)) void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late gnu scoped noreturn still changes the function type in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n[[gnu::noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late C noreturn keyword remains allowed in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n_Noreturn void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "an ignored standard record keeps a neighbouring GNU noreturn in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n[[noreturn, gnu::noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 late noreturn copies a shared specifier list before ignoring it", "-march=x86-64",
+          "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2); }\n", true, true, "-std=c23" },
     };
     const uint32_t routes = executable != NULL ? 4 : 2;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -3599,13 +3643,14 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
         char description[1024];
         snprintf(source, sizeof(source), "%s/target-feature-%u.c", directory, i);
         snprintf(object, sizeof(object), "%s/target-feature-%u.o", directory, i);
-        const char* arguments[] = { "-std=gnu17", fixtures[i].march, "-w" };
+        const char* standard = fixtures[i].standard != NULL ? fixtures[i].standard : "-std=gnu17";
+        const char* arguments[] = { standard, fixtures[i].march, "-w" };
         CheckCorpusOracle oracle = { 0 };
         const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
                                   check_corpus_clang_compile(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
         snprintf(description, sizeof(description), "%s: clang -c %s it", fixtures[i].name, fixtures[i].rejected ? "refuses" : "takes");
         check_test_expect(test, oracle_ready && oracle.rejected == fixtures[i].rejected, description);
-        const char* extra[] = { fixtures[i].march, "-w" };
+        const char* extra[] = { standard, fixtures[i].march, "-w" };
         for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
         {
             unlink(object);
@@ -3850,6 +3895,23 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static void e(int n) { int x __attribute__((cleanup(hp))) = n; stop(); }\n"
           "static void g(int n) { int x __attribute__((cleanup(hp))) = n; if (n) return; stop(); }\n"
           "static void k(int n) { int x __attribute__((cleanup(hp))) = n; stop(); lbl: x++; }\nint entry(int n) { e(n); g(n); k(n); return n; }\n" },
+        { "every target error after ignored late unscoped C23 noreturn attributes",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\nvoid stop2(void) {}\n[[_Noreturn]] void stop2(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int caller(void) { stop(); h(1); stop2(); return h(2) + h(3); }\n", "-std=c23" },
+        { "permitted C23 noreturn spellings keep only the final reachable target error",
+          "[[noreturn]] void early(void);\nvoid early(void) { for (;;) {} }\n[[noreturn]] void early(void);\n"
+          "void gnu_late(void) { for (;;) {} }\n__attribute__((noreturn)) void gnu_late(void);\n"
+          "void scoped_late(void) { for (;;) {} }\n[[gnu::noreturn]] void scoped_late(void);\n"
+          "void keyword_late(void) { for (;;) {} }\n_Noreturn void keyword_late(void);\n"
+          "void mixed_late(void) { for (;;) {} }\n[[noreturn, gnu::noreturn]] void mixed_late(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { early(); return h(1); }\nint b(void) { gnu_late(); return h(2); }\nint c(void) { scoped_late(); return h(3); }\n"
+          "int d(void) { keyword_late(); return h(4); }\nint e(void) { mixed_late(); return h(5); }\nint reachable(void) { return h(6); }\n", "-std=c23" },
+        { "shared C23 noreturn specifiers retain each declarator's disposition",
+          "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2) + h(3); }\n", "-std=c23" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
