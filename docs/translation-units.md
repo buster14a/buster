@@ -84,7 +84,10 @@ lanes are a board instead (`CheckEmitBoard`, `c_check_program_emit.c`):
 - **A lane with no unit left to take** takes the parts of any lane's share
   (`check_program_emit_help`), and while none has a part it waits on the
   board's word, which a share's opening and a lane's last unit advance
-  (`lane_advance`, `lane_wait`), until no lane takes units.
+  (`lane_advance`), until no lane takes units. It sleeps on the word's futex at
+  once (`lane_sleep`): it waits for another lane's front end, and a core that
+  spun or waited in `mwaitx` meanwhile would draw power that the cores at work
+  lack for their clocks.
 - **Each lane that takes parts of an emission** has a writer and arenas of its
   own in it, as a function lane does (its place on the board plus one; the
   sharing lane's are the caller's), which the sharing lane releases after its

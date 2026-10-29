@@ -824,11 +824,12 @@ static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
                 took = true;
             }
         }
-        // A share that opens, and a lane that stops taking units, advance the word after this lane read it.
+        // A share that opens, and a lane that stops taking units, advance the word after this lane read it. The wait is
+        // for another lane's front end, a unit's preprocessing to its selection: long enough to sleep at once.
         helping = took || __atomic_load_n(&board->taking, __ATOMIC_ACQUIRE) != 0;
         if (!took && helping)
         {
-            lane_wait(&board->generation, generation);
+            lane_sleep(&board->generation, generation);
         }
     }
 }
