@@ -465,12 +465,16 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
   32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
 - the opmask registers by number, k0 to k7, which no value keeps between entries.
 
-`tier0_operation_valid` checks each row: VEX and EVEX forms alone, their operands in their fields (no implicit
+`tier0_operation_valid` checks each row: VEX and EVEX forms, their operands in their fields (no implicit
 register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
-registers), no branch, symbol or RIP-relative address, each field's role of its class (an integer operand's no
-narrower than its field), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
-registers and memory through its addresses, and nothing else; which forms a unit's target allows is the front end's to
-decide (#180's policy), as the instruction set of its rows is.
+registers), and the legacy forms `tier0_operation_legacy_forms` lists, for the x86 builtins VEX and EVEX have no form
+of (#148: the flags' tests' `mov` and `cmovcc`, `adc`, `sbb`, `neg`, `crc32`, `rdrand`, the FS and GS bases,
+the non-temporal and direct stores, the cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating
+values live in), the shadow stack's, SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are); no branch, symbol or RIP-relative address, each field's role of its class (an
+integer operand's no narrower than its field, the integer result's in a field of 32 or 64 bits), and each record
+`x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch
+registers, the opmask registers, the flags and memory through its addresses, and nothing else Tier 0 keeps; which
+forms a unit's target allows is the front end's to decide (#180's policy), as the instruction set of its rows is.
 
 `tier0_validate` refuses a vector entry in a function without `vectors`, a local of the class that isn't an object, a
 `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of

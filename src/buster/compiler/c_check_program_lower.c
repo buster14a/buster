@@ -4193,7 +4193,7 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
     }
 }
 
-// A TypeId of an integer class, for a row's result's conversion to its builtin's type.
+// A TypeId of an integer or floating class, for a row's result's conversion to its builtin's type.
 static TypeId check_lower_class_type(uint8_t class)
 {
     static const TypeId types[] = {
@@ -4205,6 +4205,8 @@ static TypeId check_lower_class_type(uint8_t class)
         [BUSTER_TYPED_CLASS_U32] = BUSTER_TYPE_UINT,
         [BUSTER_TYPED_CLASS_I64] = BUSTER_TYPE_LONG,
         [BUSTER_TYPED_CLASS_U64] = BUSTER_TYPE_ULONG,
+        [BUSTER_TYPED_CLASS_F32] = BUSTER_TYPE_FLOAT,
+        [BUSTER_TYPED_CLASS_F64] = BUSTER_TYPE_DOUBLE,
     };
     return class < BUSTER_ARRAY_LENGTH(types) ? types[class] : 0;
 }
@@ -4229,7 +4231,8 @@ static bool check_lower_x86_named(const BuiltinIntrinsicInfo* info, const char* 
 // An x86 builtin's row (#136, #148): an X86 entry of its row (check_x86_lower_row), after its arguments but its immediate,
 // which the row's records take, and the row's result converted to the call's type. Its record in the stream
 // (CheckStream.x86, in its nodes' order) names it; an integer operand's class is its converted argument's, widened to 32
-// bits (check_lower_x86_operand_class).
+// bits (check_lower_x86_operand_class). A reduction's is two rows (check_x86_lower_reduce_row): the first of its vector,
+// the last argument, to 16 bytes, the second of those and its floating start, the first, where it has one.
 static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -4280,6 +4283,12 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row_of(program->target_features, rule, (uint64_t)immediates[0].integer,
                                                 rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
+    Tier0Operation tail;
+    const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
+    if (reduce)
+    {
+        check_x86_lower_reduce_row(rule, &tail);
+    }
     // The row's operands, the arguments but the immediates, each integer one of its argument's class, widened.
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
@@ -4292,7 +4301,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         }
         operand += taken;
     }
-    if (reason == NULL && operand != row.operand_count)
+    if (reason == NULL && operand != (reduce ? row.operand_count + tail.operand_count - 1 : row.operand_count))
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
@@ -4303,16 +4312,22 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     else
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t last = reduce ? check_lower_operation_index(writer, &tail) : index;
+        const uint8_t result_class = reduce ? tail.result_class : row.result_class;
         const TypeId result = stream->values[node].type;
         // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
         const bool zero_test = rule->zero_test;
-        if (row.result_class != BUSTER_TYPED_CLASS_VOID && row.result_class != BUSTER_TYPED_CLASS_VECTOR)
+        if (result_class != BUSTER_TYPED_CLASS_VOID && result_class != BUSTER_TYPED_CLASS_VECTOR)
         {
-            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(row.result_class), result);
+            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(result_class), result);
         }
         if (zero_test)
         {
             check_lower_truth(writer, check_lower_class_type(row.result_class), true);
+        }
+        if (reduce)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_X86, tail.result_class, last);
         }
         check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, index);
         // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
@@ -4348,12 +4363,12 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
-        const bool xgetbv = check_lower_x86_named(info, "__builtin_ia32_xgetbv");
-        const bool waits = check_lower_x86_named(info, "__builtin_ia32_monitorx") || check_lower_x86_named(info, "__builtin_ia32_mwaitx");
-        const uint64_t needed = xgetbv ? BUSTER_X86_FEATURE(XSAVE) : waits ? BUSTER_X86_FEATURE(MWAITX) : 0;
+        // The leaf's instructions' features (c_builtin_x86_helpers.c), which the target must have.
+        const CBuiltinX86HelperKind leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;
+        const uint64_t needed = cbuiltin_x86_helper_infos[leaf].features;
         if ((program->target_features & needed) != needed)
         {
-            check_lower_unsupported(writer, xgetbv ? "xgetbv without XSAVE" : "monitorx or mwaitx without MWAITX");
+            check_lower_unsupported(writer, cbuiltin_x86_helper_infos[leaf].refusal);
         }
         else
         {

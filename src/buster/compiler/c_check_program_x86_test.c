@@ -5,8 +5,9 @@
 // each family's builtins called directly, at their prototypes' types, on inputs from the call's argument, with every
 // result folded into the program's hash. The programs run where the host has the features their rows take (AVX-512F,
 // BW, CD, DQ, VL, VBMI, VBMI2, BITALG, VNNI, IFMA and BF16, GFNI, VAES, AES, FMA, AVX2 and BMI2, by x86_target_native's
-// CPUID and XCR0), and those of whose code clang takes more where it has that too (the dot products' AVX-VNNI);
-// elsewhere they compile and link, as clang's builds do, and don't run. Include after c_check_program_vector_test.c.
+// CPUID and XCR0), and those of whose code clang takes more where it has that too (the dot products' AVX-VNNI, SSE4A,
+// SHA, the direct stores); elsewhere they compile and link, as clang's builds do, and don't run, and so do the
+// operating system's instructions' everywhere. Include after c_check_program_vector_test.c.
 
 static const char check_test_x86_types[] =
     "typedef char v16qi __attribute__((vector_size(16)));typedef char v32qi __attribute__((vector_size(32)));"
@@ -26,13 +27,15 @@ static const char check_test_x86_types[] =
     "static void fill(void*p,unsigned long n,unsigned s){unsigned char*b=p;for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;b[i]=(unsigned char)(s>>16);}}\n"
     "static unsigned long long mask(int n){return (unsigned long long)((unsigned)n*2654435761u)<<32|((unsigned)n*40503u+5u);}\n";
 
-// An x86 builtin program: its name, its body after check_test_x86_types, and the features clang's code of it takes past
-// those every program's rows take, which the host must have too to run it.
+// An x86 builtin program: its name, its body after check_test_x86_types, the features clang's code of it takes past
+// those every program's rows take, which the host must have too to run it, and whether it only compiles and links (its
+// builtins' instructions are the operating system's to allow, or values no two runs share).
 typedef struct CheckTestX86Program
 {
     const char* name;
     const char* body;
     uint64_t features;
+    bool link_only;
 } CheckTestX86Program;
 
 static void check_test_program_x86_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
@@ -1241,12 +1244,312 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "v8di z=(v8di)__builtin_ia32_undef512();for(int i=0;i<8;i++)z[i]=i;FOLD(z);"
             "return (int)h;}",
         },
+        {
+            // The compares and tests into an int, from the flags: the SSE compares of each kind on equal, ordered and
+            // unordered operands, the vectors' tests on complements, equals and others, and the masks' on complements, zeros,
+            // equals and others.
+            "x86-compares-and-tests",
+            "int tested(int n){unsigned h=2166136261u;union{unsigned u;float f;}qf={0x7fc00000u};union{unsigned long long u;double d;}"
+            "qd={0x7ff8000000000000ull};v4sf a,b;v2df c,d;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);fill(&d,16,n+3);a[0]=(float)(n%3);"
+            "b[0]=(float)(n%5)*0.5f;c[0]=(double)(n%4);d[0]=(double)(n%3);if(n%7==0){b[0]=qf.f;d[0]=qd.d;}if(n%11==1){a[0]=qf.f;c[0]=qd.d;}"
+            "int r[24]={__builtin_ia32_comieq(a,b),__builtin_ia32_comilt(a,b),__builtin_ia32_comile(a,b),__builtin_ia32_comigt(a,b),"
+            "__builtin_ia32_comige(a,b),__builtin_ia32_comineq(a,b),__builtin_ia32_comisdeq(c,d),__builtin_ia32_comisdlt(c,d),"
+            "__builtin_ia32_comisdle(c,d),__builtin_ia32_comisdgt(c,d),__builtin_ia32_comisdge(c,d),__builtin_ia32_comisdneq(c,d),"
+            "__builtin_ia32_ucomieq(a,b),__builtin_ia32_ucomilt(a,b),__builtin_ia32_ucomile(a,b),__builtin_ia32_ucomigt(a,b),__builtin_ia32_ucomige(a,b),"
+            "__builtin_ia32_ucomineq(a,b),__builtin_ia32_ucomisdeq(c,d),__builtin_ia32_ucomisdlt(c,d),__builtin_ia32_ucomisdle(c,d),"
+            "__builtin_ia32_ucomisdgt(c,d),__builtin_ia32_ucomisdge(c,d),__builtin_ia32_ucomisdneq(c,d)};FOLD(r);v2di x,y;v4di X,Y;fill(&x,16,n+4);"
+            "fill(&X,32,n+5);if(n%3==0){y=~x;Y=~X;}else if(n%3==1){y=x;Y=X;}else{fill(&y,16,n+6);fill(&Y,32,n+7);}"
+            "int t[6]={__builtin_ia32_ptestz128(x,y),__builtin_ia32_ptestc128(x,y),__builtin_ia32_ptestnzc128(x,y),__builtin_ia32_ptestz256(X,Y),"
+            "__builtin_ia32_ptestc256(X,Y),__builtin_ia32_ptestnzc256(X,Y)};FOLD(t);v4sf p=(v4sf)x,q=(v4sf)y;v8sf P=(v8sf)X,Q=(v8sf)Y;v2df u=(v2df)x,"
+            "w=(v2df)y;v4df U=(v4df)X,W=(v4df)Y;int v[12]={__builtin_ia32_vtestzps(p,q),__builtin_ia32_vtestcps(p,q),__builtin_ia32_vtestnzcps(p,q),"
+            "__builtin_ia32_vtestzps256(P,Q),__builtin_ia32_vtestcps256(P,Q),__builtin_ia32_vtestnzcps256(P,Q),__builtin_ia32_vtestzpd(u,w),"
+            "__builtin_ia32_vtestcpd(u,w),__builtin_ia32_vtestnzcpd(u,w),__builtin_ia32_vtestzpd256(U,W),__builtin_ia32_vtestcpd256(U,W),"
+            "__builtin_ia32_vtestnzcpd256(U,W)};FOLD(v);unsigned long long m=mask(n);unsigned char a8=(unsigned char)m,b8=(unsigned char)(m>>8);"
+            "unsigned short a16=(unsigned short)(m>>16),b16=(unsigned short)(m>>32);unsigned a32=(unsigned)(m>>5),b32=(unsigned)(m>>27);"
+            "unsigned long long a64=m,b64=m*0x9e3779b97f4a7c15ull;if(n%4==0){b8=(unsigned char)~a8;b16=(unsigned short)~a16;b32=~a32;b64=~a64;}"
+            "if(n%4==1){a8=0;b8=0;a16=0;b16=0;a32=0;b32=0;a64=0;b64=0;}if(n%5==2){b8=a8;b16=a16;b32=a32;b64=a64;}"
+            "int k[15]={__builtin_ia32_kortestzqi(a8,b8),__builtin_ia32_kortestzhi(a16,b16),__builtin_ia32_kortestzsi(a32,b32),"
+            "__builtin_ia32_kortestzdi(a64,b64),__builtin_ia32_kortestcqi(a8,b8),__builtin_ia32_kortestchi(a16,b16),__builtin_ia32_kortestcsi(a32,b32),"
+            "__builtin_ia32_kortestcdi(a64,b64),__builtin_ia32_ktestzqi(a8,b8),__builtin_ia32_ktestzhi(a16,b16),__builtin_ia32_ktestzsi(a32,b32),"
+            "__builtin_ia32_ktestcqi(a8,b8),__builtin_ia32_ktestchi(a16,b16),__builtin_ia32_ktestcsi(a32,b32),__builtin_ia32_ktestcdi(a64,b64)};FOLD(k);"
+            "return (int)h;}",
+        },
+        {
+            // The masks' operations of each width: KNOT's of one, and KADD's, KAND's, KANDN's, KOR's, KXNOR's and KXOR's of
+            // two.
+            "x86-mask-operations",
+            "int tested(int n){unsigned h=2166136261u;unsigned long long m=mask(n),w=m*0x9e3779b97f4a7c15ull+(unsigned)n;"
+            "unsigned char a8=(unsigned char)m,b8=(unsigned char)w;unsigned short a16=(unsigned short)(m>>9),b16=(unsigned short)(w>>13);"
+            "unsigned a32=(unsigned)(m>>3),b32=(unsigned)(w>>7);unsigned long long a64=m,b64=w;unsigned char r8[7]={__builtin_ia32_knotqi(a8),"
+            "__builtin_ia32_kaddqi(a8,b8),__builtin_ia32_kandqi(a8,b8),__builtin_ia32_kandnqi(a8,b8),__builtin_ia32_korqi(a8,b8),"
+            "__builtin_ia32_kxnorqi(a8,b8),__builtin_ia32_kxorqi(a8,b8)};FOLD(r8);unsigned short r16[5]={__builtin_ia32_knothi(a16),"
+            "__builtin_ia32_kandnhi(a16,b16),__builtin_ia32_korhi(a16,b16),__builtin_ia32_kxnorhi(a16,b16),__builtin_ia32_kxorhi(a16,b16)};FOLD(r16);"
+            "unsigned r32[7]={__builtin_ia32_knotsi(a32),__builtin_ia32_kaddsi(a32,b32),__builtin_ia32_kandsi(a32,b32),__builtin_ia32_kandnsi(a32,b32),"
+            "__builtin_ia32_korsi(a32,b32),__builtin_ia32_kxnorsi(a32,b32),__builtin_ia32_kxorsi(a32,b32)};FOLD(r32);"
+            "unsigned long long r64[5]={__builtin_ia32_knotdi(a64),__builtin_ia32_kadddi(a64,b64),__builtin_ia32_kanddi(a64,b64),"
+            "__builtin_ia32_kandndi(a64,b64),__builtin_ia32_kxnordi(a64,b64)};FOLD(r64);return (int)h;}",
+        },
+        {
+            // The integers' builtins: the CRCs chained, the leading zeros' leaves (of 0 too), the bit fields, and the sums and
+            // differences with carries in and out.
+            "x86-integers",
+            "int tested(int n){unsigned h=2166136261u;unsigned long long m=mask(n);unsigned c=0x12345678u^(unsigned)n;"
+            "c=__builtin_ia32_crc32qi(c,(unsigned char)(n*7));c=__builtin_ia32_crc32hi(c,(unsigned short)(n*911));"
+            "c=__builtin_ia32_crc32si(c,(unsigned)m);FOLD(c);unsigned long long cd=__builtin_ia32_crc32di(0x9e3779b97f4a7c15ull^(unsigned long long)n,m);"
+            "FOLD(cd);unsigned z32[2]={__builtin_ia32_lzcnt_u32((unsigned)m>>(n&31)),__builtin_ia32_lzcnt_u32(0u)};FOLD(z32);"
+            "unsigned long long z64[2]={__builtin_ia32_lzcnt_u64(m>>(n&63)),__builtin_ia32_lzcnt_u64(0ull)};FOLD(z64);"
+            "unsigned b32[2]={__builtin_ia32_bextr_u32((unsigned)m,(unsigned)((n&31)|((n*3&31)<<8))),__builtin_ia32_bextr_u32(~(unsigned)m,0x1004u)};"
+            "FOLD(b32);unsigned long long b64[2]={__builtin_ia32_bextr_u64(m,(unsigned long long)((n&63)|((n*5&63)<<8))),"
+            "__builtin_ia32_bextr_u64(~m,0x2010ull)};FOLD(b64);unsigned a=(n%2)?0xffffffffu:(unsigned)m,b=(unsigned)(m>>32)|((n%3)?0u:1u);"
+            "unsigned long long A=(n%2)?~0ull:m,B=m*3+(unsigned)n;unsigned s32[2];unsigned long long s64[2];"
+            "unsigned char k[4]={__builtin_ia32_addcarryx_u32((unsigned char)(n&3),a,b,&s32[0]),"
+            "__builtin_ia32_subborrow_u32((unsigned char)(n&5),b,a,&s32[1]),__builtin_ia32_addcarryx_u64((unsigned char)(n&6),A,B,&s64[0]),"
+            "__builtin_ia32_subborrow_u64((unsigned char)(n%4==0),B,A,&s64[1])};FOLD(k);FOLD(s32);FOLD(s64);return (int)h;}",
+            BUSTER_X86_FEATURE(CRC32) | BUSTER_X86_FEATURE(BMI),
+        },
+        {
+            // The random numbers' steps, which store a value of their width at their argument: the values around it, which
+            // they must leave, and their results, each 0 or 1.
+            "x86-random",
+            "int tested(int n){unsigned h=2166136261u;unsigned short s[3]={0x1111,0x2222,0x3333};unsigned i[3]={0x44444444u,0x55555555u,0x66666666u};"
+            "unsigned long long l[3]={0x7777777777777777ull,0x8888888888888888ull,0x9999999999999999ull};unsigned ok=0;"
+            "ok+=__builtin_ia32_rdrand16_step(&s[1])<2u;ok+=__builtin_ia32_rdrand32_step(&i[1])<2u;ok+=__builtin_ia32_rdrand64_step(&l[1])<2u;FOLD(s[0]);"
+            "FOLD(s[2]);FOLD(i[0]);FOLD(i[2]);FOLD(l[0]);FOLD(l[2]);ok+=__builtin_ia32_rdseed16_step(&s[1])<2u;"
+            "ok+=__builtin_ia32_rdseed32_step(&i[1])<2u;ok+=__builtin_ia32_rdseed64_step(&l[1])<2u;FOLD(s[0]);FOLD(s[2]);FOLD(i[0]);FOLD(i[2]);"
+            "FOLD(l[0]);FOLD(l[2]);FOLD(ok);return (int)h+n;}",
+            BUSTER_X86_FEATURE(RDRND) | BUSTER_X86_FEATURE(RDSEED),
+        },
+        {
+            // The vectors' loads and stores of their own: under each width's mask of signs, the unaligned loads at every
+            // offset, and the byte stores under a vector's signs.
+            "x86-vector-memory",
+            "int tested(int n){unsigned h=2166136261u;int bi[8];long long bq[4];float bf[8];double bd[4];char bc[48];for(int i=0;i<8;i++){bi[i]=i*31+n;"
+            "bf[i]=(float)(i*3-n);}for(int i=0;i<4;i++){bq[i]=(long long)i*1000003-n;bd[i]=(double)i*0.25+n;}for(int i=0;i<48;i++)bc[i]=(char)(i*7+n);"
+            "v4si m4;v8si m8;v2di q2;v4di q4;fill(&m4,16,n);fill(&m8,32,n+1);fill(&q2,16,n+2);fill(&q4,32,n+3);"
+            "v4si l0=__builtin_ia32_maskloadd((const v4si*)bi,m4);FOLD(l0);v8si l1=__builtin_ia32_maskloadd256((const v8si*)bi,m8);FOLD(l1);"
+            "v2di l2=__builtin_ia32_maskloadq((const v2di*)bq,q2);FOLD(l2);v4di l3=__builtin_ia32_maskloadq256((const v4di*)bq,q4);FOLD(l3);"
+            "v4sf l4=__builtin_ia32_maskloadps((const v4sf*)bf,m4);FOLD(l4);v8sf l5=__builtin_ia32_maskloadps256((const v8sf*)bf,m8);FOLD(l5);"
+            "v2df l6=__builtin_ia32_maskloadpd((const v2df*)bd,q2);FOLD(l6);v4df l7=__builtin_ia32_maskloadpd256((const v4df*)bd,q4);FOLD(l7);v4si s0;"
+            "v8si s1;v2di s2;v4di s3;fill(&s0,16,n+4);fill(&s1,32,n+5);fill(&s2,16,n+6);fill(&s3,32,n+7);__builtin_ia32_maskstored((v4si*)bi,m4,s0);"
+            "__builtin_ia32_maskstored256((v8si*)bi,m8,s1);FOLD(bi);__builtin_ia32_maskstoreq((v2di*)bq,q2,s2);"
+            "__builtin_ia32_maskstoreq256((v4di*)bq,q4,s3);FOLD(bq);__builtin_ia32_maskstoreps((v4sf*)bf,m4,(v4sf)s0);"
+            "__builtin_ia32_maskstoreps256((v8sf*)bf,m8,(v8sf)s1);FOLD(bf);__builtin_ia32_maskstorepd((v2df*)bd,q2,(v2df)s2);"
+            "__builtin_ia32_maskstorepd256((v4df*)bd,q4,(v4df)s3);FOLD(bd);v16qi u0=__builtin_ia32_lddqu(bc+(n&7));FOLD(u0);"
+            "v32qi u1=__builtin_ia32_lddqu256(bc+(n&7));FOLD(u1);v16qi d,k;fill(&d,16,n+8);fill(&k,16,n+9);__builtin_ia32_maskmovdqu(d,k,bc+(n&15));"
+            "FOLD(bc);return (int)h;}",
+        },
+        {
+            // SSE4A's bit fields (each field's length and index below 32, so that their sum is within the quadword) and non-
+            // temporal scalar stores, and CLZERO's line: AMD's.
+            "x86-sse4a-clzero",
+            "int tested(int n){unsigned h=2166136261u;v2di a,b,c;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);"
+            "b[0]=(long long)(((n*3)&31)|(((n*5)&31)<<8));c[1]=(long long)(((n*7)&31)|(((n*11)&31)<<8));v2di e=__builtin_ia32_extrq(a,(v16qi)b);FOLD(e);"
+            "v2di i=__builtin_ia32_insertq(a,c);FOLD(i);double d[3]={1.5,2.5,3.5};float f[3]={4.5f,5.5f,6.5f};v2df x;v4sf y;fill(&x,16,n+3);"
+            "fill(&y,16,n+4);__builtin_ia32_movntsd(&d[1],x);__builtin_ia32_movntss(&f[1],y);FOLD(d);FOLD(f);struct{_Alignas(64) unsigned char b[128];}z;"
+            "for(int k=0;k<128;k++)z.b[k]=(unsigned char)(k+n);__builtin_ia32_clzero(z.b+64+(n&31));FOLD(z);return (int)h;}",
+            BUSTER_X86_FEATURE(SSE4A) | BUSTER_X86_FEATURE(CLZERO),
+        },
+        {
+            // The FMAs under a mask: merged into a, a zeroed and merged into c, of the scalars and of 64 bytes' alternating
+            // sums, at each rounding control.
+            "x86-masked-fmas",
+            "int tested(int n){unsigned h=2166136261u;unsigned long long m=mask(n);v2df v2df_a,v2df_b,v2df_c;fill(&v2df_a,16,n);fill(&v2df_b,16,n+1);"
+            "fill(&v2df_c,16,n+2);if(n%2==0)for(int i=0;i<2;i++){v2df_a[i]=(n-i)*0.375;v2df_b[i]=(i+1)*-1.25;v2df_c[i]=(n*i)*0.0625;}v4sf v4sf_a,v4sf_b,"
+            "v4sf_c;fill(&v4sf_a,16,n);fill(&v4sf_b,16,n+1);fill(&v4sf_c,16,n+2);if(n%2==0)for(int i=0;i<4;i++){v4sf_a[i]=(n-i)*0.375f;"
+            "v4sf_b[i]=(i+1)*-1.25f;v4sf_c[i]=(n*i)*0.0625f;}v8df v8df_a,v8df_b,v8df_c;fill(&v8df_a,64,n);fill(&v8df_b,64,n+1);fill(&v8df_c,64,n+2);"
+            "if(n%2==0)for(int i=0;i<8;i++){v8df_a[i]=(n-i)*0.375;v8df_b[i]=(i+1)*-1.25;v8df_c[i]=(n*i)*0.0625;}v16sf v16sf_a,v16sf_b,v16sf_c;"
+            "fill(&v16sf_a,64,n);fill(&v16sf_b,64,n+1);fill(&v16sf_c,64,n+2);if(n%2==0)for(int i=0;i<16;i++){v16sf_a[i]=(n-i)*0.375f;"
+            "v16sf_b[i]=(i+1)*-1.25f;v16sf_c[i]=(n*i)*0.0625f;}{v2df r=__builtin_ia32_vfmaddsd3_mask(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>0),4);"
+            "FOLD(r);}{v2df r=__builtin_ia32_vfmaddsd3_mask(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>7),8);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>14),9);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>21),10);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>28),11);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_maskz(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>35),4);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_maskz(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>42),8);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_maskz(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>1),9);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_maskz(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>8),10);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_maskz(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>15),11);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>22),4);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>29),8);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>36),9);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>43),10);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmaddsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>2),11);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>9),4);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>16),8);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>23),9);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>30),10);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>37),11);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_maskz(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>44),4);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_maskz(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>3),8);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_maskz(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>10),9);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_maskz(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>17),10);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_maskz(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>24),11);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>31),4);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>38),8);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>45),9);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>4),10);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmaddss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>11),11);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmsubsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>18),4);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmsubsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>25),8);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmsubsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>32),9);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmsubsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>39),10);FOLD(r);}"
+            "{v2df r=__builtin_ia32_vfmsubsd3_mask3(v2df_a,v2df_b,v2df_c,(unsigned char)(m>>46),11);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmsubss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>5),4);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmsubss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>12),8);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmsubss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>19),9);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmsubss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>26),10);FOLD(r);}"
+            "{v4sf r=__builtin_ia32_vfmsubss3_mask3(v4sf_a,v4sf_b,v4sf_c,(unsigned char)(m>>33),11);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>40),4);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>47),8);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>6),9);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>13),10);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>20),11);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_maskz(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>27),4);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_maskz(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>34),8);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_maskz(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>41),9);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_maskz(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>0),10);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_maskz(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>7),11);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>14),4);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>21),8);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>28),9);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>35),10);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmaddsubpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>42),11);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>1),4);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>8),8);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>15),9);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>22),10);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>29),11);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_maskz(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>36),4);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_maskz(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>43),8);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_maskz(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>2),9);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_maskz(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>9),10);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_maskz(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>16),11);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>23),4);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>30),8);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>37),9);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>44),10);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmaddsubps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>3),11);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmsubaddpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>10),4);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmsubaddpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>17),8);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmsubaddpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>24),9);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmsubaddpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>31),10);FOLD(r);}"
+            "{v8df r=__builtin_ia32_vfmsubaddpd512_mask3(v8df_a,v8df_b,v8df_c,(unsigned char)(m>>38),11);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmsubaddps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>45),4);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmsubaddps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>4),8);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmsubaddps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>11),9);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmsubaddps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>18),10);FOLD(r);}"
+            "{v16sf r=__builtin_ia32_vfmsubaddps512_mask3(v16sf_a,v16sf_b,v16sf_c,(unsigned short)(m>>25),11);FOLD(r);}return (int)h;}",
+        },
+        {
+            // The floating reductions of 64 bytes, of random bits (NaNs and infinities among them) and of modest values, whose
+            // order of operations clang's code has.
+            "x86-reductions",
+            "int tested(int n){unsigned h=2166136261u;v8df a;v16sf b;fill(&a,64,n);fill(&b,64,n+1);if(n%2==0){for(int i=0;i<8;i++)a[i]=(double)(i*n)-2.5;"
+            "for(int i=0;i<16;i++)b[i]=(float)(i-n)*0.75f;}double r[4]={__builtin_ia32_reduce_fadd_pd512(1.5,a),__builtin_ia32_reduce_fmul_pd512(-0.5,a),"
+            "__builtin_ia32_reduce_fmax_pd512(a),__builtin_ia32_reduce_fmin_pd512(a)};FOLD(r);float s[4]={__builtin_ia32_reduce_fadd_ps512(0.25f,b),"
+            "__builtin_ia32_reduce_fmul_ps512(2.0f,b),__builtin_ia32_reduce_fmax_ps512(b),__builtin_ia32_reduce_fmin_ps512(b)};FOLD(s);return (int)h;}",
+        },
+        {
+            // The scalar conversions to integers: by MXCSR's rounding, by each rounding control, and truncating with the
+            // exceptions' suppression and without, of random bits and of modest values.
+            "x86-scalar-conversions",
+            "int tested(int n){unsigned h=2166136261u;v2df a;v4sf b;fill(&a,16,n);fill(&b,16,n+1);if(n%3!=0){a[0]=(double)n*1.75-3.5;"
+            "b[0]=(float)n*-2.25f+0.5f;}int c32[2]={__builtin_ia32_cvtsd2si(a),__builtin_ia32_cvtss2si(b)};"
+            "long long c64[2]={__builtin_ia32_cvtsd2si64(a),__builtin_ia32_cvtss2si64(b)};FOLD(c32);FOLD(c64);"
+            "{unsigned r[5]={__builtin_ia32_vcvtsd2usi32(a,4),__builtin_ia32_vcvtsd2usi32(a,8),__builtin_ia32_vcvtsd2usi32(a,9),"
+            "__builtin_ia32_vcvtsd2usi32(a,10),__builtin_ia32_vcvtsd2usi32(a,11)};FOLD(r);}{unsigned r[5]={__builtin_ia32_vcvtss2usi32(b,4),"
+            "__builtin_ia32_vcvtss2usi32(b,8),__builtin_ia32_vcvtss2usi32(b,9),__builtin_ia32_vcvtss2usi32(b,10),__builtin_ia32_vcvtss2usi32(b,11)};"
+            "FOLD(r);}{unsigned long long r[5]={__builtin_ia32_vcvtsd2usi64(a,4),__builtin_ia32_vcvtsd2usi64(a,8),__builtin_ia32_vcvtsd2usi64(a,9),"
+            "__builtin_ia32_vcvtsd2usi64(a,10),__builtin_ia32_vcvtsd2usi64(a,11)};FOLD(r);}{unsigned long long r[5]={__builtin_ia32_vcvtss2usi64(b,4),"
+            "__builtin_ia32_vcvtss2usi64(b,8),__builtin_ia32_vcvtss2usi64(b,9),__builtin_ia32_vcvtss2usi64(b,10),__builtin_ia32_vcvtss2usi64(b,11)};"
+            "FOLD(r);}{int r[2]={__builtin_ia32_vcvttsd2si32(a,4),__builtin_ia32_vcvttsd2si32(a,8)};FOLD(r);}{int r[2]={__builtin_ia32_vcvttss2si32(b,4),"
+            "__builtin_ia32_vcvttss2si32(b,8)};FOLD(r);}{long long r[2]={__builtin_ia32_vcvttsd2si64(a,4),__builtin_ia32_vcvttsd2si64(a,8)};FOLD(r);}"
+            "{long long r[2]={__builtin_ia32_vcvttss2si64(b,4),__builtin_ia32_vcvttss2si64(b,8)};FOLD(r);}"
+            "{unsigned r[2]={__builtin_ia32_vcvttsd2usi32(a,4),__builtin_ia32_vcvttsd2usi32(a,8)};FOLD(r);}"
+            "{unsigned r[2]={__builtin_ia32_vcvttss2usi32(b,4),__builtin_ia32_vcvttss2usi32(b,8)};FOLD(r);}"
+            "{unsigned long long r[2]={__builtin_ia32_vcvttsd2usi64(a,4),__builtin_ia32_vcvttsd2usi64(a,8)};FOLD(r);}"
+            "{unsigned long long r[2]={__builtin_ia32_vcvttss2usi64(b,4),__builtin_ia32_vcvttss2usi64(b,8)};FOLD(r);}return (int)h;}",
+        },
+        {
+            // AVX's lanes of 32 bytes, the rounding to a scale under a mask with the exceptions' suppression and without,
+            // bf16's scalar select by each value of the mask's first bit, and SHA's messages and rounds of SHA-1.
+            "x86-lanes-scales-sha",
+            "int tested(int n){unsigned h=2166136261u;v4df a;v8sf b;v8si c;fill(&a,32,n);fill(&b,32,n+1);fill(&c,32,n+2);"
+            "v2df e0=__builtin_ia32_vextractf128_pd256(a,0),e1=__builtin_ia32_vextractf128_pd256(a,1);FOLD(e0);FOLD(e1);"
+            "v4sf e2=__builtin_ia32_vextractf128_ps256(b,0),e3=__builtin_ia32_vextractf128_ps256(b,1);FOLD(e2);FOLD(e3);"
+            "v4si e4=__builtin_ia32_vextractf128_si256(c,0),e5=__builtin_ia32_vextractf128_si256(c,1);FOLD(e4);FOLD(e5);v8df x,w;v16sf y,z;"
+            "fill(&w,64,n+4);fill(&z,64,n+6);for(int i=0;i<8;i++)x[i]=(double)(i*n)*0.37-1.0;for(int i=0;i<16;i++)y[i]=(float)(i+n)*-0.61f;"
+            "unsigned long long m=mask(n);v8df r0=__builtin_ia32_rndscalepd_mask(x,0x01,w,(unsigned char)m,4),"
+            "r1=__builtin_ia32_rndscalepd_mask(x,0x32,w,(unsigned char)(m>>8),8),r2=__builtin_ia32_rndscalepd_mask(x,0x0b,w,(unsigned char)(m>>16),4);"
+            "FOLD(r0);FOLD(r1);FOLD(r2);v16sf r3=__builtin_ia32_rndscaleps_mask(y,0x02,z,(unsigned short)m,4),"
+            "r4=__builtin_ia32_rndscaleps_mask(y,0x43,z,(unsigned short)(m>>16),8);FOLD(r3);FOLD(r4);v8bf p,q;fill(&p,16,n+7);fill(&q,16,n+8);"
+            "v8bf s0=__builtin_ia32_selectsbf_128((unsigned char)m,p,q),s1=__builtin_ia32_selectsbf_128((unsigned char)(m>>1),p,q);FOLD(s0);FOLD(s1);"
+            "v4si k0,k1;fill(&k0,16,n+9);fill(&k1,16,n+10);v4si g[5]={__builtin_ia32_sha1msg1(k0,k1),__builtin_ia32_sha1msg2(k0,k1),"
+            "__builtin_ia32_sha1nexte(k0,k1),__builtin_ia32_sha256msg1(k0,k1),__builtin_ia32_sha256msg2(k0,k1)};FOLD(g);return (int)h;}",
+            BUSTER_X86_FEATURE(SHA),
+        },
+        {
+            // The leaves of the rotates of each width, of the x87 and SSE state's saves and restores (whose control words, the
+            // same in both, it folds), of the time stamp, the flags and the vector registers' clearing; and the cache lines'
+            // and non-temporal stores' rows.
+            "x86-leaves-and-hints",
+            "int tested(int n){unsigned h=2166136261u;unsigned long long m=mask(n);"
+            "unsigned char r8[2]={__builtin_rotateleft8((unsigned char)m,(unsigned char)n),"
+            "__builtin_rotateright8((unsigned char)(m>>8),(unsigned char)(n*3))};FOLD(r8);"
+            "unsigned short r16[2]={__builtin_rotateleft16((unsigned short)m,(unsigned short)(n*5)),"
+            "__builtin_rotateright16((unsigned short)(m>>16),(unsigned short)n)};FOLD(r16);"
+            "unsigned r32[2]={__builtin_rotateleft32((unsigned)m,(unsigned)n*7u),__builtin_rotateright32((unsigned)(m>>32),(unsigned)n)};FOLD(r32);"
+            "unsigned long long r64[2]={__builtin_rotateleft64(m,(unsigned long long)n*9u),__builtin_rotateright64(~m,(unsigned long long)n)};FOLD(r64);"
+            "struct{_Alignas(64) unsigned char b[1024];}s;for(int i=0;i<1024;i++)s.b[i]=0;__builtin_ia32_xsave(s.b,3);"
+            "unsigned control=s.b[0]|s.b[1]<<8|(unsigned)s.b[24]<<16|(unsigned)s.b[25]<<24;FOLD(control);__builtin_ia32_xrstor(s.b,3);"
+            "__builtin_ia32_xsave64(s.b,3);control=s.b[0]|s.b[1]<<8|(unsigned)s.b[24]<<16|(unsigned)s.b[25]<<24;FOLD(control);"
+            "__builtin_ia32_xrstor64(s.b,3);__builtin_ia32_xsavec(s.b,3);__builtin_ia32_xsavec64(s.b,3);__builtin_ia32_xsaveopt(s.b,3);"
+            "__builtin_ia32_xsaveopt64(s.b,3);struct{_Alignas(16) unsigned char b[512];}f;for(int i=0;i<512;i++)f.b[i]=0;__builtin_ia32_fxsave(f.b);"
+            "control=f.b[0]|f.b[1]<<8|(unsigned)f.b[24]<<16|(unsigned)f.b[25]<<24;FOLD(control);__builtin_ia32_fxrstor(f.b);__builtin_ia32_fxsave64(f.b);"
+            "control=f.b[0]|f.b[1]<<8|(unsigned)f.b[24]<<16|(unsigned)f.b[25]<<24;FOLD(control);__builtin_ia32_fxrstor64(f.b);unsigned aux=0;"
+            "unsigned long long t=__builtin_ia32_rdtscp(&aux);unsigned ticks=(t|1u)!=0;FOLD(ticks);"
+            "unsigned interrupts=(__builtin_ia32_readeflags_u64()&0x200u)!=0;FOLD(interrupts);__builtin_ia32_vzeroupper();__builtin_ia32_vzeroall();"
+            "int line[16];for(int i=0;i<16;i++)line[i]=i+n;__builtin_ia32_clflushopt(line);__builtin_ia32_clwb(line+8);int nt;long long nt64;"
+            "__builtin_ia32_movnti(&nt,n*3);__builtin_ia32_movnti64(&nt64,(long long)m);FOLD(nt);FOLD(nt64);FOLD(line);__builtin_ia32_emms();"
+            "return (int)h;}",
+            BUSTER_X86_FEATURE(XSAVE) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) | BUSTER_X86_FEATURE(CLFLUSHOPT) | BUSTER_X86_FEATURE(CLWB),
+        },
+        {
+            // The direct stores of 4, 8 and 64 bytes and the instructions' prefetch hints, which Zen 5 has and Zen 4 hasn't.
+            "x86-direct-stores",
+            "int tested(int n){unsigned h=2166136261u;unsigned d32=0;unsigned long d64=0;__builtin_ia32_directstore_u32(&d32,(unsigned)n*2654435761u);"
+            "__builtin_ia32_directstore_u64(&d64,(unsigned long)mask(n));FOLD(d32);FOLD(d64);struct{_Alignas(64) unsigned char b[64];}src,dst;"
+            "for(int i=0;i<64;i++){src.b[i]=(unsigned char)(i*3+n);dst.b[i]=0;}__builtin_ia32_movdir64b(dst.b,src.b);FOLD(dst);"
+            "__builtin_ia32_prefetchi(&h,3);__builtin_ia32_prefetchi(&h,2);return (int)h;}",
+            BUSTER_X86_FEATURE(MOVDIRI) | BUSTER_X86_FEATURE(MOVDIR64B) | BUSTER_X86_FEATURE(PREFETCHI),
+        },
+        {
+            // The builtins of the operating system's instructions, which compile and link and don't run: the FS and GS bases,
+            // the processor's id, the shadow stack's, the TLB's and the caches' invalidations, the supervisor state's saves
+            // and restores, the protection keys, the performance counters, the monitor's waits and the flags' write.
+            "x86-system",
+            "int tested(int n){unsigned h=2166136261u;unsigned long long m=mask(n);unsigned b32=__builtin_ia32_rdfsbase32();"
+            "unsigned long long b64=__builtin_ia32_rdgsbase64();unsigned g32=__builtin_ia32_rdgsbase32();"
+            "unsigned long long f64=__builtin_ia32_rdfsbase64();FOLD(b32);FOLD(b64);FOLD(g32);FOLD(f64);__builtin_ia32_wrfsbase32(b32);"
+            "__builtin_ia32_wrfsbase64(f64);__builtin_ia32_wrgsbase32(g32);__builtin_ia32_wrgsbase64(b64);unsigned p=__builtin_ia32_rdpid();FOLD(p);"
+            "unsigned s32=__builtin_ia32_rdsspd((unsigned)n);unsigned long long s64=__builtin_ia32_rdsspq(m);FOLD(s32);FOLD(s64);"
+            "__builtin_ia32_incsspd((unsigned)n);__builtin_ia32_incsspq(m);unsigned long long cell[4]={0,0,0,0};__builtin_ia32_wrssd((unsigned)n,cell);"
+            "__builtin_ia32_wrssq(m,cell+1);__builtin_ia32_wrussd((unsigned)n,cell+2);__builtin_ia32_wrussq(m,cell+3);__builtin_ia32_rstorssp(cell);"
+            "__builtin_ia32_clrssbsy(cell);__builtin_ia32_saveprevssp();__builtin_ia32_setssbsy();"
+            "unsigned long long descriptor[2]={(unsigned long long)n,m};__builtin_ia32_invpcid((unsigned)n&3u,descriptor);__builtin_ia32_wbinvd();"
+            "__builtin_ia32_wbnoinvd();struct{_Alignas(64) unsigned char b[1024];}x;__builtin_ia32_xsaves(x.b,m);__builtin_ia32_xrstors(x.b,m);"
+            "__builtin_ia32_xsaves64(x.b,m);__builtin_ia32_xrstors64(x.b,m);unsigned k=__builtin_ia32_rdpkru();__builtin_ia32_wrpkru(k);FOLD(k);"
+            "unsigned long long c=__builtin_ia32_rdpmc(n)+__builtin_ia32_rdpru(n);FOLD(c);__builtin_ia32_monitor(cell,0u,0u);__builtin_ia32_mwait(0u,0u);"
+            "__builtin_ia32_writeeflags_u64(__builtin_ia32_readeflags_u64());return (int)h;}",
+            0,
+            true,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
-        const bool run = run_native && (native.features & programs[i].features) == programs[i].features;
-        if (run_native && !run)
+        const bool run = run_native && !programs[i].link_only && (native.features & programs[i].features) == programs[i].features;
+        if (run_native && !programs[i].link_only && !run)
         {
             printf("  %s: native execution skipped (the host lacks features clang's code of it takes); the program compiles and links\n",
                    programs[i].name);
@@ -1315,8 +1618,15 @@ static void check_test_program_x86_rows(CheckTest* test)
                     row.operand_classes[j] = row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR ? row.operand_classes[j] :
                                                                                                     check_lower_x86_operand_class(row.operand_classes[j]);
                 }
-                rows += 1;
-                if (!tier0_operation_valid(&row))
+                // A reduction's second row (check_x86_lower_reduce_row) too.
+                Tier0Operation tail;
+                const bool reduce = rule->family == CHECK_X86_LOWER_REDUCE;
+                if (reduce)
+                {
+                    check_x86_lower_reduce_row(rule, &tail);
+                }
+                rows += reduce ? 2 : 1;
+                if (!tier0_operation_valid(&row) || (reduce && !tier0_operation_valid(&tail)))
                 {
                     invalid += 1;
                     if (invalid <= 8)

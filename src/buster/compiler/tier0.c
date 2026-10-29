@@ -6128,7 +6128,7 @@ static bool tier0_vector_register_class(uint32_t class)
 
 static bool tier0_general_register_class(uint32_t class)
 {
-    return class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
+    return class == BUSTER_X86_CLASS_GPR8 || class == BUSTER_X86_CLASS_GPR16 || class == BUSTER_X86_CLASS_GPR32 || class == BUSTER_X86_CLASS_GPR64;
 }
 
 // A role's register by `placement` (tier0_operation_placement's), in a field of register class `class`: in a vector
@@ -6188,7 +6188,8 @@ static Tier0Reach tier0_operation_reach(const Tier0Operation* operation)
     {
         X86Instruction record = operation->records[r];
         const Tier0Fields fields = tier0_operation_fields(&record);
-        const bool vex = x86_form_description(record.form)->family == BUSTER_X86_FAMILY_VEX;
+        // A VEX form's vector registers are below 16, and so are a legacy one's (SHA's, SSE4A's).
+        const bool vex = x86_form_description(record.form)->family != BUSTER_X86_FAMILY_EVEX;
         for (uint32_t k = 0; k < fields.count; k += 1)
         {
             const uint8_t role = *fields.bytes[k];
@@ -8402,11 +8403,35 @@ static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier
     return tier0_takes_last(function, i) && validator->depth != 0 && tier0_stack_class(validator->stack[validator->depth - 1]) != function->classes[i - 1];
 }
 
+// The legacy forms a row may have (tier0_operation_form_valid), for the x86 builtins VEX and EVEX have no form of
+// (#148): ones that touch no stack, string or fixed register, and whose other effects (flags; the FS and GS bases, the
+// shadow stack, the caches, the x87's tags) aren't any value Tier 0 keeps across an entry. The flags' tests' MOV and
+// CMOVcc, ADC, SBB and NEG, CRC32, RDRAND, RDSEED and RDPID, the FS and GS bases, the non-temporal and direct
+// stores, the cache lines' flushes and prefetches, FXSAVE (not FXRSTOR, which writes the XMM registers floating values
+// live in), the shadow stack's, SHA's and SSE4A's (whose XMM registers are below 16, as VEX's: tier0_operation_reach),
+// and EMMS, WBINVD, WBNOINVD and INVPCID.
+static const uint16_t tier0_operation_legacy_forms[] = {
+    X86_FORM_MOV_R32_IMM32, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64, X86_FORM_MOV_RM16_R16, X86_FORM_MOV_RM32_R32, X86_FORM_MOV_RM64_R64,
+    X86_FORM_CMOVO_R32_RM32, X86_FORM_CMOVNO_R32_RM32, X86_FORM_CMOVB_R32_RM32, X86_FORM_CMOVAE_R32_RM32, X86_FORM_CMOVE_R32_RM32, X86_FORM_CMOVNE_R32_RM32,
+    X86_FORM_CMOVBE_R32_RM32, X86_FORM_CMOVA_R32_RM32, X86_FORM_CMOVS_R32_RM32, X86_FORM_CMOVNS_R32_RM32, X86_FORM_CMOVP_R32_RM32, X86_FORM_CMOVNP_R32_RM32,
+    X86_FORM_CMOVL_R32_RM32, X86_FORM_CMOVGE_R32_RM32, X86_FORM_CMOVLE_R32_RM32, X86_FORM_CMOVG_R32_RM32, X86_FORM_NEG_RM32, X86_FORM_ADC_R32_RM32,
+    X86_FORM_ADC_R64_RM64, X86_FORM_SBB_R32_RM32, X86_FORM_SBB_R64_RM64, X86_FORM_CRC32_R32_RM8, X86_FORM_CRC32_R32_RM16, X86_FORM_CRC32_R32_RM32,
+    X86_FORM_CRC32_R64_RM64, X86_FORM_RDRAND_R16, X86_FORM_RDRAND_R32, X86_FORM_RDRAND_R64, X86_FORM_RDSEED_R16, X86_FORM_RDSEED_R32, X86_FORM_RDSEED_R64,
+    X86_FORM_RDPID_R64, X86_FORM_RDFSBASE_R32, X86_FORM_RDFSBASE_R64, X86_FORM_RDGSBASE_R32, X86_FORM_RDGSBASE_R64, X86_FORM_WRFSBASE_R32,
+    X86_FORM_WRFSBASE_R64, X86_FORM_WRGSBASE_R32, X86_FORM_WRGSBASE_R64, X86_FORM_MOVNTI_M32_R32, X86_FORM_MOVNTI_M64_R64, X86_FORM_MOVDIRI_M32_R32,
+    X86_FORM_MOVDIRI_M64_R64, X86_FORM_MOVDIR64B_R64_M512, X86_FORM_CLWB_M8, X86_FORM_CLFLUSHOPT_M8, X86_FORM_PREFETCHIT0_M8, X86_FORM_PREFETCHIT1_M8,
+    X86_FORM_FXSAVE_M, X86_FORM_FXSAVE64_M, X86_FORM_RDSSPD_R32, X86_FORM_RDSSPQ_R64, X86_FORM_INCSSPD_R32, X86_FORM_INCSSPQ_R64, X86_FORM_WRSSD_M32_R32,
+    X86_FORM_WRSSQ_M64_R64, X86_FORM_WRUSSD_M32_R32, X86_FORM_WRUSSQ_M64_R64, X86_FORM_RSTORSSP_M64, X86_FORM_CLRSSBSY_M64, X86_FORM_SAVEPREVSSP,
+    X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA256MSG1_X_XM128,
+    X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
+    X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128,
+};
+
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
 // branch, whose syntax names no implicit register, that has a vector or an opmask operand when it is EVEX (APX's forms
 // of general registers alone are a target's that Tier 0 doesn't take), and none of those whose implicit operands their
 // syntax doesn't name: vzeroupper and vzeroall (every vector register), mulx (rdx), vmaskmovdqu (rdi's memory) and the
-// string compares (rax, rcx, rdx and xmm0).
+// string compares (rax, rcx, rdx and xmm0); or one of tier0_operation_legacy_forms.
 static bool tier0_operation_form_valid(uint32_t form)
 {
     static const uint16_t implicit[] = {
@@ -8431,19 +8456,24 @@ static bool tier0_operation_form_valid(uint32_t form)
         const bool evex = description->family == BUSTER_X86_FAMILY_EVEX && x86_form_has_vector_operand(description) &&
                           (description->evex & (BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF)) == 0;
         const bool mulx = vex && description->opcode == 0x0f38f6 && description->prefixes == 0xf2;
-        valid = explicit && (vex || evex) && !mulx && description->relative_bytes == 0;
+        bool legacy = false;
+        for (uint32_t k = 0; !legacy && description->family == BUSTER_X86_FAMILY_LEGACY && k < BUSTER_ARRAY_LENGTH(tier0_operation_legacy_forms); k += 1)
+        {
+            legacy = form == tier0_operation_legacy_forms[k];
+        }
+        valid = legacy || (explicit && (vex || evex) && !mulx && description->relative_bytes == 0);
     }
     return valid;
 }
 
 // Whether a role may be in a field of register class `class` of `operation`'s records: in a vector register's, VECTOR(j)
 // for any j below 16, FLOATING(j) for a floating operand j and FLOATING_RESULT for a floating result, those two in an XMM
-// field; in a general register's (16, 32 or 64 bits: a memory operand's base or index too), INTEGER(j) for an integer
-// operand j no narrower than the field, INTEGER_RESULT for an integer result and SCRATCH(k); in an opmask register's, k0
-// to k7. An integer's register holds its class's bytes, the rest unspecified, so a field reads it only where it is no
-// wider: a base or an index (GPR64) a 64-bit integer's, a 32-bit field a 32- or 64-bit one's, and a front end extends a
-// narrower operand first (CONVERT). A result's field is written whole: a 32-bit one zero-extends into the register, and
-// none of the forms tier0_operation_form_valid takes has a 16-bit general register (those are APX's).
+// field; in a general register's (8, 16, 32 or 64 bits: a memory operand's base or index too), INTEGER(j) for an integer
+// operand j no narrower than the field, INTEGER_RESULT for an integer result in a field of 32 or 64 bits and SCRATCH(k);
+// in an opmask register's, k0 to k7. An integer's register holds its class's bytes, the rest unspecified, so a field reads
+// it only where it is no wider: a base or an index (GPR64) a 64-bit integer's, a 32-bit field a 32- or 64-bit one's, and a
+// front end extends a narrower operand first (CONVERT). A result's field is written whole: a 32-bit one zero-extends
+// into the register, where an 8- or 16-bit one (the legacy forms', tier0_operation_legacy_forms) would leave the rest.
 static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t role, uint32_t class)
 {
     const uint32_t j = role & 7;
@@ -8459,10 +8489,10 @@ static bool tier0_operation_role_valid(const Tier0Operation* operation, uint8_t 
     }
     else if (tier0_general_register_class(class))
     {
-        const uint32_t bytes = class == BUSTER_X86_CLASS_GPR64 ? 8 : class == BUSTER_X86_CLASS_GPR32 ? 4 : 2;
+        const uint32_t bytes = class == BUSTER_X86_CLASS_GPR64 ? 8 : class == BUSTER_X86_CLASS_GPR32 ? 4 : class == BUSTER_X86_CLASS_GPR16 ? 2 : 1;
         valid = (role >= BUSTER_TIER0_ROLE_INTEGER(0) && role < BUSTER_TIER0_ROLE_INTEGER(BUSTER_TIER0_OPERATION_OPERANDS) && operand &&
                  tier0_class_integer(operation->operand_classes[j]) && tier0_class_bytes(operation->operand_classes[j]) >= bytes) ||
-                (role == BUSTER_TIER0_ROLE_INTEGER_RESULT && tier0_class_integer(operation->result_class)) ||
+                (role == BUSTER_TIER0_ROLE_INTEGER_RESULT && tier0_class_integer(operation->result_class) && bytes >= 4) ||
                 (role >= BUSTER_TIER0_ROLE_SCRATCH(0) && role < BUSTER_TIER0_ROLE_SCRATCH(BUSTER_TIER0_SCRATCH));
     }
     else if (class == BUSTER_X86_CLASS_OPMASK)

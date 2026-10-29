@@ -1434,7 +1434,28 @@ What the lowering covers past scalars (#145's programs):
     IFMA products; the blends by a vector's signs;
   - operations into w under a mask, of one vector (MASK_UNARY: every
     conversion's pair of widths, VGETEXP, VRCP14 and VRSQRT14) and of two
-    (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's).
+    (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's);
+  - compares and tests into an int, from the flags (FLAGS and KTEST): the SSE
+    compares (`comieq` and the others, of each kind, the parity giving
+    unordered operands' equal and not equal), PTEST, VTEST, KORTEST and KTEST,
+    then CMOVcc's of the condition into the result, which MOV's 0 and 1 leave
+    the flags for;
+  - KNOT and the other widths' opmask operations;
+  - the general registers' and memory's instructions (SYSTEM): CRC32, BEXTR,
+    the FS and GS bases, RDPID, the shadow stack's, the cache lines', FXSAVE,
+    the non-temporal and direct stores, PREFETCHI, INVPCID, WBINVD, WBNOINVD and
+    EMMS; RDRAND's and RDSEED's steps (the value stored, and the carry an int);
+    ADC's and SBB's sums and differences with carries, the carry in set by NEG;
+  - VMASKMOV's loads and stores under a vector's signs, VLDDQU, SSE4A's EXTRQ,
+    INSERTQ and non-temporal scalar stores, MASKMOVDQU (VPMOVB2M's mask and
+    VMOVDQU8 under it) and SHA's messages and rounds of SHA-1;
+  - the masked FMAs merged into a, zeroed and merged into c, each rounding
+    control's; the scalar conversions to integers, each rounding control's;
+    AVX's lane extraction; VRNDSCALE under a mask; bf16's scalar select (by
+    KANDN of the mask and 1, as no scalar move of 16 bits is AVX-512F's);
+  - the floating reductions of 64 bytes, two rows in clang's order: the
+    halvings to 16 bytes, then to the element, the start the last operation's
+    first operand where the reduction has one.
 
   A rounding control, a builtin's last immediate (CheckX86LowerRounding),
   picks the rule's form for 4 (`_MM_FROUND_CUR_DIRECTION`), its form that
@@ -1446,14 +1467,21 @@ What the lowering covers past scalars (#145's programs):
   opmask's are integers. A builtin the table doesn't name is refused by name
   ("this x86 builtin"), and so are one whose instructions the target hasn't and
   a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
-  instructions name fixed registers or have legacy encodings, which no row
-  takes, are calls of per-unit leaves, as the atomic builtins' are
-  (`c_builtin_x86_helpers.c`, planned by `c_check_program_helpers.c`), their
-  arguments and result unsigned longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`,
-  `mwaitx` (whose leaf saves rbx, as its unwind table says) and `tzcnt_u16`,
-  `_u32` and `_u64` (bsf and cmov, the width for 0, as clang's code gives it).
-  XGETBV requires the output target's XSAVE feature; MONITORX and MWAITX require
-  MWAITX. The baseline target still takes PAUSE, RDTSC and the BSF-based counts.
+  instructions name fixed registers, or would write the vector registers
+  Tier 0 keeps floating values in across rows (the state's restores), are calls
+  of per-unit leaves, as the atomic builtins' are (`c_builtin_x86_helpers.c`,
+  planned by `c_check_program_helpers.c`), their arguments and result unsigned
+  longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`, `mwaitx` (whose leaf saves
+  rbx, as its unwind table says), `tzcnt_u16`, `_u32` and `_u64` (bsf and cmov,
+  the width for 0, as clang's code gives it), `lzcnt_u32` and `_u64` (bsr and
+  cmov, the width for 0), the rotates of each width (rol and ror by cl), the
+  XSAVE family's saves and restores and FXRSTOR, RDPKRU and WRPKRU, RDPMC,
+  RDPRU and RDTSCP, the flags' read and write (pushfq and popfq in a frame of
+  rbp, whose CFA the pushes don't move), CLZERO, MONITOR, MWAIT, VZEROALL and
+  VZEROUPPER. Each leaf requires its instructions' features of the output
+  target (XGETBV XSAVE's, MONITORX and MWAITX MWAITX's, the others theirs);
+  the baseline target still takes PAUSE, RDTSC, the BSF- and BSR-based counts
+  and the rotates.
   `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
   nothing: its operand isn't evaluated, as clang's isn't. clang's header
   builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
