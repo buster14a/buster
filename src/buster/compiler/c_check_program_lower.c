@@ -2926,8 +2926,10 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         type = type_strip_aligned(types, type_element(types, type));
     }
     uint32_t parameters = 0;
-    const TypeId* parameter_types = type_parameters(types, type, &parameters);
     const uint8_t flags = types->types.flags[type_index(type)];
+    // Keep a known K&R signature's atomic ABI types even though its designator has no prototype.
+    const bool kr = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 && type_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_FUNCTION;
+    const TypeId* parameter_types = type_parameters(types, kr ? graph->types[node] : type, &parameters);
     const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     CheckLowerAbi* abi = writer->abi;
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
@@ -7154,7 +7156,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t asm_statements = program->status == CHECK_PROGRAM_OK && input != 0 ? input->asm_count : 0;
     const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
-                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + 32;
+                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
@@ -7162,7 +7164,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // bounds the writer's reusable local room regardless of the number of bodies.
     const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
-                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + 1;
+                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + (input != NULL ? input->kr_parameter_count : 0) + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
@@ -7672,12 +7674,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         const bool kr = (input->function_flags[body.declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
         for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
         {
-            const TypeId parameter_type = input->declared_types[parameter];
-            if (kr && type_default_argument_promote(types, type_unqualified(parameter_type)) != type_unqualified(parameter_type))
-            {
-                check_lower_unsupported(writer, "K&R parameters the default argument promotions change");
-            }
-            const CheckInputAttributes* attributes = input->attributes[parameter];
+            const TypeId declared_type = input->declared_types[parameter];
+            const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
+            const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
+            // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
+            const CheckInputAttributes* attributes = promoted ? NULL : input->attributes[parameter];
             // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
             // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(writer, parameter_type);
@@ -7699,8 +7700,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
             const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
                                             check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            if (((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 ||
-                 type_kind(types, type_strip_aligned(types, parameter_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+            if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                              type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
             {
                 writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
@@ -7709,7 +7710,53 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->parameter_count += 1;
             declared += 1;
         }
+        // Incoming ABI locals must remain the contiguous prefix, including a hidden result pointer. Allocate the
+        // declared objects only after that prefix, then convert once before any body expression can read or address
+        // them. This cold pass exists only for K&R definitions; ordinary prototypes keep their original path.
+        for (uint32_t parameter = kr && !bare ? input->parameters[body.opening] : BUSTER_CHECK_NONE;
+             parameter != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK; parameter = input->parameter_next[parameter])
+        {
+            const TypeId declared_type = input->declared_types[parameter];
+            const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
+            if (incoming_type != type_unqualified(declared_type))
+            {
+                const CheckInputAttributes* attributes = input->attributes[parameter];
+                const uint32_t requested = attributes != NULL && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+                const uint32_t natural = type_alignment_log2(types, declared_type);
+                const uint32_t alignment = requested > natural ? requested : natural;
+                const uint8_t class = check_lower_class(writer, declared_type);
+                const uint32_t incoming = writer->local_map[input->objects[parameter]];
+                writer->token = parameter;
+                check_lower_source(writer, parameter);
+                if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+                {
+                    check_lower_unsupported(writer, "parameters aligned past 1 GB");
+                }
+                const uint32_t local = alignment > 3 ? check_lower_object(writer, type_size(types, declared_type), alignment) :
+                                                      check_lower_temporary(writer, class);
+                if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                writer->local_map[input->objects[parameter]] = local;
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, check_lower_class(writer, incoming_type), incoming);
+                if ((check_lower_facts(writer, declared_type) & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
+                {
+                    // Clang's K&R entry truncates the promoted int to i1, then extends it into the byte local.
+                    // This is not the truth conversion used by an ordinary assignment to _Bool.
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+                }
+                else
+                {
+                    check_lower_conversion(writer, incoming_type, declared_type);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+            }
+        }
         writer->token = body.declaration;
+        check_lower_source(writer, body.declaration);
         abi->counts[abi->count] = declared;
         abi->named[abi->count++] = declared;
         if (writer->variadic && status->status == CHECK_PROGRAM_OK)
