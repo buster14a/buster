@@ -220,8 +220,48 @@ static void check_test_program_x86_refusals(CheckTest* test)
     }
 }
 
+// Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
+// (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
+// rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
+// (check_lower_x86_operand_class).
+static void check_test_program_x86_rows(CheckTest* test)
+{
+    static const uint64_t immediates[] = { 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 63, 0x1b, 0x80, 0xff };
+    uint32_t rows = 0;
+    uint32_t invalid = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(immediates); k += 1)
+        {
+            Tier0Operation row;
+            if (check_x86_lower_row(UINT64_MAX, rule->name, rule->name_length, immediates[k], &row) == NULL)
+            {
+                for (uint32_t j = 0; j < row.operand_count; j += 1)
+                {
+                    row.operand_classes[j] = row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR ? row.operand_classes[j] :
+                                                                                                    check_lower_x86_operand_class(row.operand_classes[j]);
+                }
+                rows += 1;
+                if (!tier0_operation_valid(&row))
+                {
+                    invalid += 1;
+                    if (invalid <= 8)
+                    {
+                        printf("  x86 rows: %s at immediate %llu isn't a row Tier 0 takes\n", rule->name, (unsigned long long)immediates[k]);
+                    }
+                }
+            }
+        }
+    }
+    char description[128];
+    snprintf(description, sizeof(description), "every x86 rule's row is one Tier 0 takes (%u rows, %u not)", rows, invalid);
+    check_test_expect(test, rows != 0 && invalid == 0, description);
+}
+
 static __attribute__((noinline)) void check_test_program_x86(CheckTest* test, const char* clang)
 {
+    check_test_program_x86_rows(test);
     X86Target target = { 0 };
     const bool parsed = x86_target_parse("znver5", strlen("znver5"), &target);
     check_test_expect(test, parsed, "the x86 builtin programs' target, znver5");

@@ -16,9 +16,13 @@
 // All loops preserve the enclosing value stack, use absolute enclosing-stream branch destinations and initialize
 // their U64 temporaries before use. Return values have their declared machine classes. No helper allocation occurs.
 //
+// ALLOCA is Tier 0's ALLOCA of its U64 size, and FRAME_ADDRESS and RETURN_ADDRESS take no arguments: they are level 0's
+// (the producer refuses any other level and evaluates none), Tier 0's FRAME_ADDRESS and the word 8 bytes above it. Each
+// gives its function a frame pointer.
+//
 // Publication has the same disjoint-column and transactional capacity contract as cbuiltin_lower, with exact scalar
-// and masked vector copy twins. ALLOCA, FRAME_ADDRESS, RETURN_ADDRESS, TRAP and UNREACHABLE are explicitly refused:
-// this module cannot invent a dynamic frame, frame-chain access or terminating typed operation.
+// and masked vector copy twins. TRAP and UNREACHABLE are explicitly refused: this module cannot invent a terminating
+// typed operation.
 #ifndef BUSTER_C_BUILTIN_MISC_LOWER_INCLUDED
 #define BUSTER_C_BUILTIN_MISC_LOWER_INCLUDED
 
@@ -455,11 +459,14 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_PREFETCH: minimum = 1; maximum = 3; break;
         case CBUILTIN_EXTRACT_RETURN_ADDR:
         case CBUILTIN_FROB_RETURN_ADDR:
+        case CBUILTIN_ALLOCA:
         case CBUILTIN_STRLEN: minimum = maximum = 1; result_class = BUSTER_TYPED_CLASS_U64; break;
         case CBUILTIN_MEMCPY:
         case CBUILTIN_MEMMOVE:
         case CBUILTIN_MEMSET: minimum = maximum = 3; result_class = BUSTER_TYPED_CLASS_U64; break;
         case CBUILTIN_MEMCMP: minimum = maximum = 3; result_class = BUSTER_TYPED_CLASS_I32; break;
+        case CBUILTIN_FRAME_ADDRESS:
+        case CBUILTIN_RETURN_ADDRESS: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
         default: result.error = CBUILTIN_LOWER_UNSUPPORTED; break;
         }
         if (result.error == CBUILTIN_LOWER_OK && (call->argument_count < minimum || call->argument_count > maximum))
@@ -519,6 +526,25 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         else if (call->id == CBUILTIN_STRLEN)
         {
             cbuiltin_misc_lower_length(&recipe, call, buffer->count);
+        }
+        else if (call->id == CBUILTIN_ALLOCA)
+        {
+            // clang -O0's dynamic alloca: the size rounded up to 16 and taken from the stack, which the function's
+            // return (or an enclosing variable-length array scope's restore, where clang's stackrestore is) releases.
+            cbuiltin_lower_local(&recipe, call->arguments[0]);
+            cbuiltin_lower_emit(&recipe, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (call->id == CBUILTIN_FRAME_ADDRESS || call->id == CBUILTIN_RETURN_ADDRESS)
+        {
+            // Level 0's, as clang -O0's frame has them: the frame pointer, and the return address above the caller's rbp
+            // that it points at.
+            cbuiltin_lower_emit(&recipe, BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+            if (call->id == CBUILTIN_RETURN_ADDRESS)
+            {
+                cbuiltin_lower_constant(&recipe, 8);
+                cbuiltin_lower_operation(&recipe, BUSTER_TYPED_ADD);
+                cbuiltin_lower_emit(&recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+            }
         }
         else if (call->id != CBUILTIN_PREFETCH)
         {

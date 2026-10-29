@@ -1410,19 +1410,73 @@ What the lowering covers past scalars (#145's programs):
   low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
   VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
   VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
-  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
-  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
-  integers. A builtin the table doesn't name is refused by name ("this x86
-  builtin"), and so are one whose instructions the target hasn't, a gather's or
-  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
-  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
-  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
-  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  scatters, VPBLENDVB and VPSHUFBITQMB, and the masked truncating stores
+  (`pmov*512mem_mask`: VPMOV into memory under the mask). A function with an X86
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
+  opmask's are integers. A builtin the table doesn't name is refused by name
+  ("this x86 builtin"), and so are one whose instructions the target hasn't and
+  a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
+  instructions name fixed registers or have legacy encodings, which no row
+  takes, are calls of per-unit leaves, as the atomic builtins' are
+  (`c_builtin_x86_helpers.c`, planned by `c_check_program_helpers.c`), their
+  arguments and result unsigned longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`,
+  `mwaitx` (whose leaf saves rbx, as its unwind table says) and `tzcnt_u16`,
+  `_u32` and `_u64` (bsf and cmov, the width for 0, as clang's code gives it).
+  XGETBV requires the output target's XSAVE feature; MONITORX and MWAITX require
+  MWAITX. The baseline target still takes PAUSE, RDTSC and the BSF-based counts.
+  `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
+  nothing: its operand isn't evaluated, as clang's isn't. clang's header
+  builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
+  functions, which its calls take for the builtins) are still calls of those
+  functions, which no library defines. `test-checker`'s x86 programs
+  (`c_check_program_x86_test.c`) call each family's builtins at their
   prototypes' types, the masks' and the vectors' from the call's argument, with
   every result folded into the program's hash, by both paths against clang
   -O0's code for znver5; they run where the host has the rows' features
   (`x86_target_native`), and compile and link elsewhere. `test-checker
   --program-vectors` runs them and the vector programs alone.
+- **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
+  `__builtin_convertvector`, the `__builtin_elementwise_*` functions and
+  `__builtin_reduce_*` of integer elements are X86 entries of rows of their own
+  (`c_check_program_vector_builtins.c`):
+  - a shuffle by constant indices is VPERMT2 of its two vectors by an index
+    vector, a constant (`Tier0Function.vector_constants`), at the wider of the
+    operands' and the result's widths, or nothing where every defined element
+    stays at its place. Its second vector is left out where none of its
+    elements is read and its evaluation has no effects, and
+    `__builtin_nondeterministic_value`'s isn't evaluated;
+  - a conversion is VPMOVSX or VPMOVZX at the result's width, VPMOV's
+    truncation at the operand's, or nothing between elements of one size. One
+    of a shuffle's first elements (a vector's low half, as the intrinsics widen
+    one) converts that shuffle's first vector in place;
+  - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
+    shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
+    has no class for, with a compound literal of constants) are VPMOV's
+    truncation, which zeroes the rest of its register, where every element past
+    the conversion's is a zero of the literal's; else that, then VPERMT2 with
+    the literal's bytes as its second table. This requires a nonvolatile literal
+    whose initializer values have no effects. A nonconstant or effectful second
+    operand is refused by name. Such a literal has no local and isn't evaluated,
+    and one evaluated anywhere else is refused by name;
+  - max and min, the saturating sums and differences of 8- and 16-bit elements,
+    abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
+    blended in where an element is zero) and the funnel shifts (VPSHLDV and
+    VPSHRDV, with VBMI2) are an instruction each;
+  - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
+    and VPSRLW) and applies its operation at each step, then moves the element
+    into a general register, in two rows where that is more than a row's 8
+    records.
+
+  `__builtin_nondeterministic_value` of a vector or a scalar is zeros. Floating
+  elements, a shuffle by a vector of indices, bit reversal, 8-bit
+  multiplication, the funnel shifts of 8-bit elements, the leading zero counts
+  of 8- and 16-bit ones, and the rows whose extensions the target hasn't (VBMI
+  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2) are refused
+  by name. `test-checker`'s vector builtin programs
+  (`c_check_program_vector_builtins_test.c`) call each at every width, the
+  narrowing conversions as the headers write them, with the masked truncating
+  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
+  paths against clang -O0's code for znver5.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -2158,6 +2212,31 @@ they do per token where little of it was per declaration or expression:
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
   instructions fewer, about 70 a token. The scalar path computes each bit with
   the walk's own tests (`check_input_syntax_of`).
+- **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
+  roles at a time, then visits only separators and statement terminators.
+  Non-separators' contexts depend directly on their roles; separators inherit
+  a parent's context. Reverse source order completes later parents first. An
+  earlier parent with a fixed context is computed directly; an earlier
+  separator parent asks the unchanged reverse-postorder scalar pass to replay
+  the whole view. This keeps dependency order for nonidentity traversals
+  without another retained column, allocation or ancestor walk. Loads and
+  stores are masked at the logical token count. The count is the parser
+  view's complete token count: a prefix has its own complete postorder, and
+  a repair includes its synthetic closers even beyond `original_end`, which
+  limits later publication. The scalar host and `--scalar` use the original
+  pass. Guard-page tests cover every tail through 257 tokens, shuffled
+  dependency orders, deep chains and unknown role bytes; real prefix and
+  repair views compare every output byte with the scalar oracle. This is a
+  bounded residual of #529; general literal preparation and graph
+  construction remain separate work. It does not repeat #646's sparse walks,
+  #640's traversal derivation, #628's retained parser buffers, #658's compact
+  integer tables or #641's post-check work.
+  The [frozen qualification](https://github.com/buster14a/buster-performance/blob/e227084cbe0f9b064b9a506ca3e34c9826f49965/docs/measurements/check-input-comma-529-2026-10-28/README.md)
+  compares `e7f89091` with `b8ee2900`: three six-placement SQLite cohorts improve
+  whole-process wall time 1.16–1.31%, with pooled RSS +22–56KiB. Tiny startup
+  cost remains unresolved and individual copy tails are retained. These are
+  frozen measurements, separate from later composition correctness; they
+  establish no current-main or general-corpus speedup.
 - **Scans for few tokens.** The passes that act on few tokens test 64 of them
   at once (16 or 8, by the column's width) and visit only those
   (`check_input_scan_*`): the constant contexts (static objects, static

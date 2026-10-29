@@ -196,6 +196,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                 const Parser* view = &repair.parser;
                 const uint32_t cut = repair.original_end;
                 const uint32_t count = view->tokens.count;
+                check_test_expression_comma_view(test, view, repair.original_end);
                 bool original_tokens = cut != 0 && cut < count && cut <= original.diagnostics[repair.diagnostic].token &&
                                        memcmp(view->tokens.kinds, original.tokens.kinds, cut) == 0 &&
                                        memcmp(view->tokens.names, original.tokens.names, (uint64_t)cut * sizeof(uint32_t)) == 0 &&
