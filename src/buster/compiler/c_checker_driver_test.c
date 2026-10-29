@@ -121,9 +121,9 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     return ready;
 }
 
-// Runs `arguments` (arguments[0] the executable) with standard output to /dev/null and its errors into *text, which
-// the caller frees: its exit status, or -1 if it didn't exit.
-static int check_test_driver_spawn(char* const* arguments, char** text)
+// Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
+// The caller frees *text. Returns the exit status, or -1 if it didn't exit.
+static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
 {
     FILE* errors = tmpfile();
     int status = 0;
@@ -137,7 +137,8 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         if (child == 0)
         {
             const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(errors), STDERR_FILENO) >= 0)
+            if (output >= 0 && dup2(stdout_capture ? fileno(errors) : output, STDOUT_FILENO) >= 0 &&
+                dup2(stdout_capture ? output : fileno(errors), STDERR_FILENO) >= 0)
             {
                 execvp(arguments[0], arguments);
             }
@@ -156,6 +157,11 @@ static int check_test_driver_spawn(char* const* arguments, char** text)
         fclose(errors);
     }
     return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    return check_test_driver_spawn_stream(arguments, text, false);
 }
 
 // Whether the files at `a` and `b` can be read and have the same bytes.
@@ -2084,6 +2090,82 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     {
         unlink(files[f]);
     }
+}
+
+// Compiler identification is an action, while an option operand that spells an action is still an operand.
+static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
+{
+    char compiler[PATH_MAX];
+    char source[256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/identity.c", directory);
+    snprintf(object, sizeof(object), "%s/--version", directory);
+    static const char program[] = "int value = 42;\n";
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const version[] = { compiler, "-O2", "--version", source, NULL };
+    char* const machine[] = { compiler, "-dumpmachine", NULL };
+    char* const target[] = { compiler, "-target", "x86_64-acme-linux-gnu", "-dumpmachine", NULL };
+    char* const target_last[] = { compiler, "--target=x86_64-first-linux-gnu", "-target", "x86_64-linux-gnu", "-dumpmachine", NULL };
+    char* const both[] = { compiler, "--version", "-dumpmachine", NULL };
+    char* const invalid[] = { compiler, "-target", "aarch64-linux-gnu", "-dumpmachine", NULL };
+    char* const missing[] = { compiler, "-dumpmachine", "-target", NULL };
+    char* const* cases[] = { version, machine, target, target_last, both, invalid, missing };
+    const char* const expected[] = { "buster (development build)\nTarget: ", "x86_64-", "x86_64-acme-linux-gnu\n",
+                                     "x86_64-unknown-linux-gnu\n", "x86_64-", "", "" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char* text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(cases[i], &text, true) : -1;
+        const bool prefix = text != NULL && strncmp(text, expected[i], strlen(expected[i])) == 0;
+        check_test_expect(test, i < 5 ? status == 0 && prefix : status != 0 && text != NULL && text[0] == 0,
+                          "compiler identification selects the correct target and refuses unsupported targets");
+        free(text);
+    }
+    char* const compile[] = { "env", "-C", (char*)directory, compiler, "-pipe", "-c", "-o", "--version", "identity.c", NULL };
+    char* text = NULL;
+    const int compiled = made ? check_test_driver_spawn(compile, &text) : -1;
+    free(text);
+    FILE* output = fopen(object, "rb");
+    unsigned char magic[4] = { 0 };
+    const bool elf = output != NULL && fread(magic, 1, sizeof(magic), output) == sizeof(magic) && memcmp(magic, "\177ELF", 4) == 0;
+    if (output != NULL)
+    {
+        fclose(output);
+    }
+    check_test_expect(test, compiled == 0 && elf, "-pipe compiles and an output named --version remains an operand");
+    char* const preprocess[] = { compiler, "-pipe", "-E", "-P", source, NULL };
+    text = NULL;
+    const int preprocessed = made ? check_test_driver_spawn_stream(preprocess, &text, true) : -1;
+    check_test_expect(test, preprocessed == 0 && text != NULL && strstr(text, "int value = 42;") != NULL,
+                      "-pipe is accepted in preprocessing mode");
+    free(text);
+    char* const command[] = { compiler, "parallel", "--version", NULL };
+    text = NULL;
+    const int command_status = made ? check_test_driver_spawn(command, &text) : -1;
+    check_test_expect(test, command_status != 0 && text != NULL && strstr(text, "usage: parallel") != NULL,
+                      "named commands take precedence over compiler identification");
+    free(text);
+    char* const assembly_version[] = { compiler, "-c", "--version", "missing.s", NULL };
+    char* const assembly_machine[] = { compiler, "-c", "-dumpmachine", "missing.s", NULL };
+    char* const* assembly_queries[] = { assembly_version, assembly_machine };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(assembly_queries); i += 1)
+    {
+        text = NULL;
+        const int status = made ? check_test_driver_spawn_stream(assembly_queries[i], &text, true) : -1;
+        check_test_expect(test, status == 0 && text != NULL && strstr(text, i == 0 ? "buster (development build)" : "x86_64-") != NULL,
+                          "information actions take precedence over implicit assembly compilation");
+        free(text);
+    }
+    char missing_assembly[256];
+    snprintf(missing_assembly, sizeof(missing_assembly), "%s/missing.s", directory);
+    char* const assembly_operand[] = { compiler, "-c", "-o", "--version", missing_assembly, NULL };
+    text = NULL;
+    const int operand_status = made ? check_test_driver_spawn_stream(assembly_operand, &text, true) : -1;
+    check_test_expect(test, operand_status != 0 && text != NULL && text[0] == 0,
+                      "an assembly output named --version does not select compiler identification");
+    free(text);
+    unlink(object);
+    unlink(source);
 }
 
 // Layout flags not implemented by the checker must not silently produce objects with another ABI.
@@ -4538,6 +4620,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_identification(&test, executable, directory);
             check_test_driver_unsupported_codegen(&test, executable, directory);
             check_test_driver_preprocess_action(&test, executable, directory);
             check_test_driver_layout_options(&test, executable, directory);
