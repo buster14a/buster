@@ -77,6 +77,7 @@ static const char* const check_input_messages[] =
     "'cleanup' argument is not a function",
     "'cleanup' function must take 1 parameter",
     "'cleanup' function's parameter has a type incompatible with the variable's address",
+    "'cleanup' attribute takes one argument",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
