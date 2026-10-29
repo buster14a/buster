@@ -354,6 +354,16 @@ and `--only vector --after-scalar 200`, and compare both against scalar runs.
 Local runs are diagnostic only. The current slice supplies the reproducible
 measurement path; it does not establish a performance gain.
 
+#141's batched choice and load fold, against main `0dd6fbc3` over six
+placements of the benchmark's unit
+([the record](https://github.com/buster14a/buster-performance/blob/62402e97b4f747070865ba29c9f773828880f82e/docs/measurements/tier1-select-141-2026-10-29/README.md)):
+the plan 1.5% to 2.5% faster on every shape and path, the whole pipeline 0.3% to
+2.1% (medians; one placement's executable misses its op cache). The fold's
+barriers kept inside the plan's pass over the nodes had made the plan up to 10%
+slower, 37 to 42 instructions more per node, which their pass of their own
+doesn't cost. The shapes hold no loads, so these are the costs, not the fold's
+gains.
+
 ## Remaining acceptance
 
 Issue #141 remains open. Full pattern-state generation, reciprocal-division
