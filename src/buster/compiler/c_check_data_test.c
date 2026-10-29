@@ -633,8 +633,9 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     expected = CHECK_DATA_INVALID;
                     break;
                 case 17:
-                    // A scalar type the data path doesn't take (a __float128 is 16 zero bytes without an initializer, #137).
-                    objects[1].type = BUSTER_TYPE_FLOAT16;
+                    // A scalar type the data path doesn't take, nullptr_t (a __float128 is 16 zero bytes without an
+                    // initializer, #137, and the half-precision types are their bits, #136).
+                    objects[1].type = BUSTER_TYPE_NULLPTR;
                     expected = CHECK_DATA_UNSUPPORTED;
                     break;
                 case 18:

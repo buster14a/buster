@@ -1526,6 +1526,76 @@ What the lowering covers past scalars (#145's programs):
   is refused by name. The overflow builtins take 128-bit operands and
   destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
   in a frame object of its own.
+- **Half-precision values (#136).** `_Float16` and `__fp16` (IEEE binary16)
+  and `__bf16` (bfloat16) are their 16 bits on the integer stack (U16), as
+  clang's IR keeps a `half` or a `bfloat` (`c_check_program_half.c`): their
+  loads, stores, locals, members, globals, static data and vector elements are a
+  16-bit integer's, which keep every bit, a NaN's payload among them. The types
+  have no class of their own, so a place that doesn't take them refuses them by
+  name ("half-precision values here"). What computes with one converts it
+  first. It extends to float exactly: a bfloat16's bits shifted up by 16, a
+  binary16's by F16C's VCVTPH2PS or libgcc's `__extendhfsf2`. A float rounds to
+  one by VCVTPS2PH (after a VMOVD into the register has zeroed the other lanes,
+  so that they raise nothing), by AVX512-BF16's or AVX-NE-CONVERT's
+  VCVTNEPS2BF16 (which flushes subnormals, as clang's code does), or by libgcc's
+  `__truncsfhf2` and `__truncsfbf2`, as LLVM selects them for the function's
+  target. A double and a
+  long double round once, by libgcc's `__truncdfhf2` to `__truncxfbf2`. Integers
+  convert through float, as LLVM converts them, but a 128-bit integer and a
+  binary16 through libgcc's `__floattihf` to `__fixunshfti`, as clang calls
+  them, whose infinities and NaNs saturate as `__fixsfti`'s don't.
+  Arithmetic is clang's excess precision where the unit's target has no native
+  arithmetic of the type (AVX512-FP16 for binary16, AVX10.2 for bfloat16):
+  `+ - * /` and unary `+` and `-` of a chain of them compute in float, and the
+  chain's value rounds once, where it leaves the chain (a store, a cast, a
+  compare, a call's argument, a conditional's or a comma's operand). A compound
+  assignment computes in float and rounds once; into a destination of another
+  type (an integer, a `_Bool`, a bit-field, the other format) it converts the
+  destination's value to float and the result back directly, with no rounding to
+  the half-precision type, as clang's promotion types do
+  (`check_lower_update_through`). `++` and `--` add one in float. With
+  AVX512-FP16, each operator rounds (float's two roundings of one operation
+  round as once). A chain of unary operators alone over its operand
+  is LLVM's fold of it: a binary16's a sign flip per `-`; a bfloat16's an
+  extension, a negation and a rounding where the count of `-` is odd, and the
+  value where it is even; and in a function with `FENV_ACCESS` anywhere in it
+  (clang then emits all of the function's floating operations as constrained
+  intrinsics, outside the pragma's block too) a chain with a `-` is an
+  extension and a rounding, which quiets a signaling NaN and raises
+  `FE_INVALID`. Compares and
+  truth extend their operands and compare floats (truth with +0.0, so that a
+  NaN is true). A call passes and returns one in an XMM register's low 16 bits,
+  and `va_arg` reads one there; structs of them go as the convention classifies
+  them. Their bits move between the stacks by VMOVD where the function's target
+  has AVX, or else through a frame temporary. Constants round in software,
+  correctly (`check_action_half_round`), and the checker folds conversions to
+  the types and negations, unary pluses and compares of their constants, but
+  not their arithmetic, which rounds at run time. An integer constant converted
+  to one rounds once, as clang folds it, where a conversion at run time rounds
+  through float (a `__bf16`'s twice; a conditional's value converts so, as
+  clang's does); but in a function with `FENV_ACCESS` none folds, as none of
+  clang's constrained conversions does, and a float rounds to a `__bf16` by
+  libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
+  unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
+  this type"), an `_Atomic` integer's update by one ("this operation on
+  half-precision values": clang's code adds the operand converted to an
+  unsigned integer there, not as the usual arithmetic conversions compute), a
+  `_BitInt`'s past 128 bits conversions to and from them, and a conversion to
+  `__bf16` with AVX512-BF16 but not AVX-512VL are refused by name. Of clang 23's code it doesn't follow four things: a
+  conversion between `__fp16` and `__bf16` converts the value through float
+  (clang copies the bits one way, and its backend stops the other way); `__bf16`
+  under `FENV_ACCESS` extends by its bits as elsewhere (clang's code calls
+  libgcc's `__extendbfsf2` with its argument in a general register, which
+  libgcc reads from xmm0); and a `__bf16` parameter keeps its bits (clang's code
+  rounds each one on entry, which quiets a signaling NaN, and flushes a
+  subnormal where the rounding is VCVTNEPS2BF16's); and a unary `+` alone in a
+  function with `FENV_ACCESS` is its operand, as elsewhere, where clang's
+  constrained round trip quiets a signaling NaN and raises `FE_INVALID` (the
+  lowering takes a `+` as it takes a cast, with no test of its type in the
+  tasks' loop). `test-checker`'s
+  half-precision programs (`c_check_program_half_test.c`) run every other use
+  above against clang -O0's code for x86-64, x86-64-v3, x86-64-v4, znver5 and
+  sapphirerapids, by both paths, where the host has each one's features.
 - **Vectors (#136).** GNU C's vector types and Clang's extended ones of 4, 8,
   16, 32 or 64 bytes (the intrinsics' `__m64` and `__m128` to `__m512i`, and the
   narrow vectors of their conversions; elements other than `bool`) are Tier 0's

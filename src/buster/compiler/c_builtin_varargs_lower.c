@@ -8,7 +8,8 @@
 //
 // cbuiltin_varargs_lower and its scalar publication twin stage a bounded existing Tier0Function recipe, with the same
 // disjoint-column and all-or-nothing contract as cbuiltin_lower. An argument plan supports one integer/pointer or
-// F32/F64 value in an eight-byte stack slot, a long double (F80) in its 16 bytes of the overflow area, or a struct or a
+// F32/F64 value in an eight-byte stack slot (or a half-precision value's bits, U16, where the convention passes it in a
+// vector register), a long double (F80) in its 16 bytes of the overflow area, or a struct or a
 // union (#137: `size` nonzero) of up to two eightbytes in registers, the high one alone too, on the stack whole, or
 // ignored; wider values are refused. The semantic caller retains C's default-promotion and va_arg type-compatibility
 // rules. A successful va_arg leaves one result of result_class while preserving values already on both stacks: a
@@ -84,9 +85,12 @@ static bool cbuiltin_varargs_plan(const CBuiltinVaLowerCall* call)
     const bool floating = call->result_class == BUSTER_TYPED_CLASS_F32 || call->result_class == BUSTER_TYPED_CLASS_F64;
     const bool slot = plan.stack_bytes == BUSTER_ABI_SLOT_BYTES && plan.overflow_alignment_log2 >= BUSTER_ABI_SLOT_LOG2 &&
                       plan.overflow_alignment_log2 <= 31 && plan.flags == 0 && plan.sources[1] == BUSTER_ABI_VA_NONE;
+    // A half-precision value's bits (U16, which no integer of the vector registers' class has) come in a vector
+    // register's low 16 bits, and are read at its slot's first bytes.
+    const bool half = call->result_class == BUSTER_TYPED_CLASS_U16;
     const bool registers = plan.kind == BUSTER_ABI_LOCATION_REGISTERS &&
         ((integer && plan.integer_registers == 1 && plan.vector_registers == 0 && plan.sources[0] == BUSTER_ABI_VA_GENERAL) ||
-         (floating && plan.integer_registers == 0 && plan.vector_registers == 1 && plan.sources[0] == BUSTER_ABI_VA_VECTOR));
+         ((floating || half) && plan.integer_registers == 0 && plan.vector_registers == 1 && plan.sources[0] == BUSTER_ABI_VA_VECTOR));
     const bool stack = plan.kind == BUSTER_ABI_LOCATION_STACK && plan.integer_registers == 0 && plan.vector_registers == 0 && plan.sources[0] == BUSTER_ABI_VA_NONE;
     // A long double (Tier 0's F80) is always in the overflow area, in 16 bytes aligned to 16.
     const bool x87 = call->result_class == BUSTER_TYPED_CLASS_F80 && stack && plan.stack_bytes == 16 && plan.overflow_alignment_log2 == 4 &&
