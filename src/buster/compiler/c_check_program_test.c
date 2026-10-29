@@ -2596,6 +2596,14 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "acc=acc*43+(unsigned long)mv+(unsigned long)(mv>>64)*3+(unsigned long)(mw>>16)*5+(unsigned long)s*7+(unsigned long)(s>>64)*11;"
         "return (int)(acc%1000003)+sw*7+(a<f)*2+(u>=(U127)n)*4+(mv==0)*8+!p*16;}",
         "bit-int-128-bit-classes", clang);
+    // Folded constants of 65 to 127 bits, which the checker gives as their width's bits: extended from the width, so that
+    // a negative one's conversion to a 128-bit integer and its compare read its value.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "int tested(int n){__int128 y=(_BitInt(100))-5;unsigned __int128 u=(unsigned _BitInt(100))-5;__int128 w=(_BitInt(127))-1;"
+        "__int128 v=(_BitInt(65))-0x123456789abcdefLL;int c=((_BitInt(100))-5<n)+((_BitInt(72))-9>(_BitInt(72))n)*2;"
+        "return (int)((y+n)%1000003)+(int)((u>>64)%1009)*3+(w==-1)*7+(int)(((v>>32)*n)%1009)*11+c*13;}",
+        "bit-int-128-bit-negative-constants", clang);
     // C23's bit-precise constants (#768): each one's type, by _Generic, a weight of its own, and their values past 64 bits
     // at run time (without digit separators, which C17 doesn't lex: the source fixture "bit-precise constants" has them).
     check_test_program_source(test,
