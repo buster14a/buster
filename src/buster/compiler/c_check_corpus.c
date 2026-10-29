@@ -627,7 +627,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
 // check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
 // with check_corpus_deferred_scalar_merge, its merge finds the columns' entries by its scalar twin
-// (CheckDeferred.scalar_merge);
+// (CheckDeferred.scalar_merge); with check_corpus_deferred_base_page_tokens, a unit of that many tokens or more is large
+// (CheckDeferred.base_page_tokens);
 // and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
 // may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
 // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
@@ -643,6 +644,7 @@ static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
 static bool check_corpus_deferred_scalar_merge;
+static uint32_t check_corpus_deferred_base_page_tokens;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
 static uint32_t check_corpus_deferred_reread;
@@ -733,6 +735,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
                         .scalar_merge = check_corpus_deferred_scalar_merge,
+                        .base_page_tokens = check_corpus_deferred_base_page_tokens,
                         .timing = check_corpus_deferred_timing,
                         .cpus = check_corpus_deferred_cpus,
                     };
@@ -2176,9 +2179,12 @@ struct CheckCorpusOutcome
     uint32_t deferred_active;
     uint32_t deferred_planned;
     // Whether the deferred path's arena of rare columns was base pages throughout, and whether the scalar or the vector
-    // path's was (CheckInput.rare_columns_shared).
+    // path's was (CheckInput.rare_columns_shared); whether the unit was large (CheckDeferred.large), and the 2 MB regions
+    // of the rare columns faulted in before the lanes (CheckDeferred.faulted).
     bool deferred_shared;
     bool source_shared;
+    bool deferred_large;
+    uint32_t deferred_faulted;
     uint64_t deferred_copies;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
@@ -2253,6 +2259,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_planned = outcome->deferred ? paths[2].deferred->planned : 0;
     outcome->deferred_shared = outcome->deferred && paths[2].input.rare_columns_shared;
     outcome->source_shared = paths[0].input.rare_columns_shared || paths[1].input.rare_columns_shared;
+    outcome->deferred_large = outcome->deferred && paths[2].deferred->large;
+    outcome->deferred_faulted = outcome->deferred ? paths[2].deferred->faulted : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;

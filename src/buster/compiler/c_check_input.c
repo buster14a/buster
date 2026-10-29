@@ -308,7 +308,8 @@ struct CheckInput
     uint32_t diagnostic_report_count;
     bool diagnostic_graph;
     // Whether the reader's arena of rare columns was base pages throughout, as where more than one lane reads the deferred
-    // bodies (check_input_sparse_arena, #764): the tests require it of those readings and of no other.
+    // bodies of a large unit (check_input_sparse_arena, #764, #847): the tests require it of those readings and of no
+    // other.
     bool rare_columns_shared;
     bool resource;
 };
@@ -648,6 +649,10 @@ struct CheckInputReader
     TypeId* tag_types;
     uint32_t* tag_ends;
     unsigned __int128* enum_values;
+    // The token columns of check_input_run's arena of rare columns, from the first to the end of the last: the 2 MB
+    // regions check_deferred_bodies faults in before more than one lane writes them in huge pages (#847).
+    uint8_t* rare_begin;
+    uint8_t* rare_end;
     // The tree's traversal (#186, #544): the postorder and the tree's columns (Parser.positions, ends, first_children
     // and next_siblings: each token's position in the postorder, its subtree's last token, its first child and its next
     // sibling). The parser's where it derived them; otherwise the reader's own, which check_input_run derives into its
@@ -6001,11 +6006,12 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
 #include "c_check_comma_input.c"
 
 // check_input_run's arena of rare columns: its first `small_bytes` (a multiple of BUSTER_ARENA_PAGE_BYTES) in base pages
-// and the rest in huge pages, or with `shared` all of it in base pages. `shared` is for a deferred reading whose bodies
-// more than one lane reads (check_deferred_shared, #764): the lanes write their bodies' entries of the arena's token
-// columns at once, and lanes that write a 2 MB region of them which has no page yet, or the huge zero page, each
-// allocate and clear a huge page for it, of which the kernel maps one. A deferred reading on one lane, as source order,
-// keeps the huge pages.
+// and the rest in huge pages, or with `shared` all of it in base pages. `shared` is for a deferred reading of a large
+// unit whose bodies more than one lane reads (check_deferred_shared, #764, #847): the lanes write their bodies' entries
+// of the arena's token columns at once, and lanes that write a 2 MB region of them which has no page yet, or the huge
+// zero page, each allocate and clear a huge page for it, of which the kernel maps one. In a smaller unit, the regions
+// that the top level's walk leaves so are faulted in before the lanes start (check_deferred_fault_regions). A deferred
+// reading on one lane, as source order, keeps the huge pages.
 static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool shared)
 {
     const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
@@ -6261,8 +6267,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // again, they made the reader's pages the most any stage touched (186 MB of sqlite3.c's, against 72 MB). The pages
     // are huge, since the walk reads most of these columns at every token, which in base pages would fault each one;
     // but the scope stacks and the enumeration constants' values, which only the tokens that write them read, are in
-    // base pages at the arena's start. Where more than one lane reads the deferred bodies, the arena is base pages
-    // throughout (check_input_sparse_arena, #764).
+    // base pages at the arena's start. Where more than one lane reads the deferred bodies of a large unit, the arena is
+    // base pages throughout (check_input_sparse_arena, #764, #847).
 #define BUSTER_CHECK_SPARSE_SMALL_COLUMNS(X) \
     X(scope_marks, uint32_t) \
     X(scope_ends, uint32_t) \
@@ -6308,6 +6314,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
 #undef BUSTER_CHECK_SPARSE_ARRAY
+    reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
+    reader.rare_end = valid ? (uint8_t*)(reader.tag_ends + count + 1) : 0;
 #undef BUSTER_CHECK_SPARSE_COLUMNS
 #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
