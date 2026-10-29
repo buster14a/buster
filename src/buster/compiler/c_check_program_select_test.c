@@ -392,12 +392,13 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_case(test,
         "int kept __attribute__((nocommon));int tested(int n) __attribute__((visibility(\"default\")));int tested(int n){return n+kept;}",
         "default-visibility-and-nocommon-publication", 1, 1, clang, true);
+    // A weak declaration's references publish as weak undefined symbols, whose addresses may be null (#147).
     check_test_program_selection_run(test,
         "extern int other(int) __attribute__((weak));int tested(int n){return other?other(n):7;}",
-        "active-weak-function-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-weak-function-truth-emits-weak-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
-        "active-weak-object-truth-requires-weak-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-weak-object-truth-emits-weak-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
         "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
@@ -451,6 +452,12 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "static int kept(int n) __attribute__((used));static int kept(int n){return n+1;}static int kept_data __attribute__((used))=3;"
         "int tested(int n){return n;}",
         "used-function-and-object-roots", 2, 1, clang, true);
+    // A cleanup's function (#147), which its variable's body references, and the one of a body nothing references.
+    check_test_program_selection_case(test,
+        "static int seen;static void released(int*p){seen+=*p;}static void unused_cleanup(int*p){seen-=*p;}"
+        "static void from_dead(int*p){seen*=*p;}static int dead(int n){int a __attribute__((cleanup(from_dead)))=n;return a;}"
+        "int tested(int n){{int a __attribute__((cleanup(released)))=n;}return seen;}",
+        "cleanup-functions-of-emitted-and-unreferenced-bodies", 2, 1, clang, true);
     // Asm labels that end as a made name's suffix does, beside two statics of one name: each label is exact, the
     // second static's suffix past the one a label spells, and a wrong label, or a made name without its suffix,
     // must differ from clang's object.
