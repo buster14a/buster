@@ -25,6 +25,12 @@ struct ParseBindingTrace
     uint32_t* label_next;
     uint32_t point;
     uint32_t builtin_count;
+    // Definitions are recorded independently of their binding's activation point: a K&R function is already
+    // visible in the declaration list before its body opens. These sparse rows follow body source order.
+    uint32_t* body_declarations;
+    uint32_t body_count;
+    uint32_t body_capacity;
+    uint32_t pending_definition;
 };
 
 static uint32_t parse_binding_trace_scope(const ParseScalar* parser)
