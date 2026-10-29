@@ -1482,8 +1482,10 @@ What the lowering covers past scalars (#145's programs):
   `_BitInt(127)` as two `i64`s, which a call may split between r9 and the
   stack), division, remainder and conversions to and from the floating types
   by libgcc's functions. One of fewer than 128 bits is kept extended from its
-  width as a narrower one is, by a pair of 128-bit shifts (a constant comes
-  folded to its width and extended so).
+  width as a narrower one is, by a pair of 128-bit shifts. A constant comes
+  folded to its width's bits, which the lowering extends from the width, as a
+  narrower one's: a negative one's conversion to `__int128` or compare reads it
+  as it is.
   The overflow builtins of one of 65 to 127 bits are refused by name (their
   recipes take a 128-bit operand whole), and so is a `_BitInt` past 128 bits.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
