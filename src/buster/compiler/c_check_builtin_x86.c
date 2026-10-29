@@ -4,7 +4,7 @@
 // #148's bounded x86 builtin constraint phase. Include after c_check_actions.c. The ordinary call owner has already
 // checked the exact decoded prototype, made all parameter conversions and built typed_call. This phase preserves
 // that result/effects/conversions and adds only generated-prototype ICE and handwritten immediate constraints.
-// name_in_scope attests BOTH exact recognition in the frozen 1483-name x86 catalogue (or among its generic names that
+// name_in_scope attests BOTH exact recognition in the frozen 1484-name x86 catalogue (or among its generic names that
 // clang checks by their prototype alone, builtin_intrinsic_prototype_names, which no row here names) and successful ordinary
 // prototype checking. A prefix, guessed suffix/prototype, or unresolved CustomTypeChecking T/t record is no proof.
 // Exact name/name_bytes are immutable metadata spelling, not necessarily NUL-terminated. No input is evaluated.
@@ -26,9 +26,9 @@
 // SUPPRESSED retains the audited fact without a diagnostic. No event is a hard action error. Missing CFG information
 // must remain DEFERRED or later emit conservatively; it must not silently suppress the warning.
 //
-// The immutable 208 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
-// implementation was copied. They cover 206 exact names: 87 RC sets, 61 SAE sets, 6 scale sets and 54 deferred ranges
-// (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope). Names in the
+// The immutable 209 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
+// implementation was copied. They cover 207 exact names: 87 RC sets, 61 SAE sets, 6 scale sets and 55 deferred ranges
+// (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope, and #619 ucmpd128_mask's range). Names in the
 // attested catalogue without a row have no additional SemaX86 rule. Reference source/case lines accompany each row:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp
 // Generic ICE/range behavior: SemaChecking.cpp:2971-2989,6796-6843; runtime context/reachability: SemaExpr.cpp and
@@ -235,6 +235,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_ucmpb128_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 652 },
     { "__builtin_ia32_ucmpb256_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 656 },
     { "__builtin_ia32_ucmpb512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 660 },
+    { "__builtin_ia32_ucmpd128_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 654 },
     { "__builtin_ia32_ucmpd256_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 658 },
     { "__builtin_ia32_ucmpd512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 662 },
     { "__builtin_ia32_ucmpq512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 663 },
@@ -354,7 +355,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_vpcomw", 21, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 669 },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 208, "the audited x86 rule manifest has 208 rows");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 209, "the audited x86 rule manifest has 209 rows");
 
 static int check_builtin_x86_compare(const char* name, uint32_t bytes, const CheckBuiltinX86Rule* rule)
 {

@@ -88,8 +88,9 @@ static void check_test_program_scans(CheckTest* test)
     CheckTestTypes types = { 0 };
     ready = check_test_types_open(&types) && ready;
     check_test_expect(test, ready, "check_program's scanned columns have protected tails");
-    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked).
-    CheckInputAttribute records[3] = {
+    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked);
+    // and a target attribute, one ignored and target_clones (CheckProgramTargetEvents).
+    CheckInputAttribute records[6] = {
         {
             .kind = CHECK_ATTRIBUTE_NAKED,
         },
@@ -100,8 +101,18 @@ static void check_test_program_scans(CheckTest* test)
         {
             .kind = CHECK_ATTRIBUTE_NO_STACK_PROTECTOR,
         },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET,
+            .ignored = true,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_TARGET_CLONES,
+        },
     };
-    CheckInputAttributes kinds_of_attributes[3] = {
+    CheckInputAttributes kinds_of_attributes[6] = {
         {
             .records = records,
             .count = 1,
@@ -112,6 +123,18 @@ static void check_test_program_scans(CheckTest* test)
         },
         {
             .records = records + 1,
+            .count = 2,
+        },
+        {
+            .records = records + 3,
+            .count = 1,
+        },
+        {
+            .records = records + 4,
+            .count = 1,
+        },
+        {
+            .records = records + 4,
             .count = 2,
         },
     };
@@ -155,8 +178,8 @@ static void check_test_program_scans(CheckTest* test)
             kinds[token] = (uint8_t)((draw >> 26) % 4 == 0 ? PARSE_KIND_SWITCH : PARSE_KIND_IDENTIFIER);
             declared_types[token] = (draw >> 28) % 2 == 0 ? runtime : BUSTER_TYPE_INT;
             parents[token] = (draw >> 29) % 4 == 0 ? BUSTER_CHECK_NONE : (draw >> 10) % count;
-            const uint32_t attribute = (draw >> 16) % 8;
-            attributes[token] = attribute < 3 ? &kinds_of_attributes[attribute] : NULL;
+            const uint32_t attribute = (draw >> 16) % 12;
+            attributes[token] = attribute < 6 ? &kinds_of_attributes[attribute] : NULL;
         }
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
@@ -224,25 +247,51 @@ static void check_test_program_scans(CheckTest* test)
             uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             bool rooms[2];
-            // The naked column in an arena of its own, every other time one with no room for it.
+            // The naked column in an arena of its own, every other time one with no room for it; and the target attributes'
+            // keys in one of their own, which grows them by doubling, every other time one with no room.
             _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
+            _Alignas(64) uint8_t event_bytes[2][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
+            CheckProgramTargetEvents events[2];
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 Arena naked = {
                     .base = naked_bytes[path],
                     .capacity = variant == 0 ? sizeof(naked_bytes[path]) : 0,
                 };
+                Arena event_arena = {
+                    .base = event_bytes[path],
+                    .capacity = variant == 0 ? sizeof(event_bytes[path]) : 0,
+                };
+                events[path] = (CheckProgramTargetEvents){ .scratch = &event_arena, .room = true };
                 programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path] };
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
-                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0);
+                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0, &events[path]);
+                events[path].scratch = NULL;
             }
             const bool naked_same = (programs[0].object_naked == 0) == (programs[1].object_naked == 0) &&
                                     (programs[0].object_naked == 0 || memcmp(programs[0].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            // Each function's declaration with a target or target_clones attribute not ignored is its object's key, in token
+            // order, as the test's own walk finds them.
+            uint32_t expected_events = 0;
+            bool events_right = true;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t object = objects[token];
+                const bool event = declarations[token] == token && static_objects[token] && object != 0 && object <= count &&
+                                   declaration_kinds[token] == C_BINDING_FUNCTION &&
+                                   (attributes[token] == &kinds_of_attributes[3] || attributes[token] == &kinds_of_attributes[5]);
+                events_right &= !event || expected_events >= events[0].count || events[0].keys[expected_events] == (((uint64_t)object << 32) | token);
+                expected_events += event;
+            }
+            const bool limited = variant != 0 && expected_events != 0;
+            events_right &= limited ? !events[0].room && events[0].count == 0 : events[0].room && events[0].count == expected_events;
+            const bool events_same = events[0].room == events[1].room && events[0].count == events[1].count &&
+                                     (events[0].count == 0 || memcmp(events[0].keys, events[1].keys, events[0].count * sizeof(uint64_t)) == 0);
             check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
-                                   rooms[0] == rooms[1] && naked_same,
-                              "check_program's static objects and naked functions agree with their scalar twin at every guarded tail");
+                                   rooms[0] == rooms[1] && naked_same && events_same && events_right,
+                              "check_program's static objects, naked functions and target attributes agree with their scalar twin at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
             {
                 uint64_t cases = 0;
@@ -733,6 +782,21 @@ static const char check_test_program_harness[] =
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
     "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
     "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
+    "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
+    "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
+    "_Atomic(ExternalAtomic4) external_atomic4(_Atomic(ExternalAtomic4) x){ExternalAtomic4 v=x;return v+3;}"
+    "int external_apply_atomic4(_Atomic(ExternalAtomic4)(*f)(_Atomic(ExternalAtomic4)),int n){ExternalAtomic4 v={0};"
+    "for(int i=0;i<4;i++)v[i]=n+i;_Atomic(ExternalAtomic4) out=f(v);ExternalAtomic4 r=out;int h=0;for(int i=0;i<4;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic8 __attribute__((vector_size(32)));"
+    "_Atomic(ExternalAtomic8) external_atomic8(_Atomic(ExternalAtomic8) x){ExternalAtomic8 v=x;return v+3;}"
+    "int external_apply_atomic8(_Atomic(ExternalAtomic8)(*f)(_Atomic(ExternalAtomic8)),int n){ExternalAtomic8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=n+i;_Atomic(ExternalAtomic8) out=f(v);ExternalAtomic8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef int ExternalAtomic16 __attribute__((vector_size(64)));"
+    "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
+    "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
+    "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
     // in xmm0 to xmm7, which its prologue saves for va_arg only when al isn't 0, then on the stack, and its longs in
@@ -773,12 +837,25 @@ struct CheckTestProgramBuild
 
 static CheckTestProgramBuild check_test_program_build;
 
+// The -march of the oracle's and the harness's compiles and of the link: x86-64's, or a section's own while it runs
+// (check_test_program_vectors, which releases the build around it).
+static const char* check_test_program_march = "-march=x86-64";
+
+// The target options a program's functions' target attributes resolve against (CheckProgramOptions.predefines): the
+// oracle's -march, whose X86Target the section gives the harness (x86_target_parse's profile of the same name).
+static PredefinesOptions check_test_program_predefines(void)
+{
+    return (PredefinesOptions){ .march = check_test_program_march + strlen("-march=") };
+}
+
 // The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
-// oracle and the harness alike.
+// oracle and the harness alike. Nothing here contracts a * b + c into one fused operation (docs/c-checker.md), which
+// clang's default (-ffp-contract=on) does even at -O0 where the target has FMA (x86-64-v4's vector programs).
 #define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned) \
     "-std=gnu17", \
     "-O0", \
-    "-march=x86-64", \
+    (char*)check_test_program_march, \
+    "-ffp-contract=off", \
     "-fno-common", \
     (char_unsigned) ? "-funsigned-char" : "-fsigned-char", \
     "-Wno-unused-value", \
@@ -934,6 +1011,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         oracle,
         object,
         "-lm",
+        "-latomic",
         "-o",
         executable,
         0,
@@ -1342,6 +1420,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     uint8_t* needs[2] = { 0 };
     CheckProgram reduced[2] = { *program, *program };
     bool rooms[2] = { false, false };
+    CheckProgramTargetEvents events[2] = { { .scratch = scratch, .room = true }, { .scratch = scratch, .room = true } };
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
         needs[path] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
@@ -1352,23 +1431,34 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
         {
             memset(needs[path], 0, (uint64_t)count + 1);
             memset(reduced[path].object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true) :
-                                     check_program_static_prepared(reduced + path, data, needs[path], output);
+            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true, &events[path]) :
+                                     check_program_static_prepared(reduced + path, data, needs[path], output, &events[path]);
         }
+    }
+    // The target attributes' keys: in token order and in each object's declarations' order, the same once sorted by
+    // object, as check_program_targets sorts them.
+    uint64_t* sorted[2] = { events[0].keys, events[1].keys };
+    for (uint32_t path = 0; same && path < 2 && events[0].count == events[1].count && events[path].count != 0; path += 1)
+    {
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, events[path].count);
+        same = temporary != NULL;
+        sorted[path] = same ? c_bindings_sort(events[path].keys, temporary, events[path].count, false, UINT32_MAX) : NULL;
     }
     same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
            memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
            (reduced[0].object_naked == NULL) == (reduced[1].object_naked == NULL) &&
-           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0) &&
+           events[0].room && events[1].room && events[0].count == events[1].count &&
+           (events[0].count == 0 || memcmp(sorted[0], sorted[1], events[0].count * sizeof(uint64_t)) == 0);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return same;
 }
 
-// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
-// it with the same.
-static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
+// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
+// x86-64's), against clang's build of it with the same; its executable runs where `run_native` says the host can run it.
+static void check_test_program_source_native_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native, uint32_t local_limit)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1377,7 +1467,9 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = true,
         .predefines.char_unsigned = char_unsigned,
+        .target = target != NULL ? *target : (X86Target){ 0 },
     };
+    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "executable source preprocessing");
@@ -1403,6 +1495,7 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
+        uint64_t return_flow_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1411,8 +1504,17 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
+            .return_flow_work = &return_flow_work,
+            .target = pp_options.target,
+            .predefines = &predefines,
         };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch);
+        if (ready && strcmp(name, "many-aggregate-return-bodies") == 0)
+        {
+            check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
+                                   return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
+                              "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -1473,6 +1575,8 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
         }
         for (uint32_t b = 0; lowered && b < program.body_count; b += 1)
         {
+            check_test_expect(test, local_limit == 0 || (lower[0].functions[b].local_count <= local_limit && lower[1].functions[b].local_count <= local_limit),
+                              "builtin scratch locals stay bounded across repeated recipes");
             check_test_expect(test, check_test_program_function(lower[0].functions + b, lower[1].functions + b),
                               "complete typed function and ABI locations agree across unit batches");
         }
@@ -1527,15 +1631,27 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
     intern_release(&identifiers);
 }
 
+static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, target, run_native, 0);
+}
+
+static void check_test_program_source_bounds(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                            int32_t expected_pools, uint32_t entry_limit, uint32_t local_limit)
+{
+    check_test_program_source_native_bounds(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true, local_limit);
+}
+
 static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
                                              int32_t expected_pools, uint32_t entry_limit)
 {
-    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true);
+    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true);
 }
 
 static void check_test_program_source_native(CheckTest* test, const char* source, const char* name, const char* clang, bool run_native)
 {
-    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, run_native);
+    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, NULL, run_native);
 }
 
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
@@ -1698,16 +1814,18 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
-// A program fixture checked and lowered by both paths: accepted or not, lowered or refused, with the references and
-// initializations it keeps; and, for a refusal with `reason`, the feature the refusal names
-// (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
-static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
-                                               uint32_t initializations, const char* reason)
+// A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
+// refused, with the references and initializations it keeps; and, for a refusal with `reason`, the feature the refusal
+// names (CheckProgramLowered.reason, which the driver prints as "unsupported: FEATURE").
+static void check_test_program_boundary_target(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason, const X86Target* target)
 {
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
-    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true,
+                                   .target = target != NULL ? *target : (X86Target){ 0 } };
+    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
                         pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "program boundary source preprocessing");
@@ -1738,7 +1856,8 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
         }
         if (ready)
         {
-            const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
+            const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0,
+                                                  .target = pp_options.target, .predefines = &predefines };
             CheckProgram program = { 0 };
             const bool built = check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch);
             snprintf(description, sizeof(description), "%s: checked control acceptance matches the independent C constraint", name);
@@ -1816,6 +1935,13 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// A program fixture, checked and lowered by both paths for x86-64 (check_test_program_boundary_target).
+static void check_test_program_boundary_reason(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references,
+                                               uint32_t initializations, const char* reason)
+{
+    check_test_program_boundary_target(test, source, name, accepted, machine, references, initializations, reason, NULL);
 }
 
 static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
@@ -1900,6 +2026,11 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
 #include "c_check_program_copy_test.c"
+#include "c_check_program_folds_test.c"
+#include "c_check_program_vector_test.c"
+#include "c_check_program_x86_test.c"
+#include "c_check_program_vector_builtins_test.c"
+#include "c_check_program_fp16_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2059,14 +2190,329 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+// A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
+// next body's builder may, and retain reference epochs for nodes reached by earlier bodies. Both a completed walk
+// and its conservative early stop must restore those marks before builtin/reference selection reads them.
+static void check_test_program_return_marks(CheckTest* test)
+{
+    enum { TOKENS = 1024, CAPACITY = 8 * TOKENS + 16, NODES = 4096 };
+    CheckTestTypes types = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = scratch.base != NULL && check_test_types_open(&types);
+    const TypeId record = ready ? type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, 1) : 0;
+    const TypeMember member = { .name = 1, .type = BUSTER_TYPE_LONG, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
+    TypeId function = ready ? type_function(&types.table, record, NULL, 0, 0) : 0;
+    CheckOp* ops = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckOp, NODES);
+    uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* seconds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* absent = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, CAPACITY + 1);
+    CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
+    ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
+    check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
+    for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
+    {
+        for (uint32_t node = 0; node < NODES; node += 1)
+        {
+            ops[node] = CHECK_OP_VALUE;
+            operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
+            marks[node] = node == 0 ? unsafe : node % 2;
+        }
+        ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
+        ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
+        operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
+        seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
+        marks[NODES] = stack[NODES] = labels[CAPACITY] = UINT32_C(0x71625344);
+        memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
+        const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
+                                   .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
+        CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+        CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = CAPACITY };
+        CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
+        check_program_return_flow(&writer, &body, marks, stack, NULL);
+        bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
+                    marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[CAPACITY] == UINT32_C(0x71625344);
+        for (uint32_t node = 0; same && node < NODES; node += 1)
+        {
+            same = marks[node] == (node == 0 ? unsafe : node % 2);
+        }
+        // The call stops its comma expression with the other operand still queued. Only one or three ledger words change.
+        const uint8_t* bytes = (const uint8_t*)tasks;
+        for (uint32_t byte = CAPACITY + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < CAPACITY + NODES; byte += 1)
+        {
+            same = bytes[byte] == 0xa5;
+        }
+        check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch, including early stops");
+    }
+    arena_release(&scratch);
+    check_test_types_close(&types);
+}
+
 #include "c_check_program_batch_test.c"
 #include "c_check_literal_table_test.c"
 
+static void check_test_program_many_arguments(CheckTest* test, const char* clang)
+{
+    static const uint32_t counts[] = { 65, 127, 130, 238, 239 };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "large call source has a bounded output stream");
+        if (text != NULL)
+        {
+            fprintf(text, "long many(");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%slong a%u", a != 0 ? "," : "", a);
+            }
+            fprintf(text, "){return ");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%sa%u*%u", a != 0 ? "+" : "", a, a + 1);
+            }
+            fprintf(text, ";}int tested(int n){");
+            if (counts[c] <= 238)
+            {
+                // Keep the direct result in a local: holding it on the value stack would exhaust the indirect limit.
+                fprintf(text, "__typeof__(many)*volatile p=many;long direct=many(");
+            }
+            else
+            {
+                fprintf(text, "return (int)(many(");
+            }
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                if (counts[c] <= 127)
+                {
+                    fprintf(text, "%s(long)n+%u", a != 0 ? "," : "", a);
+                }
+                else
+                {
+                    fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                }
+            }
+            if (counts[c] <= 238)
+            {
+                fprintf(text, ");long indirect=p(");
+                for (uint32_t a = 0; a < counts[c]; a += 1)
+                {
+                    if (counts[c] <= 127)
+                    {
+                        fprintf(text, "%s(long)n-%u", a != 0 ? "," : "", a);
+                    }
+                    else
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                }
+                fprintf(text, ");");
+                if (counts[c] >= 130)
+                {
+                    // A wide call must refill the live prefix, even when its compact negative stack effect wraps.
+                    fprintf(text, "long held=(long)n-many(");
+                    for (uint32_t a = 0; a < counts[c]; a += 1)
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                    fprintf(text, ");return (int)((direct+indirect+held)%%1000003);}");
+                }
+                else
+                {
+                    fprintf(text, "return (int)((direct+indirect)%%1000003);}");
+                }
+            }
+            else
+            {
+                fprintf(text, ")%%1000003);}");
+            }
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "large call source completes without truncation");
+            if (written)
+            {
+                char name[80];
+                snprintf(name, sizeof(name), "calls-of-%u-arguments", counts[c]);
+                check_test_program_source(test, source, name, clang);
+            }
+        }
+        free(source);
+    }
+    char* variadic = NULL;
+    size_t variadic_length = 0;
+    FILE* text = open_memstream(&variadic, &variadic_length);
+    check_test_expect(test, text != NULL, "127-argument variadic source has output storage");
+    if (text != NULL)
+    {
+        fputs("struct P{float a,b,c,d;};long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;"
+              "for(int i=0;i<count;i++){r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);"
+              "struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}__builtin_va_end(ap);return r;}"
+              "int tested(int n){struct P p={n,n+1,n+2,n+3};return (int)(var(42", text);
+        for (uint32_t a = 0; a < 42; a += 1)
+        {
+            fprintf(text, ",(long)n+%u,(double)n*0.25+%u,p", a, a);
+        }
+        fputs(")%1000003);}", text);
+        const bool written = fclose(text) == 0;
+        check_test_expect(test, written, "127-argument variadic source completes without truncation");
+        if (written)
+        {
+            check_test_program_source(test, variadic, "variadic-127-mixed-aggregate-arguments", clang);
+        }
+    }
+    free(variadic);
+    check_test_program_source(test,
+        "struct P{float a,b,c,d;};struct Q{long a;double b;};struct B{long a,b,c,d;};"
+        "long mixed(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,"
+        "struct P x,struct Q y,struct B z,double r,double s){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+(long)(x.a+x.b+x.c+x.d+y.b+r+s)+y.a+z.a+z.b+z.c+z.d;}"
+        "struct B hidden(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,struct P x)"
+        "{struct B r={a+b+c+d,e+f+g+h,i+j+k+l,m+o+p+q+(long)x.d};return r;}"
+        "long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;for(int i=0;i<count;i++){"
+        "r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}"
+        "__builtin_va_end(ap);return r;}"
+        "int tested(int n){struct P p={n,n+1,n+2,n+3};struct Q q={n,n+0.5};struct B b={n,n+1,n+2,n+3};"
+        "struct B r=hidden(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p);"
+        "return (int)(mixed(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p,q,b,2.5,3.5)+r.a+r.b+r.c+r.d+"
+        "var(7,(long)n,1.0,p,2L,3.0,p,4L,5.0,p,6L,7.0,p,8L,9.0,p,10L,11.0,p,12L,13.0,p));}",
+        "deep-aggregate-mixed-and-variadic-calls", clang);
+}
+
+static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
+{
+    for (uint32_t bodies = 64; bodies <= 128; bodies *= 2)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "many aggregate bodies have bounded source output storage");
+        if (text != NULL)
+        {
+            fputs("struct S{long a,b;};", text);
+            for (uint32_t b = 0; b < bodies; b += 1)
+            {
+                fprintf(text, "struct S f%u(int n,struct S s){if(n)return s;}", b);
+            }
+            fprintf(text, "int tested(int n){struct S s={n,n+1};struct S a=f0(1,s),b=f%u(1,s);return a.a+a.b+b.a+b.b;}", bodies - 1);
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "many aggregate bodies complete without truncation");
+            if (written)
+            {
+                check_test_program_source(test, source, "many-aggregate-return-bodies", clang);
+            }
+        }
+        free(source);
+    }
+}
+
+static void check_test_program_builtin_scratch(CheckTest* test, const char* clang)
+{
+    for (uint32_t limit = CBUILTIN_LOWER_LIMIT_RECIPE; limit <= CBUILTIN_LOWER_LIMIT_LOCALS; limit += 1)
+    {
+        CheckProgramLowered output = { 0 };
+        CheckLowerWriter writer = { .output = &output, .token = 17 };
+        const CBuiltinLowerBuffer buffer = { .capacity = BUSTER_TIER0_MAX_ENTRIES, .local_capacity = BUSTER_TIER0_MAX_LOCALS };
+        const CBuiltinLowerResult result = { .error = CBUILTIN_LOWER_CAPACITY, .limit = (CBuiltinLowerLimit)limit };
+        const char* expected = limit == CBUILTIN_LOWER_LIMIT_RECIPE ? "builtin recipe limit" : limit == CBUILTIN_LOWER_LIMIT_ENTRIES ?
+                               "Tier 0 per-function entry limit" : "Tier 0 per-function local limit";
+        check_lower_builtin_finish(&writer, &buffer, result, BUSTER_TYPE_INT);
+        check_lower_resource(&writer, "a later failure");
+        check_test_expect(test, output.status == CHECK_PROGRAM_RESOURCE && output.token == 17 && output.reason != NULL && strcmp(output.reason, expected) == 0,
+                          "builtin resource failures name the actual first limit");
+    }
+    static const char* unary[] = {
+        "__builtin_bswap16((unsigned short)x)",
+        "__builtin_bswap32(x)",
+        "__builtin_bswap64(z)",
+        "__builtin_clz(x)",
+        "__builtin_clzl(z)",
+        "__builtin_clzll(z)",
+        "__builtin_ctz(x)",
+        "__builtin_ctzl(z)",
+        "__builtin_ctzll(z)",
+        "__builtin_popcount(x)",
+        "__builtin_popcountl(z)",
+        "__builtin_popcountll(z)",
+        "__builtin_parity(x)",
+        "__builtin_parityl(z)",
+        "__builtin_parityll(z)",
+        "__builtin_ffs((int)x)",
+        "__builtin_ffsl((long)z)",
+        "__builtin_ffsll((long long)z)",
+    };
+    char source[32768];
+    uint32_t used = (uint32_t)snprintf(source, sizeof(source),
+        "int other(int n){unsigned long a;return __builtin_add_overflow((unsigned long)n,3UL,&a)+(int)(a%%97);}"
+        "int tested(int n){unsigned x=(unsigned)n|1;unsigned long z=((unsigned long)x<<33)|x;unsigned y=0;");
+    for (uint32_t repeat = 0; repeat < 8; repeat += 1)
+    {
+        for (uint32_t id = 0; id < BUSTER_ARRAY_LENGTH(unary); id += 1)
+        {
+            used += (uint32_t)snprintf(source + used, sizeof(source) - used, "y+=(unsigned)(%s)%%97;", unary[id]);
+        }
+        static const char* operation[] = { "add", "sub", "mul" };
+        for (uint32_t id = 0; id < BUSTER_ARRAY_LENGTH(operation); id += 1)
+        {
+            used += (uint32_t)snprintf(source + used, sizeof(source) - used,
+                "{signed char r;unsigned __int128 w;"
+                "y+=__builtin_%s_overflow((long)n,z,&r);y+=(unsigned char)r;"
+                "y+=__builtin_%s_overflow((__int128)n*((__int128)1<<64),(unsigned __int128)z,&w);y+=(unsigned)(w%%101);}", operation[id], operation[id]);
+        }
+    }
+    snprintf(source + used, sizeof(source) - used, "return (int)(y%%1000000007)+other(n);}");
+    check_test_program_source_bounds(test, source, "repeated-integer-recipes-reuse-locals", clang, false, -1, 0, 160);
+    check_test_program_source_bounds(test,
+        "int tested(int n){unsigned long a=0,b=0,c=0;unsigned long x=(unsigned long)(unsigned)n*0x100000001UL;"
+        "int r=__builtin_add_overflow(x,x+17,(__builtin_mul_overflow(x,x,&b),&a));"
+        "int s=__builtin_sub_overflow(x,__builtin_add_overflow(x,19UL,&c),&b);"
+        "unsigned t=__builtin_popcount((unsigned)n)+__builtin_clz((unsigned)n|1)+__builtin_parityll(x);"
+        "return (int)((a%97)+(b%101)+(c%103))+r*1000+s*2000+(int)t;}",
+        "nested-operand-destination-and-sibling-result-lifetimes", clang, false, -1, 0, 80);
+    check_test_program_source_bounds(test,
+        "int tested(int n){__int128 a=0,c=0;unsigned __int128 b=0;"
+        "__int128 x=(__int128)n*0x1000000000000000UL;unsigned __int128 y=(unsigned __int128)(unsigned)n<<96;"
+        "int r=__builtin_mul_overflow(x,(__builtin_sub_overflow(y,(unsigned __int128)17,&b),x+1),"
+        "(__builtin_add_overflow(x,x,&c),&a));"
+        "int s=__builtin_add_overflow(y,(__builtin_mul_overflow(x,x,&c),(unsigned __int128)c),&b);"
+        "return (int)((unsigned __int128)a%97+b%101+(unsigned __int128)c%103)+r*1000+s*2000;}",
+        "nested-wide-operand-objects-and-signedness", clang, false, -1, 0, 96);
+    check_test_program_source(test,
+        "int tested(int n){_Atomic unsigned long cell=(unsigned long)(unsigned)n+1;"
+        "unsigned shift=__builtin_ctzll(__c11_atomic_load(&cell,5)|8UL);"
+        "unsigned long value=__builtin_bswap64(__c11_atomic_load(&cell,5)+1);"
+        "cell+=__builtin_popcountll(value);"
+        "unsigned long old=__c11_atomic_fetch_xor(&cell,__builtin_bswap64(value),5);"
+        "return (int)((old^__c11_atomic_load(&cell,5))&0x7fffff00UL)+(int)shift;}",
+        "atomic-captures-and-integer-recipe-scratch", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_return_marks(test);
     check_test_literal_tables(test, clang);
+    check_test_program_builtin_scratch(test, clang);
     check_test_program_copies(test, clang);
+    check_test_program_folds(test, clang);
     check_test_program_batch(test);
+    check_test_program_many_arguments(test, clang);
+    check_test_program_many_aggregate_returns(test, clang);
+    check_test_program_source(test,
+        "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
+        "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
+        "struct L chain(int n,struct L s){if(n>0)return s;else if(n<0){s.b+=3;return s;}else{s.d+=5;return s;}}"
+        "struct D select(int n,struct D s){switch(n&3){case 0:return s;case 1:s.a+=1;return s;default:s.b+=2;return s;}}"
+        "struct S loop(int n,struct S s){for(;;){if(n&1)return s;else{s.a+=3;return s;}}}"
+        "struct L nested(int n,struct L s){if(n){if(n&1)return s;s.c+=7;}else{return s;}return s;}"
+        "struct S partial(int n,struct S s){if(n)return s;}struct L wide_partial(int n,struct L s){if(n)return s;}"
+        "struct S labels(int n,struct S s){if(n)goto live;return s;live:s.a+=11;return s;}"
+        "int tested(int n){struct S s={n,n+2};struct L l={n,n+1,n+2,n+3};struct D d={n*0.5,n*0.25};"
+        "struct S a=choose(n,s),b=loop(n,s),c=partial(1,s),e=labels(n,s);"
+        "struct L p=chain(n,l),q=nested(n,l),r=wide_partial(1,l);struct D v=select(n,d);"
+        "partial(0,s);wide_partial(0,l);return a.a+a.b+b.a+b.b+c.a+c.b+e.a+e.b+p.a+p.b+p.c+p.d+q.c+r.d+(int)(v.a*4+v.b*8);}",
+        "aggregate-return-control-flow", clang);
     check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
         "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
@@ -2096,6 +2542,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_helpers(test);
     check_test_program_atomics(test, clang);
     check_test_program_diagnostics(test, clang);
+    check_test_program_vectors(test, clang);
+    check_test_program_x86(test, clang);
+    check_test_program_vector_builtins(test, clang);
+    check_test_program_fp16(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);
@@ -2516,17 +2966,70 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
         "return (int)y+x+__builtin_constant_p(n++);}", "builtin-hints-and-unevaluated-query", clang);
+    // __builtin_alloca (#148), as clang -O0's dynamic alloca: sizes rounded up to 16 (the second allocation 32 bytes below
+    // the first), one among a call's stack arguments, one of no bytes, in a loop, and the first's bytes intact after them.
+    check_test_program_source(test,
+        "int sink(long a,long b,long c,long d,long e,long f,long g,long h){return (int)(a+b*2+c*3+d*4+e*5+f*6+g*7+h*8);}"
+        "int tested(int n){unsigned k=(unsigned)(n+3)*5+1;char*p=__builtin_alloca(k);for(unsigned i=0;i<k;i++)p[i]=(char)(i*7+n);"
+        "char*q=__builtin_alloca(17);q[16]=(char)n;int r=(int)(((unsigned long)p|(unsigned long)q)&15)+(int)(p-q)+q[16];"
+        "r+=sink(1,2,3,4,5,6,p[0],(long)((unsigned long)__builtin_alloca(32)&15));"
+        "for(int i=0;i<3;i++){char*t=__builtin_alloca(64);t[63]=(char)(i+n);r+=t[63];}"
+        "long s=0;for(unsigned i=0;i<k;i++)s+=p[i];r+=(int)((unsigned long)__builtin_alloca(0)&15);return r*7+(int)s;}",
+        "alloca-runtime", clang);
+    // An allocation after a block's first variable-length array is released with it, at the block's end and at a
+    // continue, a break or a goto out of it, as clang's stackrestore releases it: each loop of 20,000 allocations of 8 KB
+    // would take 160 MB of stack without the releases.
+    check_test_program_source(test,
+        "int tested(int n){long s=0;for(int i=0;i<20000;i++){char v[(n&7)+1];v[0]=(char)i;char*p=__builtin_alloca(8192);"
+        "p[0]=(char)(i*3);p[8191]=v[0];s+=p[0]+p[8191];if(i==n+5)continue;}"
+        "for(int i=0;i<30000;i++){char v[(n&3)+2];char*p=__builtin_alloca(8192);p[1]=v[0]=(char)i;s+=p[1];if(i==20000+n)break;}"
+        "int j=0;again:{char v[(n&3)+1];char*p=__builtin_alloca(8192);p[2]=(char)j;v[0]=p[2];s+=v[0];if(++j<20000)goto again;}"
+        "return (int)(s&0x7fffffff);}",
+        "alloca-released-with-variable-length-arrays", clang);
+    // Allocations in a realigned frame (an object aligned to 64) and in a variadic definition, whose va_arg reads the
+    // incoming areas the allocation moved rsp past.
+    check_test_program_source(test,
+        "long vsum(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);char*b=__builtin_alloca((unsigned)count*8+3);long s=0;"
+        "for(int i=0;i<count;i++){long x=__builtin_va_arg(ap,long);b[i*8]=(char)x;s+=x+b[i*8];}__builtin_va_end(ap);return s+(long)((unsigned long)b&15);}"
+        "int tested(int n){_Alignas(64) char a[64];a[0]=(char)n;char*p=__builtin_alloca((unsigned)(n+3)*3+1);p[0]=a[0];"
+        "int r=(int)(((unsigned long)a&63)|((unsigned long)p&15));long v=vsum(9,1L,2L,3L,(long)n,5L,6L,7L,8L,(long)p[0]);"
+        "return r+(int)v+(int)((unsigned long)__builtin_alloca(40)&15);}",
+        "alloca-realigned-and-variadic", clang);
+    // __builtin_frame_address(0) and __builtin_return_address(0) (#148), as clang -O0's frame has them: the frame
+    // address a multiple of 16 above the locals, the return address the word above it, a callee's saved rbp the caller's
+    // frame address (in a realigned frame too), a callee's frame below its caller's, return addresses the same at one call
+    // and different at two, after the caller's start, and the frame address unmoved by an allocation.
+    check_test_program_source(test,
+        "void*caller_frame(void){return *(void**)__builtin_frame_address(0);}void*where(void){return __builtin_return_address(0);}"
+        "char*inner(void){return __builtin_frame_address(0);}"
+        "int aligned(int n){_Alignas(64) char a[64];a[0]=(char)n;char*f=__builtin_frame_address(0);"
+        "return ((unsigned long)a&63)==0&&caller_frame()==f&&*(void**)(f+8)==__builtin_return_address(0)&&f>a&&a[0]==(char)n;}"
+        "int tested(int n){char*f=__builtin_frame_address(0);char local=(char)n;int r=((unsigned long)f&15)==0;r|=(f>&local)<<1;"
+        "r|=(*(void**)(f+8)==__builtin_return_address(0))<<2;r|=(inner()<f)<<3;void*a=where();void*b=where();r|=(a!=b)<<4;"
+        "void*prev=0;for(int i=0;i<2;i++){void*c=where();if(i)r|=(c==prev)<<5;prev=c;}r|=(caller_frame()==f)<<6;"
+        "r|=((char*)where()>(char*)tested)<<7;r|=(__builtin_extract_return_addr(__builtin_return_address(0))==__builtin_return_address(0))<<8;"
+        "char*p=__builtin_alloca((unsigned)(n+3)*16);r|=(__builtin_frame_address(0)==f)<<9;r|=(p<f)<<10;r|=aligned(n)<<11;"
+        "r|=(__builtin_frob_return_addr(where())!=0)<<12;return r+local;}",
+        "frame-builtins", clang);
+    // A caller's frame, which clang -O0's code finds through the frame pointers' chain, is refused by name.
+    check_test_program_boundary_reason(test, "int tested(int n){return (__builtin_frame_address(1)!=0)+n;}", "frame-address-caller", true, false, 0, 0,
+                                       "__builtin_frame_address and __builtin_return_address of a caller's frame");
+    check_test_program_boundary_reason(test, "int tested(int n){return (__builtin_return_address(2)!=0)+n;}", "return-address-caller", true, false, 0, 0,
+                                       "__builtin_frame_address and __builtin_return_address of a caller's frame");
     check_test_program_source(test,
         "int tested(int n){double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}",
         "floating-builtin-runtime-classification", clang);
+    // Which of fpclassify's selectors run for each category, and how often, and its argument's effect: mark counts each
+    // selector's evaluations in a 3-bit field of its own (the argument's seen++ in the lowest), not their order, since
+    // clang evaluates the normal and subnormal ones in an order its own build decides (check_lower_floating_prepare).
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "double x=n<0?__builtin_nan(\"\"):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),x);return seen*10+r;}",
         "fpclassify-conditional-selector-effects", clang);
     check_test_program_source(test,
-        "int seen;int mark(int n){seen=seen*10+n;return n;}int tested(int n){seen=0;"
+        "int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;"
         "int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}",
         "fpclassify-known-category-effects", clang);
     // K&R definitions (C17 6.9.1, #154's decision: as clang): their declaration lists' types, the parameters' order the
@@ -3169,8 +3672,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
     check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
                                        "typed-asm-goto-target", true, false, 0, 0, "asm goto");
+    // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
-                                "file-assembly-machine-boundary", true, false, 0, 0);
+                                "file-assembly-lowers-no-code", true, true, 0, 0);
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);

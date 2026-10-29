@@ -97,8 +97,10 @@ static bool x86_semantics_report(const X86SemanticsTally* tally)
 // ---------------------------------------------------------------------------------------------------------------------
 // The harness
 
-// What the harness loads into the processor and stores back: the general registers (RSP the stack's), RFLAGS and ZMM0 to
-// ZMM15, or their low 128 bits on a host without AVX-512. x86_semantics_test_enter's offsets are these.
+// What the harness loads into the processor and stores back: the general registers (RSP the stack's), RFLAGS, ZMM0 to
+// ZMM15 (or their low 128 bits on a host without AVX-512), and the x87's state as FXSAVE64 lays it out (its control and
+// status words, its abridged tags and its registers, with MXCSR the C code's; the image's XMM registers are overwritten
+// by `vector`). x86_semantics_test_enter's offsets are these.
 typedef struct X86SemanticsState X86SemanticsState;
 struct X86SemanticsState
 {
@@ -106,22 +108,35 @@ struct X86SemanticsState
     uint64_t flags;
     uint64_t padding[7];
     uint8_t vector[16][64];
+    uint8_t x87[512] __attribute__((aligned(64)));
 };
 _Static_assert(offsetof(X86SemanticsState, flags) == 128, "x86_semantics_test_enter's offset of the flags");
 _Static_assert(offsetof(X86SemanticsState, vector) == 192, "x86_semantics_test_enter's offset of the vector registers");
+_Static_assert(offsetof(X86SemanticsState, x87) == 1216, "x86_semantics_test_enter's offset of the x87's state");
+// The FXSAVE image's fields the checks compare: the control word, the status word, the abridged tags, and each register's
+// 10 bytes, 16 apart (but the last instruction's and operand's pointers and opcode, which AMD stores only with an
+// exception pending, and MXCSR, whose status flags the SSE forms may set).
+#define BUSTER_X86_SEMANTICS_FX_CONTROL 0
+#define BUSTER_X86_SEMANTICS_FX_STATUS 2
+#define BUSTER_X86_SEMANTICS_FX_TAGS 4
+#define BUSTER_X86_SEMANTICS_FX_MXCSR 24
+#define BUSTER_X86_SEMANTICS_FX_REGISTERS 32
 
-// The trampoline's own state, which it reaches RIP-relative while every register is the test's.
+// The trampoline's own state, which it reaches RIP-relative while every register is the test's: the C code's x87 and SSE
+// state too, which it restores after storing the test's.
+static __attribute__((used, aligned(64))) uint8_t x86_semantics_test_host[512];
 static __attribute__((used)) uint64_t x86_semantics_test_saved_rsp;
 static __attribute__((used)) X86SemanticsState* x86_semantics_test_state;
 static __attribute__((used)) uint64_t x86_semantics_test_code;
 static __attribute__((used)) uint64_t x86_semantics_test_scratch;
 static __attribute__((used)) uint8_t x86_semantics_test_wide;
 
-// Loads the available vector state, the flags, then the general registers (RSP last but RDI, which held the state) and jumps
-// to x86_semantics_test_code, which ends with a jump back to x86_semantics_test_return. There it stores the general
-// registers, the flags (pushed on the C stack, after RSP is stored) and the vector registers into the state, restores the
-// C stack and the callee-saved registers, and returns. The test code may change any register but the trampoline's
-// statics, and may use the stack the state's RSP points at.
+// Saves the C code's x87 and SSE state and loads the state's x87 one, then the available vector state, the flags, then
+// the general registers (RSP last but RDI, which held the state) and jumps to x86_semantics_test_code, which ends with a
+// jump back to x86_semantics_test_return. There it stores the general registers, the flags (pushed on the C stack, after
+// RSP is stored), the vector registers and the x87's state into the state, restores the C code's x87 and SSE state, the C
+// stack and the callee-saved registers, and returns. The test code may change any register but the trampoline's statics,
+// and may use the stack the state's RSP points at.
 static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86SemanticsState* state)
 {
     __asm__ volatile(".intel_syntax noprefix\n"
@@ -133,6 +148,8 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "push r15\n"
                      "mov qword ptr [rip + x86_semantics_test_saved_rsp], rsp\n"
                      "mov qword ptr [rip + x86_semantics_test_state], rdi\n"
+                     "fxsave64 [rip + x86_semantics_test_host]\n"
+                     "fxrstor64 [rdi + 1216]\n"
                      "cmp byte ptr [rip + x86_semantics_test_wide], 0\n"
                      "je .Lsemantics_load_sse\n"
                      "vmovdqu64 zmm0, zmmword ptr [rdi + 192]\n"
@@ -250,6 +267,8 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "movdqu xmmword ptr [rdi + 1088], xmm14\n"
                      "movdqu xmmword ptr [rdi + 1152], xmm15\n"
                      ".Lsemantics_stored:\n"
+                     "fxsave64 [rdi + 1216]\n"
+                     "fxrstor64 [rip + x86_semantics_test_host]\n"
                      "cld\n"
                      "pop r15\n"
                      "pop r14\n"
@@ -290,7 +309,7 @@ static uint8_t x86_semantics_test_native[X86_FORM_COUNT];
 
 // The target table fails closed on unclassified forms. These covered legacy forms are nevertheless baseline
 // instructions; keep executing them rather than treating an absent target-table row as a missing CPU feature.
-static bool x86_semantics_test_known_legacy(uint32_t form)
+static bool x86_semantics_test_known_legacy(uint32_t form, uint64_t features)
 {
     static const char* const prefixes[] = {
         "LOCK_XADD_", "LOCK_ADD_", "LOCK_OR_", "LOCK_ADC_", "LOCK_SBB_", "LOCK_AND_", "LOCK_SUB_", "LOCK_XOR_",
@@ -305,7 +324,7 @@ static bool x86_semantics_test_known_legacy(uint32_t form)
     }
     if (strncmp(name, "ROUNDSS_", 8) == 0 || strncmp(name, "ROUNDSD_", 8) == 0)
     {
-        known |= __builtin_cpu_supports("sse4.1") != 0;
+        known |= (features & BUSTER_X86_FEATURE(SSE41)) != 0;
     }
     return known && x86_form_descriptions[form].family == BUSTER_X86_FAMILY_LEGACY;
 }
@@ -429,8 +448,50 @@ static uint8_t x86_semantics_flags(uint64_t rflags)
     return result;
 }
 
-// A random state: random general and vector registers and status flags (DF clear), RSP the stack's top, and random
-// bytes in the data and stack pages.
+// A random x87 state, as an FXSAVE image: every exception masked, so that none traps, with a random precision (single,
+// double or extended) and rounding; random condition codes, exception flags and stack top; random tags; and registers
+// that are mostly normal numbers near 1 (an exponent within 16 of the bias), else random bits (NaNs, infinities, denormals
+// and unsupported encodings among them). MXCSR is the C code's, its status flags clear.
+static void x86_semantics_random_x87(uint64_t* state, uint8_t* image)
+{
+    static const uint16_t precisions[3] = { 0, 2, 3 };
+    memset(image, 0, 512);
+    const uint16_t control = (uint16_t)(0x007f | precisions[x86_random_below(state, 3)] << 8 | x86_random_below(state, 4) << 10);
+    const uint16_t status = (uint16_t)((x86_test_random(state) & 0x477f) | x86_random_below(state, 8) << 11);
+    const uint32_t mxcsr = _mm_getcsr() & ~0x3fu;
+    memcpy(image + BUSTER_X86_SEMANTICS_FX_CONTROL, &control, 2);
+    memcpy(image + BUSTER_X86_SEMANTICS_FX_STATUS, &status, 2);
+    image[BUSTER_X86_SEMANTICS_FX_TAGS] = (uint8_t)x86_test_random(state);
+    memcpy(image + BUSTER_X86_SEMANTICS_FX_MXCSR, &mxcsr, 4);
+    for (uint32_t r = 0; r < 8; r += 1)
+    {
+        uint64_t significand = x86_test_random(state);
+        uint16_t exponent = (uint16_t)x86_test_random(state);
+        if (x86_random_below(state, 4) != 0)
+        {
+            significand |= 1ull << 63;
+            exponent = (uint16_t)((exponent & 0x8000) | (0x3fff - 16 + x86_random_below(state, 33)));
+        }
+        memcpy(image + BUSTER_X86_SEMANTICS_FX_REGISTERS + 16 * r, &significand, 8);
+        memcpy(image + BUSTER_X86_SEMANTICS_FX_REGISTERS + 16 * r + 8, &exponent, 2);
+    }
+}
+
+// Whether two states' x87 states are the same, as the checks compare them: the status word, the tags and the registers,
+// and the control word too when `control`.
+static bool x86_semantics_x87_same(const X86SemanticsState* a, const X86SemanticsState* b, bool control)
+{
+    bool same = memcmp(a->x87 + BUSTER_X86_SEMANTICS_FX_STATUS, b->x87 + BUSTER_X86_SEMANTICS_FX_STATUS, 3) == 0;
+    same &= !control || memcmp(a->x87 + BUSTER_X86_SEMANTICS_FX_CONTROL, b->x87 + BUSTER_X86_SEMANTICS_FX_CONTROL, 2) == 0;
+    for (uint32_t r = 0; r < 8; r += 1)
+    {
+        same &= memcmp(a->x87 + BUSTER_X86_SEMANTICS_FX_REGISTERS + 16 * r, b->x87 + BUSTER_X86_SEMANTICS_FX_REGISTERS + 16 * r, 10) == 0;
+    }
+    return same;
+}
+
+// A random state: random general and vector registers and status flags (DF clear), RSP the stack's top, a random x87
+// state, and random bytes in the data and stack pages.
 static void x86_semantics_random_state(uint64_t* state, X86SemanticsMachine* machine, X86SemanticsState* result)
 {
     for (uint32_t g = 0; g < 16; g += 1)
@@ -447,6 +508,7 @@ static void x86_semantics_random_state(uint64_t* state, X86SemanticsMachine* mac
             memcpy(&result->vector[v][i], &bits, 8);
         }
     }
+    x86_semantics_random_x87(state, result->x87);
     for (uint32_t i = 0; i < BUSTER_X86_SEMANTICS_TEST_PAGE; i += 8)
     {
         const uint64_t bits = x86_test_random(state);
@@ -592,7 +654,7 @@ static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_MOVABS_AL_MOFFS,
     X86_FORM_RCL_RM64_1,
     X86_FORM_RORX_R32_RM32_IMM8,
-    X86_FORM_SHLD_RM64_R64_CL,
+    X86_FORM_SHLD_RM16_R16_CL,
     X86_FORM_CMPXCHG_RM64_R64,
     X86_FORM_XCHG_R64_RAX,
     X86_FORM_PUSHP_R64,
@@ -603,6 +665,12 @@ static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_PSHUFD_X_XM128_IMM8,
     X86_FORM_INT_IMM8,
     X86_FORM_ENTER,
+    X86_FORM_FXCH_ST,
+    X86_FORM_FNSTSW_AX,
+    X86_FORM_LDMXCSR_M32,
+    X86_FORM_VZEROALL,
+    X86_FORM_VMOVDQU8_Z_ZM512,
+    X86_FORM_VADDPS_Y_Y_YM256,
 };
 
 static bool x86_semantics_check_fixtures(void)
@@ -696,6 +764,14 @@ static bool x86_semantics_check_fixtures(void)
     x86_semantics_expect(&tally, covered + 1 == x86_effects_count, "%u covered forms, and %u records past the conservative one", covered, x86_effects_count - 1);
     printf("effects: %u covered forms of %u, %u records of %u bytes and an index of %u bytes\n", covered, (uint32_t)X86_FORM_COUNT, x86_effects_count,
            (uint32_t)sizeof(X86Effects), (uint32_t)sizeof(x86_effects_index));
+    // Every form number's record by x86_effects_by_form, as x86_semantics_row finds it (a segment override's copies, the
+    // fixup flag and the numbers past the copies among them).
+    bool by_form = true;
+    for (uint32_t number = 0; number < 2 * (BUSTER_X86_FORM_NUMBER + 1); number += 1)
+    {
+        by_form &= x86_effects(number) == &x86_effects_records[x86_effects_index[x86_semantics_row(number)]];
+    }
+    x86_semantics_expect(&tally, by_form, "x86_effects by form number is x86_semantics_row's record for every number");
     return x86_semantics_report(&tally);
 }
 
@@ -872,6 +948,108 @@ static bool x86_semantics_check_resolved(void)
             .writes = memory,
             .what = "mfence: orders every access",
         },
+        {
+            .record = { .form = X86_FORM_VPXORD_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 2 },
+            .reads = 0,
+            .writes = BUSTER_X86_RESOURCE_VECTOR(1),
+            .what = "vpxord xmm1, xmm2, xmm2: a zero idiom of its sources, which zeroes the rest of ZMM1",
+        },
+        {
+            .record = { .form = X86_FORM_VPXORD_X_X_XM128, .reg = 2, .vvvv = 1, .rm = 2 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(1) | BUSTER_X86_RESOURCE_VECTOR(2),
+            .writes = BUSTER_X86_RESOURCE_VECTOR(2),
+            .what = "vpxord xmm2, xmm1, xmm2: reg and rm alike, but its sources aren't: no idiom",
+        },
+        {
+            .record = { .form = X86_FORM_VPXORD_Z_Z_ZM512, .reg = 1, .vvvv = 1, .rm = 2, .decorations = 3 },
+            .reads = BUSTER_X86_RESOURCE_ALL,
+            .writes = BUSTER_X86_RESOURCE_ALL,
+            .what = "vpxord zmm1{k3}, zmm1, zmm2: an opmask, which the sets have no resource for",
+        },
+        {
+            .record = { .form = X86_FORM_VMOVDQU64_ZM512_Z, .reg = 7, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(7) | BUSTER_X86_RESOURCE_GPR(7),
+            .writes = memory,
+            .what = "vmovdqu64 [rdi], zmm7: a store",
+        },
+        {
+            .record = { .form = X86_FORM_VMOVDQU_Y_YM256, .reg = 3, .rm = 4 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(4),
+            .writes = BUSTER_X86_RESOURCE_VECTOR(3),
+            .what = "vmovdqu ymm3, ymm4: zeroes ZMM3's bits above 255, so doesn't read it",
+        },
+        {
+            .record = { .form = X86_FORM_VZEROUPPER },
+            .reads = BUSTER_X86_RESOURCE_LOWER_VECTORS,
+            .writes = BUSTER_X86_RESOURCE_LOWER_VECTORS,
+            .what = "vzeroupper: ZMM0 to ZMM15's bits above 127, the rest kept",
+        },
+        {
+            .record = { .form = X86_FORM_FLD_M80, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16 },
+            .reads = BUSTER_X86_RESOURCE_GPR(4) | memory | BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = BUSTER_X86_RESOURCE_X87,
+            .what = "fld tbyte [rsp + 16]",
+        },
+        {
+            .record = { .form = X86_FORM_FSTP_M80, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE },
+            .reads = BUSTER_X86_RESOURCE_GPR(4) | BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = memory | BUSTER_X86_RESOURCE_X87,
+            .what = "fstp tbyte [rsp]",
+        },
+        {
+            .record = { .form = X86_FORM_FADDP_ST_ST0, .rm = 1 },
+            .reads = BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = BUSTER_X86_RESOURCE_X87,
+            .what = "faddp st(1), st(0): its registers are the x87's state, not general registers",
+        },
+        {
+            .record = { .form = X86_FORM_FUCOMIP_ST0_ST, .rm = 1 },
+            .reads = BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = BUSTER_X86_RESOURCE_X87 | status,
+            .what = "fucomip st(0), st(1): every status flag",
+        },
+        {
+            .record = { .form = X86_FORM_FCMOVBE_ST0_ST, .rm = 2 },
+            .reads = BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL | (uint64_t)(BUSTER_X86_FLAG_CF | BUSTER_X86_FLAG_ZF) << BUSTER_X86_RESOURCE_FLAGS_SHIFT,
+            .writes = BUSTER_X86_RESOURCE_X87,
+            .what = "fcmovbe st(0), st(2)",
+        },
+        {
+            .record = { .form = X86_FORM_FLDCW_M16, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -2 },
+            .reads = BUSTER_X86_RESOURCE_GPR(4) | memory | BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .what = "fldcw [rsp - 2]: the control word",
+        },
+        {
+            .record = { .form = X86_FORM_FNSTCW_M16, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -2 },
+            .reads = BUSTER_X86_RESOURCE_GPR(4) | BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = memory | BUSTER_X86_RESOURCE_X87,
+            .what = "fnstcw [rsp - 2]: leaves the condition codes undefined",
+        },
+        {
+            .record = { .form = X86_FORM_SHLD_RM64_R64_CL, .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RAX },
+            .reads = BUSTER_X86_RESOURCE_GPR(0) | BUSTER_X86_RESOURCE_GPR(1) | BUSTER_X86_RESOURCE_GPR(2) | status,
+            .writes = BUSTER_X86_RESOURCE_GPR(0) | status,
+            .what = "shld rax, rdx, cl: the flags pass through for a count of 0",
+        },
+        {
+            .record = { .form = X86_FORM_SHRD_RM32_R32_IMM8, .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RAX, .immediate = 32 },
+            .reads = BUSTER_X86_RESOURCE_GPR(0) | BUSTER_X86_RESOURCE_GPR(2),
+            .writes = BUSTER_X86_RESOURCE_GPR(0),
+            .what = "shrd eax, edx, 32: masked to 0, no flags",
+        },
+        {
+            .record = { .form = X86_FORM_STMXCSR_M32, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 },
+            .reads = BUSTER_X86_RESOURCE_GPR(4) | BUSTER_X86_RESOURCE_MXCSR,
+            .writes = memory,
+            .what = "stmxcsr [rsp + 8]",
+        },
+        {
+            .record = { .form = X86_FORM_PUSHW_IMM8, .immediate = -56 },
+            .reads = BUSTER_X86_RESOURCE_GPR(4),
+            .writes = BUSTER_X86_RESOURCE_GPR(4) | memory,
+            .what = "pushw -56",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -969,8 +1147,9 @@ static bool x86_semantics_check_resolved(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // The effects table, executed
 
-// A random register for an operand descriptor: a vector register, or a general one but RSP (the harness's stack) and
-// SPL, sometimes AH to BH for a byte register (x86_validate refuses those beside REX, and the caller retries).
+// A random register for an operand descriptor: a vector register (of the 16 the harness has), an x87 one, or a general
+// one but RSP (the harness's stack) and SPL, sometimes AH to BH for a byte register (x86_validate refuses those beside
+// REX, and the caller retries).
 static uint8_t x86_semantics_random_register(uint64_t* state, uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
@@ -978,6 +1157,10 @@ static uint8_t x86_semantics_random_register(uint64_t* state, uint16_t descripto
     if (class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM)
     {
         result = (uint8_t)x86_random_below(state, 16);
+    }
+    else if (class == BUSTER_X86_CLASS_ST)
+    {
+        result = (uint8_t)x86_random_below(state, 8);
     }
     else if (class == BUSTER_X86_CLASS_GPR8 && x86_random_below(state, 4) == 0)
     {
@@ -1176,8 +1359,16 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                 const bool upper_kept = memcmp(output.vector[v] + 16, input.vector[v] + 16, 48) == 0;
                 x86_semantics_expect(tally, !written || !(effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || upper_kept,
                                      "%s changed vector register %u's bits above 127", x86_semantics_test_case, v);
+                const bool zeroes_upper = (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) != 0;
+                x86_semantics_expect(tally, !zeroes_upper || (memcmp(output.vector[v], input.vector[v], 16) == 0 && x86_semantics_zero_bytes(output.vector[v], 16, 64)),
+                                     "%s didn't keep ZMM%u's low 128 bits and zero the rest", x86_semantics_test_case, v);
             }
         }
+        // The x87's state: kept by a form that doesn't write it, and its control word by one that doesn't load it.
+        x86_semantics_expect(tally, (writes & BUSTER_X86_RESOURCE_X87) || x86_semantics_x87_same(&input, &output, false), "%s changed the x87's state, which it doesn't write",
+                             x86_semantics_test_case);
+        x86_semantics_expect(tally, (writes & BUSTER_X86_RESOURCE_X87_CONTROL) || memcmp(input.x87, output.x87, 2) == 0, "%s changed the x87's control word, which it doesn't write",
+                             x86_semantics_test_case);
         const uint8_t values[BUSTER_X86_ROLES] = { record->reg, record->rm, record->vvvv };
         // Two operands that write the same register (xchg al, ah) each change the other's bytes: their rests aren't checked.
         const uint32_t reg_bits = x86_effects_role(effects, BUSTER_X86_ROLE_REG);
@@ -1197,8 +1388,11 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                     const uint8_t* after = output.vector[value & 15];
                     const bool zeroes = rest == BUSTER_X86_REST_ZERO || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && memory);
                     const bool keeps = rest == BUSTER_X86_REST_MERGE || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && !memory);
-                    x86_semantics_expect(tally, !zeroes || x86_semantics_zero_bytes(after, effects->write_bytes, 16), "%s didn't zero XMM%u's bytes %u to 15",
-                                         x86_semantics_test_case, value & 15, effects->write_bytes);
+                    // A legacy SSE form's rest ends at byte 15 (it keeps the bits above 127); a VEX or EVEX form's at the
+                    // register's end, as far as the harness's state reaches.
+                    const uint32_t end = (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || !x86_semantics_test_wide ? 16 : 64;
+                    x86_semantics_expect(tally, !zeroes || x86_semantics_zero_bytes(after, effects->write_bytes, end), "%s didn't zero vector register %u's bytes %u to %u",
+                                         x86_semantics_test_case, value & 15, effects->write_bytes, end - 1);
                     x86_semantics_expect(tally, !keeps || memcmp(after + effects->write_bytes, before + effects->write_bytes, 16 - effects->write_bytes) == 0,
                                          "%s didn't keep XMM%u's bytes %u to 15", x86_semantics_test_case, value & 15, effects->write_bytes);
                     changes->roles_changed |= memcmp(before, after, 16) != 0 ? 1u << role : 0;
@@ -1292,6 +1486,10 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                 }
             }
         }
+        if (!(reads & BUSTER_X86_RESOURCE_X87))
+        {
+            x86_semantics_random_x87(state, second_input.x87);
+        }
         memcpy(machine->data, data, sizeof(data));
         memcpy(machine->stack, stack, sizeof(stack));
         second_output = second_input;
@@ -1310,6 +1508,8 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
                                  "%s wrote vector register %u from something it doesn't read",
                                  x86_semantics_test_case, v);
         }
+        x86_semantics_expect(tally, !(writes & BUSTER_X86_RESOURCE_X87) || x86_semantics_x87_same(&second_output, &output, true),
+                             "%s wrote the x87's state from something it doesn't read", x86_semantics_test_case);
         const uint8_t defined_difference = (x86_semantics_flags(second_output.flags) ^ x86_semantics_flags(output.flags)) & flags_written;
         x86_semantics_expect(tally, defined_difference == 0, "%s defined flags %#x from something it doesn't read", x86_semantics_test_case, defined_difference);
         x86_semantics_expect(tally, memcmp(machine->data, data_after, sizeof(data_after)) == 0 && memcmp(machine->stack, stack_after, sizeof(stack_after)) == 0,
@@ -1385,6 +1585,8 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     uint32_t witness_runs = 0;
     uint32_t never_shown = 0;
     uint32_t unavailable = 0;
+    uint32_t unclassified = 0;
+    uint16_t unavailable_forms[32];
     uint32_t wide_state = 0;
     for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
     {
@@ -1395,6 +1597,13 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
         }
         else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_native[form])
         {
+            // #180's table leaves the form unclassified (unavailable on every target), or the host lacks a feature it
+            // requires.
+            unclassified += x86_target_requirement(form) == 0;
+            if (unavailable < 32)
+            {
+                unavailable_forms[unavailable] = (uint16_t)form;
+            }
             unavailable += 1;
         }
         else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_wide && x86_form_descriptions[form].family != BUSTER_X86_FAMILY_LEGACY)
@@ -1433,7 +1642,13 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     printf("effects: %u covered forms executed %u times each and %u more until every write showed (%u forms with one that never did), %u that branch, call, "
            "return or trap left to the fixtures\n",
            forms, runs, witness_runs, never_shown, skipped);
-    printf("effects: %u covered forms require unavailable host features\n", unavailable);
+    printf("effects: %u covered forms not executed, %u of them unclassified by #180's table and the rest of features this host lacks", unavailable,
+           unclassified);
+    for (uint32_t i = 0; i < unavailable && i < 32; i += 1)
+    {
+        printf("%s %s", i == 0 ? ":" : "", x86_semantics_test_name(unavailable_forms[i]));
+    }
+    printf("\n");
     if (wide_state != 0)
     {
         printf("effects: %u covered vector-encoded forms skipped (the harness captures only 128-bit state)\n", wide_state);
@@ -2468,6 +2683,9 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
                 records[i].reg |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_REGISTER_HIGH_BYTE : 0;
             }
             records[i].rm = x86_random_below(&state, 4) == 0 ? records[i].reg : records[i].rm;
+            // An opmask only where x86_validate takes one, an EVEX form's: any other form's record has none.
+            const bool evex = x86_form_descriptions[x86_semantics_row(form)].family == BUSTER_X86_FAMILY_EVEX;
+            records[i].decorations = evex ? records[i].decorations : (uint8_t)(records[i].decorations & ~BUSTER_X86_DECORATION_MASK);
         }
         x86_instructions_effects_scalar(records, count, scalar_reads, scalar_writes);
         x86_instructions_effects(records, count, vector_reads, vector_writes);
@@ -2577,43 +2795,76 @@ static bool x86_semantics_check_target(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // x86_match's agreement
 
-// The assembler's matcher (x86_match.c) keeps immediate ranges of its own: on the forms its syntax supports whose immediate is a
-// value, the shared rule must take every value it takes. It takes fewer: not the unsigned spelling of a sign-extended
-// pattern (0xffffffff for an imm8 at 32 bits, which is -1), which the shared rule takes. Those are counted, not failed.
+// The assembler's matcher (x86_match.c) takes its values' immediates from the shared rule: on every form its syntax
+// supports whose immediate is a value, x86_match_immediate (its scalar path, the vector path's oracle) must take exactly
+// the values x86_immediate_encodes takes, the unsigned spellings of sign-extended patterns among them (0xffffffff for an
+// imm8 at 32 bits, which is -1, and 2^64 - 128 for one at 64 bits), and an __int128 past the operation's width none
+// (2^32 + 5 at 32 bits, whose low 32 bits would fit). Every form it reads as sign-extending (x86_match_sign_extends) must
+// be such a value's form, with a field narrower than the operation, so that its fallback for other immediates never
+// meets one; and its intervals (x86_match_range) must give the same answers as the rule.
 static bool x86_semantics_check_match(void)
 {
     X86SemanticsTally tally = {
-        .check = "x86_match: its immediate ranges against the shared rule",
+        .check = "x86_match: its immediates against the shared rule",
     };
     uint64_t forms = 0;
-    uint64_t agreed = 0;
-    uint64_t unsigned_spellings = 0;
+    uint64_t values = 0;
+    uint64_t spellings = 0;
+    static const __int128 beyond[] = {
+        (__int128)UINT64_MAX,
+        (__int128)UINT64_MAX - 127,
+        (__int128)UINT64_MAX - 128,
+        (__int128)UINT64_MAX - 0x7fffffff,
+        (__int128)UINT64_MAX - 0x80000000ll,
+        (__int128)INT64_MAX + 1,
+        (__int128)UINT64_MAX + 1,
+        (__int128)INT64_MIN - 1,
+        ((__int128)1 << 32) + 5,
+        ((__int128)1 << 32) - 1,
+        ((__int128)1 << 32) - 128,
+        ((__int128)1 << 32) - 129,
+        ((__int128)1 << 16) - 128,
+        ((__int128)1 << 16) - 129,
+    };
     for (uint32_t form = 1; form < BUSTER_X86_FORM_LEGACY_MODES; form += 1)
     {
         const X86FormDescription* description = &x86_form_descriptions[form];
         const X86Effects* effects = x86_effects(form);
-        if (x86_match_supported(description) && description->immediate_bytes != 0 && x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE)
+        const bool value = description->immediate_bytes != 0 && x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE;
+        if (x86_match_supported(description) && x86_match_sign_extends(description))
+        {
+            x86_semantics_expect(&tally, value && description->immediate_bytes < effects->width, "%s: x86_match sign-extends it, but it isn't a value's form narrower than its width",
+                                 x86_semantics_test_name(form));
+        }
+        if (x86_match_supported(description) && value)
         {
             forms += 1;
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_semantics_values); i += 1)
+            const X86MatchRange range = x86_match_range(form);
+            const uint32_t total = BUSTER_ARRAY_LENGTH(x86_semantics_values) + BUSTER_ARRAY_LENGTH(beyond);
+            for (uint32_t i = 0; i < total; i += 1)
             {
-                const int64_t value = x86_semantics_values[i];
+                const __int128 operand_value = i < BUSTER_ARRAY_LENGTH(x86_semantics_values) ? (__int128)x86_semantics_values[i] : beyond[i - BUSTER_ARRAY_LENGTH(x86_semantics_values)];
                 const X86Operand operand = {
-                    .value = value,
+                    .value = operand_value,
                     .kind = X86_OPERAND_IMMEDIATE,
                 };
+                const uint32_t width = effects->width;
+                const bool of_width = operand_value >= -((__int128)1 << (8 * width - 1)) && operand_value <= ((__int128)1 << (8 * width)) - 1;
+                const bool ours = of_width && x86_immediate_encodes(form, (int64_t)operand_value);
                 const bool theirs = x86_match_immediate(description, &operand);
-                const bool ours = x86_immediate_encodes(form, value);
-                const bool unsigned_spelling = ours && !theirs && value > 0 && description->immediate_bytes < effects->width;
-                x86_semantics_expect(&tally, theirs == ours || unsigned_spelling, "%s, %lld: x86_match %s it, the shared rule %s", x86_semantics_test_name(form), (long long)value,
-                                     theirs ? "takes" : "refuses", ours ? "takes" : "refuses");
-                agreed += theirs == ours;
-                unsigned_spellings += unsigned_spelling;
+                const uint64_t bits = (uint64_t)operand_value;
+                const bool interval = operand_value >= INT64_MIN && operand_value <= (__int128)UINT64_MAX &&
+                                      (operand_value < 0 ? (int64_t)bits >= range.min : bits <= range.max || bits - range.spelling <= range.max);
+                x86_semantics_expect(&tally, theirs == ours && interval == ours, "%s, 0x%016llx%016llx: x86_match %s it, its intervals %s it, the shared rule %s",
+                                     x86_semantics_test_name(form), (unsigned long long)((unsigned __int128)operand_value >> 64), (unsigned long long)bits,
+                                     theirs ? "takes" : "refuses", interval ? "take" : "refuse", ours ? "takes" : "refuses");
+                values += 1;
+                spellings += ours && operand_value > 0 && description->immediate_bytes < width && (uint64_t)operand_value > (uint64_t)range.max;
             }
         }
     }
-    printf("x86_match: %llu forms it supports with a value immediate, %llu value pairs agree, %llu unsigned spellings it refuses and the shared rule takes\n",
-           (unsigned long long)forms, (unsigned long long)agreed, (unsigned long long)unsigned_spellings);
+    printf("x86_match: %llu forms it supports with a value immediate, %llu values, %llu of them unsigned spellings it takes as the shared rule does\n",
+           (unsigned long long)forms, (unsigned long long)values, (unsigned long long)spellings);
     return x86_semantics_report(&tally);
 }
 
@@ -2797,14 +3048,14 @@ static int run_x86_semantics_tests(int argc, char** argv)
         x86_target_forms(&native, x86_semantics_test_native);
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (x86_target_requirement(form) == 0 && x86_semantics_test_known_legacy(form))
+            if (x86_target_requirement(form) == 0 && x86_semantics_test_known_legacy(form, native.features))
             {
                 x86_semantics_test_native[form] = 1;
             }
         }
         // RORX's substitution fixture executes it even though the effects table does not cover it.
-        x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = __builtin_cpu_supports("bmi2") != 0;
-        x86_semantics_test_wide = __builtin_cpu_supports("avx512f") != 0;
+        x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = (native.features & BUSTER_X86_FEATURE(BMI2)) != 0;
+        x86_semantics_test_wide = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
         if (!x86_semantics_test_wide)
         {
             printf("x86 semantics: native vector state checked through 128 bits (AVX-512 unavailable)\n");

@@ -2,14 +2,17 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's measurement on real C (benchmark-backend-source): benchmark-backend's variants (tier0_benchmark_measure.c),
-// Tier 0's vector path, its scalar twin, branch sizing and encoding, on the functions the driver's -c compiles. Include
-// after c_lowering_source_benchmark.c.
+// Tier 0's vector path, its scalar twin, branch sizing, encoding, the validation and the immediates' form choice (#221),
+// on checked functions' typed streams. Include after c_lowering_source_benchmark.c.
 //
-//   build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode] [--after-scalar MS]
-//                                           [preprocessor options] file...
+//   build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+//                                           [--after-scalar MS] [preprocessor options] file...
 //
-// Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), and the definitions -c
-// lowers (check_program_select_mode's C_LOWERING_REACHABLE) lowered and emitted by check_program_emit, outside the time.
+// Each file is checked as the driver checks it (the vector path, check_corpus_check_policy), and its reachable
+// definitions (check_program_select_mode's C_LOWERING_REACHABLE) lowered and emitted by check_program_emit, outside the time.
+// Admission ends at function emission: static-data publication and object-section placement (including descriptors
+// for assembled file-scope atoms) are outside this benchmark. A valid typed function stream can be measured when
+// whole-object publication is unsupported; use the driver/corpus object checks to establish that eligibility.
 // Their typed streams stay in an arena that outlives the file's other state, with the symbols' access given again
 // (check_program_access), and join one corpus of every file's functions, which the benchmark measures as
 // benchmark-backend measures generated ones: both paths must give each function the same records, then the medians of
@@ -271,7 +274,7 @@ static int run_backend_source_benchmark(int count, char** arguments)
     valid = valid && backend_source_files(&source, files, file_count, options, option_count, only, after_scalar, (BackendSourceFault){ 0 });
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|scalar|sizing|encode] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar] [--after-scalar MS] [preprocessor options] file...\n");
     }
     free(files);
     free(options);

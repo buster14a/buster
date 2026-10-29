@@ -1096,12 +1096,36 @@ jobs:
           done
 
       - name: Benchmark the backend (Tier 0, branch sizing and encoding)
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,') || contains(env.MEASURE, ',streaming,')
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend,') || contains(env.MEASURE, ',unwind,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
-          taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
+
+      - name: Benchmark streaming on distinct physical cores
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',streaming,')
+        run: |
+          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
+          mapfile -t core_cpus < <(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
+              BEGIN {
+                  n = split(allowed, ranges, ",")
+                  for (r = 1; r <= n; r++) {
+                      m = split(ranges[r], ends, "-")
+                      last = m == 2 ? ends[2] : ends[1]
+                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
+                  }
+              }
+              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && count++ < 8 { print $1 }
+          ')
+          test "${#core_cpus[@]}" -gt 0
+          printf -v placement '%s,' "${core_cpus[@]}"
+          placement="${placement%,}"
+          writer=()
+          if [ "${#core_cpus[@]}" -ge 2 ]; then
+            writer=(--cpus "${core_cpus[0]},${core_cpus[1]}")
+          fi
+          printf 'Streaming: allowed CPUs=%s; distinct-core CPUs=%s; lanes=%s\n' "$allowed" "$placement" "${#core_cpus[@]}"
+          taskset -c "$placement" ./build/compiler benchmark-streaming --units 100 --runs 5 --lanes "${#core_cpus[@]}" "${writer[@]}"
 
       - name: Benchmark the backend on the frozen SQLite source's functions
         # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
@@ -1141,6 +1165,30 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+
+      - name: Benchmark the IR of the frozen SQLite source's functions
+        # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
+        # largest functions' shares, then lowering, verification and promotion per typed entry by both paths, after both
+        # lowerings agree on every function and both promotions verify. benchmark-backend-source's options.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-source,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-source "${source[@]}"
+
+      - name: Benchmark the IR lowering of the frozen SQLite source's functions after scalar work
+        # Where `changes` doesn't rule it out (the lowering's sources).
+        if: needs.changes.outputs.ir_lowering != 'false'
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower --after-scalar 200 "${source[@]}"
 
       - name: Benchmark the verified Tier 1 optimization passes
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-optimize,') || contains(env.MEASURE, ',ir-optimize-passes,')

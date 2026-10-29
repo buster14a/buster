@@ -13,7 +13,7 @@ harness.
 ## The command
 
 ```sh
-./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--cross-check] [--keep] DIR
+./build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] [--id-order N] [--cross-check] [--keep] DIR
 ./build/compiler test-c-testsuite --self-test
 ```
 
@@ -25,8 +25,10 @@ For each, the harness:
 1. compiles and links it with `compiler --verify NAME.c -o program -lm` (the
    vector paths, every function's records checked by `x86_validate`, with libm
    as the cross-check's `cc` links it) and with `--scalar` too (the scalar
-   twins): the two executables must be the same bytes, or the two refusals the
-   same diagnostics;
+   twins), its identifiers' IDs in another order (the driver's `--id-order`,
+   [#153](https://github.com/buster14a/buster/issues/153)'s test option, the
+   Nth test's from `--id-order N` on, 153 by default): the two executables must
+   be the same bytes, or the two refusals the same diagnostics;
 2. runs the program in a directory of its own, with standard input from
    `/dev/null`, under `--timeout` (10 s; a compile gets 120 s), killing its
    process group at the deadline;

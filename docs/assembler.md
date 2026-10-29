@@ -195,6 +195,13 @@ form can represent `-128..127`, so `add rax,200` uses a wider form. Whole-width
 fields accept signed values or unsigned bit patterns of their width.
 The assembler canonicalizes a whole-width unsigned spelling before matching:
 `andw $65535,%si` chooses the same sign-extended imm8 as `andw $-1,%si`.
+The matcher takes a value's immediate by the compiler's own rule
+(`x86_immediate_encodes`, [the x86 semantics](x86-semantics.md)) and writes its
+field's bits (`x86_immediate_field`), so an unsigned spelling of a sign-extended
+pattern takes the shorter field without a register to give its width too:
+`pushw $0xffc8` is `66 6a c8`, as GNU as assembles it. A count or a control
+byte takes the field's bits, signed or unsigned. `x86_match_initialize` needs
+`x86_semantics_initialize` first.
 Relocations are PC32/PLT32, ABS32/ABS32S and ABS64 with explicit signed 64-bit
 addends. Symbolic byte/word data, nonrepresentable expressions and oversized
 fields fail instead of truncating. Absolute memory uses signed disp32; 16/32-bit

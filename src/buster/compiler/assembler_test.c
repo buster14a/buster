@@ -605,6 +605,17 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
         UINT64_MAX,
         (__int128)UINT64_MAX + 1,
         (__int128)INT64_MIN - 1,
+        // The unsigned spellings of sign-extended patterns at each width, which #221's rule takes, and the values next
+        // to them, which it doesn't; and one past 32 bits whose low 32 bits would fit.
+        0xff80,
+        0xff7f,
+        0xffffff80,
+        0xffffff7f,
+        (__int128)UINT64_MAX - 127,
+        (__int128)UINT64_MAX - 128,
+        (__int128)UINT64_MAX - 0x7fffffff,
+        (__int128)UINT64_MAX - 0x80000000ll,
+        ((__int128)1 << 32) + 5,
     };
     uint32_t length_checks = 0;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
@@ -840,7 +851,7 @@ static void asm_test_code(AsmTest* test)
     asm_test_code_pair(test, "  # a comment, %eax\n\n", 0, "inline code: a comment alone");
     // The newly admitted processor-state instructions, each a record.
     asm_test_code_pair(test, "cpuid\nxgetbv\nxchgq %rbx,%rsi\nfnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\npcmpeqd %xmm1,%xmm2\n"
-                             "bswapl %eax\nbswapq %r9", 12,
+                             "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
                        "inline code: processor-state instructions");
     // Symbols the source doesn't define: references by name, a call's preemptible, the records marked.
     const AsmCode symbols = asm_test_code_pair(test, "call external\n\tmovq data+8(%rip), %rax\n\tmovl $sym+4, %eax", 3, "inline code: references");
@@ -1215,7 +1226,7 @@ static int run_assembler_tests(int count, char** arguments)
             .scalar = arena_reserve(1ull << 30),
             .vector = arena_reserve(1ull << 30),
     };
-    valid = valid && test.index != 0 && x86_encoder_initialize();
+    valid = valid && test.index != 0 && x86_encoder_initialize() && x86_semantics_initialize();
     if (valid)
     {
         const X86Target baseline = {0};
@@ -1392,6 +1403,12 @@ static int run_assembler_tests(int count, char** arguments)
             {
                 asm_test_oracle(&test, asm_test_function, directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nfixture: test al,200\ntest ax,200\ntest eax,200\ntest rax,200\nnop dword ptr [rax]\n", directory, 0);
+                // The unsigned spellings of sign-extended patterns, which #221's rule takes as GNU as does (the imm8 of
+                // add eax, 0xffffffff is -1), beside the values next to them, which need the wider field.
+                asm_test_oracle(&test, ".intel_syntax noprefix\nspellings: add eax,0xffffffff\nadd ecx,0xffffff80\nadd cx,0xffff\nadd cx,0xff80\n"
+                                       "imul eax,ecx,0xffffffff\npush 0xffffffffffffffff\nand rax,0xffffffffffffff80\ncmp ecx,0xffffff7f\n"
+                                       "mov rax,0xffffffff80000000\npushw 0xffc8\nadd rax,0xffffffffffffff80\nsub esi,0xffffff7f\ntest ecx,0xffffffff\n"
+                                       "add dword ptr [rdi],0xfffffffe\n.att_syntax prefix\naddl $0xffffffff,%eax\npushw $0xff80\n", directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\n.text\nf: mov rax,200\nadd rax,200\nsub rcx,-129\nret\n.data\n.globl x\n.type x,@object\nx: .quad f+4, ext-8\n.size x,16\n", directory, 0);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nsimd:\nmov ah,bl\nmov r8,[r12+r9*4-129]\nmov eax,dword ptr fs:[8]\naddps xmm1,xmm2\nvaddps ymm1,ymm2,ymm3\nvaddps zmm1{k2}{z},zmm2,zmm3\nvaddps zmm1,zmm2,dword ptr [rax]{1to16}\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
@@ -1400,7 +1417,8 @@ static int run_assembler_tests(int count, char** arguments)
                 // The processor-state instructions C's inline assembly reaches (#147).
                 asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"
                                        "fnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\n"
-                                       "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n", directory, X86_ARCH_V3);
+                                       "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n"
+                                       "fxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)\nfxsave (%r12,%rcx,4)\nfxrstor64 (%r13)\n", directory, X86_ARCH_V3);
                 // And naked functions' (#147): SSE2's movq, the x87's loads and stores, the string instructions, the flags,
                 // and AVX-512's 64-bit element moves.
                 asm_test_oracle(&test, ".text\nnaked: movq 56(%r12),%xmm0\nmovq %xmm1,160(%r12)\nmovq %rax,%xmm2\nmovq %xmm3,%rcx\nmovq %xmm4,%xmm5\n"

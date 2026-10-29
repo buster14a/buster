@@ -363,15 +363,25 @@ did (the same counts and object bytes). So does a run that measures no file.
 injected where the real ones arise, with the status each would have
 (`c_lowering_source_benchmark_test.c`).
 
-The issue's case is `main.c`'s unit, whose intrinsic headers define about 5,200
-inline functions of which the compiler uses about 50. It can't be measured yet:
+The issue's case is `main.c`'s unit, whose headers define 5,424 inline
+functions, the intrinsics among them, of which the compiler's own functions
+reach 358. It can't be measured yet. Since #543 the checker refuses the unit at
+its `#pragma clang section` lines, and `-c` its file-scope `asm`
+([#619](https://github.com/buster14a/buster/issues/619)). Without those lines,
+the lowering takes vector types and their operators
+([the checker guide](c-checker.md#backend-handoff)), and `-c` of the unit with
+`build.sh`'s flags for the 9700X (`-march=znver5`) selects 8,489 functions,
+lowers 7,966 and refuses 523, by their first refusal (2026-10-27,
+[the survey](https://github.com/buster14a/buster-performance/tree/b2e5db81/docs/measurements/main-c-lowering-survey-136-2026-10-27)):
 
-- the checker refuses four of its expressions, three AVX-512 builtins outside
-  [#148](https://github.com/buster14a/buster/issues/148)'s frozen own-main scope
-  (`__builtin_ia32_prold512`, `__builtin_ia32_gathersiv16si`,
-  `__builtin_ia32_vec_ext_v16qi`) and `#pragma clang loop`;
-- Tier 0 lowers no vector types, so none of the compiler's own functions, nor
-  the intrinsics they call, can be lowered either way.
+- 520 for vector, x86 and bit-cast builtins (#148);
+- 2 for inline assembly operands of vector types in their constraints'
+  registers (`shift_in_previous` and `encode_group`, #147);
+- 1 for a `_BitInt` (`cbuiltin_test_overflow`).
+
+With `--lower-all`, 8,738 of the unit's 13,850 definitions lower; most of the
+others wait for the intrinsics' builtins (4,856), MMX's 8-byte vectors (174) or
+AVX512-FP16's `_Float16` (79).
 
 Where it works today, selection lets units compile that lowering everything
 can't: of musl's math files, the referenced definitions lower and all of them
@@ -394,7 +404,7 @@ includes it:
 
 A program that skips nothing costs the same either way, so the selection's own
 work is in the noise. These are small units: the measurement that matters,
-`main.c`'s, waits on the two items above.
+`main.c`'s, waits on the items above.
 
 That comparison is within one tree. Against main, on the same work, a harness of
 `benchmark-lowering-source` reduced to the driver's selection
@@ -467,7 +477,10 @@ after the function lanes (#151), the change merged with it is −19.8% in all,
 record's synthetic units of 200 and 2,000 definitions, whose few tokens leave the
 whole-unit passes little to cost, −3.7 to −7.9%. The Xeon gave −25.5% in all
 against main before #418, and +4.0% under 300 tokens. The smallest units, which
-have few tokens to skip, keep a fixed cost: chiefly the ABI classification of
-the 64 builtin types on every lowering, whose rows are the same for every unit
-of a configuration but would need state that `main.c`'s units share to cache.
+have few tokens to skip, kept a fixed cost: chiefly the ABI classification of
+the 42 present builtin types in the 64-index builtin prefix on every lowering.
+The later [immutable builtin projection](calling-convention.md#immutable-builtin-facts-442)
+reuses those rows without a mutable cross-unit cache; derived classifications
+and dependency scheduling remain private to each unit. The historical numbers
+above predate that change and do not measure its effect.
 These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.

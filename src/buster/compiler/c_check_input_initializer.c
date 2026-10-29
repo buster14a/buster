@@ -70,6 +70,15 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         }
         else
         {
+            uint32_t embed_length = 0;
+            const uint8_t* embed = parse_embed_bytes(parser, token, &embed_length);
+            if (embed != NULL && token > begin && token + 1 < end &&
+                (parser->tokens.kinds[token - 1] == PARSE_KIND_L_BRACE || parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA ||
+                 parser->tokens.kinds[token - 1] == PARSE_KIND_EQUAL) &&
+                (parser->tokens.kinds[token + 1] == PARSE_KIND_COMMA || parser->tokens.kinds[token + 1] == PARSE_KIND_R_BRACE))
+            {
+                reader->initializers[token] = 3;
+            }
             item = false;
             if (kind == PARSE_KIND_STRING)
             {
@@ -180,6 +189,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             if (reader->linkage[declaration] != 0)
             {
                 reader->linked_types[name] = type;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
             }
         }
     }

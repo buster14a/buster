@@ -21,7 +21,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Structs and unions passed and returned by value** (#137), in registers, on the stack and through a hidden pointer,
   from #137's locations ("Structs and unions by value", below), and **variadic functions' incoming frames** (#356).
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
-  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15).
+  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
+  the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
@@ -35,7 +36,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
-  values at once, among them calls of up to 64 arguments, in frame slots ("Deep values", below).
+  values at once, among them calls of at least 127 arguments and calls with aggregate arguments, in frame slots
+  ("Deep values", below).
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -52,8 +54,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
-- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on the functions `-c` compiles
+- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
   of C files, `sqlite3.c`'s among them ("Measurements", below).
+  The source benchmark admits the reachable functions through typed emission.
+  Static-data publication and object-section placement, including assembled
+  file-scope atoms' section descriptors, are outside its validation scope.
+  For example, a valid function stream under a named `.note.*` section can be
+  measured even when whole-object publication explicitly refuses that section.
+  The driver and corpus object checks establish whole-object eligibility.
 
 - **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
@@ -78,6 +86,13 @@ exact rules):
 Each function may have up to 16,777,216 entries and 16,777,216 locals, including parameters and lowering temporaries
 (`BUSTER_TIER0_MAX_ENTRIES`, `BUSTER_TIER0_MAX_LOCALS`). Local identities and homes use 32-bit indices; #622 removed
 the former 65,536-local cap. Available arena memory and representable frame displacements still bound compilation.
+Per-entry instruction counts use 32 bits, including a call's complete aggregate copies. Both paths accumulate the
+prologue/body/epilogue total in 64 bits and refuse output before allocation when its record identities, including
+emission padding, cannot fit 32 bits. Available arena memory remains a separate bound.
+Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), within the 240-depth storage bound. An indirect
+call also holds its callee, so 238 simple arguments fit that bound; expressions inside arguments can need additional
+live values. Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
+Clang cross-checks. Beyond the argument bound, the C driver names the 239-argument limit.
 The C driver names an exhausted entry or local limit separately from insufficient lowering storage. Its
 `test-checker-driver` regression compiles 32,768 blocks with 65,537 locals through both paths, compares the objects,
 and runs their code against an unsigned arithmetic loop and clang.
@@ -137,11 +152,14 @@ table. The kinds are:
 - the stack, for variable-length arrays, each U64 with no value:
   - `ALLOCA` pops a byte count, rounds it up to 16 (to the frame's alignment in a realigned frame, so that rsp keeps
     it), takes it from the stack and pushes the allocation's address, a multiple of 16;
-  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it.
+  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it;
+  - `FRAME_ADDRESS` pushes the frame's address, its frame pointer: where the prologue's push saved the caller's rbp,
+    under the return address, as clang -O0's frame has it.
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
   none: the epilogue releases the frame. That a restored position is an earlier save's is the producer's to keep.
+  `__builtin_alloca` is an `ALLOCA` of its own, which a block's restore releases where clang's `stackrestore` does.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -451,12 +469,18 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
   32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
 - the opmask registers by number, k0 to k7, which no value keeps between entries.
 
-`tier0_operation_valid` checks each row: VEX and EVEX forms alone, their operands in their fields (no implicit
-register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
-registers), no branch, symbol or RIP-relative address, each field's role of its class (an integer operand's no
-narrower than its field), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
-registers and memory through its addresses, and nothing else; which forms a unit's target allows is the front end's to
-decide (#180's policy), as the instruction set of its rows is.
+`tier0_operation_valid` checks each row: VEX and EVEX forms, their operands in their fields (no implicit register:
+`vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of registers but
+VP2INTERSECT's opmask pair, two of the opmask registers no value keeps), and the legacy forms
+`tier0_operation_legacy_forms` lists, for the x86 builtins VEX and EVEX have no form of (#148: the flags' tests' `mov`
+and `cmovcc`, `adc`, `sbb`, `neg`, `crc32`, `rdrand`, the FS and GS bases, the non-temporal and direct stores, the
+cache lines', `fxsave` (not `fxrstor`, which writes the XMM registers floating values live in), the shadow stack's,
+SHA's and SSE4A's, whose XMM registers are below 16 as VEX's are); no branch, symbol or RIP-relative address, each
+field's role of its class (an integer operand's no narrower than its field, the integer result's in a field of 32 or
+64 bits), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its
+result, its scratch registers, the opmask registers, the flags and memory through its addresses, and nothing else
+Tier 0 keeps; which forms a unit's target allows is the front end's to decide (#180's policy), as the instruction set
+of its rows is.
 
 `tier0_validate` refuses a vector entry in a function without `vectors`, a local of the class that isn't an object, a
 `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
@@ -549,13 +573,22 @@ copies each argument on the stack from its slot through rax into the outgoing ar
 from its slot (after the stack ones), its callee into r11, makes the call as `tier0_emit_call` does (al, the hidden
 pointer, the result object), stores the result into its slot and loads back the stacks within the tables. Nothing below
 its arguments needs saving: it is in the slots.
+The compact stack effects are byte deltas modulo 256, so deep exit depths use the same byte arithmetic as the
+depth columns. In particular a call with more than 128 arguments still reloads a live prefix and its result.
+
+For an aggregate argument, its saved value is the address of its bytes. Before populating ABI registers, the deep
+call copies whole stack arguments, SPLIT stack parts and odd-size temporary parts through RAX with R10/XMM0 scratch.
+Then it reloads each aggregate address and loads its GP/XMM register parts. The indirect callee, hidden result pointer
+and variadic vector count are installed after this setup. These scratch registers cannot overwrite a live stack
+value, which is already in its slot. Guarded native fixtures run every hand-made aggregate location with both stacks
+past their tables, through both encoders, including hidden results and an indirect callee.
 
 A deep function's deep code takes the depth registers below the tables, which its depths reach anyway: no other
 register, and never a frame pointer's rbp.
 
 **Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a function with values of the memory classes (long double's and the
-128-bit integers') whose stacks pass the tables, since such a value's slot is its integer depth's; a call with aggregate arguments where its copies' scratch registers
-are past the tables; and a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
+128-bit integers') whose stacks pass the tables, since such a value's slot is its integer depth's; and a stack deeper
+than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
 past (a stack rises by one entry at a time at most, so it shows there first).
 
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
@@ -580,7 +613,7 @@ the objects' limit):
   the size needs no rounding of its own.
 - **The frame's places** (slots, objects, the call save area, the fixed, deep and memory classes' slots, the incoming
   variadic save area) are rsp's, with no bias (`Tier0Frame.base`).
-- **With entries that move rsp** (`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE`: `Tier0Frame.based`), they are r15's: the
+- **With the stack's entries** (`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`: `Tier0Frame.based`), they are r15's: the
   prologue pushes r15 with the callee-saved registers and sets it to rsp after the `and`, and r15 leaves the depth table
   and the homes. r15 is the table's last register but rbp, so the stack keeps the table's first 13 depths, as a frame
   pointer keeps its first 14 (`tier0_integer_depth_count`); clang takes rbx for its base pointer, which in Tier 0's
@@ -739,7 +772,9 @@ selection:
 - a call's stack arguments still go at rsp: the outgoing area is rounded up to 16 and stays below the allocations, so
   `ALLOCA` is `add r, 15; and r, -16; sub rsp, r; lea r, [rsp + outgoing]` (`mov` without an outgoing area). rsp
   stays a multiple of 16, at every call too;
-- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it;
+- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it, and `FRAME_ADDRESS` a `mov` from rbp. A function
+  whose only stack entry is `FRAME_ADDRESS` takes the same frame as one whose rsp moves: rare enough that a frame of
+  its own (rbp's, its places rsp's) wouldn't pay for its code;
 - the epilogue sets rsp back from rbp (`lea rsp, [rbp - 8 * pushes]`, or `mov rsp, rbp`), past whatever the body
   allocated, before its pops and `pop rbp`.
 
@@ -792,7 +827,10 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   instruction of unknown effects.
 - The immediates: every record with an immediate takes the shortest form that keeps its value and the flags its
   template reads (`x86_choose_forms`): imm8, the accumulator's form, `xor` for zero, `test r, r` for `cmp r, 0`, `inc`
-  and `dec`.
+  and `dec`. The records the emitter writes with a constant it computes (the frame's reservation and release, its
+  realignment, `ALLOCA`'s rounding, a vector constant's words) take their imm8 or imm32 by `x86_immediate_encodes`, the
+  same rule (#221). Every form the emitter writes has `x86_semantics.c`'s effects, which `test-tier0` checks on every
+  record it compiles but the X86 entries'.
 
 ## The two paths
 
@@ -1105,7 +1143,8 @@ Before the programs, checks of their own:
   fit its class.
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
-    another class or with a value, and a restore of another class or with a value, and take a save restored.
+    another class or with a value, a restore of another class or with a value, and a frame's address of another class
+    or with a value, and take a save restored.
   - 14 and 15 integer values at once must compile with a frame pointer and without, by both paths alike: with one,
     the 15th goes to its deep slot (rbp, the table's last depth, is the frame's).
   - a function of the test's own (`tier0_test_stack_entry`) allocates 64 KB and up 1,000 times in a loop, each in a
@@ -1114,6 +1153,11 @@ Before the programs, checks of their own:
     the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
     `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
     expected one.
+- **frame address** (`tier0_test_frame_address`): a function of `FRAME_ADDRESS` alone must compile by both paths
+  alike, with a frame pointer and a `mov` from rbp; then a callee that returns the word its frame address points at
+  (the rbp its push saved) and an entry that compares it with its own frame address, takes its frame address again
+  after an allocation (which moves rsp, not rbp) and checks the allocation below it, both functions with frame
+  pointers, run in a child on eight inputs against the expected results (the interpreter has no frame to model).
 - **labels** (#133's labels as values, `tier0_label_test.c`):
   - `tier0_validate` must refuse, at the entry, an indirect jump to an I64, of class I64, with a value, with a value left
     under it and in a function without labels, a label past the end, the labels' count without their entries and a
@@ -1482,6 +1526,13 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
 - The vector path takes 62.6 cycles per entry alone, and 63.5 after 200 ms of the scalar path.
 - Real code costs less per entry than the generator's (79.6 cycles there): it makes fewer records per entry.
 - The three stages take about 5.3 ms for the file, 41 to 42 cycles for each of its 706,237 output tokens.
+- **The immediates' choice** (#221, `--only choose`, from the requests `Tier0Function.choice_requests` copies; the
+  9700X at `cff7bc98`, three processes, [record](https://github.com/buster14a/buster-performance/tree/a74e2a6ee49e31ea9f948f597ecefc9c02f3e835/docs/measurements/x86-semantics-221-2026-10-28)): 71,198 requests, 0.179 per entry, at 1.74 to 1.88 cycles per entry (10 per
+  request, a function's 27 at a time) and 3.32 instructions, 1.50 after 200 ms of its scalar twin, which takes 7.70.
+  3.3% of the requests kept their template's form, 44.0% took another encoding of the instruction and 52.7% another
+  instruction; their records' 450,190 bytes became 234,542, 15% of the code the functions would make with each
+  template's widest form. The vector path's 152.82 instructions per entry against main's 152.43 are the frame's
+  immediates through `x86_immediate_encodes` (the shared rule's calls in each prologue and epilogue).
 
 **Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
 9700X, each run alone under its lock and pinned to CPU 2):
@@ -1535,10 +1586,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
 ## Follow-ups
 
-- **Deep values' refusals:** a function with values of the memory classes past the depth tables, and a call with
-  aggregate arguments there (`TIER0_ERROR_DEPTH`). The memory classes' would take their slots by true depth in the deep
-  emitters; the
-  aggregates', their copies through a deep scratch register. And deep code that hovers around the tables' edge stores
+- **Deep values' refusals:** a function with values of the memory classes past the depth tables (`TIER0_ERROR_DEPTH`).
+  The memory classes would take their slots by true depth in the deep emitters. Deep code that hovers around the tables' edge stores
   and loads every register at each crossing: a stack of 15 integer values that takes and drops one a few times pays
   about 30 records each time, where storing and loading the one register the entry needs would do.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
@@ -1569,8 +1618,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   for real functions.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
-  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a
-  function with long double code, whose x87 forms `x86_semantics.c` has no rows for yet.
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It refused every
+  function with long double code too, whose x87 forms `x86_semantics.c` had no rows for until #221 covered them.
 
 ## Boundary audit #298
 

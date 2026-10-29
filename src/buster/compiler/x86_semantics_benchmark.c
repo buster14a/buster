@@ -560,9 +560,10 @@ static bool x86_semantics_benchmark_tables(X86SemanticsBenchmarkCounters* counte
     }
     const uint64_t records = (uint64_t)x86_effects_count * sizeof(X86Effects);
     const uint64_t choice = sizeof(x86_choice_forms_by_candidate) + sizeof(x86_choice_conditions_by_candidate) + sizeof(x86_choice_row_info);
-    printf("tables: %u covered forms, records %llu bytes (%u of 16), index %llu bytes (a u16 per form of %u), choice %llu bytes (%u rows of %u candidates) "
-           "and %llu more for the scalar twin's rows\n",
+    printf("tables: %u covered forms, records %llu bytes (%u of 16), index %llu bytes (a u16 per form of %u) and %llu by form number (its FS and GS "
+           "copies too), choice %llu bytes (%u rows of %u candidates) and %llu more for the scalar twin's rows\n",
            x86_effects_count - 1, (unsigned long long)records, x86_effects_count, (unsigned long long)sizeof(x86_effects_index), (uint32_t)X86_FORM_COUNT,
+           (unsigned long long)sizeof(x86_effects_by_form),
            (unsigned long long)choice, x86_choice_row_count, BUSTER_X86_CHOICE_CANDIDATES, (unsigned long long)(x86_choice_row_count * sizeof(X86ChoiceRow)));
     printf("tables: x86_semantics_initialize %.1f us, %.0f cycles (median of %u)\n", x86_semantics_benchmark_median(nanoseconds) / 1000.0,
            x86_semantics_benchmark_median(cycles), BUSTER_X86_SEMANTICS_BENCHMARK_PASSES);

@@ -346,7 +346,16 @@ static uint64_t tier0_test_scan_random(uint64_t* state)
 // validator does; `taken` counts what each took.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken)
 {
-    tier0_test_expect(tally, function->vectors || tier0_validate_accepts(function), "validation", "seed %" PRIu64 ": the vector path leaves a valid function to the scalar validator",
+    bool wide_call = false;
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        const uint32_t call = (uint32_t)function->values[i];
+        if (function->kinds[i] == BUSTER_TYPED_CALL && call < function->call_count)
+        {
+            wide_call |= function->call_argument_counts[call] + (function->call_targets[call] == 0 ? 1u : 0u) > 64;
+        }
+    }
+    tier0_test_expect(tally, function->vectors || wide_call || tier0_validate_accepts(function), "validation", "seed %" PRIu64 ": the vector path leaves a valid function to the scalar validator",
                       seed);
     const uint32_t count = function->count;
     const uint64_t mark = arena->length;
@@ -715,13 +724,15 @@ static void tier0_test_scan_review_regressions(Tier0TestTally* tally, Tier0TestS
     }
     for (uint32_t indirect = 0; indirect < 2; indirect += 1)
     {
-        for (uint32_t arguments = 63; arguments <= 64; arguments += 1)
+        static const uint32_t counts[] = { 63, 64, 65, 127, BUSTER_TIER0_MAX_CALL_ARGUMENTS };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
+            const uint32_t arguments = counts[c];
             const SymbolId target = indirect != 0 ? 0 : 1;
             const uint32_t first = 0;
             const uint8_t variadic = 0;
-            uint8_t classes[64];
-            AbiLocation locations[64];
+            uint8_t classes[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+            AbiLocation locations[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
             AbiCall call = { 0 };
             call.stack_bytes = arguments * 8;
             call.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
@@ -772,7 +783,7 @@ static void tier0_test_scan_review_regressions(Tier0TestTally* tally, Tier0TestS
             tier0_test_stream_add(stream, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0);
             tier0_test_stream_add(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
             function.count = stream->count;
-            tier0_test_stream_judge(tally, "63/64 argument direct/indirect call across blocks", stream, &function, true, operands > 64, guard, taken);
+            tier0_test_stream_judge(tally, "wide direct/indirect call across blocks", stream, &function, true, operands > 64, guard, taken);
             stream->classes[last] = BUSTER_TYPED_CLASS_U32;
             tier0_test_stream_judge(tally, "wide call last argument has the wrong class", stream, &function, false, false, guard, taken);
         }

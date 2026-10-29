@@ -225,6 +225,7 @@ static CheckPrefixStatus check_prefix_make(CheckPrefix* prefix, const Parser* pa
         view->options = parser->options;
         view->options.tree_only = false;
         view->language = parser->language;
+        view->preprocessor = parser->preprocessor;
         memcpy(view->predeclared, parser->predeclared, sizeof(view->predeclared));
         view->tokens.count = end;
         view->tokens.capacity = end;

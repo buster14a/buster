@@ -1071,12 +1071,15 @@ typedef void (*Tier0TestVectorRun)(const void* code, Tier0TestVectorShared* shar
 
 // Runs `run` on `code` (`length` bytes) in a child, which must exit with status 0: the code mapped executable at a page of
 // its own, `run` calling it from C.
-// The generated rows include AVX2, BMI and AVX-512 with byte, VL and VBMI forms. Clang's CPU checks include OS save-state support.
+// The generated rows include AVX2, BMI and AVX-512 with byte, VL and VBMI forms. The shared native detector includes
+// OS save-state support independently of the host build's selected ISA, and remains readable by our own checker.
 static bool tier0_test_vector_can_run(void)
 {
-    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("avx512f") &&
-           __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") && __builtin_cpu_supports("avx512vl") &&
-           __builtin_cpu_supports("avx512vbmi");
+    const X86Target native = x86_target_native();
+    const uint64_t required = BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(AVX512F) |
+                              BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) |
+                              BUSTER_X86_FEATURE(AVX512VBMI);
+    return (native.features & required) == required;
 }
 
 static bool tier0_test_vector_native(const uint8_t* code, uint32_t length, Tier0TestVectorRun run, Tier0TestVectorShared* shared)
@@ -1119,8 +1122,11 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                          Tier0Error allowed, Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
-    const Tier0Code vector = tier0_compile(function, arena);
+    // With the entries' first records, which tier0_test_covered needs to leave the rows' records out.
+    Tier0Function wanted = *function;
+    wanted.entry_records = true;
+    const Tier0Code scalar = tier0_compile_scalar(&wanted, arena);
+    const Tier0Code vector = tier0_compile(&wanted, arena);
     *error = scalar.error;
     bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "vectors", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)",
                                    name, check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
@@ -1131,6 +1137,7 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "vectors", "%s: an invalid record or an invalid branch column", name);
+    ready = ready && tier0_test_covered(tally, "vectors", name, function, &scalar);
     uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
@@ -2037,7 +2044,12 @@ static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
     case 7: row.operand_count = BUSTER_TIER0_OPERATION_OPERANDS + 1; break;
     case 8: row.operand_bytes[1] = 8; break;
     case 9: row.result_bytes = 0; break;
-    case 10: row.records[0] = (X86Instruction){ .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) }; break;
+    case 10:
+        // A block of registers (V4FMADDPS's four in vvvv), which a row can't name; an opmask pair it can (below).
+        row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD);
+        row.records[1] = (X86Instruction){ .form = X86_FORM_V4FMADDPS_Z_Z_M128, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(4),
+                                           .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE };
+        break;
     case 11:
         row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_NOT_LOW);
         row.records[1].form = X86_FORM_MULX_R32_R32_RM32;
@@ -2089,6 +2101,10 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         const Tier0Operation row = tier0_test_vector_broken_row(b);
         tier0_test_expect(tally, !tier0_operation_valid(&row), "vectors", "row break %u taken", b);
     }
+    // VP2INTERSECT's opmask pair (k2 and k3), two of the opmask registers no value keeps between entries.
+    Tier0Operation pair = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
+    pair.records[0] = (X86Instruction){ .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    tier0_test_expect(tally, tier0_operation_valid(&pair), "vectors", "VP2INTERSECT's opmask pair refused");
     // The narrow operands' neighbours: an address of I64, an index of U64 and of I64, and a 64-bit operand in a 32-bit
     // field (its low half).
     Tier0Operation neighbours[4] = {

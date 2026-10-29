@@ -50,26 +50,52 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 
    A lane copies the top level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
-   nothing (#432's review): its binding stacks (the top level's events, then
-   room for the largest body), the per-name and per-tag arrays the walk writes,
-   the scope stacks and reports, the appended tables, and the table
-   (`type_copy`, with room for the largest body's types). The copies are
-   columns with room for the largest body that a lane mostly never touches, so
-   a lane's arenas are base pages throughout: the kernel clears a huge page
-   whole the first time any of it is touched. The table's index has room for
-   the top level's types and 4,096 more, and grows past them as any index does.
+   nothing (#432's review): the per-tag arrays the walk writes, the scope
+   stacks and reports, the appended tables, and the table (`type_copy`, with
+   room for the largest body's types), whose columns a body's withdrawals
+   change (step 4). The copies are columns with room for the largest body that
+   a lane mostly never touches, so a lane's arenas are base pages throughout:
+   the kernel clears a huge page whole the first time any of it is touched. The
+   table's index has room for the top level's types and a slack more (at most
+   4,096 and the top level's own count, and at least 512), and grows past them
+   as any index does. Where the top level's index has that room already, its
+   slots are copied as they are, rather than its types placed again.
+
+   A lane copies none of the top level's per-name columns or binding events
+   (#697's item 2). Its binding heads, parameters' and members' marks, stamps,
+   linked declarations and types, and intrinsics' and builtins' caches are its
+   own, in its sixth arena, at places they keep from one reading to the next
+   (`check_deferred_lane_names`). Before its walk, a body sets them for the
+   names it spells (step 4). After the walk it takes the ones that start as
+   none back to none, so that no reading clears them. A reading with more
+   names than the places have room for lays them out again, on zero pages, or
+   on the old ones cleared where the kernel keeps them (it refuses
+   `MADV_DONTNEED` for a locked range). Before its bodies, the pages of its
+   names' entries are committed, each column's in one call
+   (`MADV_POPULATE_WRITE`, `check_deferred_lane_commit`):
+   a body's position checks set a few entries of every column for the names
+   it spells, far apart, and their faults, a page at a time, took the position
+   checks to up to 7 times main's on one lane and 14 times on eight ("A
+   lane's copy at a first reading", below). A lane's binding stream holds
+   proxies of the file scope's events its heads reach (step 4), then the
+   body's own events. Before, it held a copy of every one of the top level's
+   events.
 
    The state (`CheckDeferred`) keeps its memory (`CheckDeferredMemory`) from one
    reading to the next: its own arena, the top level's table and index, and
-   each lane's five arenas, one mapping a lane, which the calling thread
+   each lane's six arenas, one mapping a lane, which the calling thread
    reserves before the lanes start, the first time the state runs that lane
    (`check_deferred_lane_arenas`). Each reading takes the memory back to empty,
-   and `check_deferred_release` unmaps it. Before, each lane mapped and advised
-   its five arenas inside the lane at every reading, and lanes that did so at
-   once waited for each other on the address space's lock. A state's reading
-   after its first finds its pages in place, and a lane's copy is then a copy
-   alone; a process's first reading still faults in every page its lanes'
-   copies take.
+   and `check_deferred_release` unmaps it. All of it is base pages: the top
+   level's table has the caller's capacities, each column room for every type
+   the unit could make, and the state's arena room for two linked updates a
+   token, of which a reading touches a little at each one's start, where a
+   huge page was cleared whole the first time (`check_deferred_arena`).
+   Before, each lane mapped and advised its five arenas inside the lane at
+   every reading, and lanes that did so at once waited for each other on the
+   address space's lock. A state's reading after its first finds its pages in
+   place, and a lane's copy is then a copy alone; a process's first reading
+   still faults in every page its lanes' copies take.
 4. **A body** (`check_deferred_body`). The lane sets its reader to what source
    order's is at the body's opening, the position checks:
    - each name the body and its parameters spell, once (a stamp per name),
@@ -80,7 +106,25 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      (`check_deferred_visible`). Only a declarator that fails ends one, and its
      unit is source order's: a tag first named in a file-scope prototype
      (`void g(struct S *p);`) is of the prototype's scope, a level deeper than
-     the file scope the history holds (#438);
+     the file scope the history holds (#438). Each head the history gives is
+     one of the top level's events, which the body's stream gets a proxy of
+     (`check_deferred_proxy`), in the keys' order, for the walk reads the file
+     scope's events at its heads alone. After them comes a proxy of the top
+     level's last event before the body, whose point a variable-length array's
+     bound reads as the stream's last before the body's first own event
+     (`check_input_vla_bound`'s `cached`), as in source order's stream there. The kept events' ids are mapped back to the top level's numbering:
+     a proxy's to the event it copies, an own event's to its place past the
+     top level's events;
+   - each of those names gets the rest of the per-name state the top level's
+     walk changes as it goes, as it was at the opening
+     (`check_deferred_name_state`): its linked declaration and type, the last
+     of the top level's updates before the opening (`check_deferred_linked`
+     logs them by position, and `check_deferred_bodies` indexes the log by
+     name). An upper-bound binary search selects the last equal-position update
+     at or before the opening, so many later redeclarations do not make each
+     body scan the name's suffix again. It also gets its intrinsic's cache entry, a hit not yet decoded where the
+     top level decoded it after the opening, as source order's is there, and its builtins' cache entry, the top
+     level's;
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
      transparency after it withdrawn (`type_tag_withdraw`). The withdrawals
@@ -99,24 +143,48 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    activations are the top level's, and only scopes end after the closing).
    Its result is kept from the lane's copies: its type changes (from the
    lane's one record, which each body takes back, packed), its binding events,
-   its appended entries, the completion positions of the tags it made, the top
-   level's VLAs it changed (its parameters') and the predefined types it made.
-   Then the lane takes its names' heads and its view back.
+   its appended entries (its intrinsic declarations and calls among them), the
+   completion positions and transparency of the tags it made, those of the
+   top level's tags it completed (its definition's parameter-list tags, #436),
+   the top level's VLAs it changed (its parameters') and the predefined types
+   it made. Then the lane takes its names' heads and marks, its view and the
+   top level's tags it changed back (`type_tag_restore`).
 5. **The merge** (`check_deferred_merge`), in source order, on the caller's
-   thread:
+   thread but for its pass, which runs on the lanes the bodies ran on:
    - `type_replay` makes the top level's changes and each body's again in the
      caller's table, merged by key (position, then order at the position), the
      top level's first at a position both have. Each change's types are mapped
      to the replay's, and `last_error` is the last write's by key;
    - each appended table is laid out with each body's entries at its cut, where
      source order appends them, and every id into it mapped;
-   - each body's events go at its cut, their handles mapped, a restore's mark
-     past the top level's active declarations at the cut;
-   - every column the walk wrote with a `TypeId` or a table id is mapped
-     through its owner's part: a body's tokens and its parameters' through the
-     body's, the rest through the top level's. The tags' completion positions,
-     linked types, predefined types (the earliest maker's by position),
-     `__func__` strings and intrinsic declarations follow.
+   - the events are laid out the same way, each body's at its cut, and the
+     indices into them that the walk keeps (each name's head and the top
+     level's active declarations) mapped;
+   - the pass (`check_deferred_pass_items`) shares the unit among the lanes by
+     whole items, each the top level's tokens and events after one body and
+     then the next body's own, by their tokens (`lane_range_by_cost`). Each
+     item's events go to their places in the merged stream, the fields without
+     an index copied whole and the handles mapped, a restore's mark past the
+     top level's active declarations at the cut; and every column the walk
+     wrote with a `TypeId` or a table id is mapped at the item's tokens that
+     have an entry (`check_deferred_entries`, 64 tokens a test, with its
+     scalar twin) through its owner's part: a body's tokens and its
+     parameters' through the body's, the rest through the top level's. Every
+     item writes places of its own, so the lanes need no sync until the pass
+     ends, and one lane runs it on the caller's thread;
+   - the tags' completion positions, before the pass, and linked types,
+     predefined types (the earliest maker's by position) and `__func__`
+     strings, after it, are mapped too;
+   - the intrinsic declarations go in the order source order decodes them,
+     each catalogue entry once, at its first maker's place: for each body, the
+     top level's made before its cut, then the body's own, and last the top
+     level's after the last cut. A body that uses an entry the top level
+     decoded before its opening finds that declaration in its cache and makes
+     none; one whose entry the top level decoded only after its opening
+     decodes it itself, as source order's walk does there, and every later
+     declaration of the entry, the top level's or another body's, is its own
+     in the merge. The calls go at their cuts, each with its declaration's
+     place, and each token's call id is mapped to its call's place.
 
 Each body's walk writes the shared per-token columns only at its own tokens
 and its parameters', which no other walk writes; everything else it writes is
@@ -161,16 +229,49 @@ source order, said with the reason:
 
 - the top level reports an error, or its walk stops;
 - the unit has overloadable functions, whose sets later declarations join;
-- a body declares something with linkage (`extern`, a function at block
-  scope): the file-scope entity's type, which later declarations see;
-- a body makes a union transparent, which applies to what follows it;
-- a body uses an intrinsic, whose tables the merge doesn't take yet;
-- a body completes a tag the top level made: its definition's parameter-list
-  tag, which the body declares again (#436), whose completion everything after
-  the body sees in source order and the merge doesn't carry yet;
+- a body's declaration with linkage (`extern`, a function at block scope)
+  that changes what later declarations see (below): its entity's first
+  declaration, one that changes the entity's type, or one unlike the linked
+  declaration it replaces;
+- a body makes a union of the top level's transparent, which applies to what
+  follows it: a file-scope union a block's typedef makes so, or a definition's
+  parameter-list union its body defines so;
 - a body's walk reports an error (a later phase's error is merged like any
   other: the phases run on the merged state);
 - a table runs out of room.
+
+A body's declaration with linkage is the file-scope entity's, and source
+order's walk keeps it for the declarations after it: the name's linked
+declaration (`linked_declarations`) and type (`linked_types`, the composite of
+every declaration so far). A lane starts from the top level's at its opening,
+and takes a declaration that leaves them as they would be without it: of an
+entity declared before the opening, whose composite with the entity's type is
+that type (no array size or prototype the entity lacked), and that replaces the
+linked declaration only by one later declarations inherit the same from (its
+kind, linkage and thread-local storage it must share, or the walk reports it,
+and the rest it inherited, but whether it is naked, which is its own).
+
+An intrinsic's tables are its declarations, decoded once per catalogue entry
+in the order the walk first uses each, and its calls; the merge orders both as
+source order's walk makes them (above). A lane has room for the top level's
+declarations and as many again, since a body decodes each entry once at most,
+an entry the top level decoded after the body's opening among them.
+
+A body that completes its definition's parameter-list tag, which it declares
+again (#436), completes a tag the top level made. Nothing after the body can
+name it: its scope ends with the body, and distinct tags are never compatible
+(C17's rule, which the checker keeps: C23's tag compatibility, #133, would let
+code after the body compare it with another tag of its name). So the merged
+table, which `type_replay` completes at the body's definition, and the tag's
+completion position are all that show it, and the merge takes the position
+from the body's result. A lane gives the tag back to the top level's state,
+incomplete, before its next body.
+
+A unit with overloadable functions stays source order's. A lane would need each
+set's index as the top level had it at the body's opening (each name's
+candidates by signature, and whether the name is overloadable yet), and its
+own candidates and calls laid out at its cut, as the intrinsics' are. None of
+the corpora below has one: C code meets them mostly in clang's `<tgmath.h>`.
 
 The fallback checks the unit from nothing, with the caller's table taken back
 to how it came: a merge that fails after its replay has filled it.
@@ -183,7 +284,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 80 fixtures, 65 of the
+- `./build/compiler test-checker-deferred [--id-order N] [--keep]`: 111 fixtures, 96 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -191,7 +292,12 @@ passes every checker test.
   on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct binding
   resolution, the issue's cases on every lane their bodies can take
   (`CheckDeferred.every_lane`). The deferred result must be the vector path's
-  column for column, and each fixture says whether the reader merges it. A
+  column for column, and each fixture says whether the reader merges it. Each
+  fixture runs again with its identifiers' IDs in another order
+  ([#153](https://github.com/buster14a/buster/issues/153): the driver's
+  `--id-order` table, `check_driver_id_order`, from `--id-order N` on, 153 by
+  default), on 8 lanes through each resolution: the three paths must still
+  be alike, and the reader must merge it as before. A
   merged unit's bodies must run on the rule's lanes (`CheckDeferred.active`),
   in as many parts as a group of them cuts (`CheckDeferred.parts`), its reader
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
@@ -226,7 +332,10 @@ passes every checker test.
   source order's result; on 8 lanes by a state that read it before, on one
   lane and on eight with every byte that reading pushed in the state's memory
   poisoned (`check_deferred_poison`) and on eight as it left it, whose memory
-  the reading must keep (`check_corpus_deferred_reread`); and with the
+  the reading must keep (`check_corpus_deferred_reread`), and on one with
+  every lane's stamp then at its last (`check_deferred_stamp`), which each
+  lane's next body wraps: the one lane's first body's names, stamped as the
+  wrapped stamp's first, must be taken again; and with the
   allocation of the reader's state failing
   (`check_corpus_deferred_fail_state`), which must count as a resource failure
   (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
@@ -242,10 +351,23 @@ passes every checker test.
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
   refused without a write past the room, and so are malformed lists; and the
-  state's memory (`check_deferred_test_memory`): a lane's five arenas in one
+  state's memory (`check_deferred_test_memory`): a lane's six arenas in one
   mapping, end to end with their capacities, writable to their last byte and
-  kept with their pages when the state takes them back, and every mapping
-  gone after `check_deferred_release`.
+  kept with their pages when the state takes them back, the lanes' mappings
+  and the state's own three arenas in base pages to their last byte, and
+  every mapping gone after `check_deferred_release`. Then a lane's per-name
+  columns (`check_deferred_test_lane_names`): laid out from room for 4,096
+  names, in order, each on a line of its own and clear of the next, the pages
+  of the reading's names' entries resident before anything reads them and the
+  last page of each column's room not (where the kernel takes
+  `MADV_POPULATE_WRITE`), those that start as none zero; at the same places,
+  with what the last reading left, for a reading of fewer names; those that
+  start as none cleared, with the stamp, after a poisoned reading, and the
+  others left to the bodies, which set them before they read them; laid out
+  again on zero pages for more names than the room, their entries committed
+  again, and on the old pages cleared where the kernel keeps them (the names
+  arena's first page locked, where the test may lock one); and refused for more
+  names than the arena holds.
   Mutants of the change, each built at `-O1` from it merged with main and run
   on the 9700X (the record's `logs/mutants2`), fail. Of the rule: the largest
   body counted twice, as #448's rule did, 27 checks; the largest body alone
@@ -261,22 +383,45 @@ passes every checker test.
   rule's 18; the lanes' arenas not reserved before the lanes 974; a release
   that doesn't unmap them 723; a state that doesn't keep the lanes' memory
   554; the lane's name stamps not cleared 8; and the deferral mask not cleared
-  hangs the reread of a poisoned state's memory past a 120 s timeout.
+  hangs the reread of a poisoned state's memory past a 120 s timeout. Item
+  2's three mutants (#697), each built with clang 18 on a host of the scalar
+  path, fail too. The stream's last proxy taken from the top level's last
+  event, rather than its last before the body, fails the two fixtures of
+  bounds of file-scope names: they aren't merged, by any resolution on any
+  lane count. The stamps not cleared where they wrap fails the reread with
+  the stamps at their last on 12 fixtures (6 results that differ, 6 not
+  merged), and the test then faults on a head that a skipped name left. The
+  poisoned columns not cleared fails the per-name columns' check. So do its
+  pages' three, built the same way: the state's own arenas in huge pages fails
+  the memory test, and the names' entries not committed, or the heads' alone
+  not, the per-name columns' check.
   They are: the issue's three (a later declaration, a later completion, an
   enumerator from an initializer); typedefs shadowed and redeclared after a
   body; tags completed, redeclared and shadowed around bodies, and completed
   between bodies where the walk itself needs them complete or not (a local
   object, local records, an enum, a typedef); block-scope declarations with
-  linkage; strings and `__func__`, string initializers' indices, statement
-  expressions, VLAs, varargs, a predefined type first made in a body, asm
+  linkage, which merge where they leave the entity's linked state as it was
+  at the opening (after its definition and before it, a prototype before the
+  function's definition, an array without the size the top level gives it
+  later, a naked prototype's attribute it inherits) and go to source order
+  where they don't (its first declaration, a size or parameters it lacked, the
+  naked attribute it adds, a conflict); intrinsics in a body, in two,
+  before the top level's use of them (with types the top level makes between
+  them) and after it, and of vector types, which merge;
+  strings and `__func__`, string initializers' indices, statement
+  expressions, VLAs (bounds of file-scope names in bodies without parameters
+  among them), varargs, a predefined type first made in a body, asm
   statements, cached constants and `_Generic`, compound literals and statics;
-  recursion and forward calls, labels; unions made transparent in a body and
-  at file scope between bodies; naked functions' bodies, among others' and
+  recursion and forward calls, labels; unions made transparent in a body
+  (a file-scope one, which goes to source order, and the body's own, which
+  merges) and at file scope between bodies; naked functions' bodies, among
+  others' and
   with what a naked body refuses; loop hints, and those clang refuses;
   tags first named in a prototype's parameter, a sizeof in an array's bound
   and a definition's parameter, and one declared before its prototype; a
-  definition's parameter-list tag used in its body, which merges, and
-  completed there, which goes to source order; C23's enums with a fixed
+  definition's parameter-list tag used in its body, and completed there (a
+  struct, a union and an enum, after a use, and in each of two bodies), which
+  merge; C23's enums with a fixed
   underlying type in bodies beside plain enums, structs and unions, read with
   `-std=gnu23`: a fixed one before a plain one and after it, eight bodies of
   them, and a file-scope one shadowed in a body;
@@ -297,9 +442,23 @@ passes every checker test.
   bodies, the differences, and the units left to source order by reason.
 
 The 9700X job runs `test-checker-deferred`, c-testsuite's programs with
-`--deferred 8`, and the frozen SQLite source's check with `--deferred 8`.
+`--deferred 8` and the IDs in another order (`test-checker-corpus --id-order
+153`), and the frozen SQLite source's check with `--deferred 8`.
 
-On the laptop (Zen 4), with `--deferred 8` unless said, each against clang:
+On the 9700X, with #697's item 4 (the bodies above merged) and `--deferred 8`,
+each against clang 23.1.1: c-testsuite on the system's headers, as the 9700X
+job checks it, and the frozen corpora on their own headers
+(`--no-default-config --target=x86_64-linux-gnu -march=znver5 -nostdinc`):
+
+| Corpus | Units merged | Left to source order | Bodies read apart | Differences |
+| --- | --- | --- | --- | --- |
+| c-testsuite's 220 programs | 220 | 0 | 449 | 0 |
+| the frozen `sqlite3.c` (`-std=gnu17`, with `--symbols`) | 1 | 0 | 2,608 | 0 |
+| the frozen musl's `src` (1,524 files, its build's options) | 1,486 | 38: 37 errors in a body, 1 that doesn't parse | 21,918 | 0 |
+| the frozen Zig 0.14.1 `lib/libc` (2,315 files, 968 that don't preprocess alone, `-std=gnu17`) | 1,022 | 325: 256 that don't parse, 43 errors in a body, 26 at the top level | 3,178 | 0 |
+
+Before it, on the laptop (Zen 4), with `--deferred 8` unless said, each
+against clang:
 
 | Corpus | Units merged | Left to source order | Bodies read apart | Differences |
 | --- | --- | --- | --- | --- |
@@ -334,7 +493,9 @@ level's tokens and the bodies' tokens that pay for a lane by the rule
 in nanoseconds per token: the parse; source order's reading; and each deferred
 reading's whole, its top level, the history's index, the bodies' walks and
 their position checks (summed over the lanes), the lanes' span, the merge and
-the rest (the phases after the merge); the position checks per body too, the
+the rest (the phases after the merge); the merge's parts (its replay, the
+appended tables, the events' layout, the tags' completions, its pass and the
+rest); the position checks per body too, the
 lanes the bodies ran on (`active`: as many as the rule gives them, or with
 `--every-lane` every lane they can take) and those that copied the reader
 (`copies`); and what a lane costs, in nanoseconds: a copy of the reader
@@ -485,7 +646,9 @@ Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
 that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
 eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
 rule puts 38 units within one percentage point of their best and forgoes
-10.7 points, where #448's rule puts 19 and forgoes 107.4.
+10.7 points, where #448's rule puts 19 and forgoes 107.4. Campaign A4, the same
+grid after #697's item 2, keeps the rule's constants ("A lane's copy at a first
+reading (#697)", below).
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -628,6 +791,113 @@ they came within 0.9% of each other on the 62 programs of 1,000 tokens or
 more, and within the noise of readings of tens of microseconds on the others
 (a standard deviation of 2.9% under 100 tokens).
 
+### The merge's serial work (#697)
+
+On eight lanes on `sqlite3.c`, the merge took 7.3 of the reading's 73.5
+ns/token. That is more than the 4.7 by which the reader trailed source order;
+its pass over every token's columns took 5.1 of them. The pass now finds the
+columns' entries 64 tokens at a time, and it runs on the bodies' lanes with the
+binding events' copies (step 5 of "The reader"). On the 9700X, on the frozen
+`sqlite3.c`, these are the medians of six processes of 24 passes each, in
+nanoseconds per token ([the
+record](https://github.com/buster14a/buster-performance/tree/5ee80035f62e5f8826407a5801cb4770a9f0ae81/docs/measurements/deferred-merge-697-2026-10-28)
+has the method, the logs and the traces):
+
+| | Before | With the scan | With the pass on the lanes |
+| --- | ---: | ---: | ---: |
+| source order's reader | 68.78 | 69.02 | 69.04 |
+| the deferred reader, one lane | 86.36 | 84.49 | 84.73 |
+| its merge | 7.02 | 5.16 | 5.04 |
+| the deferred reader, eight lanes | 73.48 | 71.29 | 69.34 |
+| its merge | 7.27 | 5.39 | 2.62 |
+| its pass (before it, the token columns alone) | 5.14 | 3.26 | 1.65 |
+| eight lanes against source order, each process's | +6.8% (+6.7 to +7.1) | +3.3% (+3.1 to +3.7) | −0.0% (−0.4 to +0.5) |
+
+On eight lanes, three parts of the merge stay on the calling thread: its replay
+(0.56 ns/token), its appended tables and tags' completions (0.28), and the
+events' layout (0.06). One lane's pass, with the events' copies in it, takes
+4.20 ns/token, against 3.13 for the columns and 1.26 for the events before.
+
+The traces show what limits the pass. Each of eight lanes takes its 88,000 to
+102,000 tokens in 0.9 to 1.1 ms, where one lane takes all 706,237 in about 2.1
+ms, so the lanes share the memory's bandwidth ("What is left"). A cursor over
+the bodies' parameters, in place of the owner lookup's walk, saved one lane 4%
+of its token columns and eight lanes nothing. It was left out.
+
+After items 2 and 4, on the same file, by the rule on eight lanes, six processes
+of 24 passes each (campaign S4 in
+[item 2's record](https://github.com/buster14a/buster-performance/tree/79c90346c27d937bb8dffb771be9d9fcca6995b6/docs/measurements/deferred-copies-697-2026-10-28)),
+in nanoseconds per token:
+
+| | Main (`abc6bf24`) | With item 2 |
+| --- | ---: | ---: |
+| source order's reader | 71.13 | 70.39 |
+| the deferred reader, one lane | 86.52 | 83.82 |
+| the deferred reader, eight lanes | 70.49 | 66.42 |
+| its top level | 23.34 | 22.67 |
+| the lanes' span | 5.50 | 5.24 |
+| its merge (its pass, on the lanes) | 2.61 (1.66) | 2.44 (1.55) |
+| `check_input_run`'s phases after the merge | 38.85 | 35.87 |
+| eight lanes against source order, each process's | −1.1% (−2.2 to −0.3) | −5.6% (−5.9 to −5.0) |
+
+On eight lanes the serial part, the top level, the history's index, the merge
+but its pass and the phases after it, takes 59.6 of the reading's 66.4
+ns/token: the lanes shorten 6.8 of it.
+
+### A lane's copy at a first reading (#697)
+
+At a process's first reading a lane's copy of the top level's reader was mostly
+the first touches of its pages: 69 µs on two lanes and 100 µs on eight on
+campaign A2 (the median of the 42 units but `sqlite3.c`), and 401 and 663 µs on
+`sqlite3.c`. A lane now copies none of the top level's per-name columns or
+binding events, and its type index keeps the top level's slots where they have
+the room (step 3). On the 9700X, on A2's grid and units, three rounds (campaign
+A4 in item 2's record), a lane's copy takes 41 and 71 µs (245 and 467 µs on
+`sqlite3.c`), main's 72 and 125 µs (450 and 787), and at a state's later
+reading (`--warm`) 3 and 4 µs (48 and 86), A2's 6 and 9 (140 and 457).
+
+Two costs that the copy hid came out with it. The state's own arenas were huge
+pages past their first 64 KB, of which a reading touches a little at each
+column's start: in base pages, main's reader read sixteen bodies of 993 tokens
+after three headers 27% faster on one lane and 43% faster on eight, and its
+threads cleared huge pages in 63 of 836 cycle samples of six passes, where they
+had in 414 of 1,299. And a lane's per-name entries faulted a page at a time in
+the position checks, up to 7 times main's on one lane and 14 times on eight,
+until the lane committed them (step 3). With both, the 43 units read 26.3%
+faster than main on eight lanes (the median; 5.2 to 42.9%) and 23.6% faster on
+one, and 1.9% and 1.3% faster than main with its state's arenas in base pages
+(from 8.4% faster to 10.7% slower on eight). By the rule, which gives every unit
+the same lanes in both, item 2 reads each unit 5.5% (`sqlite3.c`) to 43.1%
+faster than main, and the 31 units it gives more than one lane read 23.3% faster
+to 0.2% slower than one lane (the median −6.1%), where main's read them 20.2%
+faster to 7.1% slower (−1.5%) (campaign B4, five rounds). On c-testsuite's 220
+programs (CT4, three rounds), both rules read every program but `00204.c` on one
+lane, and item 2 reads them 30.5% faster than main (the median; 8.6 to 44.5%).
+`sqlite3.c` reads 1.2% slower on one lane than main with base-page arenas: a
+body's position checks set the lane's own columns and proxies for each name it
+spells, 6.5 ns/token on eight lanes, summed over the lanes, against main's 5.4
+(S4, above).
+
+The rule keeps its constants. On A4's grid it forgoes 48.5 points, the least of
+the grid, puts 26 of the 43 units within one point of their best, and reads its
+worst unit, sixteen bodies of 993 tokens after thirty headers, 1.7% slower on
+its two lanes than on one, where B4's five rounds read it 0.2% slower. 1,536
+tokens and a sixth of the top level's forgo 51.2 points (worst +0.7%), and
+4,096 and a third, A3's best before the last two commits, 79.9 (+0.0%). Most of
+what the rule forgoes is on units whose eight lanes read worse than four, where
+the lanes' walks write into `check_input_run`'s arena of rare columns (#572),
+huge pages past its scope stacks. Where the top level's walk only read a 2 MB
+region of it, or never touched it, a lane's write allocates and clears a huge
+page, and lanes that write a region at once each clear one, of which the kernel
+maps one; whether a woken lane comes to a region with the first lane or after
+it depends on the lanes' timing. On A4, eight lanes' walks of one unit took 57,
+66 and 36 ns/token in its three rounds, against 28, 23 and 25 by main's reader
+with base-page arenas, which runs into it too, and at a state's later readings,
+whose lanes reach their walks at once, they run into it in every round. In base
+pages that arena takes the race away but costs source order's reader, whose
+arena it is, up to 6.6% on the record's units, where it saves up to 4.2% on
+others: #764.
+
 ## One-lane pinning removed (#450)
 
 The exact `35f26f68` baseline and `1d2b12c6` candidate were compared on the
@@ -673,22 +943,32 @@ is retained.
 
 ## What is left
 
-The top level, the merge and the phases after it are sequential, so the lanes
-shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading. Bodies that do what the merge doesn't take
-(above) send their unit to source order. Intrinsic declarations, block-scope
-declarations with linkage and transparency made in a body are the next to
-merge.
+The top level, the merge's replay and layouts, and the phases after it are
+sequential, so the lanes shorten only the bodies' walks and the merge's pass,
+which on `sqlite3.c` are about a quarter of one lane's reading. On eight lanes
+the pass shares the memory's bandwidth: it reads each of its columns at every
+token, mostly zeros, and the lanes' scans of their shares run at about a third
+of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000
+tokens, against 2.1 ms for all 706,237 on one lane). A record of where the
+walk writes each column's entries, such as a bitmap of 64-token blocks for the
+sparser columns, would let the pass read those blocks alone.
 
-A lane's cost decides how many lanes pay, and a process's first reading pays
-most of it in its lanes' first touches of their copies' pages: on the laptop,
-545 of them on `sqlite3.c`, of which the binding events took 248, the table
-137 and the per-name columns 108. The copies hold the whole top level because
-a body's walk writes into the same columns it reads the top level's entries
-from. A lane that read the top level's columns where they are, and wrote only
-its own events, names and types apart, would copy next to nothing. A state's
-later readings pay none of it: a lane of theirs paid for 256 tokens on the warm
-grid ("How many lanes"), which a rule that knew the lanes' memory was in place
-could give them.
+Bodies that do what the merge doesn't take
+(above) send their unit to source order: on the corpora above, only bodies
+that report errors do since #697's item 4. Overloadable functions and a union
+of the top level's made transparent in a body are what the merge doesn't take
+yet.
+
+A lane still copies the top level's type table, whose withdrawals a body's
+walk makes in place (step 4), and at a process's first reading the position
+checks fault in the lane's event columns as they write the proxies: on eight
+lanes, `sqlite3.c`'s position checks take 6.5 ns/token in all, against main's
+5.4 with each lane's copy of the top level's events. The lanes' walks write
+into the checker's rare columns' huge pages, which they race to clear (#764):
+a fix that keeps source order's huge pages would call for the rule to be fitted
+again, and would let a state's later readings, whose lanes run into the race in
+every round, have a rule of their own (#697's item 3), once a caller reads
+several units with one state.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
