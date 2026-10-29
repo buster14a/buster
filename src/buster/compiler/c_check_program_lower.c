@@ -772,21 +772,32 @@ static uint32_t check_lower_limb_room_units(const TypeTable* types, TypeId type,
     return units;
 }
 
-// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_shared's bound), none in a unit without
-// one (check_lower_limb_types): each node that computes, converts or updates one writes up to 64 entries a limb
+// The room a unit's _BitInts past 128 bits take beyond a node's (check_lower_prepare's bounds): the entries, the
+// temporaries and frame objects (`locals`), and the calls of libgcc's functions and memmove, and their arguments.
+typedef struct CheckLowerLimbRoom
+{
+    uint64_t entries;
+    uint64_t locals;
+    uint64_t calls;
+    uint64_t arguments;
+} CheckLowerLimbRoom;
+
+// The room a unit's _BitInts past 128 bits take (CheckLowerLimbRoom), none in a unit without one
+// (check_lower_limb_types): each node that computes, converts or updates one writes up to 64 entries a limb
 // (check_lower_limb_arithmetic and the rest go a limb at a time, an update converting, computing and converting back),
 // the most of its value's, its operands' and their converted types (check_lower_limb_room_units, four times a complex
-// one's element's), and takes up to 16 temporaries and frame objects (`locals`), or 128 for a complex one's, whose
-// parts' computations each take their own. Out of line, as few units have such a type: the preparation's own loops
-// compile as they do without it.
-static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgram* program, uint64_t* locals)
+// one's element's), and takes up to 16 temporaries and frame objects, or 128 for a complex one's, whose parts'
+// computations each take their own. A complex one also makes up to 24 calls of 128 arguments in all beyond a node's
+// 3 calls: a quotient's ten of libgcc's (four products and a quotient a part, of 6 and 8 arguments), memmove's copies
+// of parts past 256 bytes, and an update's conversions of both parts there and back. Out of line, as few units have such
+// a type: the preparation's own loops compile as they do without it.
+static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const CheckProgram* program)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const uint32_t count = check_lower_limb_types(types) ? graph->count : 0;
-    uint64_t entries = 0;
-    *locals = 0;
+    CheckLowerLimbRoom room = { 0 };
     for (uint32_t node = 0; node < count; node += 1)
     {
         const uint32_t operands[2] = { graph->operand0[node], graph->operand1[node] };
@@ -799,10 +810,12 @@ static __attribute__((noinline)) uint64_t check_lower_limb_room(const CheckProgr
             units = own > units ? own : units;
             units = converted > units ? converted : units;
         }
-        entries += 64 * (uint64_t)units;
-        *locals += complex ? 128 : units != 0 ? 16 : 0;
+        room.entries += 64 * (uint64_t)units;
+        room.locals += complex ? 128 : units != 0 ? 16 : 0;
+        room.calls += complex ? 24 : 0;
+        room.arguments += complex ? 128 : 0;
     }
-    return entries;
+    return room;
 }
 
 // A type's facts for the lowering (BUSTER_CHECK_LOWER_TYPE_*), from its aligned typedef's type (type_strip_aligned):
@@ -8764,12 +8777,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // expression's, and its call, with its block and a temporary an operand among the locals.
     const uint64_t asm_statements = program->status == CHECK_PROGRAM_OK && input != 0 ? input->asm_count : 0;
     const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
-    // A unit with a _BitInt past 128 bits (#137) has room for its limbs (check_lower_limb_room).
-    uint64_t limb_locals = 0;
-    const uint64_t limb_entries = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program, &limb_locals) : 0;
+    // A unit with a _BitInt past 128 bits (#137) has room for its limbs, its computations' temporaries and libgcc's calls
+    // (check_lower_limb_room).
+    const CheckLowerLimbRoom limb_room = program->status == CHECK_PROGRAM_OK && program->stream != 0 && input != 0 && types != 0 ? check_lower_limb_room(program) :
+                                                                                                                                (CheckLowerLimbRoom){ 0 };
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
-                                limb_entries + 32;
+                                limb_room.entries + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
@@ -8778,7 +8792,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
                                       varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + (input != NULL ? input->kr_parameter_count : 0) +
-                                      limb_locals + 1;
+                                      limb_room.locals + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
@@ -8843,11 +8857,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->integer_builtin_count = integer_builtin_count;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
     // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
-    // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
-    // (check_lower_runtime) follow the helpers'.
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + 1;
+    // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
+    // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
+    // the helpers'.
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
-                                                    (uint64_t)lowered->initializers.count * 3 + 1 : 0;
+                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
     lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;
