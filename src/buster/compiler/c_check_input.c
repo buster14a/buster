@@ -53,6 +53,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_AUTO_TYPE_BIT_FIELD,
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
+    CHECK_INPUT_PRAGMA_SEMANTICS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -88,6 +89,7 @@ static const char* const check_input_messages[] =
     "cannot use '__auto_type' with array in C",
     "cannot pass bit-field as __auto_type initializer in C",
     "bit-precise integer constants wider than 128 bits are not supported",
+    "unsupported semantic pragma",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -282,6 +284,8 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     CheckWarningEvents warning_events;
+    // Directive-only warnings survive parser recovery independently of expression facts.
+    CheckWarningEvents pragma_warnings;
     CheckConstValues const_values;
     uint8_t* constant_warnings;
     uint32_t constant_warning_count;
@@ -1881,6 +1885,7 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 
 #include "c_check_function_name_input.c"
 #include "c_check_pragma_input.c"
+#include "c_check_ignored_pragma.c"
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
 #include "c_check_fp_input.c"
@@ -6720,6 +6725,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
                 prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
+                prepared = prepared && check_input_ignored_pragmas(&reader, handled);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -6734,12 +6740,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     {
                         handled[pragma] = 1;
                     }
+                    const CheckInputPragmaDisposition disposition = handled[pragma] == 0 ? check_input_pragma_disposition(&reader, pragma) : CHECK_PRAGMA_OWNED;
+                    if (handled[pragma] == 0 && disposition != CHECK_PRAGMA_OWNED && disposition != CHECK_PRAGMA_SEMANTIC)
+                    {
+                        handled[pragma] = 1;
+                    }
                     if ((handled[pragma] == 0 || handled[pragma] >= 3) &&
                         (input->deferred_tokens == 0 || deferred != 0 || input->deferred_tokens[position] == 0))
                     {
                         reader.resolve_limit = parser->tokens.pragma_positions[pragma];
                         reader.resolve_pragma = pragma;
-                        reader.resolve_message = handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
+                        reader.resolve_message = disposition == CHECK_PRAGMA_SEMANTIC ? CHECK_INPUT_PRAGMA_SEMANTICS :
+                                                 handled[pragma] < 3 ? CHECK_INPUT_UNSUPPORTED :
                                                  loop_messages[pragma] != 0 ? (CheckInputMessage)loop_messages[pragma] : CHECK_INPUT_DECLARATION;
                         handler_error = handled[pragma] == BUSTER_CHECK_LOOP_HANDLER_ERROR;
                         if (handler_error && position != 0)

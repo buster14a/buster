@@ -81,6 +81,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_ARRAY: result = "cannot use '__auto_type' with array in C"; break;
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
     }
     return result;
 }
@@ -840,6 +841,20 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                 "parameter '%.*s' was not declared, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]",
                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_PRAGMA_SEMANTICS && input->reports[index].pragma != 0)
+                        {
+                            const uint32_t start = parser->tokens.pragma_sources[input->reports[index].pragma - 1];
+                            const CheckInputReader names = { .pp = pp, .parser = parser };
+                            const String8 first = check_driver_warning_name(pp, check_input_pragma_name(&names, start + 2));
+                            const bool vendor = pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "GCC") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "clang") ||
+                                                pp_token_is_name(pp, &pp->output, start + 2, pp->output.count, "STDC");
+                            const String8 second = vendor && start + 3 < pp->output.count ?
+                                check_driver_warning_name(pp, check_input_pragma_name(&names, start + 3)) : (String8){ .pointer = "" };
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, start + 2, publication,
+                                "unsupported semantic '#pragma %.*s%s%.*s' directive",
+                                (int)first.length, first.pointer, vendor ? " " : "", (int)second.length, second.pointer);
+                        }
                         else
                         {
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "%s", message);
@@ -861,8 +876,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             check_driver_remaining_pragmas(original, pp, pragma_input, &pragma, &visibility, quiet);
         }
     }
+    const CheckInput* directives = original_pragmas != NULL ? original_pragmas : input;
+    const bool pragma_ready = ready && check_driver_warning_events_at(original_pragmas != NULL ? original : parser, pp, directives, NULL,
+        &directives->pragma_warnings, NULL, publication_end, scratch);
     arena_pop_to(scratch, mark);
-    return ready;
+    return pragma_ready;
 }
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
@@ -2032,6 +2050,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     uint32_t promoted_source = BUSTER_CHECK_NONE;
                     const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                     const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
+                    promoted |= check_driver_warning_promoted(pp, pragma_input, &pragma_input->pragma_warnings, NULL);
                     promoted |= check_diagnostic_first_pragma_error_mode(pragma_input, pragma_end, &promoted_token, &promoted_source, quiet);
                     bool visibility_diagnostics = false;
                     const CheckInputVisibilityPragmas* visibility_history = pragma_input->visibility_pragmas;
@@ -2187,6 +2206,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 uint32_t fp = 0;
                 uint32_t visibility = 0;
                 check_driver_remaining_pragmas(parser, pp, &original_pragmas, &fp, &visibility, quiet);
+                if (!check_driver_warning_events_at(parser, pp, &original_pragmas, NULL, &original_pragmas.pragma_warnings, NULL, publication_end, scratch))
+                {
+                    fprintf(errors, "fatal error: original pragma warning capacity exhausted\n");
+                }
             }
             if (!pp->fatal)
             {
