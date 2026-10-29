@@ -172,6 +172,88 @@ Inline assembly, threads and signals are outside this oracle's scope. Program
 callbacks from libc into interpreted functions and setjmp/longjmp are not an
 implemented host boundary.
 
+## Metamorphic IR testing
+
+`./build/compiler test-ir-metamorphic` runs the versioned, deterministic IR
+campaign for [#731](https://github.com/buster14a/buster/issues/731). It consumes
+the existing public IR, parser, verifier, interpreter and optimizer interfaces;
+it does not replace their implementations or the C source fuzzing campaign.
+
+```sh
+./build/compiler test-ir-metamorphic --seed 731 --count 6
+./build/compiler test-ir-metamorphic --seed 17 --first 24 --count 1000 \
+  --max-steps 100000 --max-ms 600000 --artifacts /tmp/ir-failures \
+  --revision EXACT_SOURCE_REVISION
+./build/compiler test-ir-metamorphic --replay /tmp/ir-failures/CASE_DIRECTORY
+```
+
+The initial grammar subset has one `i64` parameter and result, integer bitvector
+operations, diamonds and phis, bounded single/nested loops, switches, and ordinary
+or volatile stack/global loads and stores. Each case has an independently stated
+unsigned-C model of its result and final global bytes. Input cohorts include zero,
+both branch directions, every switch arm, the maximum unsigned value and the sign
+bit. Loops run at most seven outer and five inner iterations. Calls, floating
+point, dynamic stack operations and native Tier1 execution are not admitted by
+this initial generator. They are not counted as successful unsupported cases.
+
+The representation variants are an identity control, instruction/block ID
+renaming, independent constant reordering, unused pure-value insertion, CFG edge
+splitting with phi predecessor repair, commutative operand exchange, and an
+unreachable block. Rebuilding validates the original and replacement. Its
+bounded SIMD ID-remap kernel has a scalar twin; canonical texts must match
+exactly. Both complete verifiers check reachable dominance. Both text-parser
+paths must stabilize print/parse/print. For each variant, SCCP, DCE, CFG cleanup,
+their combination, GVN, LICM and scalar replacement run through their scalar and
+vector paths. Optimized arrays may differ; checked execution must preserve the
+independent result and guarded global-memory observations.
+
+The default six cases cover every shape and are in the shared correctness
+inventory. Larger runs have explicit case, step, time, instruction and arena
+bounds: at most 100,000 cases, 128 instructions and 16 blocks per function, eight
+8MiB arenas, four interpreter frames and bounded memory registrations. Time or
+execution limits, unsupported consumers, undefined values, resource exhaustion and semantic
+differences have distinct categories. Invalid opcode/type/value/phi/terminator
+and grammar controls must be rejected with matching complete diagnostics; no
+invalid IR is interpreted. Allocation failures must preserve unpublished views
+and arena prefixes.
+
+`--max-ms` is checked between bounded consumer calls, rather than interrupting
+an individual public API call. Interpretation has the separate `--max-steps`
+limit; the enclosing CI command also has its process timeout. Resource limits
+from rebuilding, printing, either parser, verification and optimization stay
+resource outcomes. Constrained-arena controls check those boundaries, and an
+independent control requires rejection when a correct return value accompanies
+different final global memory.
+
+Artifact capture requires `--revision` (or `GITHUB_SHA`) to identify the source
+used to build the tool. The caller is responsible for that association; it is
+not inferred from a possibly newer working checkout. The record also stores
+the host compiler, executable size/FNV fingerprint, generator version, seed,
+case, transformation, optimizer path, input, limits, exact failure category and
+observations. FNV is an identifier aid, not a correctness or collision oracle.
+Fresh case directories contain `original.ir`, `variant.ir` (the optimizer
+input), and `transformed.ir` (the consumer output) when those views are valid,
+plus `run.txt` and its one-line replay command.
+If construction failed before a valid view could be published, the artifact
+states that boundary and retains the original generated text and regeneration
+recipe. Existing directories/files are never overwritten. Capture failures are
+reported separately from the original failure.
+
+Replay regenerates the recorded version/seed/case under the same limits and
+requires the same failure category, transformation, optimizer path, input and
+complete retained canonical bytes. A trailing-byte difference fails replay too.
+A different error, timeout or unsupported result is not the recorded failure.
+The explicit `--inject semantics|verify|step-limit` option tests this protocol
+using an intentional control in the first unoptimized candidate; manifests and
+summaries identify the injection, and replay preserves it. These controls are
+not enabled in ordinary campaigns. The runner's own temporary-file contracts
+check capture, exact replay, overwrite refusal, malformed metadata and cleanup.
+Exit0 means the campaign passed (or the recorded failure no longer reproduces),
+exit1 is a classified correctness failure, and exit2 is a usage, budget,
+unsupported, resource, changed-replay or artifact failure. Deterministic summary
+fingerprints retain canonical generated/variant text; wall time and addresses
+do not enter them.
+
 ## Acceptance boundaries
 
 The default source driver remains syntax-only. The checker currently publishes
