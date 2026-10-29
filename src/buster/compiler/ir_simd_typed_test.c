@@ -10,6 +10,8 @@ static void ir_simd_typed_test(IrTestTally* tally)
     const bool ready = type_test_table_open(&table, 256);
     ir_test_expect(tally, ready, "typed SIMD operation fixtures initialize a real C type table");
     const uint64_t target = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512BW);
+    // The producer's target: the same features, as the lowering's X86Target has them.
+    const X86Target producer = { .features = target };
     static const CheckOp operations[] = {
         CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR, CHECK_OP_BIT_NOT,
         CHECK_OP_LESS, CHECK_OP_LESS_EQUAL, CHECK_OP_GREATER, CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL,
@@ -30,7 +32,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
             for (uint32_t operation = 0; operation < sizeof(operations) / sizeof(*operations); operation += 1)
             {
                 Tier0Operation row = { 0 };
-                const char* reason = check_vector_lower_row(&table.table, target, operations[operation], type, BUSTER_TYPED_CLASS_VOID, &row);
+                const char* reason = check_vector_lower_row(&table.table, &producer, false, operations[operation], type, BUSTER_TYPED_CLASS_VOID, &row);
                 IrSimdTypedOperation decoded = { 0 };
                 const IrSimdTypedStatus admitted = ir_simd_typed_operation(&row, target, &decoded);
                 const bool compare = operation >= 7;
@@ -71,7 +73,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
             }
             Tier0Operation unsupported = { 0 };
             const TypeId floating = type_vector(&table.table, BUSTER_TYPE_FLOAT, 4u << width, false);
-            const char* reason = check_vector_lower_row(&table.table, target, CHECK_OP_ADD, floating, BUSTER_TYPED_CLASS_VOID, &unsupported);
+            const char* reason = check_vector_lower_row(&table.table, &producer, false, CHECK_OP_ADD, floating, BUSTER_TYPED_CLASS_VOID, &unsupported);
             IrSimdTypedOperation decoded = { 0 };
             ir_test_expect(tally, reason == NULL && ir_simd_typed_operation(&unsupported, target, &decoded) == IR_SIMD_TYPED_UNSUPPORTED,
                            "an otherwise valid floating producer operation remains explicitly outside the integer lane subset");
@@ -92,8 +94,8 @@ static void ir_simd_typed_test(IrTestTally* tally)
             {
                 Tier0Operation row = { 0 };
                 Tier0Operation canonical = { 0 };
-                const char* reason = check_vector_lower_row(&table.table, target, integer_operations[operation], vector, BUSTER_TYPED_CLASS_VOID, &row);
-                const char* normalized_reason = check_vector_lower_row(&table.table, target, integer_operations[operation], normalized, BUSTER_TYPED_CLASS_VOID, &canonical);
+                const char* reason = check_vector_lower_row(&table.table, &producer, false, integer_operations[operation], vector, BUSTER_TYPED_CLASS_VOID, &row);
+                const char* normalized_reason = check_vector_lower_row(&table.table, &producer, false, integer_operations[operation], normalized, BUSTER_TYPED_CLASS_VOID, &canonical);
                 IrSimdTypedOperation result = { 0 };
                 const IrSimdTypedStatus status = ir_simd_typed_operation(&row, target, &result);
                 const bool bitwise = operation < 4;

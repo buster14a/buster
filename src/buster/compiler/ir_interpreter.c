@@ -11,11 +11,15 @@
 // Layout: integer/float payload helpers; symbol lookup; frame preparation; scalar operations; ir_interpret.
 
 
+// A function and its symbol; `labels`, the producer's symbols of its labels in IrFunction.labels' order (label_count of
+// them), or null for a function whose labels' addresses nothing takes. A label's address is its labels entry's, which
+// only br_indirect reads. A function with by-value aggregates' ABI records or a variadic frame (#131) is refused.
 typedef struct IrInterpreterFunction IrInterpreterFunction;
 struct IrInterpreterFunction
 {
     SymbolId symbol;
     const IrFunction* function;
+    const SymbolId* labels;
 };
 
 typedef struct IrInterpreterProgram IrInterpreterProgram;
@@ -220,6 +224,18 @@ static bool ir_interpreter_symbol_address(const IrInterpreterProgram* program, S
     }
     else
     {
+        for (uint32_t f = 0; f < program->function_count && !found; f += 1)
+        {
+            const IrInterpreterFunction* binding = &program->functions[f];
+            for (uint32_t k = 0; binding->labels != 0 && binding->function != 0 && k < binding->function->label_count && !found; k += 1)
+            {
+                if (binding->labels[k] == symbol)
+                {
+                    *value = (InterpreterValue){ .low = (uintptr_t)&binding->function->labels[k] };
+                    found = true;
+                }
+            }
+        }
         for (uint32_t b = 0; b < program->binding_count && !found; b += 1)
         {
             if (program->bindings[b].symbol == symbol)
@@ -246,8 +262,9 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     {
         status = INTERPRETER_RESOURCE;
     }
-    else if (verified.error != IR_OK || function->parameter_count != count || (count != 0 && arguments == 0))
+    else if (verified.error != IR_OK || function->parameter_count != count || (count != 0 && arguments == 0) || function->parameter_passed != 0 || function->variadic)
     {
+        // By-value aggregates' copies and a variadic definition's incoming frame aren't executed yet (#131).
         status = INTERPRETER_INVALID;
     }
     else if (ir_function_has_simd(function))
@@ -828,6 +845,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             result.status = INTERPRETER_UNDEFINED;
                         }
                     }
+                    if (result.status == INTERPRETER_OK && call.abi != 0)
+                    {
+                        // A call that passes or returns an aggregate by value isn't executed yet (#131).
+                        result.status = INTERPRETER_INVALID;
+                    }
                     if (result.status == INTERPRETER_OK && callee != UINT32_MAX)
                     {
                         const IrFunction* target = program->functions[callee].function;
@@ -950,6 +972,15 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_UNREACHABLE:
                     result.status = INTERPRETER_UNDEFINED;
                     break;
+                case IR_BR_INDIRECT:
+                {
+                    // An address of one of this function's labels (ir_interpreter_symbol_address), or undefined.
+                    const uint64_t offset = av.low - (uintptr_t)function->labels;
+                    const uint64_t label = offset / sizeof(uint32_t);
+                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count ?
+                                        ir_interpreter_enter_block(frame, function->labels[label], frame->block, options, &result.steps) : INTERPRETER_UNDEFINED;
+                    break;
+                }
                 default:
                     result.status = ir_interpreter_operation(function, i, av, bv, &value);
                     break;

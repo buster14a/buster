@@ -880,6 +880,11 @@ static bool ir_optimize_control(IrOptimizeWork* work, uint32_t i, bool queue)
     {
         target = f->a[i];
     }
+    else if (op == IR_BR_INDIRECT)
+    {
+        // It may go to any label: no address it holds is known to be one label's rather than another's.
+        all = true;
+    }
     else if (op == IR_CBR || op == IR_SWITCH)
     {
         const uint8_t state = work->states[f->a[i]];
@@ -1071,6 +1076,7 @@ static const uint8_t ir_optimize_roots[64] = {
         [IR_BR] = 1,
         [IR_CBR] = 1,
         [IR_SWITCH] = 1,
+        [IR_BR_INDIRECT] = 1,
         [IR_RET] = 1,
         [IR_UNREACHABLE] = 1,
         [IR_SDIV] = 2,
@@ -1340,6 +1346,9 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
         .address_count = f->address_count,
         .call_type_count = f->call_type_count,
         .parameter_count = f->parameter_count,
+        .label_count = f->label_count,
+        .abi_call_count = f->abi_call_count,
+        .passed_count = f->passed_count,
     };
     for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
     {
@@ -1410,6 +1419,26 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
         {
             memcpy(candidate.parameter_types, f->parameter_types, f->parameter_count);
         }
+        // The ABI records and the incoming frame as they were (each call keeps its index), and each label at its block
+        // as threaded: a label whose block is dead has none, which only a function no br_indirect reaches leaves.
+        if (f->abi_call_count != 0)
+        {
+            memcpy(candidate.abi_calls, f->abi_calls, (uint64_t)f->abi_call_count * sizeof(IrAbiCall));
+        }
+        if (f->passed_count != 0)
+        {
+            memcpy(candidate.passed, f->passed, (uint64_t)f->passed_count * sizeof(IrPassed));
+        }
+        for (uint32_t label = 0; label < f->label_count; label += 1)
+        {
+            const uint32_t block = f->labels[label];
+            candidate.labels[label] = block == BUSTER_IR_NONE || work->blocks[block] == 0 ? BUSTER_IR_NONE : blocks[threads[block]];
+        }
+        candidate.parameter_passed = f->parameter_passed;
+        candidate.result_size = f->result_size;
+        candidate.result_abi = f->result_abi;
+        candidate.variadic = f->variadic;
+        candidate.incoming = f->incoming;
         uint32_t extra = 0;
         uint32_t constants = f->constant_count;
         uint32_t calls = 0;

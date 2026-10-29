@@ -3942,6 +3942,20 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // An intrinsic's result, from its prototype, which the reader keeps at the call's `)`, whatever the last operand the
+        // call names: a vector after a scalar count, and a scalar after a vector.
+        {
+            "intrinsics' results in an inferred array",
+            "typedef short v8hi __attribute__((vector_size(16)));\ntypedef char v16qi __attribute__((vector_size(16)));\ntypedef int v4si __attribute__((vector_size(16)));\nint f(v8hi h, int n, v16qi c, v4si x)\n{\n    v8hi a[] = { __builtin_ia32_psllwi128(h, n), h, __builtin_ia32_psrawi128(h, n) };\n    _Static_assert(sizeof a == 3 * sizeof(v8hi), \"three vectors\");\n    v4si b[] = { __builtin_ia32_pmovmskb128(c), 2, 3, 4, x };\n    _Static_assert(sizeof b == 2 * sizeof(v4si), \"four scalars braced into a vector, then a vector\");\n    return a[2][0] + b[1][0];\n}\n",
+            false,
+            false
+        },
+        {
+            "an intrinsic immediate cannot discard side effects",
+            "typedef int V __attribute__((vector_size(64)));V f(V a,int*p){return __builtin_ia32_alignd512(a,a,((*p)++,3));}",
+            true,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
@@ -4529,12 +4543,20 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_function_name_test.c"
 #include "c_check_pragma_test.c"
 #include "c_check_diagnostic_test.c"
+#include "c_check_warning_events_test.c"
+#include "c_check_const_values_test.c"
+#include "c_check_warning_deferred_test.c"
+#include "c_check_warning_policy_test.c"
+#include "c_check_warning_render_test.c"
 #include "c_check_lazy_test.c"
 #include "c_check_intrinsic_input_test.c"
 #include "c_check_initializer_test.c"
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_const_source_test.c"
+#include "c_check_const_alias_test.c"
+#include "c_check_comma_input_test.c"
 #include "c_check_embed_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
@@ -4613,6 +4635,8 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool const_values = false;
+    bool program_vectors = false;
     bool embed_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -4629,6 +4653,14 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_initializers = true;
         }
+        else if (strcmp(argv[i], "--const-values") == 0)
+        {
+            const_values = true;
+        }
+        else if (strcmp(argv[i], "--program-vectors") == 0)
+        {
+            program_vectors = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -4644,20 +4676,34 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && embed_initializers)
+        if (initialized && const_values)
+        {
+            check_test_const_values(&test);
+            check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
+            check_test_const_programs(&test, clang);
+        }
+        else if (initialized && embed_initializers)
         {
             check_test_embed_initializers(&test, clang);
         }
         else if (initialized && program_initializers)
         {
             check_test_program_initializers(&test, clang);
+        }
+        else if (initialized && program_vectors)
+        {
+            check_test_program_vectors(&test, clang);
+            check_test_program_x86(&test, clang);
+            check_test_program_vector_builtins(&test, clang);
+            check_test_program_fp16(&test, clang);
         }
         else if (initialized)
         {
@@ -4668,6 +4714,14 @@ static int run_checker_tests(int argc, char** argv)
             check_test_integer_float_rounding(&test, &types.table);
             check_test_action_oracles(&test, clang);
             check_test_actions_batch(&test, &types.table);
+            check_test_warning_events(&test);
+            check_test_const_values(&test);
+            check_test_warning_deferred(&test);
+            check_test_warning_policy(&test);
+            check_test_warning_render(&test);
+            check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
+            check_test_const_programs(&test, clang);
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);
             Arena scratch = arena_reserve(UINT64_C(1) << 27);
@@ -4704,6 +4758,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
             check_test_input_scans(&test);
+            check_test_expression_commas(&test);
             check_test_warning_ranges(&test);
             check_test_selection_roots(&test);
             check_test_varargs_graph(&test, &types.table);
@@ -4745,6 +4800,9 @@ static int run_checker_tests(int argc, char** argv)
             check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
+        // The program harness's build directory, which the sections' programs share: removed after the last of them,
+        // whichever sections ran.
+        check_test_program_build_release();
         check_test_types_close(&types);
     }
     oracle_cache_report(oracle, "test-checker");

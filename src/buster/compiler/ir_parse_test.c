@@ -46,7 +46,10 @@ static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
     bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count &&
                  a->constant_count == b->constant_count && a->vector_constant_count == b->vector_constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count &&
                  a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count &&
-                 a->result_type == b->result_type && a->symbol_count == b->symbol_count;
+                 a->result_type == b->result_type && a->symbol_count == b->symbol_count && a->label_count == b->label_count &&
+                 a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count && a->parameter_passed == b->parameter_passed &&
+                 a->result_size == b->result_size && ir_parse_test_bytes(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) && a->variadic == b->variadic &&
+                 ir_parse_test_bytes(&a->incoming, &b->incoming, sizeof(AbiCall));
     if (equal)
     {
         const uint64_t count = a->instruction_count;
@@ -55,7 +58,16 @@ static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
                 ir_parse_test_bytes(a->a, b->a, count * 4) && ir_parse_test_bytes(a->b, b->b, count * 4) && ir_parse_test_bytes(a->c, b->c, count * 4) &&
                 ir_parse_test_bytes(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * 4) &&
                 ir_parse_test_bytes(a->extra, b->extra, (uint64_t)a->extra_count * 4) && ir_parse_test_bytes(a->call_types, b->call_types, a->call_type_count) &&
-                ir_parse_test_bytes(a->parameter_types, b->parameter_types, a->parameter_count);
+                ir_parse_test_bytes(a->parameter_types, b->parameter_types, a->parameter_count) && ir_parse_test_bytes(a->labels, b->labels, (uint64_t)a->label_count * 4);
+        for (uint32_t i = 0; equal && i < a->abi_call_count; i += 1)
+        {
+            equal = ir_parse_test_bytes(&a->abi_calls[i].call, &b->abi_calls[i].call, sizeof(AbiCall)) && a->abi_calls[i].passed == b->abi_calls[i].passed &&
+                    a->abi_calls[i].result_size == b->abi_calls[i].result_size;
+        }
+        for (uint32_t i = 0; equal && i < a->passed_count; i += 1)
+        {
+            equal = ir_parse_test_bytes(&a->passed[i].location, &b->passed[i].location, sizeof(AbiLocation)) && a->passed[i].size == b->passed[i].size;
+        }
         for (uint32_t i = 0; equal && i < a->constant_count; i += 1)
         {
             equal = a->constants[i].low == b->constants[i].low && a->constants[i].high == b->constants[i].high;
@@ -75,7 +87,7 @@ static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
             const IrCall x = a->calls[i];
             const IrCall y = b->calls[i];
             equal = x.argument_first == y.argument_first && x.argument_count == y.argument_count && x.type_first == y.type_first &&
-                    x.parameter_count == y.parameter_count && x.result_type == y.result_type && x.variadic == y.variadic;
+                    x.parameter_count == y.parameter_count && x.result_type == y.result_type && x.variadic == y.variadic && x.abi == y.abi;
         }
     }
     return equal;
@@ -661,6 +673,8 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/control.ir",
                 "tests/ir/memory-calls.ir",
                 "tests/ir/dynamic-stack.ir",
+                "tests/ir/labels.ir",
+                "tests/ir/aggregates.ir",
                 "tests/ir/vector-mask.ir",
                 "tests/ir/empty.ir",
                 "tests/ir/tier0-add.ir",

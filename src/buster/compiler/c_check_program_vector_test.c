@@ -3,7 +3,8 @@
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
 // every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
-// elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of vector type.
+// va_arg of them, elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of
+// vector type.
 // Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign its frame
 // (#552). Then what the lowering refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other
 // sizes. Include after c_check_program_test.c's runners.
@@ -111,6 +112,35 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h+(a*3)[n&3];}",
         },
         {
+            "atomic-vector-transport",
+            "typedef int A4 __attribute__((vector_size(16)));"
+            "_Atomic(A4) external_atomic4(_Atomic(A4));int external_apply_atomic4(_Atomic(A4)(*)(_Atomic(A4)),int);"
+            "static _Atomic(A4) local_atomic4(_Atomic(A4) x){A4 v=x;return v+1;}"
+            "typedef int A8 __attribute__((vector_size(32)));"
+            "_Atomic(A8) external_atomic8(_Atomic(A8));int external_apply_atomic8(_Atomic(A8)(*)(_Atomic(A8)),int);"
+            "static _Atomic(A8) local_atomic8(_Atomic(A8) x){A8 v=x;return v+1;}"
+            "typedef int A16 __attribute__((vector_size(64)));"
+            "_Atomic(A16) external_atomic16(_Atomic(A16));int external_apply_atomic16(_Atomic(A16)(*)(_Atomic(A16)),int);"
+            "static _Atomic(A16) local_atomic16(_Atomic(A16) x){A16 v=x;return v+1;}"
+            "int tested(int n){unsigned h=2166136261u;"
+            "A4 a4={0};for(int i=0;i<4;i++)a4[i]=n+i;_Atomic(A4) s4=a4;A4 r4=s4;FOLD(r4);"
+            "s4=a4+1;A4 e4=a4+1;int ok4=__c11_atomic_compare_exchange_strong(&s4,&e4,a4+2,5,0);FOLD(ok4);"
+            "ok4=__c11_atomic_compare_exchange_strong(&s4,&e4,a4+3,5,0);FOLD(ok4);FOLD(e4);"
+            "r4=__c11_atomic_exchange(&s4,a4+4,5);FOLD(r4);__c11_atomic_store(&s4,a4+5,5);r4=__c11_atomic_load(&s4,5);FOLD(r4);"
+            "_Atomic(A4) z4=external_atomic4(a4);r4=z4;FOLD(r4);int q4=external_apply_atomic4(local_atomic4,n);FOLD(q4);"
+            "A8 a8={0};for(int i=0;i<8;i++)a8[i]=n+i;_Atomic(A8) s8=a8;A8 r8=s8;FOLD(r8);"
+            "s8=a8+1;A8 e8=a8+1;int ok8=__c11_atomic_compare_exchange_strong(&s8,&e8,a8+2,5,0);FOLD(ok8);"
+            "ok8=__c11_atomic_compare_exchange_strong(&s8,&e8,a8+3,5,0);FOLD(ok8);FOLD(e8);"
+            "r8=__c11_atomic_exchange(&s8,a8+4,5);FOLD(r8);__c11_atomic_store(&s8,a8+5,5);r8=__c11_atomic_load(&s8,5);FOLD(r8);"
+            "_Atomic(A8) z8=external_atomic8(a8);r8=z8;FOLD(r8);int q8=external_apply_atomic8(local_atomic8,n);FOLD(q8);"
+            "A16 a16={0};for(int i=0;i<16;i++)a16[i]=n+i;_Atomic(A16) s16=a16;A16 r16=s16;FOLD(r16);"
+            "s16=a16+1;A16 e16=a16+1;int ok16=__c11_atomic_compare_exchange_strong(&s16,&e16,a16+2,5,0);FOLD(ok16);"
+            "ok16=__c11_atomic_compare_exchange_strong(&s16,&e16,a16+3,5,0);FOLD(ok16);FOLD(e16);"
+            "r16=__c11_atomic_exchange(&s16,a16+4,5);FOLD(r16);__c11_atomic_store(&s16,a16+5,5);r16=__c11_atomic_load(&s16,5);FOLD(r16);"
+            "_Atomic(A16) z16=external_atomic16(a16);r16=z16;FOLD(r16);int q16=external_apply_atomic16(local_atomic16,n);FOLD(q16);"
+            "return (int)h;}",
+        },
+        {
             "volatile-vector-values",
             "int tested(int n){unsigned h=2166136261u;volatile v4si a={n,2,3,4};v4si b=a;a=b+1;"
             "int x=((v4si)a)[n&3];v4si c=(0,a);int y=c[(n+1)&3];FOLD(b);FOLD(x);FOLD(y);return (int)h;}",
@@ -120,6 +150,45 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
             "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
             "v16si array[2]={a,b};array[1]+=array[0];FOLD(array);int t=(a*b)[n&15]+(d+d)[n&3];FOLD(t);return (int)h;}",
+        },
+        {
+            // Unnamed vectors (#137): 16-byte ones from the save area's vector slots until the eight registers are taken,
+            // then from the overflow area, also through a va_copy; and the wider ones, which a variadic call passes in
+            // memory, from the overflow area at their alignments, 16 (the aligned typedefs) and 32 and 64.
+            "vector-varargs",
+            "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
+            "static unsigned narrow(int n,...){unsigned h=2166136261u;__builtin_va_list ap,copy;__builtin_va_start(ap,n);"
+            "for(int i=0;i<n;i++){v4si a=__builtin_va_arg(ap,v4si);v2df d=__builtin_va_arg(ap,v2df);FOLD(a);FOLD(d);if(i==2)__builtin_va_copy(copy,ap);}"
+            "double e=__builtin_va_arg(ap,double);v4si t=__builtin_va_arg(copy,v4si);FOLD(e);FOLD(t);__builtin_va_end(copy);__builtin_va_end(ap);return h;}"
+            "static unsigned wide(int n,...){unsigned h=2166136261u;__builtin_va_list ap;__builtin_va_start(ap,n);"
+            "for(int i=0;i<n;i++){v8sf b=__builtin_va_arg(ap,v8sf);v16su c=__builtin_va_arg(ap,v16su);v16si f=__builtin_va_arg(ap,v16si);"
+            "v4df g=__builtin_va_arg(ap,v4df);FOLD(b);FOLD(c);FOLD(f);FOLD(g);}__builtin_va_end(ap);return h;}"
+            "int tested(int n){v4si a={n,2,-3,4};v8sf b;fillf((float*)&b,8,n);v16su c;fill(&c,64,n);v2df d={(double)n,0.25};"
+            "v16si f={n,n*n,-n};v4df g={0.5,(double)n};"
+            "unsigned x=narrow(5,a,d,a+1,d+d,a*3,d,a-n,d*d,a,d,1.5);unsigned y=wide(2,b,c,f,g,b*2.0f,c^1u,f+n,g+g);return (int)(x^y);}",
+        },
+        {
+            // Past the integer depth table (#780): calls of 16 arguments that return vectors of 16, 32 and 64 bytes (the
+            // first as _mm_set1_epi8 calls _mm_set_epi8), one of 16 and two vectors computed past it, and an addition
+            // nested 18 deep beside a vector.
+            "vectors-past-the-depth-tables",
+            "v16qu vector_spread(unsigned char a0,unsigned char a1,unsigned char a2,unsigned char a3,unsigned char a4,unsigned char a5,unsigned char a6,"
+            "unsigned char a7,unsigned char a8,unsigned char a9,unsigned char a10,unsigned char a11,unsigned char a12,unsigned char a13,unsigned char a14,"
+            "unsigned char a15){v16qu v={a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15};return v;}"
+            "v8si vector_pairs(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9,int a10,int a11,int a12,int a13,int a14,int a15)"
+            "{v8si v={a0+a8,a1+a9,a2+a10,a3+a11,a4+a12,a5+a13,a6+a14,a7+a15};return v;}"
+            "v16su vector_wide(unsigned a0,unsigned a1,unsigned a2,unsigned a3,unsigned a4,unsigned a5,unsigned a6,unsigned a7,unsigned a8,unsigned a9,"
+            "unsigned a10,unsigned a11,unsigned a12,unsigned a13,unsigned a14,unsigned a15)"
+            "{v16su v={a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15};return v*3u;}"
+            "int vector_taken(int a0,int a1,int a2,int a3,int a4,int a5,int a6,int a7,int a8,int a9,int a10,int a11,int a12,int a13,int a14,int a15,"
+            "v8si v,v16qu q){return a0+a15+v[a1&7]+q[a2&15];}"
+            "int tested(int n){unsigned h=2166136261u;unsigned char b=(unsigned char)n;"
+            "v16qu q=vector_spread(b,b,b,b,b,b,b,b,b,b,b,b,b,b,b,b);FOLD(q);"
+            "v8si s=vector_pairs(n+0,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15);FOLD(s);"
+            "v16su d=vector_wide(n*1,n*2,n*3,n*4,n*5,n*6,n*7,n*8,n*9,n*10,n*11,n*12,n*13,n*14,n*15,n*16);FOLD(d);"
+            "int t=vector_taken(n+0,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15,s*s+s,q+q);FOLD(t);"
+            "v8si u=s+(n+0+(n+1+(n+2+(n+3+(n+4+(n+5+(n+6+(n+7+(n+8+(n+9+(n+10+(n+11+(n+12+(n+13+(n+14+(n+15+(n+16+(n+17+(n)))))))))))))))))));"
+            "FOLD(u);return (int)h;}",
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
@@ -201,6 +270,12 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             0,
         },
         {
+            "atomic-vector-update",
+            "typedef int V __attribute__((vector_size(16)));V tested(_Atomic(V)*p,V v){return *p+=v;}",
+            "updates of atomic vector values",
+            0,
+        },
+        {
             "vector-logical-not",
             "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2};return (!a)[0];}",
             "vector logical operators and conditions",
@@ -225,6 +300,12 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
+            "vector-bf16-arithmetic",
+            "typedef __bf16 v8bf __attribute__((vector_size(16)));void tested(v8bf*p,v8bf*q){*p=*p+*q;}",
+            "vector operations on elements of this type",
+            0,
+        },
+        {
             "vector-integer-cast",
             "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n};__int128 x=(__int128)a;return (int)x;}",
             "casts between vectors and integers or vectors of other sizes",
@@ -238,6 +319,50 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
     // Without AVX-512F and AVX-512VL, a vector value of any kind.
     check_test_program_boundary_reason(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
                                        "vector-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL");
+}
+
+// Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
+static void check_test_program_atomic_vector_constraints(CheckTest* test, const char* clang)
+{
+    static const CheckSourceFixture fixtures[] = {
+        {
+            "atomic vector initializers keep the declared destination",
+            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
+            "int f(void){_Atomic(V) a=(V){1,2,3,4};V b=a;_Atomic(V) c=make(b);V d=c;return b[0]+d[0];}",
+            false,
+            false,
+        },
+        {
+            "atomic vector rvalues do not initialize plain vectors",
+            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
+            "V f(void){V x=make((V){1,2,3,4});return x;}",
+            true,
+            false,
+        },
+    };
+    char directory[] = "/tmp/buster-atomic-vector-XXXXXX";
+    const bool created = mkdtemp(directory) != NULL;
+    check_test_expect(test, created, "atomic vector constraint directory");
+    const char* arguments[] = { "-std=gnu17" };
+    for (uint32_t i = 0; created && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%u.c", directory, i);
+        char* paths[] = { path };
+        ParseTestClang oracle = { 0 };
+        const bool ready = parse_test_write(path, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &oracle);
+        check_test_expect(test, ready, "atomic vector constraint oracle");
+        if (ready)
+        {
+            check_test_source(test, fixtures + i, path, &oracle);
+        }
+        unlink(path);
+    }
+    if (created)
+    {
+        rmdir(directory);
+    }
 }
 
 static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test, const char* clang)
@@ -254,5 +379,6 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
+        check_test_program_atomic_vector_constraints(test, clang);
     }
 }

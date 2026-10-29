@@ -67,6 +67,8 @@ typedef enum IrInlineDecision
     IR_INLINE_BODY,
     IR_INLINE_COST,
     IR_INLINE_GROWTH,
+    // A call that passes or returns an aggregate by value: its ABI records (#131) stay a call's.
+    IR_INLINE_ABI,
     IR_INLINE_DECISION_COUNT,
 } IrInlineDecision;
 
@@ -144,6 +146,9 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->calls,
         function->call_types,
         function->parameter_types,
+        function->labels,
+        function->abi_calls,
+        function->passed,
     };
     const uint64_t counts[] = {
         sizeof(*function),
@@ -163,6 +168,9 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         (uint64_t)function->call_count * sizeof(IrCall),
         function->call_type_count,
         function->parameter_count,
+        (uint64_t)function->label_count * 4,
+        (uint64_t)function->abi_call_count * sizeof(IrAbiCall),
+        (uint64_t)function->passed_count * sizeof(IrPassed),
     };
     bool conflict = false;
     for (uint32_t i = 0; !conflict && i < sizeof(pointers) / sizeof(pointers[0]); i += 1)
@@ -196,11 +204,14 @@ static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
     return first < unit->count && unit->symbols[first] == symbol ? first : BUSTER_IR_NONE;
 }
 
+// A call with ABI records (#131) has the convention's shape, which only its records give (a hidden pointer its callee
+// takes as parameter 0, a void call of a callee whose result is the address of its bytes): its result and parameters'
+// IR types aren't its callee's, though whether it is variadic is, and it stays a call (IR_INLINE_ABI).
 static bool ir_inline_signature(const IrFunction* caller, uint32_t node, const IrFunction* callee, uint8_t flags)
 {
     const IrCall call = caller->calls[caller->b[node]];
-    bool match = call.result_type == callee->result_type && call.parameter_count == callee->parameter_count && call.variadic == ((flags & BUSTER_IR_INLINE_VARIADIC) != 0);
-    for (uint32_t p = 0; match && p < call.parameter_count; p += 1)
+    bool match = call.variadic == ((flags & BUSTER_IR_INLINE_VARIADIC) != 0) && (call.abi != 0 || (call.result_type == callee->result_type && call.parameter_count == callee->parameter_count));
+    for (uint32_t p = 0; match && call.abi == 0 && p < call.parameter_count; p += 1)
     {
         match = caller->call_types[call.type_first + p] == callee->parameter_types[p];
     }
@@ -426,7 +437,9 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
 {
     IrInlineBody body = {
         .cost = UINT32_MAX,
-        .supported = function->block_count == 1 && function->slot_count == 0 && function->op[function->instruction_count - 1] == IR_RET,
+        // Labels would be defined twice, and by-value aggregates' copies (#131's ABI records) need a frame of their own.
+        .supported = function->block_count == 1 && function->slot_count == 0 && function->op[function->instruction_count - 1] == IR_RET && function->label_count == 0 &&
+                     function->parameter_passed == 0,
     };
     if (body.supported)
     {
@@ -508,6 +521,10 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
         {
             decision = IR_INLINE_RECURSIVE;
         }
+        else if (unit->functions[function].calls[unit->functions[function].b[node]].abi != 0)
+        {
+            decision = IR_INLINE_ABI;
+        }
         else
         {
             const IrInlineBody body = ir_inline_body(&result->functions[callee]);
@@ -583,6 +600,11 @@ static void ir_inline_node(const IrFunction* source, uint32_t old, IrFunction* d
     {
         destination->a[node] = values[source->a[old]];
     }
+    else if ((op == IR_CALL || op == IR_CALL_INDIRECT) && source->c[old] != BUSTER_IR_NONE)
+    {
+        // An aggregate result's destination (IrAbiCall.result_size).
+        destination->c[node] = values[source->c[old]];
+    }
 }
 
 static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineResult* result)
@@ -597,6 +619,9 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .slot_count = source->slot_count,
         .address_count = source->address_count,
         .parameter_count = source->parameter_count,
+        .label_count = source->label_count,
+        .abi_call_count = source->abi_call_count,
+        .passed_count = source->passed_count,
     };
     uint32_t call = result->call_offsets[function];
     for (uint32_t node = 0; ok && node < source->instruction_count; node += 1)
@@ -669,6 +694,25 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         {
             memcpy(rewritten.parameter_types, source->parameter_types, source->parameter_count);
         }
+        // The caller's blocks don't change, so its labels keep theirs; its ABI records and incoming frame stay as they
+        // were, each call it keeps with its index into them.
+        if (source->label_count != 0)
+        {
+            memcpy(rewritten.labels, source->labels, (uint64_t)source->label_count * 4);
+        }
+        if (source->abi_call_count != 0)
+        {
+            memcpy(rewritten.abi_calls, source->abi_calls, (uint64_t)source->abi_call_count * sizeof(IrAbiCall));
+        }
+        if (source->passed_count != 0)
+        {
+            memcpy(rewritten.passed, source->passed, (uint64_t)source->passed_count * sizeof(IrPassed));
+        }
+        rewritten.parameter_passed = source->parameter_passed;
+        rewritten.result_size = source->result_size;
+        rewritten.result_abi = source->result_abi;
+        rewritten.variadic = source->variadic;
+        rewritten.incoming = source->incoming;
         uint32_t constants = source->constant_count;
         uint32_t addresses = source->address_count;
         uint32_t extra = 0;

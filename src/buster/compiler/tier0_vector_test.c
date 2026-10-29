@@ -12,8 +12,8 @@
 //     statement, stored after it), against this file's own stack machine over the same stream
 //     (tier0_test_vector_interpret), whose rows' model is plain C (tier0_test_vector_model);
 //   - placement: each row under as many floating values as leave its VECTOR registers room, past 16 for the EVEX ones,
-//     and one past the room of a VEX form's, which both paths refuse (TIER0_ERROR_DEPTH), and a scratch register past the
-//     integer depths' table;
+//     and one past the room of a VEX form's, and a scratch register past the integer depths' table, which both paths
+//     take through the deep slots (#780);
 //   - aggregates in one vector register: functions of 16-, 32- and 64-byte vector parameters (in XMM, YMM and ZMM
 //     registers and on the stack) and results, as objects, as a front end hands them, called from C; and functions
 //     calling C functions of them, a vector argument on the stack among them;
@@ -1122,8 +1122,11 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                          Tier0Error allowed, Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
-    const Tier0Code vector = tier0_compile(function, arena);
+    // With the entries' first records, which tier0_test_covered needs to leave the rows' records out.
+    Tier0Function wanted = *function;
+    wanted.entry_records = true;
+    const Tier0Code scalar = tier0_compile_scalar(&wanted, arena);
+    const Tier0Code vector = tier0_compile(&wanted, arena);
     *error = scalar.error;
     bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "vectors", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)",
                                    name, check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
@@ -1134,6 +1137,7 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "vectors", "%s: an invalid record or an invalid branch column", name);
+    ready = ready && tier0_test_covered(tally, "vectors", name, function, &scalar);
     uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
@@ -1325,6 +1329,17 @@ static void tier0_test_vector_placed(Tier0TestVectorProgram* program, uint32_t k
     for (uint32_t j = 0; j < kind->operand_count; j += 1)
     {
         tier0_test_vector_simple_leaf(program, kind->operands[j], state);
+        if (k == BUSTER_TIER0_TEST_VECTOR_ADD_S && !program->overflow)
+        {
+            // The placement leaves are arbitrary bits. Make each lane a finite normal float so the scalar model and
+            // vaddps have a bit-exact result even on machines that choose different NaN payloads.
+            const uint32_t constant = program->constant_count - 1;
+            for (uint32_t w = 0; w < 8; w += 1)
+            {
+                uint64_t* word = &program->constants[8 * constant + w];
+                *word = (*word & 0x807fffff807fffffull) | 0x3e8000003e800000ull;
+            }
+        }
     }
     tier0_test_vector_emit(program, BUSTER_TYPED_X86, result, k);
     if (result != BUSTER_TYPED_CLASS_VOID)
@@ -1370,9 +1385,10 @@ static uint32_t tier0_test_vector_floating_operands(const Tier0TestVectorKind* k
 // (their consumer's DUP, before it, takes the 16th: tier0_test_vector_adjacent), for the kinds without a VEX form, whose
 // VECTOR registers then go from xmm15 on past the XMM registers (from VECTOR(0) on where a floating operand takes the
 // 16th); and a VEX form's edge, under as many floats as leave its registers below 16 (its VECTOR registers from the
-// floating stack's depth, one past a floating result's where no floating operand takes its place), which fits, and one
-// more, which both paths refuse (TIER0_ERROR_DEPTH); and a scratch register (the andn row's) at the integer table's last
-// depth, which fits, and past it, which both paths refuse.
+// floating stack's depth, one past a floating result's where no floating operand takes its place), and one more; and a
+// scratch register (the andn row's) at the integer table's last depth, and past it. Each compiles by both paths and runs
+// against the model: past a table, its stack's values in their deep slots and the row's operands in its first registers
+// (tier0_select_deep, #780), as under 15 floats a VEX form's row is.
 static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Tier0TestVectorShared* shared)
 {
     Tier0TestVectorProgram* program = calloc(1, sizeof(Tier0TestVectorProgram));
@@ -1387,14 +1403,12 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
         const uint32_t past = kind->result == BUSTER_TIER0_TEST_VECTOR_F32 && floating == 0 ? 1 : 0;
         uint32_t floats[6] = { 0, 8, BUSTER_TIER0_FLOATING_DEPTHS - 1, 0, 0, 0 };
         uint32_t ints[6] = { 0, 3, 0, 0, 0, 0 };
-        bool fits[6] = { true, true, kind->vex_reach == 0, false, false, false };
         uint32_t cases = 3;
         if (kind->vex_reach != 0)
         {
             const uint32_t room = BUSTER_TIER0_FLOATING_DEPTHS - floating - past - kind->vex_reach;
             floats[3] = room;
             floats[4] = room + 1;
-            fits[3] = true;
             cases = 5;
         }
         if (k == BUSTER_TIER0_TEST_VECTOR_NOT_LOW)
@@ -1403,7 +1417,6 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
             // register at the depth after them: 14, the table's last, under 10 live integers, and 15 under 11.
             ints[3] = 10;
             ints[4] = 11;
-            fits[3] = true;
             cases = 5;
         }
         for (uint32_t c = 0; c < cases; c += 1)
@@ -1414,9 +1427,8 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
             snprintf(name, sizeof(name), "%s under %u floats and %u integers", kind->name, floats[c], ints[c]);
             const Tier0Function function = tier0_test_vector_function(program);
             Tier0Error error = TIER0_OK;
-            const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_ERROR_DEPTH, &error);
-            tier0_test_expect(tally, (error == TIER0_OK) == fits[c] && (fits[c] || error == TIER0_ERROR_DEPTH), "vectors", "%s: %s (error %d)", name,
-                              fits[c] ? "must compile" : "must be refused past the depths", error);
+            const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+            tier0_test_expect(tally, error == TIER0_OK, "vectors", "%s: must compile (error %d)", name, error);
             if (length != 0)
             {
                 tier0_test_vector_inputs(shared, &state);
@@ -2040,7 +2052,12 @@ static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
     case 7: row.operand_count = BUSTER_TIER0_OPERATION_OPERANDS + 1; break;
     case 8: row.operand_bytes[1] = 8; break;
     case 9: row.result_bytes = 0; break;
-    case 10: row.records[0] = (X86Instruction){ .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) }; break;
+    case 10:
+        // A block of registers (V4FMADDPS's four in vvvv), which a row can't name; an opmask pair it can (below).
+        row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD);
+        row.records[1] = (X86Instruction){ .form = X86_FORM_V4FMADDPS_Z_Z_M128, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .vvvv = BUSTER_TIER0_ROLE_VECTOR(4),
+                                           .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE };
+        break;
     case 11:
         row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_NOT_LOW);
         row.records[1].form = X86_FORM_MULX_R32_R32_RM32;
@@ -2092,6 +2109,10 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         const Tier0Operation row = tier0_test_vector_broken_row(b);
         tier0_test_expect(tally, !tier0_operation_valid(&row), "vectors", "row break %u taken", b);
     }
+    // VP2INTERSECT's opmask pair (k2 and k3), two of the opmask registers no value keeps between entries.
+    Tier0Operation pair = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
+    pair.records[0] = (X86Instruction){ .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
+    tier0_test_expect(tally, tier0_operation_valid(&pair), "vectors", "VP2INTERSECT's opmask pair refused");
     // The narrow operands' neighbours: an address of I64, an index of U64 and of I64, and a 64-bit operand in a 32-bit
     // field (its low half).
     Tier0Operation neighbours[4] = {

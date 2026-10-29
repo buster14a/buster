@@ -301,6 +301,13 @@ int run_floors_benchmark(int argc, char** argv);
 #include "buster/compiler/branch_sizing_test.c"
 int run_branch_sizing_benchmark(int argc, char** argv);
 
+// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
+// and the value-preserving form choice), before the assembler's matcher, which takes its values' immediates from it.
+// Its tests, for the test-x86-semantics command, follow the assembler's (they take the encoder's tests' printer and
+// branch sizing's tests' runner, and check x86_match.c against the shared rule). Its benchmark is another translation
+// unit.
+#include "buster/compiler/x86_semantics.c"
+
 #include "buster/compiler/x86_match.c"
 #include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
@@ -308,11 +315,6 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_test.c"
 #include "buster/compiler/assembler_benchmark.c"
 
-// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
-// and the value-preserving form choice) and its tests, for the test-x86-semantics command (which takes the encoder's
-// tests' printer and branch sizing's tests' runner, and checks x86_match.c's ranges). Its benchmark is another
-// translation unit.
-#include "buster/compiler/x86_semantics.c"
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
 
@@ -360,6 +362,7 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text"
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
 #include "buster/compiler/c_check_builtin_atomic_rmw.c"
+#include "buster/compiler/c_check_builtin_atomic_c11.c"
 #include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
@@ -418,6 +421,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/c_builtin_rounds_helper_test.c"
 #include "buster/compiler/c_builtin_math_helpers.c"
 #include "buster/compiler/c_builtin_math_helpers_test.c"
+#include "buster/compiler/c_builtin_x86_helpers.c"
 #include "buster/compiler/tier0_variadic_frame_test.c"
 #include "buster/compiler/unwind_tier0_test.c"
 #include "buster/compiler/unwind_test.c"
@@ -522,6 +526,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/interpreter_driver.c"
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
+#include "buster/compiler/ir_source_test.c"
+#include "buster/compiler/ir_source_benchmark.c"
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -536,6 +542,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_sroa.c"
 #include "buster/compiler/ir_optimize_sroa_test.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
+#include "buster/compiler/ir_metamorphic.c"
 
 // Selected effective uses feed liveness, allocation and the bounded native function consumer.
 #include "buster/compiler/tier1_select.c"
@@ -591,6 +598,34 @@ int main_unit_checker(int argc, char** argv, bool* found);
 int main_unit_check_builtins(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
+int main_preprocessor_command(int count, char** arguments);
+
+// Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
+// options in step with pp_option_takes_value and the C driver's own options.
+static bool main_preprocessing(int count, char** arguments)
+{
+    static const char* const valued[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter",
+                                          "-target", "--predefines", "--location-limit", "--window-bytes", "--lanes",
+                                          "--worker-budget", "--id-order", "-l", "-L" };
+    bool result = false;
+    for (int i = 0; !result && i < count; i += 1)
+    {
+        if (strcmp(arguments[i], "--") == 0)
+        {
+            break;
+        }
+        result = strcmp(arguments[i], "-E") == 0;
+        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(valued); v += 1)
+        {
+            if (strcmp(arguments[i], valued[v]) == 0 && i + 1 < count)
+            {
+                i += 1;
+                break;
+            }
+        }
+    }
+    return result;
+}
 
 // Keep the historical -c assembly spelling while sending C compilation to the semantic driver. Options which
 // take a separate argument cannot make an output or include path look like an assembly input.
@@ -622,7 +657,7 @@ static bool main_assembly_source(int count, char** arguments)
             assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
         }
     }
-    return compile && assembly && !explicit_c;
+    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments);
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
@@ -677,10 +712,6 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
-    }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "-E") == 0)
-    {
-        result = run_preprocessor_command_mode(argc - 1, argv + 1, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
@@ -1118,6 +1149,14 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
+    {
+        result = run_ir_source_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
+    {
+        result = run_ir_source_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {
         result = run_backend_source_benchmark(argc - 2, argv + 2);
@@ -1282,6 +1321,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_ir_optimize_tests(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-metamorphic") == 0)
+    {
+        result = run_ir_metamorphic_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-gvn") == 0)
     {
         result = run_ir_gvn_tests(argc - 1, argv + 1);
@@ -1375,7 +1418,8 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        result = run_source_check_command(argc - 1, argv + 1);
+        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
+                 run_source_check_command(argc - 1, argv + 1);
     }
     else
     {
@@ -1444,6 +1488,11 @@ int main_unit_x86(int argc, char** argv, bool* found)
     return main_command(argc, argv, found);
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+int main_preprocessor_command(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, false);
+}
+
 int main_unit_frontend(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
@@ -1486,7 +1535,12 @@ int main_unit_checker(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
 int main_unit_check_builtins(int argc, char** argv, bool* found)
 {
-    return main_command(argc, argv, found);
+    const char* command = argc >= 2 ? argv[1] : 0;
+    OracleCache* cache = oracle_test_fresh_builtin(command) ? oracle_cache() : 0;
+    const OracleMode mode = oracle_test_fresh_begin(cache);
+    const int result = main_command(argc, argv, found);
+    oracle_test_fresh_end(cache, mode);
+    return result;
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
 int main_unit_backend(int argc, char** argv, bool* found)

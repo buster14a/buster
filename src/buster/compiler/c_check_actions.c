@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 #include "host_isa.h"
+#include "c_check_warning_events.c"
 
 typedef enum CheckCategory
 {
@@ -59,6 +60,17 @@ typedef enum CheckFault
 // A floating value converted to an integer type outside its range, which clang's folding saturates (a NaN to 0): a GNU
 // constant where an integer constant expression is required, and a static initializer's value, but no array bound's.
 #define BUSTER_CHECK_GNU_FLOAT_RANGE 0x8000u
+// A known value read from a completed const object's initializer. It can be a GNU constant without being an ICE
+// or an ICE-form null pointer constant. An enumerator declared from it receives its own ordinary ICE provenance.
+#define BUSTER_CHECK_GNU_OBJECT_READ 0x10000u
+// The designator names an inactive member of a known const union. Its address remains valid; value conversion
+// cannot use the initializer receipt. Runtime union access keeps its ordinary semantics.
+#define BUSTER_CHECK_INACTIVE_UNION_READ 0x40000u
+#define BUSTER_CHECK_INACTIVE_UNION_ADDRESS 0x80000u
+// A symbolic address can remain valid when Clang refuses a value read through its source path: a changed
+// pointee type (including a void round trip), or an array member without a declared bound. This evidence
+// follows the selected pointer, not unrelated/discarded operands. Qualifier-only casts keep the read proof.
+#define BUSTER_CHECK_CONST_READ_RESTRICTED 0x100000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -90,6 +102,8 @@ struct CheckValue
     uint32_t bit_width;
     CheckFault fault;
     uint32_t fault_node;
+    // Bits within offset's byte for a bit-field designator. This occupies the value's existing tail padding.
+    uint32_t object_bit_offset;
 };
 
 typedef enum CheckOp
@@ -218,6 +232,12 @@ typedef enum CheckDiagnostic
 #define CHECK_WARNING_DISTINCT_POINTER_COMPARE 0x2000u
 #define CHECK_WARNING_CONDITIONAL_POINTER_INTEGER 0x4000u
 #define CHECK_WARNING_CONDITIONAL_POINTER_TYPES 0x8000u
+// Cold source/call diagnostics live above the packed 16-bit arithmetic warning keys.
+#define CHECK_WARNING_KR_DEFINITION 0x200000u
+#define CHECK_WARNING_NON_PROTOTYPE_CALL 0x400000u
+#define CHECK_WARNING_KR_TOO_FEW 0x800000u
+#define CHECK_WARNING_KR_TOO_MANY 0x1000000u
+#define CHECK_WARNING_KR_CALLS (CHECK_WARNING_NON_PROTOTYPE_CALL | CHECK_WARNING_KR_TOO_FEW | CHECK_WARNING_KR_TOO_MANY)
 
 typedef struct CheckConversion CheckConversion;
 struct CheckConversion
@@ -228,6 +248,7 @@ struct CheckConversion
 
 typedef struct CheckAction CheckAction;
 typedef struct CheckVectorMember CheckVectorMember;
+struct CheckConstValues;
 struct CheckAction
 {
     CheckOp op;
@@ -254,6 +275,10 @@ struct CheckAction
     uint32_t extensions;
     // Runtime floating environment, independent of source constant-expression evaluation.
     uint32_t fp_environment;
+    const struct CheckConstValues* const_values;
+    // Receipt reads are limited to source constant evaluation. Ordinary runtime loads, including atomic loads,
+    // retain their effects and ordering even when this view knows their initializer's value.
+    bool constant_evaluated;
     const CheckVectorMember* vector_member;
 };
 
@@ -391,7 +416,7 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
     value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION |
-                                      BUSTER_CHECK_GNU_FLOAT_RANGE);
+                                      BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ);
     if (value->fault == CHECK_FAULT_NONE && operand->fault != CHECK_FAULT_NONE)
     {
         value->fault = operand->fault;
@@ -474,6 +499,14 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
 {
     const TypeId source = value->type;
     const uint8_t target_kind = check_action_kind(table, destination);
+    const bool source_pointer = check_action_kind(table, source) == BUSTER_TYPE_KIND_POINTER;
+    const bool target_pointer = target_kind == BUSTER_TYPE_KIND_POINTER;
+    if (source_pointer || target_pointer)
+    {
+        const TypeId from = source_pointer ? type_unqualified(type_strip_aligned(table, type_element(table, source))) : 0;
+        const TypeId to = target_pointer ? type_unqualified(type_strip_aligned(table, type_element(table, destination))) : 0;
+        value->flags |= source_pointer && target_pointer && from == to ? 0 : BUSTER_CHECK_CONST_READ_RESTRICTED;
+    }
     uint32_t source_width = 0;
     uint32_t target_width = 0;
     bool source_signed = false;
@@ -632,6 +665,8 @@ static void check_action_conversion(const TypeTable* table, CheckValue* value, T
     check_action_convert_value(table, value, destination, node);
 }
 
+#include "c_check_const_values.c"
+
 static CheckValue check_action_operand(TypeTable* table, const CheckAction* action, CheckActionResult* result, uint32_t index)
 {
     CheckValue value = action->operands[index];
@@ -655,7 +690,7 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
             value.type = pointer;
             value.category = CHECK_RVALUE;
             value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
-            if ((value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
+            if (!action->constant_evaluated && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
             {
                 value.constant_kind = CHECK_CONSTANT_NONE;
             }
@@ -686,11 +721,26 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, index);
         }
-        if (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_ICE) == 0)
+        const bool volatile_read = (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                                   (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+        CheckValue loaded = { 0 };
+        const bool known = action->constant_evaluated && !volatile_read && value.fault == CHECK_FAULT_NONE &&
+                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                           (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
+                           check_const_load(table, action->const_values, value.object, value.offset, value.object_bit_offset,
+                                            value.bit_width, value.type, action->source_position, &loaded);
+        if (known)
+        {
+            check_action_inherit(&loaded, &value);
+            loaded.flags |= value.flags & BUSTER_CHECK_BIT_FIELD;
+            loaded.bit_width = value.bit_width;
+            value = loaded;
+        }
+        else if (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_ICE) == 0)
         {
             value.constant_kind = CHECK_CONSTANT_NONE;
         }
-        if ((type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 || (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC)
+        if (volatile_read || (kind == BUSTER_TYPE_KIND_ATOMIC && !known))
         {
             value.flags |= BUSTER_CHECK_SIDE_EFFECT;
             value.constant_kind = CHECK_CONSTANT_NONE;
@@ -842,7 +892,8 @@ static bool check_action_assignable_mode(const TypeTable* table, TypeId destinat
         accepted = accepted && !(strict && (warning != 0 || extension));
         result->warnings |= accepted ? warning : 0;
     }
-    else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR) && target_kind == input_kind)
+    else if ((target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION || target_kind == BUSTER_TYPE_KIND_NULLPTR ||
+              target_kind == BUSTER_TYPE_KIND_ATOMIC) && target_kind == input_kind)
     {
         accepted = check_action_compatible_at(table, target, input, action, result);
     }
@@ -1486,7 +1537,8 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
             check_action_promote(table, &index, &result->conversions[index_slot], action->node);
             result->value.type = action->op == CHECK_OP_SUBSCRIPT ? type_element(table, pointer.type) : pointer.type;
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
-            result->value.flags |= pointer.flags & BUSTER_CHECK_STATIC_OBJECT;
+            result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED);
+            result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
             int64_t number = 0;
             const uint64_t stride = check_action_pointer_stride(table, pointer.type, action);
             int64_t delta = 0;
@@ -1606,6 +1658,53 @@ static __attribute__((noinline)) uint32_t check_action_member_lookup(const TypeT
     return check_action_find_member(table, record, name, offset, qualifiers, false, result);
 }
 
+// Check every union along an anonymous-member path. Equal byte offsets and equal scalar types cannot distinguish
+// two union members; the initializer's active physical member is part of a constant-read proof.
+static bool check_action_const_member(const TypeTable* table, const CheckAction* action, const CheckValue* base, TypeId record, uint32_t member)
+{
+    bool allowed = true;
+    bool searching = action->constant_evaluated && action->const_values != NULL && base->constant_kind == CHECK_CONSTANT_ADDRESS &&
+                     base->object != 0 && base->offset >= 0 && base->object_bit_offset < 8 && (uint64_t)base->offset <= UINT64_MAX / 8;
+    uint64_t at = searching ? (uint64_t)base->offset * 8 + base->object_bit_offset : 0;
+    TypeId current = type_unqualified(type_strip_aligned(table, record));
+    for (uint32_t depth = 0; searching && depth < table->tags.count; depth += 1)
+    {
+        const uint32_t tag = table->types.index[type_index(current)];
+        const uint32_t first = table->tags.member_begin[tag];
+        const uint32_t count = table->tags.member_count[tag];
+        uint32_t selected = member >= first && member - first < count ? member : 0;
+        for (uint32_t i = 0; selected == 0 && i < count; i += 1)
+        {
+            const uint32_t candidate = first + i;
+            const TypeId child = type_unqualified(type_strip_aligned(table, table->members.type[candidate]));
+            const uint8_t kind = type_kind(table, child);
+            if (table->members.name[candidate] == 0 && (table->members.flags[candidate] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
+                (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+            {
+                uint64_t ignored_offset = 0;
+                uint32_t ignored_qualifiers = 0;
+                const uint32_t found = action->scalar ? type_lookup_member_scalar(table, child, action->member, &ignored_offset, &ignored_qualifiers) :
+                                                       type_lookup_member(table, child, action->member, &ignored_offset, &ignored_qualifiers);
+                selected = found == member ? candidate : 0;
+            }
+        }
+        allowed = selected != 0;
+        if (allowed && type_kind(table, current) == BUSTER_TYPE_KIND_UNION)
+        {
+            allowed = check_const_union_allows(table, action->const_values, base->object, current, at, selected - first + 1,
+                                               action->source_position);
+        }
+        searching = allowed && selected != member;
+        if (searching)
+        {
+            allowed = !__builtin_add_overflow(at, table->members.offset[selected], &at);
+            current = type_unqualified(type_strip_aligned(table, table->members.type[selected]));
+            searching = allowed;
+        }
+    }
+    return allowed && !searching;
+}
+
 static void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     const bool arrow = action->op == CHECK_OP_ARROW;
@@ -1646,7 +1745,14 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
             result->value.type = type_qualify(table, table->members.type[member], qualifiers);
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
-            result->value.flags |= base.flags & BUSTER_CHECK_STATIC_OBJECT;
+            result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED);
+            result->value.flags |= type_kind(table, type_strip_aligned(table, result->value.type)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ?
+                                   BUSTER_CHECK_CONST_READ_RESTRICTED : 0;
+            result->value.flags |= arrow && (base.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
+            if (!check_action_const_member(table, action, &base, record, member))
+            {
+                result->value.flags |= BUSTER_CHECK_INACTIVE_UNION_READ;
+            }
             if ((table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0)
             {
                 result->value.flags |= BUSTER_CHECK_BIT_FIELD;
@@ -1656,14 +1762,16 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
             {
                 result->value.flags |= base.flags & BUSTER_CHECK_REGISTER;
             }
-            if (base.constant_kind == CHECK_CONSTANT_ADDRESS && offset % 8 == 0 && offset / 8 <= INT64_MAX)
+            uint64_t bits = 0;
+            if (base.constant_kind == CHECK_CONSTANT_ADDRESS && !__builtin_add_overflow(offset, base.object_bit_offset, &bits) && bits / 8 <= INT64_MAX)
             {
                 int64_t addend = 0;
-                if (!__builtin_add_overflow(base.offset, (int64_t)(offset / 8), &addend))
+                if (!__builtin_add_overflow(base.offset, (int64_t)(bits / 8), &addend))
                 {
-                    result->value.constant_kind = CHECK_CONSTANT_ADDRESS;
+                    result->value.constant_kind = bits % 8 == 0 ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_NONE;
                     result->value.object = base.object;
                     result->value.offset = addend;
+                    result->value.object_bit_offset = (uint32_t)(bits % 8);
                 }
             }
         }
@@ -1795,7 +1903,8 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
     }
     if (type_is_valid(table, target))
     {
-        target = type_conversion_operand(table, target);
+        target = check_action_kind(table, source.type) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(type_strip_aligned(table, target))
+                                                                               : type_conversion_operand(table, target);
         const bool void_return = action->op == CHECK_OP_CONVERT && check_action_kind(table, target) == BUSTER_TYPE_KIND_VOID &&
                                  (check_action_kind(table, source.type) == BUSTER_TYPE_KIND_VOID || (action->extensions & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0);
         if (!void_return && !check_action_assignable(table, target, &source, action, result))
@@ -2076,12 +2185,27 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
         const uint8_t flags = table->types.flags[type_index(function)];
         const bool prototype = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        // A direct K&R designator has no prototype. The reader retains its known definition's promoted signature
+        // separately, as clang does: convert the known arguments, but diagnose a count mismatch as a warning.
+        // A real prototype (including a function pointer's) never takes this exception.
+        const bool kr = !prototype && type_kind(table, action->type) == BUSTER_TYPE_KIND_FUNCTION;
         uint32_t count = 0;
-        const TypeId* parameters = type_parameters(table, function, &count);
-        if (prototype && (action->argument_count < count || (!variadic && action->argument_count != count)))
+        const TypeId* parameters = type_parameters(table, kr ? action->type : function, &count);
+        if ((prototype || kr) && (action->argument_count < count || (!variadic && action->argument_count != count)))
         {
-            // As clang reports them: too few arguments at the call, too many at the first argument past the last parameter.
-            check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, action->argument_count > count ? count + 1 : 0);
+            if (kr)
+            {
+                result->warnings |= action->argument_count < count ? CHECK_WARNING_KR_TOO_FEW : CHECK_WARNING_KR_TOO_MANY;
+            }
+            else
+            {
+                // As clang reports them: too few at the call, too many at the first argument past the last parameter.
+                check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, action->argument_count > count ? count + 1 : 0);
+            }
+        }
+        else if (!prototype && !kr && action->argument_count != 0)
+        {
+            result->warnings |= CHECK_WARNING_NON_PROTOTYPE_CALL;
         }
         result->value.type = type_return(table, function);
         result->value.flags = BUSTER_CHECK_SIDE_EFFECT;
@@ -2108,12 +2232,16 @@ static void check_action_call(TypeTable* table, const CheckAction* action, Check
             else
             {
                 CheckValue value = check_action_operand(table, &argument, &converted, 0);
-                const bool parameter = prototype && i < count;
+                const bool parameter = (prototype || kr) && i < count;
                 if (!parameter)
                 {
                     check_action_promote(table, &value, &converted.conversions[0], action->node);
                 }
                 TypeId destination = parameter ? parameters[i] : type_default_argument_promote(table, value.type);
+                if (check_action_kind(table, value.type) != BUSTER_TYPE_KIND_ATOMIC)
+                {
+                    destination = type_conversion_operand(table, destination);
+                }
                 bool assignable = check_action_assignable(table, destination, &value, action, &converted);
                 bool transparent = false;
                 if (!assignable && parameter && converted.diagnostic == CHECK_DIAG_NONE)
@@ -2438,8 +2566,10 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                     result->value = operand;
                     result->value.type = type_pointer(table, operand.type);
                     result->value.category = CHECK_RVALUE;
+                    result->value.flags |= (operand.flags & BUSTER_CHECK_INACTIVE_UNION_READ) != 0 ? BUSTER_CHECK_INACTIVE_UNION_ADDRESS : 0;
+                    result->value.flags &= ~BUSTER_CHECK_INACTIVE_UNION_READ;
                     result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART);
-                    if ((operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && result->value.constant_kind == CHECK_CONSTANT_ADDRESS && result->value.object != 0)
+                    if (!action->constant_evaluated && (operand.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && result->value.constant_kind == CHECK_CONSTANT_ADDRESS && result->value.object != 0)
                     {
                         result->value.constant_kind = CHECK_CONSTANT_NONE;
                     }
@@ -2461,6 +2591,7 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                     result->value = pointer;
                     result->value.type = type_element(table, type_strip_aligned(table, pointer.type));
                     result->value.category = check_action_kind(table, result->value.type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
+                    result->value.flags |= (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
                     result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
                     // Keep an incomplete designator until its context is known: &*p is valid even for void*.
                     // An ordinary value context rejects the incomplete type in check_action_operand.

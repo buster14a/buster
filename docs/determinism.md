@@ -76,6 +76,29 @@ place and fill canonical ranges before those records reach the writer. The
 existing generated-program tests cover string-pool bytes and their fixups;
 they do not stand in for an unimplemented C literal-pooling frontend.
 
+Foreign resolution keeps hash-partition name IDs for lookup. Its separate
+publication permutation orders each name by its first ordinary object symbol:
+round, then item in that round's symbol columns (objects in input order and
+symbols in symbol-table order). Command-line `-u` records precede the objects.
+A name seen only in shared-library references follows all ordinary object
+records, in its own first-record order. Unloaded archive index entries do not
+publish names or choose output positions.
+
+The winners pass retains the minimum key while it reads each record. The
+already checked cumulative global-symbol ordinal represents `(round, item)`
+without truncation; ordinary and library-only keys form separate ranges, so
+the class does not consume an ordinal bit. A four-byte stable radix sort of
+each range has exact scalar and vector paths. The resulting immutable
+permutation lives with `Foreign`; temporary sorting storage is released before
+conversion, and an allocation failure rejects the resolution.
+
+Scalar conversion walks that permutation. Lane conversion counts and fills
+consecutive ranges of it, retaining hash IDs only for maps and translating a
+failure position back to its name. Common atoms, copy-relocation groups and
+representatives, linker-generated section-bound groups, and executable/shared
+library export lists likewise follow canonical order. This includes placement
+that occurs after the initial global symbols have been created.
+
 ## Property tests
 
 - `test-diagnostics`: radix against stable insertion sort on counts 0–319
@@ -108,8 +131,46 @@ they do not stand in for an unimplemented C literal-pooling frontend.
   adds must have changed IDs. This covers the tree, the generated spellings,
   the contexts and special paths, and in the workflow the repository's units
   and `--flat src`.
+- `test-foreign`: dedicated `foreign_order_test.c` coverage varies
+  `partition_records` and adds thousands of unused archive-index symbols.
+  Original C objects, an assembly entry and a DSO exercise scalar/vector
+  conversion at 1/2/3/8 lanes. Complete static/PIE bytes, `.symtab`, `.dynsym`,
+  GOT slots and execution must agree. Independent symbol-table walks require
+  first-record order, and the real driver repeats unused-index/lane changes
+  without an environment override. Guarded radix tails, high ordinal bits,
+  unsigned IDs above `INT32_MAX` and allocation refusals cover the ordering
+  kernel's bounds.
+- `test-check-lanes`: #151's per-function emission. Each generated and failing
+  program is compiled again by the same path with its identifiers' IDs in
+  another order (the driver's `--id-order`, below) and emitted on one lane and
+  on eight, with `-g`'s rows and unwind tables and without: every object or
+  failure must be the first compile's on one lane, byte for byte. The second
+  compile's table must have every name of the first, most of them at other IDs.
+  Through the driver, four programs' objects and executables by
+  `--lanes 8 --id-order N`, by each path, must be `--lanes 1`'s, and run alike,
+  and the failing programs' exit statuses and diagnostics too.
+- `test-c-testsuite`: the scalar twins' compile of each program runs with
+  `--id-order` (the Nth test's from 153 on) and must write the vector path's
+  executable, or its diagnostics, byte for byte.
+- `test-checker-deferred`: #113's deferred reader, which reads function bodies
+  on lanes. Every fixture runs again with the IDs in another order, on 8 lanes
+  through each binding resolution: the scalar path, the vector path and the
+  deferred reader must still give the same results, column by column, and the
+  reader must merge each fixture as before. `test-checker-corpus --id-order N`
+  checks a corpus so, which the workflow does for c-testsuite's programs with
+  `--deferred 8`.
 
-The four output test commands, `test-preprocessor` and `test-files` accept
+The C driver's `--id-order N` (`check_driver_id_order`) is the test option for
+a whole compile: it preprocesses the unit once, printing nothing, into a table
+of its own, whose names then prime the unit's table as `test-files` primes its
+(`intern_prime_reordered`: 17 to 47 names no unit has, then every other name
+of the first table, in reverse from a place N picks). The compile finds those
+and numbers the others after them, so that its IDs are neither the ones it
+gives alone nor in their first occurrences' order. Nothing it writes may
+change.
+
+The four output test commands, `test-preprocessor`, `test-files`,
+`test-check-lanes`, `test-checker-deferred` and `test-c-testsuite` accept
 `--id-order N` (default 153) to choose another permutation, independently of
 fixture seeds. The default 9700X workflow runs these property checks in their
 stage commands and runs `test-diagnostics` explicitly.
@@ -166,10 +227,25 @@ independent dependencies each add their own integration check:
   lanes, the link's atoms, symbols and fixups are added in source order, and
   the failure reported is source order's. `test-check-lanes` compares objects,
   `-g`'s rows, unwind tables, executables and failures at 1, 2, 3 and 8
-  lanes, with a slow lane, against one lane's.
+  lanes, with a slow lane, against one lane's, and at 1 and 8 lanes with the
+  identifiers' IDs in another order, in-process and through the driver's
+  `--id-order`; `test-c-testsuite` compiles each program's scalar build so.
+- #113's deferred reader, which checks function bodies on lanes:
+  `test-checker-deferred` compares its results with source order's reader at
+  1, 2, 3 and 8 lanes, and at 8 with the IDs in another order.
+- link-foreign (#86, #594), which resolves, converts and writes on lanes:
+  `test-foreign` and `test-foreign-corpus` compare its outputs at 1, 2, 3 and
+  8 lanes. It adds the global names to its link in its name IDs' order, which
+  its hash partitions decide, so the symbols' order, the GOT slots and the code
+  that reaches them change with the partition count: its ID-order property
+  waits for [#734](https://github.com/buster14a/buster/issues/734).
 - #152's multi-file driver must route jobs' diagnostic groups through the
   merge, finish the earlier jobs before applying fatal cutoff, and compare
   its final objects, executable, `-E` text and diagnostic stream.
+- #86/#594's foreign-input conversion has its own first-record publication
+  order and partition/ID perturbation property checks in `test-foreign`
+  ([#734](https://github.com/buster14a/buster/issues/734)). Hash partitioning
+  and lookup IDs do not determine emitted globals, GOT slots or export order.
 
 The others' integration checks belong in each stage's test command as it lands.
 Passing the current tests is not proof of those future pipelines, and #153

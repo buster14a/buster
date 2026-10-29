@@ -850,7 +850,10 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
-            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                 ? BUSTER_TIER0_ACCESS_GOT
+                                 : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -1343,8 +1346,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const Tier0Code* code = run.codes + failed;
         result->status = code->error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                          code->error == TIER0_ERROR_UNSUPPORTED || code->error == TIER0_ERROR_DEPTH ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
-        result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0 has registers for, with long double values or "
-                                                            "a call's aggregate arguments, or than its deep slots take" :
+        result->reason = code->error == TIER0_ERROR_DEPTH ? "more values live at once than Tier 0's deep slots take" :
                          code->error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
         result->backend_error = code->error;
         result->backend_node = code->node;

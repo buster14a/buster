@@ -623,30 +623,17 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
 
 static bool check_builtin_atomic_test_warning_oracle(const char* clang, const char* path, const char* warning, bool* rejected)
 {
-    // parse_test_clang deliberately passes -w. Clang suppresses warnings even after -Werror there, so use a
-    // separate direct syntax-only child for this diagnostic check rather than report a falsely passing oracle.
+    // Keep diagnostic policy exact: parse_test_clang supplies -w and cannot serve this oracle.
     char* arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", (char*)warning, (char*)path, NULL };
-    posix_spawn_file_actions_t actions;
-    bool ready = posix_spawn_file_actions_init(&actions) == 0;
-    if (ready)
-    {
-        ready = posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0) == 0 &&
-                posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) == 0;
-        pid_t child = -1;
-        ready = ready && posix_spawnp(&child, clang, &actions, NULL, arguments, environ) == 0;
-        if (ready)
-        {
-            int status = 0;
-            pid_t waited;
-            do
-            {
-                waited = waitpid(child, &status, 0);
-            } while (waited < 0 && errno == EINTR);
-            ready = waited == child && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 1);
-            *rejected = ready && WEXITSTATUS(status) == 1;
-        }
-        posix_spawn_file_actions_destroy(&actions);
-    }
+    OracleRun run = {
+        .purpose = "checker atomic warning oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 10,
+    };
+    const int status = oracle_test_run(&run, 0, 0, 0, 0);
+    const bool ready = status == 0 || status == 1;
+    *rejected = ready && status == 1;
     return ready;
 }
 
@@ -812,8 +799,65 @@ static void check_builtin_atomic_test_pointer_oracle(CheckBuiltinAtomicTest* tes
     rmdir(directory);
 }
 
+static void check_builtin_atomic_test_c11(CheckBuiltinAtomicTest* test, TypeTable* table)
+{
+    const TypeId values[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_CHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_INT128 };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(values); t += 1)
+    {
+        const TypeId atomic = type_atomic(table, values[t]);
+        const TypeId pointer = type_pointer(table, atomic);
+        CheckValue arguments[5] = {
+            check_builtin_atomic_test_pointer(pointer, t + 1, 0),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 0),
+        };
+        CheckBuiltinAtomicAction action = {
+            .id = CBUILTIN_C11_ATOMIC_LOAD,
+            .arguments = arguments,
+            .argument_count = 2,
+            .alignment_known = true,
+            .minimum_alignment = type_alignment(table, atomic),
+        };
+        CheckBuiltinAtomicResult result;
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == values[t] &&
+                                        result.object_type == atomic && result.object_size == type_size(table, atomic) && result.reads_memory && !result.writes_memory &&
+                                        result.evaluated_operands == 3 && result.runtime_builtin == CBUILTIN_ATOMIC_LOAD_N,
+                                        "C11 load retains its atomic storage and unqualified value types");
+        action.id = CBUILTIN_C11_ATOMIC_STORE;
+        action.argument_count = 3;
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_VOID &&
+                                        result.argument_conversions[1].type == values[t] && result.writes_memory && !result.reads_memory && result.evaluated_operands == 7,
+                                        "C11 store converts its value without discarding atomic storage metadata");
+        arguments[0].type = type_pointer(table, values[t]);
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE,
+                                        "C11 operations reject pointers to ordinary objects");
+        arguments[0].type = type_pointer(table, type_qualify(table, atomic, BUSTER_TYPE_CONST));
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_MODIFIABLE_REQUIRED,
+                                        "C11 writes reject const atomic objects");
+        arguments[0].type = pointer;
+        arguments[1] = check_builtin_atomic_test_pointer(type_pointer(table, values[t]), t + 20, 0);
+        action.id = CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG;
+        action.argument_count = 5;
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_BOOL &&
+                                        result.argument_conversions[1].type == arguments[1].type && result.argument_conversions[2].type == values[t] &&
+                                        result.evaluated_operands == 31 && result.rmw && result.runtime_builtin == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N,
+                                        "C11 compare-exchange keeps five evaluated source operands and the plain expected pointer");
+        action.argument_count = 4;
+        check_builtin_atomic_c11_one(table, &action, &result);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "C11 compare-exchange enforces source arity before reading operands");
+    }
+}
+
 static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char** argv)
 {
+    const bool epoch = oracle_epoch_begin();
     CheckBuiltinAtomicTest test = { 0 };
     const char* clang = "clang";
     bool options = true;
@@ -838,6 +882,7 @@ static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char
         if (initialized)
         {
             check_builtin_atomic_test_values(&test, &types.table);
+            check_builtin_atomic_test_c11(&test, &types.table);
             check_builtin_atomic_test_enum_pointers(&test, &types.table);
             check_builtin_atomic_test_orders(&test, &types.table);
             check_builtin_atomic_test_constraints(&test, &types.table);
@@ -848,5 +893,7 @@ static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char
         check_builtin_atomic_test_pointer_oracle(&test, clang);
     }
     printf("test-check-builtins-atomic: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+    oracle_cache_report(oracle_cache(), "test-check-builtins-atomic");
+    oracle_epoch_end(epoch);
     return test.failures != 0;
 }

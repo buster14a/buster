@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-check-lanes [--executable PATH] [--seed N] [--programs N] [--keep]: the functions' lanes (#151, and #153's item
-// for them), check_program_emit_lanes. Every output must be one lane's, whatever the lanes and whichever finishes first.
+// test-check-lanes [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]: the functions' lanes (#151, and
+// #153's item for them), check_program_emit_lanes. Every output must be one lane's, whatever the lanes, whichever finishes
+// first and whatever ids the identifiers get.
 //
 // - Programs: generated programs (--programs, 6 by default, and two of 600 functions) of functions of many kinds, among
 //   them 128-bit integers' division and conversions and complex products (libgcc's functions, which the lowering numbers
@@ -14,6 +15,10 @@
 //   runs unpinned and then counts as lanes that didn't start), with -g's rows and unwind tables and without: each the
 //   same object (object_build of the emission's link and the static data), byte for byte, as one lane's, with the lanes
 //   and parts the emission says it ran, run again on one lane only when its lanes didn't start.
+// - The ids' order (#153): each generated and failing program compiled again by the same path with its identifiers' ids
+//   in another order (check_driver_id_order, the driver's --id-order, from --id-order N on, 153 by default), whose table
+//   must have every name of the first compile, most of them at other ids, then emitted on one lane and on 8, with -g's
+//   rows and unwind tables and without: each the first compile's object or failure on one lane, byte for byte.
 // - The lane rule: a program's lanes by default (CheckProgramLanes.lanes 8, not every lane), one for few tokens, and
 //   more with more bodies than twice the largest's, never more than the bodies.
 // - Failures: programs whose bodies fail at different steps, in different orders (a lowering's refusal by name, Tier 0's
@@ -39,10 +44,11 @@
 //   check_program_emit and on lanes of one with the least room of the caller's scratch they take, found by halving:
 //   one lane's object, with less room than lane 0's columns take, whose own arena mustn't depend on the scratch's room.
 // - The driver (with --executable, this executable by default): four of the generated programs' objects (-c) and
-//   executables (one of 3 functions, two of random sizes and the first of 600) by --lanes 1, 3 and 8 and by default, by
-//   each path: the same bytes, and the executables exit with the same status; in a child limited as above, the first
-//   and the last of them by --lanes 8, each one lane's; and each failing program by --lanes 8, with lanes and in such a
-//   child, by each path: the exit status and diagnostics of --lanes 1.
+//   executables (one of 3 functions, two of random sizes and the first of 600) by --lanes 1, 3 and 8 and by default, and
+//   by --lanes 8 with the ids in another order (--id-order), by each path: the same bytes, and the executables exit with
+//   the same status; in a child limited as above, the first and the last of them by --lanes 8, each one lane's; each
+//   failing program by --lanes 8, with lanes, with the ids in another order and in such a child, by each path: the exit
+//   status and diagnostics of --lanes 1; and --lanes', --worker-budget's and --id-order's values it refuses.
 
 #include "worker_budget_test.c"
 
@@ -230,8 +236,10 @@ static void check_lanes_test_close(CheckLanesTestUnit* unit)
 }
 
 // Compiles `path` to its selected program into `unit` by the scalar path or the vector one, with `pp` and `parser`,
-// which the caller keeps and releases.
-static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path, bool scalar)
+// which the caller keeps and releases; when `ordered`, with its identifiers' ids in another order, as the driver's
+// --id-order `id_order` gives them (check_driver_id_order).
+static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path, bool scalar,
+                                           bool ordered, uint64_t id_order)
 {
     *pp = (Preprocessor){ 0 };
     *parser = (Parser){ 0 };
@@ -251,8 +259,9 @@ static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp,
     options.semantic_pragmas = true;
     options.quiet = true;
     const ParseOptions parse_options = { .scalar = scalar };
-    ready = ready && intern_initialize(identifiers) && pp_initialize(pp, &options, identifiers) && parse_initialize(parser, &parse_options, options.language) &&
-            pp_run(pp, input) && pp->errors == 0 && parse_translation_unit(parser, pp) && parser->errors == 0;
+    ready = ready && intern_initialize(identifiers) && (!ordered || check_driver_id_order(identifiers, &options, input, id_order)) &&
+            pp_initialize(pp, &options, identifiers) && parse_initialize(parser, &parse_options, options.language) && pp_run(pp, input) && pp->errors == 0 &&
+            parse_translation_unit(parser, pp) && parser->errors == 0;
     const uint32_t tokens = ready ? parser->tokens.count : 0;
     const TypeCapacity capacity = {
         .types = tokens * 4 + 64,
@@ -283,6 +292,11 @@ static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp,
     ready = ready && check_program(&unit->program, parser, &unit->input, &unit->stream, &unit->types, program_options, &unit->output, &unit->scratch) &&
             check_program_select(&unit->selected, &unit->program, &unit->data, scalar, &unit->output, &unit->scratch);
     unit->ready = ready;
+}
+
+static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp, Parser* parser, InternTable* identifiers, const char* path, bool scalar)
+{
+    check_lanes_test_compile_order(unit, pp, parser, identifiers, path, scalar, false, 0);
 }
 
 // One emission of a compiled unit and what it made: its object's bytes (malloc'd, the caller frees them), or its
@@ -529,9 +543,113 @@ static uint32_t check_lanes_test_unit(CheckLanesTestTally* tally, CheckLanesTest
     return compared;
 }
 
+// A failed setup of the priming preprocessor must fail the requested property check. SOURCE_DATE_EPOCH is validated
+// during that setup; a child supplies an invalid value without changing this process's environment.
+static bool check_lanes_test_order_setup(void)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        InternTable identifiers = { 0 };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+        const bool initialized = setenv("SOURCE_DATE_EPOCH", "invalid", 1) == 0 && intern_initialize(&identifiers);
+        const bool refused = initialized && !check_driver_id_order(&identifiers, &options, "unused.c", 153);
+        intern_release(&identifiers);
+        _exit(refused ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// The private preparation must not borrow a caller's table-bound cache, and a source error in that preparation stays
+// for the real compile to report: the names preceding it still prime the requested order.
+static bool check_lanes_test_order_cache(const char* directory)
+{
+    static const char source[] = "int id_order_cached_name0;int id_order_cached_name1;\n#error expected\n";
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/id-order.c", directory);
+    FILE* file = length > 0 && length < (int)sizeof(path) ? fopen(path, "wb") : NULL;
+    bool written = file != NULL;
+    if (file != NULL)
+    {
+        written = fwrite(source, 1, sizeof(source) - 1, file) == sizeof(source) - 1;
+        written = fclose(file) == 0 && written;
+    }
+    InternTable identifiers = { 0 };
+    FileCache cache = { 0 };
+    PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const bool initialized = written && intern_initialize(&identifiers) && file_cache_initialize(&cache, &identifiers, pp_prepare_options(&options));
+    const FileCache before = cache;
+    options.files = &cache;
+    const bool result = initialized && check_driver_id_order(&identifiers, &options, path, 153) &&
+                        (intern_find(&identifiers, (const uint8_t*)"id_order_cached_name0", sizeof("id_order_cached_name0") - 1) != 0 ||
+                         intern_find(&identifiers, (const uint8_t*)"id_order_cached_name1", sizeof("id_order_cached_name1") - 1) != 0) &&
+                        memcmp(&cache, &before, sizeof(cache)) == 0;
+    file_cache_release(&cache);
+    intern_release(&identifiers);
+    return result;
+}
+
+// `unit`, compiled from `path` with `identifiers`, emitted on one lane, then compiled again with its identifiers' ids in
+// another order (check_lanes_test_compile_order with `id_order`) and emitted on one lane and on 8, every lane forced,
+// with -g's rows and unwind tables and without: each emission the first one's object or failure (#153). The second
+// compile's table must have every name of the first, many of them at other ids. Returns how many emissions it compared.
+static uint32_t check_lanes_test_order(CheckLanesTestTally* tally, CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp,
+                                       const InternTable* identifiers, const char* path, bool scalar, uint64_t id_order, const char* what)
+{
+    static InternTable ordered_identifiers;
+    static Preprocessor ordered_pp;
+    static Parser ordered_parser;
+    CheckLanesTestUnit ordered;
+    check_lanes_test_compile_order(&ordered, &ordered_pp, &ordered_parser, &ordered_identifiers, path, scalar, true, id_order);
+    char detail[256];
+    snprintf(detail, sizeof(detail), "%s, %s path, --id-order %llu", what, scalar ? "scalar" : "vector", (unsigned long long)id_order);
+    check_lanes_test_expect(tally, ordered.ready, "compile a program with its identifiers' ids in another order", detail);
+    uint32_t found = 0;
+    uint32_t moved = 0;
+    for (IdentId id = C_NAME_COUNT; ordered.ready && id < identifiers->count; id += 1)
+    {
+        const IdentId other = intern_find(&ordered_identifiers, intern_bytes(identifiers, id), intern_length(identifiers, id));
+        found += other != 0;
+        moved += other != 0 && other != id;
+    }
+    const uint32_t names = identifiers->count - C_NAME_COUNT;
+    check_lanes_test_expect(tally, !ordered.ready || (found == names && moved * 2 >= names), "the second compile has every name, most at other ids", detail);
+    uint32_t compared = 0;
+    for (uint32_t shape = 0; ordered.ready && shape < 2; shape += 1)
+    {
+        const bool rows = shape == 1;
+        CheckLanesTestEmission one = check_lanes_test_emit(unit, parser, pp, identifiers, NULL, scalar, rows, rows);
+        for (uint32_t run = 0; run < 2; run += 1)
+        {
+            CheckProgramLanes lanes = {
+                .lanes = 8,
+                .every_lane = true,
+            };
+            CheckLanesTestEmission other = check_lanes_test_emit(&ordered, &ordered_parser, &ordered_pp, &ordered_identifiers, run == 0 ? NULL : &lanes, scalar, rows,
+                                                                 rows);
+            char compare[384];
+            snprintf(compare, sizeof(compare), "%s, %s%s: status %u/%u, token %u/%u, %llu/%llu bytes", detail, run == 0 ? "one lane" : "8 lanes",
+                     rows ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)other.status, one.token, other.token, (unsigned long long)one.size,
+                     (unsigned long long)other.size);
+            check_lanes_test_expect(tally, check_lanes_test_same(&one, &other), "an emission with the ids in another order makes the same object or failure",
+                                    compare);
+            free(other.object);
+            compared += 1;
+        }
+        free(one.object);
+    }
+    check_lanes_test_close(&ordered);
+    parse_release(&ordered_parser);
+    pp_release(&ordered_pp);
+    intern_release(&ordered_identifiers);
+    return compared;
+}
+
 // Generated programs (see the file's comment), written to `directory` as program_N.c, compiled by each path and emitted
-// on every set of lanes.
-static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* directory, uint32_t programs)
+// on every set of lanes, and again with their identifiers' ids in another order, from `id_order` on.
+static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* directory, uint32_t programs, uint64_t id_order)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -539,6 +657,7 @@ static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* di
     const uint64_t capacity = UINT64_C(1) << 24;
     char* text = malloc(capacity);
     uint64_t emissions = 0;
+    uint64_t ordered = 0;
     uint64_t functions_total = 0;
     for (uint32_t p = 0; text != NULL && p < programs + 2; p += 1)
     {
@@ -557,6 +676,7 @@ static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* di
             check_lanes_test_expect(tally, unit.ready, "compile a generated program to its selected program", path);
             bool emitted = false;
             emissions += unit.ready ? check_lanes_test_unit(tally, &unit, &parser, &pp, &identifiers, scalar != 0, path, &emitted) : 0;
+            ordered += unit.ready ? check_lanes_test_order(tally, &unit, &parser, &pp, &identifiers, path, scalar != 0, id_order + p, path) : 0;
             check_lanes_test_expect(tally, !unit.ready || emitted, "a generated program emits", path);
             functions_total += unit.ready ? unit.selected.program.body_count : 0;
             check_lanes_test_close(&unit);
@@ -566,8 +686,8 @@ static void check_lanes_test_programs(CheckLanesTestTally* tally, const char* di
         }
     }
     free(text);
-    printf("  programs: %u generated, %llu functions compiled, %llu emissions on lanes, each one lane's\n", programs + 2, (unsigned long long)functions_total,
-           (unsigned long long)emissions);
+    printf("  programs: %u generated, %llu functions compiled, %llu emissions on lanes and %llu with the ids in another order, each one lane's\n", programs + 2,
+           (unsigned long long)functions_total, (unsigned long long)emissions, (unsigned long long)ordered);
 }
 
 // A failing program: its source and the step the first failure is at, which every lane count must report.
@@ -579,37 +699,50 @@ struct CheckLanesTestFailure
     CheckProgramStatus status;
 };
 
-// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt), Tier 0's
-// refusal (values past its depth tables in a function with long double values), and fine bodies around them. Source
-// order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever it is.
+// Bodies that fail at different steps, in both orders: a lowering's refusal by name (a local _BitInt past 128 bits), Tier
+// 0's refusal (an addition nested 240 deep in a function with long double values: a stack past the deep slots,
+// BUSTER_TIER0_MAX_DEPTH, where it takes the values past its depth tables, #780), and fine bodies around them.
+// Source order's lowering takes every body before Tier 0 takes any, so a lowering's refusal is the failure wherever
+// it is.
+#define BUSTER_CHECK_LANES_TEST_OPEN16 "a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + ("
+#define BUSTER_CHECK_LANES_TEST_CLOSE16 "))))))))))))))))"
+#define BUSTER_CHECK_LANES_TEST_OPEN80                                                                                      \
+    BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 BUSTER_CHECK_LANES_TEST_OPEN16 \
+        BUSTER_CHECK_LANES_TEST_OPEN16
+#define BUSTER_CHECK_LANES_TEST_CLOSE80                                                                                         \
+    BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 BUSTER_CHECK_LANES_TEST_CLOSE16 \
+        BUSTER_CHECK_LANES_TEST_CLOSE16
+#define BUSTER_CHECK_LANES_TEST_DEEP                                                                                            \
+    "    return " BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 BUSTER_CHECK_LANES_TEST_OPEN80 "a" BUSTER_CHECK_LANES_TEST_CLOSE80 \
+        BUSTER_CHECK_LANES_TEST_CLOSE80 BUSTER_CHECK_LANES_TEST_CLOSE80 ";\n}\n"
 static const CheckLanesTestFailure check_lanes_test_failures[] = {
     {
         "lowering after Tier 0",
         "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
-        "int refused(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
     {
         "lowering before Tier 0",
         "long double g;\n"
-        "int refused(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused(int a) { _BitInt(200) x = a; return (int)x; }\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int main(void) { return fine0(1) + deep(2) + refused(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
     {
         "two lowering refusals",
         "int fine0(int a) { return a + 1; }\n"
-        "int refused0(int a) { _BitInt(37) x = a; return (int)x; }\n"
+        "int refused0(int a) { _BitInt(200) x = a; return (int)x; }\n"
         "int fine1(int a) { return a * 2; }\n"
-        "int refused1(int a) { _BitInt(41) y = a; return (int)y; }\n"
+        "int refused1(int a) { _BitInt(300) y = a; return (int)y; }\n"
         "int main(void) { return fine0(1) + refused0(2) + fine1(3) + refused1(4); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
@@ -618,15 +751,16 @@ static const CheckLanesTestFailure check_lanes_test_failures[] = {
         "long double g;\n"
         "int fine0(int a) { return a + 1; }\n"
         "int deep(int a)\n{\n    g = 1.0L;\n"
-        "    return a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + (a + a))))))))))))))));\n}\n"
+        BUSTER_CHECK_LANES_TEST_DEEP
         "int fine1(int a) { return a * 2; }\n"
         "int main(void) { return fine0(1) + deep(2) + fine1(3); }\n",
         CHECK_PROGRAM_UNSUPPORTED,
     },
 };
 
-// Each failing program (see the file's comment) emitted on every set of lanes: one lane's failure, at its step.
-static void check_lanes_test_failing(CheckLanesTestTally* tally, const char* directory)
+// Each failing program (see the file's comment) emitted on every set of lanes, and with its identifiers' ids in another
+// order, from `id_order` on: one lane's failure, at its step.
+static void check_lanes_test_failing(CheckLanesTestTally* tally, const char* directory, uint64_t id_order)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -655,6 +789,7 @@ static void check_lanes_test_failing(CheckLanesTestTally* tally, const char* dir
                 check_lanes_test_expect(tally, !one.emitted && one.status == failure->status, "a failing program fails at its step on one lane", detail);
                 free(one.object);
                 check_lanes_test_unit(tally, &unit, &parser, &pp, &identifiers, scalar != 0, failure->name, &emitted);
+                check_lanes_test_order(tally, &unit, &parser, &pp, &identifiers, path, scalar != 0, id_order + f, failure->name);
             }
             check_lanes_test_expect(tally, !emitted, "a failing program fails on every set of lanes", failure->name);
             check_lanes_test_close(&unit);
@@ -1196,13 +1331,15 @@ static int check_lanes_test_run_unstarted(char* const* arguments, const char* er
     return waited && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-// The driver (see the file's comment) on four of the generated programs `program_N.c` in `directory`.
-static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
+// The driver (see the file's comment) on four of the generated programs `program_N.c` in `directory`, and with their
+// identifiers' ids in another order, from `id_order` on.
+static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs, uint64_t id_order)
 {
     static const char* const lane_counts[] = { "1", "3", "8", NULL };
     const uint32_t chosen[] = { 2, 3, 5, programs };
     char detail[PATH_MAX + 128];
     uint32_t compared = 0;
+    uint32_t ordered = 0;
     uint32_t driven = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(chosen) && chosen[i] < programs + 2; i += 1)
     {
@@ -1261,9 +1398,49 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
                     compared += 1;
                 }
             }
+            // With the identifiers' ids in another order (#153's --id-order), by --lanes 8: one lane's object and executable.
+            char order[48];
+            char object[PATH_MAX];
+            char program[PATH_MAX];
+            char first_object[PATH_MAX];
+            char first_program[PATH_MAX];
+            snprintf(order, sizeof(order), "--id-order=%llu", (unsigned long long)(id_order + p));
+            snprintf(object, sizeof(object), "%s/driver_%u_%u_ordered.o", directory, p, scalar);
+            snprintf(program, sizeof(program), "%s/driver_%u_%u_ordered", directory, p, scalar);
+            snprintf(first_object, sizeof(first_object), "%s/driver_%u_%u_0.o", directory, p, scalar);
+            snprintf(first_program, sizeof(first_program), "%s/driver_%u_%u_0", directory, p, scalar);
+            char* object_arguments[10] = { (char*)executable };
+            char* program_arguments[10] = { (char*)executable };
+            uint32_t count = 1;
+            if (scalar != 0)
+            {
+                object_arguments[count] = (char*)"--scalar";
+                program_arguments[count++] = (char*)"--scalar";
+            }
+            object_arguments[count] = (char*)"--lanes=8";
+            program_arguments[count++] = (char*)"--lanes=8";
+            object_arguments[count] = order;
+            program_arguments[count++] = order;
+            object_arguments[count] = (char*)"-c";
+            program_arguments[count] = (char*)"-o";
+            object_arguments[count + 1] = (char*)"-o";
+            program_arguments[count + 1] = program;
+            object_arguments[count + 2] = object;
+            program_arguments[count + 2] = source;
+            object_arguments[count + 3] = source;
+            const bool objected = check_lanes_test_run(object_arguments, errors) == 0;
+            const bool linked = check_lanes_test_run(program_arguments, errors) == 0;
+            char* run_arguments[] = { program, NULL };
+            const int status = linked ? check_lanes_test_run(run_arguments, "/dev/null") : -1;
+            snprintf(detail, sizeof(detail), "%s, %s path, --lanes 8 %s", source, scalar != 0 ? "scalar" : "vector", order);
+            check_lanes_test_expect(tally, objected && check_test_driver_same_files(object, first_object), "the driver's object with the ids in another order is one lane's",
+                                    detail);
+            check_lanes_test_expect(tally, linked && check_test_driver_same_files(program, first_program) && status == statuses[0],
+                                    "the driver's executable with the ids in another order is one lane's, and exits as it does", detail);
+            ordered += 1;
         }
     }
-    printf("  driver: %u objects and executables on lanes, each one lane's\n", compared);
+    printf("  driver: %u objects and executables on lanes and %u with the ids in another order, each one lane's\n", compared, ordered);
     // With lanes that don't start: two of the programs' objects and executables by --lanes 8, by each path, each the one
     // lane's from above. The driver starts threads for the functions' lanes alone; it writes the executable on one lane.
     uint32_t unstarted = 0;
@@ -1334,12 +1511,34 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
     }
     char* missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--lanes", NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(missing, errors) == 1, "the driver refuses --lanes without its value", 0);
+    // --id-order's value: a number, as `--id-order N` or `--id-order=N`; any other is the usage, with status 1.
+    static const char* const unordered[] = { "x", "8x", "", "-" };
+    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(unordered); r += 1)
+    {
+        char* arguments[] = { (char*)executable, (char*)"--id-order", (char*)unordered[r], (char*)"-c", (char*)"-o", object, source, NULL };
+        snprintf(detail, sizeof(detail), "--id-order \"%s\"", unordered[r]);
+        check_lanes_test_expect(tally, check_lanes_test_run(arguments, errors) == 1, "the driver refuses an id order it can't take", detail);
+    }
+    char* order_missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--id-order", NULL };
+    check_lanes_test_expect(tally, check_lanes_test_run(order_missing, errors) == 1, "the driver refuses --id-order without its value", NULL);
+    char* order_separate[] = { (char*)executable, (char*)"--id-order", (char*)"7", (char*)"-c", (char*)"-o", object, source, NULL };
+    check_lanes_test_expect(tally, check_lanes_test_run(order_separate, errors) == 0, "the driver takes --id-order 7", NULL);
     char* joined[] = { (char*)executable, (char*)"--lanes=8", (char*)"-c", (char*)"-o", object, source, NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(joined, errors) == 0, "the driver takes --lanes=8", 0);
     char* capped[] = { (char*)executable, (char*)"--lanes=8", (char*)"--worker-budget=1", (char*)"-c", (char*)"-o", object, source, NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(capped, errors) == 0, "the driver takes an explicit calling-thread-only worker budget", NULL);
     char* budget_missing[] = { (char*)executable, (char*)"-c", (char*)"-o", object, source, (char*)"--worker-budget", NULL };
     check_lanes_test_expect(tally, check_lanes_test_run(budget_missing, errors) == 1, "the driver refuses --worker-budget without its value", NULL);
+    static const char* const non_dry_flags[] = { "MAKEFLAGS= -I/usr/include", "MAKEFLAGS= -Onone", "MAKEFLAGS= -I/opt/inc -j2" };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(non_dry_flags); f += 1)
+    {
+        unlink(object);
+        char* compile[] = { "env", (char*)non_dry_flags[f], (char*)executable, "-c", "-o", object, source, NULL };
+        struct stat output_stat;
+        const int status = check_lanes_test_run(compile, errors);
+        check_lanes_test_expect(tally, status == 0 && stat(object, &output_stat) == 0 && output_stat.st_size > 0,
+                                "make option arguments containing n still compile an object", non_dry_flags[f]);
+    }
     static const char* const dry_routes[] = { "-c", "-E", "parse" };
     for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(dry_routes); r += 1)
     {
@@ -1355,10 +1554,11 @@ static void check_lanes_test_driver(CheckLanesTestTally* tally, const char* exec
 }
 
 // The driver on each failing program `failure_N.c` in `directory` (see the file's comment), by each path: by --lanes 8,
-// and by --lanes 8 in a child whose lanes don't start (not as root), the exit status and diagnostics --lanes 1 gives.
-static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const char* executable, const char* directory)
+// by --lanes 8 with the identifiers' ids in another order (from `id_order` on), and by --lanes 8 in a child whose lanes
+// don't start (not as root), the exit status and diagnostics --lanes 1 gives.
+static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const char* executable, const char* directory, uint64_t id_order)
 {
-    static const char* const ways[] = { "1", "8", "8 that don't start" };
+    static const char* const ways[] = { "1", "8", "8 with the ids in another order", "8 that don't start" };
     char detail[PATH_MAX + 128];
     uint32_t compared = 0;
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_lanes_test_failures); f += 1)
@@ -1374,13 +1574,19 @@ static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const ch
             for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(ways) && (w + 1 < BUSTER_ARRAY_LENGTH(ways) || geteuid() != 0); w += 1)
             {
                 snprintf(errors[w], sizeof(errors[w]), "%s/failure_%u_%u_%u.errors", directory, f, scalar, w);
-                char* arguments[8] = { (char*)executable };
+                char* arguments[10] = { (char*)executable };
                 uint32_t count = 1;
                 if (scalar != 0)
                 {
                     arguments[count++] = (char*)"--scalar";
                 }
                 arguments[count++] = w == 0 ? (char*)"--lanes=1" : (char*)"--lanes=8";
+                char order[48];
+                snprintf(order, sizeof(order), "--id-order=%llu", (unsigned long long)(id_order + f));
+                if (w == 2)
+                {
+                    arguments[count++] = order;
+                }
                 arguments[count++] = (char*)"-c";
                 arguments[count++] = (char*)"-o";
                 arguments[count++] = object;
@@ -1404,7 +1610,7 @@ static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const ch
             }
         }
     }
-    printf("  driver: %u failing programs' diagnostics on lanes, each one lane's\n", compared);
+    printf("  driver: %u failing programs' diagnostics on lanes and with the ids in another order, each one lane's\n", compared);
 }
 
 // The benchmark's untimed object warm-ups must place named sections as -c does, and reject a section -c refuses.
@@ -1440,6 +1646,7 @@ static int run_check_lanes_tests(int argc, char** argv)
     const char* executable = "/proc/self/exe";
     bool keep = false;
     uint32_t programs = 6;
+    uint64_t id_order = 153;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -1456,6 +1663,12 @@ static int run_check_lanes_tests(int argc, char** argv)
         {
             executable = argv[++i];
         }
+        else if (strcmp(argv[i], "--id-order") == 0 && i + 1 < argc)
+        {
+            char* end = NULL;
+            id_order = strtoull(argv[++i], &end, 10);
+            options = end != argv[i] && *end == 0;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -1465,7 +1678,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             options = false;
         }
     }
-    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--keep]", 0);
+    check_lanes_test_expect(&tally, options, "options: [--executable PATH] [--seed N] [--programs N] [--id-order N] [--keep]", 0);
     char resolved[PATH_MAX];
     const ssize_t resolved_length = strcmp(executable, "/proc/self/exe") == 0 ? readlink(executable, resolved, sizeof(resolved) - 1) : -1;
     if (resolved_length > 0)
@@ -1484,15 +1697,17 @@ static int run_check_lanes_tests(int argc, char** argv)
         check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
         check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
-        check_lanes_test_programs(&tally, directory, programs);
-        check_lanes_test_failing(&tally, directory);
+        check_lanes_test_expect(&tally, check_lanes_test_order_setup(), "refuse an id-order priming setup that fails", NULL);
+        check_lanes_test_expect(&tally, check_lanes_test_order_cache(directory), "prime from a private cache while retaining source-error names", NULL);
+        check_lanes_test_programs(&tally, directory, programs, id_order);
+        check_lanes_test_failing(&tally, directory, id_order);
         check_lanes_test_squeezes(&tally, directory);
         check_lanes_test_unstarted(&tally, directory);
         check_lanes_test_address_space(&tally, directory);
         check_lanes_test_scratch(&tally, directory);
         check_lanes_test_rule(&tally, directory);
-        check_lanes_test_driver(&tally, executable, directory, programs);
-        check_lanes_test_driver_failing(&tally, executable, directory);
+        check_lanes_test_driver(&tally, executable, directory, programs, id_order);
+        check_lanes_test_driver_failing(&tally, executable, directory, id_order);
         check_lanes_test_benchmark_sections(&tally, executable, directory);
         if (!keep && tally.failures == 0)
         {

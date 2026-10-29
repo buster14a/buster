@@ -15,6 +15,7 @@
 #define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
 
 #include "c_check_packed_diagnostic.c"
+#include "c_check_warning_ids.c"
 
 typedef enum CheckWarningSeverity
 {
@@ -55,13 +56,32 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wreturn-type", NULL, "non-void function does not return a value" },
     { "-Wimplicit-function-declaration", "-Wimplicit", "call to undeclared function" },
     { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
+    { "-Wdeprecated-non-prototype", NULL, "a function definition without a prototype is deprecated in all versions of C and is not supported in C23" },
+    { "-Wdeprecated-non-prototype", NULL, "passing arguments to a function without a prototype is deprecated in all versions of C and is not supported in C23" },
+    { NULL, NULL, "too few arguments in call" },
+    { NULL, NULL, "too many arguments in call" },
+    { "-Wnon-literal-null-conversion", NULL, "expression which evaluates to zero treated as a null pointer constant" },
+    { "-Wliteral-range", NULL, "floating literal is outside the range of its type" },
+    { NULL, NULL, "ordered comparison between pointer and integer" },
+    { "-Wmissing-declarations", NULL, "declaration does not declare anything" },
+    { NULL, NULL, "plain '_Complex' requires a type specifier; assuming '_Complex double'" },
+    { "-Wgnu-variable-sized-type-not-at-end", "-Wgnu", "field with variable sized type is not at the end of a struct or class" },
+    { "-Wstatic-local-in-inline", NULL, "non-constant static local variable in inline function may be different in different files" },
+    { "-Wmany-braces-around-scalar-init", NULL, "too many braces around scalar initializer" },
+    { "-Winitializer-overrides", NULL, "initializer overrides prior initialization of this subobject" },
+    { "-Wundefined-internal", NULL, "function has internal linkage but is not defined" },
+    { "-Wc23-extensions", "-Wc2x-extensions", "omitting the parameter name in a function definition is a C23 extension" },
 };
+
+_Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
 
 static bool check_diagnostic_option(String8 option, const char* expected)
 {
     const bool result = expected != NULL && option.length == strlen(expected) && memcmp(option.pointer, expected, option.length) == 0;
     return result;
 }
+
+#include "c_check_warning_policy.c"
 
 static uint32_t check_diagnostic_warning_index(uint32_t warning)
 {
@@ -76,9 +96,8 @@ static const char* check_diagnostic_message(uint32_t warning)
     return result;
 }
 
-static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, CheckWarningSeverity severity)
+static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t index, CheckWarningSeverity severity)
 {
-    const uint32_t index = check_diagnostic_warning_index(warning);
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     if (history != NULL && index < BUSTER_ARRAY_LENGTH(check_warning_descriptions))
     {
@@ -102,10 +121,7 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
         for (uint32_t visited = 0; !matched && state < history->count && visited < history->count; visited += 1)
         {
             const CheckInputDiagnosticPragma* record = history->records + state;
-            const CheckWarningDescription* description = check_warning_descriptions + index;
-            matched = check_diagnostic_option(record->option, description->option) || check_diagnostic_option(record->option, description->parent) ||
-                      check_diagnostic_option(record->option, "-Weverything") || (index == 1 && check_diagnostic_option(record->option, "-Wpedantic")) ||
-                      (warning == CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION && check_diagnostic_option(record->option, "-Wall"));
+            matched = check_warning_option(index, record->option);
             if (matched)
             {
                 severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :
@@ -116,6 +132,11 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
         }
     }
     return severity;
+}
+
+static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, CheckWarningSeverity severity)
+{
+    return check_diagnostic_severity_id_from(input, token, source, check_diagnostic_warning_index(warning), severity);
 }
 
 static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
@@ -143,6 +164,49 @@ static CheckWarningSeverity check_diagnostic_severity(const CheckInput* input, u
 {
     const CheckWarningSeverity severity = check_diagnostic_severity_default(input, token, warning, false);
     return severity;
+}
+
+// Snapshot command-line policy independently of option storage and source-ordered pragma overrides.
+static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options)
+{
+    _Static_assert(CHECK_WARNING_ID_KR_TOO_MANY - CHECK_WARNING_ID_KR_DEFINITION + 1 == BUSTER_ARRAY_LENGTH(input->kr_warning_severities),
+                   "the K&R policy snapshot covers its four stable IDs");
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(input->kr_warning_severities); i += 1)
+    {
+        const CheckWarningCommandLine command = check_warning_command_line(options, CHECK_WARNING_ID_KR_DEFINITION + i, false);
+        input->kr_warning_severities[i] = (uint8_t)command.severity;
+        input->kr_warning_quiet = command.quiet;
+        input->kr_warning_system = command.system_headers;
+        input->kr_warning_errors |= command.severity >= CHECK_WARNING_ERROR;
+    }
+    input->kr_warning_policy = true;
+}
+
+// K&R diagnostics retain call-site spelling independently of the definition's compatibility signature.
+static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t known = graph->members != NULL ? graph->members[node] : 0;
+    uint32_t callee = graph->operand0[node];
+    if (callee < graph->count && graph->ops[callee] == CHECK_OP_ADDRESS)
+    {
+        callee = graph->operand0[callee];
+    }
+    return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
+}
+
+static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
+{
+    const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+    // An implicit declaration already has its own diagnostic; Clang does not add a deprecation warning to direct
+    // calls to it. An explicit pointer or a dereferenced designator still has its expression's ordinary policy.
+    const bool implicit = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && declaration < input->token_count &&
+                          (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
+    const uint32_t id = check_diagnostic_warning_index(warning);
+    const CheckWarningSeverity baseline = input->kr_warning_policy && id >= CHECK_WARNING_ID_KR_DEFINITION && id <= CHECK_WARNING_ID_KR_TOO_MANY ?
+        (CheckWarningSeverity)input->kr_warning_severities[id - CHECK_WARNING_ID_KR_DEFINITION] : CHECK_WARNING_WARNING;
+    const bool suppressed = implicit || input->kr_warning_quiet || (!input->kr_warning_system && check_graph_system_token(&input->graph, token));
+    return suppressed ? CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, baseline);
 }
 
 static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uint32_t token)
@@ -193,6 +257,15 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
         }
     }
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
+    for (uint32_t i = 0; i < input->kr_diagnostic_count; i += 1)
+    {
+        const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
+        const uint32_t at = diagnostic.token;
+        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
+        {
+            first = at;
+        }
+    }
     for (uint32_t i = 0; policies && i < input->packed_member_count; i += 1)
     {
         const CheckInputPackedMember* member = input->packed_members + i;
@@ -224,15 +297,18 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
             warnings &= warnings - 1;
         }
     }
-    for (uint32_t node = 0; policies && stream != NULL && node < stream->count; node += 1)
+    for (uint32_t node = 0; (policies || input->kr_warning_errors) && stream != NULL && node < stream->count; node += 1)
     {
-        const uint32_t at = input->graph.tokens[node];
         uint32_t warnings = stream->warnings[node];
-        while (at < first && warnings != 0)
+        while (warnings != 0)
         {
             const uint32_t warning = warnings & (0u - warnings);
+            const bool kr = (warning & CHECK_WARNING_KR_CALLS) != 0;
+            const uint32_t at = kr ? check_diagnostic_kr_call_token(input, node) : input->graph.tokens[node];
             const bool ignored = stream->warning_ignored != NULL && (stream->warning_ignored[node] & warning) != 0;
-            if (check_diagnostic_severity_default(input, at, warning, ignored) >= CHECK_WARNING_ERROR)
+            const CheckWarningSeverity severity = kr ? check_diagnostic_kr_severity(input, at, warning) :
+                                                      check_diagnostic_severity_default(input, at, warning, ignored);
+            if (at < first && severity >= CHECK_WARNING_ERROR)
             {
                 first = at;
             }

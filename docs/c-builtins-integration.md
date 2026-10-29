@@ -73,14 +73,17 @@ class and a new temporary-local range. It leaves one result on the typed value
 stack and preserves values already below it. Overflow stores the converted
 low result through the supplied pointer before producing the boolean. Runtime
 descriptors currently represent ordinary signed/unsigned 8-, 16-, 32- and
-64-bit integers, unsigned one-bit booleans in byte storage, and 128-bit
-integers (`BUSTER_CBUILTIN_LOWER_WIDE`, signed or not: a width's seven bits
-stop at 127). Boolean stores retain the low mathematical bit; they do not use
-the ordinary nonzero-to-true cast. A 128-bit operand's slot is an address-taken
-frame object (class VOID) holding its 16 bytes, which the recipe reads as two
-64-bit limbs, and a 128-bit destination takes its two limbs in two stores.
-Other bit-precise memory representations return an explicit unsupported
-status.
+64-bit integers, unsigned one-bit booleans in byte storage, `_BitInt`s of the
+other widths to 64 bits, and 128-bit integers (`BUSTER_CBUILTIN_LOWER_WIDE`,
+signed or not: a width's seven bits stop at 127). Boolean stores retain the low
+mathematical bit; they do not use the ordinary nonzero-to-true cast. A
+`_BitInt`'s slot is the narrowest class of 8, 16, 32 or 64 bits that holds it,
+its value extended from its width there, as clang stores it and the source
+producer keeps it, and a `_BitInt` destination takes its value extended so,
+by a pair of shifts. A 128-bit operand's slot is an address-taken frame object
+(class VOID) holding its 16 bytes, which the recipe reads as two 64-bit limbs,
+and a 128-bit destination takes its two limbs in two stores. Wider bit-precise
+types return an explicit unsupported status.
 
 The caller supplies mutually disjoint kind, class, value, local-class and
 local-flag columns, writable to their declared capacities and disjoint from
@@ -244,8 +247,26 @@ in freestanding and no-builtin modes; the existing policy for recognizing
 ordinary function names is unchanged. The compiler's masked vector publication
 and scalar publication produce the same typed columns. Hints and baseline x86
 return-address extraction use the documented identity/no-op behavior.
-Dynamic stack allocation and genuine frame addresses remain explicit refusals
-in this adapter. Terminal helpers require a separate terminal source-graph
+
+The stack's and the frame's builtins are clang -O0's code (#148):
+
+- `__builtin_alloca`, which glibc's `<alloca.h>` makes of `alloca`, is Tier 0's
+  `ALLOCA` of its size: rounded up to 16 bytes and taken from the stack. A
+  variable-length array's scope releases it at its end exactly where clang's
+  `stackrestore` would: an allocation after the block's first array goes with
+  the arrays, one before it stays until the function returns.
+- `__builtin_frame_address(0)` is Tier 0's `FRAME_ADDRESS`, the frame pointer,
+  which the entry gives its function as the stack's kinds do. The address
+  points at the caller's saved rbp, 16 bytes below the incoming arguments.
+  `__builtin_return_address(0)` is the word 8 bytes above it. Their level is a
+  constant of their own, which nothing evaluates, so the recipes take no
+  arguments.
+- A level past 0 is a caller's frame, which clang -O0 reaches through the frame
+  pointers' chain. Tier 0's functions keep a frame pointer only where they need
+  one, so the lowering refuses those levels by name: "unsupported:
+  `__builtin_frame_address` and `__builtin_return_address` of a caller's frame".
+
+Terminal helpers require a separate terminal source-graph
 path. The native recipe tests retain independent libc comparisons, exact
 guarded tails, every small size across the expansion cutoffs, close overlap in
 both directions, high-bit bytes, and operations through 1 MiB. The checker
@@ -452,6 +473,43 @@ argument clears the flags, including quiet-NaN/signaling-NaN pairs.
 
 ## Atomic and terminal helper calls
 
+`c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
+both `<stdatomic.h>` implementations. Its pointer must address `_Atomic(T)`;
+load removes the atomic wrapper, writes reject const objects, compare-exchange
+takes a pointer to plain `T`, and pointer fetch-add/sub scales by the pointee's
+stride. Init and the weak/strong forms retain their source arities. Every source
+argument, including dynamic orders, is evaluated once. Constant lock-free
+queries for zero and 1/2/4/8 bytes retain Clang's integer-constant-expression
+proof; other sizes use the runtime query.
+
+The C11 scalar forms use the existing GNU raw-bit leaves. Small record and
+complex representations use those same leaves through an owned byte buffer,
+including zeroed atomic storage padding. Other widths or insufficient alignment
+use libatomic's generic size-and-pointer load, store, exchange and compare-exchange
+ABI. Objects wider than eight bytes therefore require `-latomic` when linked;
+this implementation does not advertise a lock-free 16-byte path. The ordinary
+value representation limits still apply to `_Float16`, `_Float128` and arbitrary
+`_BitInt` values.
+
+`c_check_program_atomic.c` also lowers ordinary `_Atomic` lvalue reads, assignment,
+compound assignments and increments. Accesses use sequential consistency;
+compound updates snapshot the address and RHS before a compare-exchange loop,
+including an owned copy of a complex RHS. Failed attempts refresh the expected
+representation without reevaluating source operands. Integer promotions,
+pointer strides, prefix/postfix results, complex arithmetic and 128-bit division
+reuse the ordinary lowering's type and runtime contracts. Atomic locals remain
+addressable, and static-data emission retains the atomic storage size/alignment
+separately from its unwrapped value type.
+Atomic parameters retain their declared ABI classification while argument values
+are captured in padded objects. Atomic aggregate returns similarly copy only the
+underlying value's bytes into zeroed atomic storage. Compatible atomic rvalues
+retain their identity for initialization, assignment and calls.
+
+Floating updates follow Clang's current compare-exchange loop behavior. Clang
+23.1.1's `CGExprScalar.cpp` explicitly leaves saving/restoring floating exceptions
+across retries as a FIXME; this implementation likewise does not claim full C
+floating-environment conformance for failed retries.
+
 `c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,
 sync fence and atomic thread/signal-fence slice. It retains actual object and
 value types, qualifiers, all argument effects, ordinary `int` order conversions,
@@ -459,7 +517,7 @@ and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
 integer objects. Read/modify/write checking and runtime leaves are separate
-modules described below; other recognized atomic/sync families remain
+modules described below; other recognized GNU atomic/sync families remain
 explicit refusals.
 The source-domain rules follow the approved Clang 23.1.1 release: real and
 floating-complex `_n` objects are valid, while direct x87 long double and
@@ -634,7 +692,7 @@ hash-pins all four inputs before publishing output. Derived LLVM data retains
 its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
 input, tool and output provenance is in
 [`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
-The 1,535-row frozen own-main subset includes explicit `bit_cast` parser and
+The 1,543-row frozen own-main subset includes explicit `bit_cast` parser and
 `va_list` predefined-type gaps. These are not invented function declarations
 and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
 not a general `__has_builtin` answer. Header/language restrictions and custom
@@ -642,7 +700,7 @@ rules remain consumer obligations.
 
 `builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
 two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
-the 1,484 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the 1,492 recorded x86/x86-64 members. Neither a name prefix nor membership in
 the complete installed catalogue attests the audited operand-constraint scope.
 Membership also does not replace successful ordinary prototype checking.
 
@@ -663,10 +721,10 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds the 209 audited SemaX86 constraint facts for the
-207 affected names in the frozen 1,484-name own-main target-builtin scope: 87
+`c_check_builtin_x86.c` adds the 217 audited SemaX86 constraint facts for the
+215 affected names in the frozen 1,492-name own-main target-builtin scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 55 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 63 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -674,7 +732,13 @@ shuffle, rotate and mask-shift builtins, and `executable_benchmark.c`'s
 `scattersiv16si`), with their 17 ranges and 6 scales, and
 `__builtin_unpredictable` and `__builtin_assume`. #619 added
 `__builtin_ia32_ucmpd128_mask`, which `c_check_program_batch.c` reaches through
-`_mm_cmplt_epu32_mask`, with its range. `builtin_intrinsic_own_main_prototype_in_scope` also admits
+`_mm_cmplt_epu32_mask`, with its range. #148 added the SSE builtins that
+stb_image, dr_flac, dr_mp3 and minimp3 call and the scope lacked, with their 8
+ranges: `pshufd`, `pshufhw`, `pshuflw` and `shufps` (0 to 255),
+`psrldqi128_byteshift` and `palignr128` (0 to 255), `vec_ext_v8hi` and
+`vec_set_v8hi` (0 to 7). Their target features (SSE2, and SSSE3 for
+`palignr128`) are no more checked than any x86 builtin's.
+`builtin_intrinsic_own_main_prototype_in_scope` also admits
 the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
 `__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
@@ -689,6 +753,27 @@ prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
 first. Generated ICEs precede hard rounding/SAE sets and cumulative direct
 ranges; both rules for each `rndscale` spelling are retained.
+
+#148's SSE builtins lower through `c_check_program_x86.c`'s table, as the
+other x86 builtins do, where the target has AVX-512F and AVX-512VL, which the
+lowering requires of every vector. A row each in its EVEX form for the 8 above
+but `vec_ext_v8hi` and `vec_set_v8hi`, which had rows; the packs,
+multiplications, `maxps`, `minps` and `cvtps2dq` their intrinsics reach too are
+rows of the families at every width (`BUSTER_CHECK_X86_BINARIES` and
+`BUSTER_CHECK_X86_SSE`). VPSHUFD, VPSHUFHW, VPSHUFLW, VSHUFPS, VPSRLDQ and
+VPALIGNR take the immediate's whole byte, as the instructions do: a byte shift
+or an align past the vector's bytes gives zeros. VMAXPS and VMINPS take the
+builtin's first operand in vvvv, so that a NaN or a pair of zeros gives the
+second, as MAXPS does, and VCVTPS2DQ rounds by MXCSR. `vec_ext_v8hi`'s VPEXTRW
+(C5) takes its general register in reg and its vector in rm, the other
+extracts' forms the other way round. `test-checker`'s x86 programs
+(`c_check_program_x86_test.c`) call them directly, at their immediates' edges
+and on NaNs, zeros of either sign and halfway values, with `cvtps2dq` also
+under each of MXCSR's four rounding modes, set and restored around it, and through
+`<smmintrin.h>`'s intrinsics, by both paths against clang -O0's code for
+znver5. The program that includes the header lowers only what its roots reach,
+as `-c` does (`check_test_program_includes`), since the header's MMX functions
+call builtins no row takes.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these

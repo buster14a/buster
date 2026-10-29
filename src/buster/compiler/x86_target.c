@@ -91,6 +91,23 @@ typedef enum X86Feature
 _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
 #define BUSTER_X86_FEATURE(name) (UINT64_C(1) << X86_FEATURE_##name)
 
+// The features past those that the generated code may use, which form eligibility doesn't classify and only the
+// lowering's x86 rows read (c_check_program_x86.c): X86Target.extensions, from the target options as clang resolves them
+// and from a function's target attribute (c_predefines.c's predefines_target and predefines_function_target), by clang's
+// names (predefines_x86_extensions).
+#define BUSTER_X86_TARGET_EXTENSIONS(X) \
+    X(AVX512FP16)
+
+#define BUSTER_X86_TARGET_EXTENSION_ENUM(name) X86_EXTENSION_##name,
+typedef enum X86Extension
+{
+    BUSTER_X86_TARGET_EXTENSIONS(BUSTER_X86_TARGET_EXTENSION_ENUM)
+    X86_EXTENSION_COUNT,
+} X86Extension;
+#undef BUSTER_X86_TARGET_EXTENSION_ENUM
+_Static_assert(X86_EXTENSION_COUNT <= 64, "the extensions are a word's bits");
+#define BUSTER_X86_EXTENSION(name) (UINT64_C(1) << X86_EXTENSION_##name)
+
 typedef struct X86FeatureDescription X86FeatureDescription;
 struct X86FeatureDescription
 {
@@ -122,6 +139,8 @@ typedef struct X86Target X86Target;
 struct X86Target
 {
     uint64_t features; // Extra features above x86-64's mandatory x87/MMX/SSE/SSE2/FXSR/CMOV/CX8.
+    // X86Extension's: the lowering's alone.
+    uint64_t extensions;
     X86Architecture architecture;
     // Clang's CPU identity macros describe -march, even with an explicit -mtune.
     bool native_znver5;
@@ -160,6 +179,8 @@ static X86Target x86_target_from_cpuid(const X86CpuId* cpu)
     {
         result.features &= ~avx512_bits;
     }
+    // AVX512-FP16 (7:0 EDX bit 23), an extension, with the AVX-512 state.
+    result.extensions = avx512 && ((cpu->words[1][3] >> 23) & 1) != 0 ? BUSTER_X86_EXTENSION(AVX512FP16) : 0;
     return result;
 }
 

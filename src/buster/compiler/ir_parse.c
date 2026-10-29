@@ -81,8 +81,17 @@ struct IrParseState
     IrParseArray calls;
     IrParseArray call_types;
     IrParseArray parameters;
+    IrParseArray labels;
+    IrParseArray abi_calls;
+    IrParseArray passed;
     uint32_t symbol_count;
     uint8_t result_type;
+    // The header's own lines: a variadic definition's incoming frame, and the function's ABI records.
+    bool variadic;
+    AbiCall incoming;
+    uint32_t parameter_passed;
+    uint32_t result_size;
+    AbiReturn result_abi;
 };
 
 static __attribute__((unused)) IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result);
@@ -382,6 +391,138 @@ static void ir_parse_slot(IrParseState* state)
     ir_parse_append(state, &state->slots, &slot);
 }
 
+// The ABI records' forms, as ir_print_location, ir_print_return and ir_print_abi_call write them.
+static AbiLocation ir_parse_location(IrParseState* state)
+{
+    AbiLocation location = { 0 };
+    ir_parse_keyword(state, "loc(");
+    location.kind = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    location.registers[0] = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    location.registers[1] = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    location.stack_offset = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+    ir_parse_expect(state, ',');
+    location.flags = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ')');
+    return location;
+}
+
+static AbiReturn ir_parse_return(IrParseState* state)
+{
+    AbiReturn result = { 0 };
+    ir_parse_keyword(state, "ret(");
+    result.kind = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    result.flags = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    result.part_bytes = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    for (uint32_t r = 0; r < BUSTER_ABI_RESULT_PARTS; r += 1)
+    {
+        ir_parse_expect(state, ',');
+        result.registers[r] = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    }
+    ir_parse_expect(state, ')');
+    return result;
+}
+
+static AbiCall ir_parse_abi_call(IrParseState* state)
+{
+    AbiCall call = { 0 };
+    ir_parse_keyword(state, "call(");
+    call.stack_bytes = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+    ir_parse_expect(state, ',');
+    call.stack_alignment_log2 = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    call.integer_registers = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    call.vector_registers = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, false);
+    ir_parse_expect(state, ',');
+    call.result = ir_parse_return(state);
+    ir_parse_expect(state, ')');
+    return call;
+}
+
+// `label #k b<block>` or `label #k none`, in their order.
+static void ir_parse_label(IrParseState* state)
+{
+    ir_parse_keyword(state, "label");
+    const uint32_t id = ir_parse_id(state, '#');
+    if (state->result.error == IR_PARSE_OK && id != state->labels.count)
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    const uint32_t block = ir_parse_word(state, "none") ? BUSTER_IR_NONE : ir_parse_id(state, 'b');
+    ir_parse_append(state, &state->labels, &block);
+}
+
+// `passed #k size=<bytes> loc(...)`, in their order.
+static void ir_parse_passed(IrParseState* state)
+{
+    ir_parse_keyword(state, "passed");
+    const uint32_t id = ir_parse_id(state, '#');
+    if (state->result.error == IR_PARSE_OK && id != state->passed.count)
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    IrPassed passed = { 0 };
+    ir_parse_keyword(state, "size=");
+    passed.size = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+    passed.location = ir_parse_location(state);
+    ir_parse_append(state, &state->passed, &passed);
+}
+
+// `abi #k call(...) passed=#<first> result=<bytes>`, in their order.
+static void ir_parse_abi(IrParseState* state)
+{
+    ir_parse_keyword(state, "abi");
+    const uint32_t id = ir_parse_id(state, '#');
+    if (state->result.error == IR_PARSE_OK && id != state->abi_calls.count)
+    {
+        ir_parse_fail(state, IR_PARSE_SYNTAX);
+    }
+    IrAbiCall abi = { 0 };
+    abi.call = ir_parse_abi_call(state);
+    ir_parse_keyword(state, "passed=");
+    abi.passed = ir_parse_id(state, '#');
+    ir_parse_keyword(state, "result=");
+    abi.result_size = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+    ir_parse_append(state, &state->abi_calls, &abi);
+}
+
+// `variadic call(...)` and `result size=<bytes> ret(...) passed=#<first>`, each once.
+static void ir_parse_frame(IrParseState* state)
+{
+    if (ir_parse_word(state, "variadic"))
+    {
+        if (state->result.error == IR_PARSE_OK && state->variadic)
+        {
+            ir_parse_fail(state, IR_PARSE_SYNTAX);
+        }
+        state->variadic = true;
+        state->incoming = ir_parse_abi_call(state);
+    }
+    else
+    {
+        ir_parse_keyword(state, "result");
+        if (state->result.error == IR_PARSE_OK && state->parameter_passed != 0)
+        {
+            ir_parse_fail(state, IR_PARSE_SYNTAX);
+        }
+        ir_parse_keyword(state, "size=");
+        state->result_size = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+        state->result_abi = ir_parse_return(state);
+        ir_parse_keyword(state, "passed=");
+        const uint32_t first = ir_parse_id(state, '#');
+        if (state->result.error == IR_PARSE_OK && first == UINT32_MAX)
+        {
+            ir_parse_fail(state, IR_PARSE_LIMIT);
+        }
+        state->parameter_passed = first + 1;
+    }
+}
+
 static void ir_parse_address(IrParseState* state, IrParseRow* row)
 {
     row->a = ir_parse_id(state, '%');
@@ -431,6 +572,20 @@ static void ir_parse_call(IrParseState* state, IrParseRow* row)
     call.parameter_count = state->call_types.count - call.type_first;
     ir_parse_keyword(state, "variadic=");
     call.variadic = ir_parse_unsigned(state, 1, false) != 0;
+    // A call that passes or returns an aggregate: its ABI records, and the destination of an aggregate result.
+    if (ir_parse_word(state, "abi="))
+    {
+        const uint32_t abi = ir_parse_id(state, '#');
+        if (state->result.error == IR_PARSE_OK && abi == UINT32_MAX)
+        {
+            ir_parse_fail(state, IR_PARSE_LIMIT);
+        }
+        call.abi = abi + 1;
+    }
+    if (ir_parse_word(state, "into="))
+    {
+        row->c = ir_parse_id(state, '%');
+    }
     row->b = ir_parse_append(state, &state->calls, &call);
 }
 
@@ -662,6 +817,9 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         .call_count = state->calls.count,
         .call_type_count = state->call_types.count,
         .parameter_count = state->parameters.count,
+        .label_count = state->labels.count,
+        .abi_call_count = state->abi_calls.count,
+        .passed_count = state->passed.count,
     };
     IrFunction function = { 0 };
     const IrError created = ir_create(output, &sizes, &function);
@@ -683,6 +841,14 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
         ir_parse_copy(state->calls, function.calls);
         ir_parse_copy(state->call_types, function.call_types);
         ir_parse_copy(state->parameters, function.parameter_types);
+        ir_parse_copy(state->labels, function.labels);
+        ir_parse_copy(state->abi_calls, function.abi_calls);
+        ir_parse_copy(state->passed, function.passed);
+        function.variadic = state->variadic;
+        function.incoming = state->incoming;
+        function.parameter_passed = state->parameter_passed;
+        function.result_size = state->result_size;
+        function.result_abi = state->result_abi;
         const IrParseRow* rows = state->rows.data;
         for (uint32_t id = 0; id < function.instruction_count; id += 1)
         {
@@ -738,6 +904,9 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
         .calls.bytes = sizeof(IrCall),
         .call_types.bytes = sizeof(uint8_t),
         .parameters.bytes = sizeof(uint8_t),
+        .labels.bytes = sizeof(uint32_t),
+        .abi_calls.bytes = sizeof(IrAbiCall),
+        .passed.bytes = sizeof(IrPassed),
         .symbol_count = 1,
         .result.check.instruction = BUSTER_IR_NONE,
     };
@@ -770,6 +939,22 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
             else if (state.source.pointer[state.cursor] == 's' && state.blocks.count == 0)
             {
                 ir_parse_slot(&state);
+            }
+            else if (state.source.pointer[state.cursor] == 'l' && state.blocks.count == 0)
+            {
+                ir_parse_label(&state);
+            }
+            else if (state.source.pointer[state.cursor] == 'p' && state.blocks.count == 0)
+            {
+                ir_parse_passed(&state);
+            }
+            else if (state.source.pointer[state.cursor] == 'a' && state.blocks.count == 0)
+            {
+                ir_parse_abi(&state);
+            }
+            else if ((state.source.pointer[state.cursor] == 'v' || state.source.pointer[state.cursor] == 'r') && state.blocks.count == 0)
+            {
+                ir_parse_frame(&state);
             }
             else if (state.source.pointer[state.cursor] == 'b')
             {

@@ -17,6 +17,20 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The canonical foreign-name permutation and its original C/assembly/property
+fixtures in `foreign_order.c` and `foreign_order_test.c` (#734) use the project
+default terms. The radix kernel follows this project's original
+`c_bindings_sort` count/place/fill design. System C compilers, the ELF loader
+and linkers are external test tools; no external implementation or corpus
+fixture is incorporated.
+
+The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
+(`c_check_program_atomic.c`) and the added semantic, native and static-data
+fixtures (#671) are original project material under the default terms. Exact
+Clang/LLVM `llvmorg-23.1.1` Sema and code-generation sources supply behavioral
+facts; Clang and system libatomic run externally as oracles/runtime consumers.
+No external implementation, corpus fixture or generated data is incorporated.
+
 `c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
 associated declaration/ELF integration (#620) are original project material
 under the default terms. Clang is an external behavior and object-format oracle;
@@ -49,6 +63,14 @@ default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
 and Clang runs externally as an independent oracle. No external implementation
 or fixture is copied.
 
+The source-driver collection and independent-declaration diagnostic recovery
+(#698, #699), `c_checker_driver_recovery_test.c`, and sparse warning completion
+facts in `c_check_warning_events.c` and its model tests are original project
+material under the default terms. They reuse this project's arenas, parser
+forest, binding history, diagnostic gate and deferred type replay. Installed
+Clang 23.1.4 supplies independent behavior and diagnostic-order observations;
+no compiler implementation, external fixture or generated corpus is imported.
+
 The deep aggregate-call setup, argument bound and extended generated/guarded
 native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
 `tier0_validate_test.c` and `c_check_program_test.c` (#668/#663) are original
@@ -75,6 +97,7 @@ Paths below are relative to the repository root. "Default" means
 
 | Paths or portions | Origin and disposition |
 | --- | --- |
+| `src/buster/compiler/calling_convention_builtins.c`, its focused tests in `calling_convention_test.c`, and `tools/generate_builtin_abi.c` | Original immutable projection of this project's builtin type and ABI classification rules, bounded initialization and independent scalar recomputation; Default. The initial input is project revision `e7f89091648f68940b595aadd648841c1ffc3ec5`, `c_types.c` and `calling_convention.c`. No external implementation or generated data is imported. The generator includes the existing `lane.c` module, which retains its MIT notice and grant. Reproduction and ownership limits are in `docs/calling-convention.md`. |
 | `src/buster/compiler/c_check_clock.c`, `src/buster/compiler/compile_measure.c`, `docs/compile-time.md` and the `--time-stages` additions to `src/buster/compiler/c_checker_driver.c`, `src/buster/compiler/c_check_program_emit.c` and `src/buster/compiler/c_checker_driver_test.c` | Original opt-in stage clock, whole-process compile harness, driver tests and attribution notes (#518); Default. Reuses this repository's profiling helpers (`profile.c`) and the preprocessor's phase timers. tcc, perf and the frozen SQLite amalgamation run or are read externally; no external implementation or data is imported. |
 | `src/buster/compiler/tier1_select.c`, `src/buster/compiler/tier1_select_test.c`, `src/buster/compiler/tier1_select_benchmark.c`, `src/buster/compiler/tier1_liveness.c`, `src/buster/compiler/tier1_liveness_test.c`, `src/buster/compiler/tier1_emit.c`, `src/buster/compiler/tier1_emit_test.c`, `src/buster/compiler/tier1_call_test.c`, `src/buster/compiler/tier1_narrow_test.c`, `src/buster/compiler/tier1_terminal_test.c`, `src/buster/compiler/tier1_pipeline_test.c`, `docs/tier1.md`, `docs/tier1-selection.md`, `docs/tier1-liveness.md`, `docs/tier1-pipeline.md` | Original selection, selected-use analysis, native fragment/call consumer, hostile native call helpers, guarded narrow-value and bounded terminal fixtures, typed-stream fixtures, independent Clang formulas, process supervisor and measurement helpers; Default. Existing project IR/SSA, dataflow, allocator, frame, encoder, target and model APIs are consumed under their retained provenance. Clang runs externally; no external implementation or corpus is imported. |
 | `src/buster/compiler/tier1_model_measure.c`, `src/buster/compiler/tier1_model_measure_test.c`, `docs/tier1-model-measurements.md` | Original emitted-case inventory, register-normalized experiments and reader regression fixtures; Default. Uses the original project selector manifest, encoder/effects and Zen 5 counter helpers; introduces no third-party timing data or new model observations. |
@@ -96,6 +119,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_builtin_catalog.c`, `src/buster/compiler/c_builtin_varargs_lower.c`, `src/buster/compiler/c_builtin_varargs_lower_test.c` | Original shared builtin identities/capability metadata, SysV va_list typed-stream expansion and guarded/native fixtures; Default. The psABI and existing project ABI tables supply layout facts. Clang supplies independent varargs state and execution results; no external compiler implementation or fixtures are imported. |
 | `src/buster/compiler/c_builtin_lower.c`, `src/buster/compiler/c_builtin_lower_test.c`, `src/buster/compiler/c_builtin_lower_benchmark.c` | Original integer-builtin expansion into the existing typed stream, scalar/vector publication, bounded-capacity checks, native execution fixtures and whole-recipe benchmark; Default. The bootstrap Clang compiler is an external semantic oracle. No Clang implementation or external fixtures are imported. |
 | `src/buster/compiler/differential.c`, `src/buster/compiler/differential_test.c`, `tests/differential/tool.c`, `tests/differential/interesting.c`, `tests/differential/lifecycle.c`, `docs/differential.md` | Original external-generator compiler comparison harness, fake protocol fixtures, reducer adapter, CLI lifetime regressions and documentation; Default. Csmith and YARPGen run externally under their retained upstream terms; no generator implementation, runtime or generated corpus is imported. Generated artifacts stay outside the repository and require their own provenance/license review before retention. |
+| `src/buster/compiler/ir_metamorphic.c`, `src/buster/compiler/ir_metamorphic_test.c` and their section of `docs/ir-tools.md` | Original bounded deterministic IR generator, representation transformations, independent unsigned arithmetic/memory models, consumer comparisons and replay/lifecycle controls; Default. Existing project IR, parser, verifier, optimizer and interpreter interfaces are reused under their retained provenance. No external implementation or fixture corpus is imported. |
 | `src/buster/compiler/dominators.c`, `src/buster/compiler/dominators_test.c`, `src/buster/compiler/dominators_benchmark.c`, `docs/dominators.md` | Original entry-rooted dominance, frontier and natural-loop analyses, independent graph oracles, synthetic fixtures, measurement helpers and documentation; Default. Cooper, Harvey and Kennedy's paper and the linked Cornell and LLVM descriptions supply algorithm definitions, not copied code or fixtures. No external implementation or generated dataset is imported. |
 | `src/buster/compiler/tier1_allocate.c`, `src/buster/compiler/tier1_rematerialize.c`, `src/buster/compiler/tier1_allocate_test.c`, `src/buster/compiler/tier1_moves_test.c`, `src/buster/compiler/tier1_allocate_benchmark.c`, `docs/tier1-allocation.md` | Original interval allocation/coloring, reload splitting, parallel move resolution, rematerialization, native fixtures and measurement helpers; Default. Uses the existing encoder and arena interfaces; no other compiler implementation, benchmark corpus or generated dataset is imported. |
 | `src/buster/compiler/tier1_frame.c`, `src/buster/compiler/tier1_frame_test.c`, `src/buster/compiler/tier1_frame_benchmark.c`, `src/buster/compiler/tier1_frame_emit.c`, `src/buster/compiler/tier1_frame_execution_test.c`, `docs/tier1-frame.md` | Original interval slot-coloring, frame and prologue/epilogue planning, native instruction consumer, independent layout/prologue simulations, native ABI/probe fixtures and measurement helpers; Default. Existing calling-convention data and SysV architectural rules are consumed without importing another compiler implementation or external fixtures. |

@@ -76,7 +76,10 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         ssa_ir_owned(arena, f->addresses, f->address_count, sizeof(IrAddress)) ||
         ssa_ir_owned(arena, f->calls, f->call_count, sizeof(IrCall)) ||
         ssa_ir_owned(arena, f->call_types, f->call_type_count, 1) ||
-        ssa_ir_owned(arena, f->parameter_types, f->parameter_count, 1);
+        ssa_ir_owned(arena, f->parameter_types, f->parameter_count, 1) ||
+        ssa_ir_owned(arena, f->labels, f->label_count, 4) ||
+        ssa_ir_owned(arena, f->abi_calls, f->abi_call_count, sizeof(IrAbiCall)) ||
+        ssa_ir_owned(arena, f->passed, f->passed_count, sizeof(IrPassed));
 }
 
 static IrError ssa_ir_error(SsaError error)
@@ -251,6 +254,9 @@ static IrError ssa_ir_layout(SsaIrWork* work)
             .address_count = f->address_count,
             .call_type_count = f->call_type_count,
             .parameter_count = f->parameter_count,
+            .label_count = f->label_count,
+            .abi_call_count = f->abi_call_count,
+            .passed_count = f->passed_count,
         };
         for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
         {
@@ -368,6 +374,25 @@ static void ssa_ir_copy_metadata(const SsaIrWork* work, IrFunction* f)
     {
         memcpy(f->parameter_types, input->parameter_types, input->parameter_count);
     }
+    // The ABI records and the incoming frame as they were: each call keeps its index into them. A label whose block
+    // is removed (no reachable br_indirect can go there) keeps no block.
+    if (input->abi_call_count != 0)
+    {
+        memcpy(f->abi_calls, input->abi_calls, (uint64_t)input->abi_call_count * sizeof(IrAbiCall));
+    }
+    if (input->passed_count != 0)
+    {
+        memcpy(f->passed, input->passed, (uint64_t)input->passed_count * sizeof(IrPassed));
+    }
+    for (uint32_t label = 0; label < input->label_count; label += 1)
+    {
+        f->labels[label] = input->labels[label] == BUSTER_IR_NONE ? BUSTER_IR_NONE : work->blocks[input->labels[label]];
+    }
+    f->parameter_passed = input->parameter_passed;
+    f->result_size = input->result_size;
+    f->result_abi = input->result_abi;
+    f->variadic = input->variadic;
+    f->incoming = input->incoming;
     for (uint32_t slot = 0; slot < input->slot_count; slot += 1)
     {
         if (work->slots[slot] != BUSTER_IR_NONE)
