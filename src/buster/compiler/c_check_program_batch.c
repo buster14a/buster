@@ -36,7 +36,7 @@ static const uint8_t check_lower_batch_ops[64] __attribute__((aligned(64))) = {
 };
 
 // Classify at most 16 immutable operator/type records. The register result avoids an intermediate plan
-// or speculative payload walk; production callers supply the reached two/three-node fragment.
+// or speculative payload walk; callers supply only a proved reached fragment.
 static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWriter* writer, uint32_t first, uint32_t count)
 {
     const CheckStream* stream = writer->program->stream;
@@ -63,18 +63,21 @@ static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWr
     else
     {
         const __mmask16 active = (__mmask16)((1u << count) - 1);
-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
-        const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + first, 1);
-        const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
-        const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)writer->type_count));
-        const __m512i metadata = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), typed, indices, writer->type_templates, 4);
+        // Zen 5's wide gathers are expensive. These bounded scalar type loads also avoid a speculative row
+        // beyond the proved fragment; the operator lookup and classification remain SIMD.
+        uint32_t metadata[BUSTER_CHECK_LOWER_BATCH] = { 0 };
+#pragma clang loop vectorize(disable) unroll_count(4)
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t index = type_index(stream->values[first + i].type);
+            metadata[i] = index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
+        }
         const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
         const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
         const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
         const __m128i selected = _mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, _mm512_load_si512(check_lower_batch_ops)));
         const __m512i recipes = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(selected));
-        result = _mm512_or_si512(metadata, _mm512_slli_epi32(recipes, 16));
+        result = _mm512_or_si512(_mm512_loadu_si512(metadata), _mm512_slli_epi32(recipes, 16));
     }
     writer->classified_nodes += count;
     return result;
@@ -114,7 +117,7 @@ static inline __attribute__((always_inline)) bool check_lower_plain(CheckLowerWr
     return plain;
 }
 
-// The scalar payload of a reached leaf. A two/three-node template calls this only after its parent has
+// The scalar payload of a reached leaf. A fragment calls this only after its parent has
 // proved the original evaluation order. A neighboring body's speculative type classification never reads its map.
 static inline __attribute__((always_inline)) bool check_lower_value_payload(const CheckLowerWriter* writer, uint32_t node, uint32_t metadata, bool initialized, uint8_t* kind, uint64_t* bits)
 {
@@ -223,6 +226,8 @@ static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWr
     return valid;
 }
 
+#include "c_check_program_fragment.c"
+
 static inline __attribute__((always_inline)) bool check_lower_batch_expression(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -278,5 +283,14 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
             }
         }
     }
+#if BUSTER_HOST_VECTOR
+    // Preserve the leaf-sized hot path. Only a supported root with a non-VALUE child can amortize a larger
+    // proof; the out-of-line helper must prove the entire closed fragment before publishing any entry.
+    if (!valid && check_lower_fragment_operator(op) && a < node && (!binary || b < node) &&
+        (graph->ops[a] != CHECK_OP_VALUE || (binary && graph->ops[b] != CHECK_OP_VALUE)))
+    {
+        valid = check_lower_fragment(writer, node);
+    }
+#endif
     return valid;
 }

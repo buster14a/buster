@@ -103,6 +103,8 @@ static void check_test_program_task_stack(CheckTest* test)
     }
 }
 
+#include "c_check_program_fragment_test.c"
+
 static void check_test_program_batch(CheckTest* test)
 {
     check_test_program_task_stack(test);
@@ -162,6 +164,7 @@ static void check_test_program_batch(CheckTest* test)
         {
             type_templates[i] = type_classes[i] | (uint32_t)type_facts[i] << 8;
         }
+        check_test_program_fragments(test, &types.table, type_classes, type_facts, type_templates);
         const CheckLowerWriter columns = {
             .type_classes = type_classes,
             .type_facts = type_facts,
