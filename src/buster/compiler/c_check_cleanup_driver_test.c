@@ -79,6 +79,11 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
         { "two arguments", "void f(int *p);\nvoid g(void) {\nint a __attribute__((cleanup(f, f)));\n}\n", 0 },
         { "two arguments on a file-scope variable, ignored", "void f(int *p);\nint a __attribute__((cleanup(f, f)));\nvoid g(void) {\nint b __attribute__((cleanup()));\n}\n", 0 },
         { "two arguments before one", "void f(int *p);\nvoid g(void) {\nint a __attribute__((cleanup(f, f), cleanup(f)));\n}\n", 0 },
+        // A specifier's, which a function declarator before the variables ignores (#745's review): clang reports the count
+        // at each variable, at the same place, which the driver prints once.
+        { "two arguments on a function, then on a variable", "void f(int *p);\nvoid g(void) {\n__attribute__((cleanup(f, f))) int h(void), a;\n}\n", 0 },
+        { "two arguments on a function, then on two variables", "void f(int *p);\nvoid g(void) {\n__attribute__((cleanup(f, f))) int h(void), a, b;\n}\n", 1 },
+        { "another pointee after a function", "void f(long *p);\nvoid g(void) {\n__attribute__((cleanup(f))) int h(void), a;\n}\n", 0 },
         { "a function without a prototype", "void f();\nvoid g(void) {\nint a __attribute__((cleanup(f)));\n}\n", 0 },
         { "a function of two parameters", "void f(int *p, int q);\nvoid g(void) {\nint a __attribute__((cleanup(f)));\n}\n", 0 },
         { "a function of no parameter", "void f(void);\nvoid g(void) {\nint a __attribute__((cleanup(f)));\n}\n", 0 },
