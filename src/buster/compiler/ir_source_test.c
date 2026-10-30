@@ -143,6 +143,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
         .identifiers = identifiers,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
+        .target = pp_options.target,
     };
     prepared = prepared && check_program(&program, parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
     const bool unsupported = accepted && !prepared && program.status == CHECK_PROGRAM_UNSUPPORTED;
