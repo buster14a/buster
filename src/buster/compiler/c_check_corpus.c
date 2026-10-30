@@ -1138,61 +1138,76 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
             reason = read ? CHECK_CORPUS_SYMBOL_FOLDED : reason;
         }
     }
+    // Membership matters only for the definition named by this difference. Scanning the other selection for every
+    // unrelated body/object multiplies the two selections' sizes for each difference in a large source unit.
     for (uint32_t body = 0; !difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && body < reached->program.body_count; body += 1)
     {
         const CheckProgramBody* definition = reached->program.bodies + body;
-        bool ours = false;
-        for (uint32_t i = 0; i < selected->program.body_count; i += 1)
+        if (check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name))
         {
-            ours |= selected->program.bodies[i].object == definition->object;
+            bool ours = false;
+            for (uint32_t i = 0; i < selected->program.body_count; i += 1)
+            {
+                ours |= selected->program.bodies[i].object == definition->object;
+            }
+            reason = !ours ? CHECK_CORPUS_SYMBOL_UNSELECTED : reason;
         }
-        reason = !ours && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_UNSELECTED : reason;
     }
     for (uint32_t i = 0; !difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && i < reached->data.count; i += 1)
     {
         const uint32_t object = reached->data.objects[i].object;
         const uint32_t declaration = reached->program.object_declarations[object];
-        bool ours = false;
-        for (uint32_t j = 0; j < selected->data.count; j += 1)
+        if (declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name))
         {
-            ours |= selected->data.objects[j].object == object;
+            bool ours = false;
+            for (uint32_t j = 0; j < selected->data.count; j += 1)
+            {
+                ours |= selected->data.objects[j].object == object;
+            }
+            reason = !ours ? CHECK_CORPUS_SYMBOL_UNSELECTED : reason;
         }
-        reason = !ours && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
-                 CHECK_CORPUS_SYMBOL_UNSELECTED : reason;
     }
     for (uint32_t body = 0; difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && body < selected->program.body_count; body += 1)
     {
         const CheckProgramBody* definition = selected->program.bodies + body;
-        bool theirs = false;
-        for (uint32_t i = 0; i < kept->program.body_count; i += 1)
+        if (check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name))
         {
-            theirs |= kept->program.bodies[i].object == definition->object;
+            bool theirs = false;
+            for (uint32_t i = 0; i < kept->program.body_count; i += 1)
+            {
+                theirs |= kept->program.bodies[i].object == definition->object;
+            }
+            reason = !theirs ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
         }
-        reason = !theirs && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
     }
     for (uint32_t i = 0; difference->first && reason == CHECK_CORPUS_SYMBOL_REASONS && i < selected->data.count; i += 1)
     {
         const uint32_t object = selected->data.objects[i].object;
         const uint32_t declaration = selected->program.object_declarations[object];
-        bool theirs = false;
-        for (uint32_t j = 0; j < kept->data.count; j += 1)
+        if (declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name))
         {
-            theirs |= kept->data.objects[j].object == object;
+            bool theirs = false;
+            for (uint32_t j = 0; j < kept->data.count; j += 1)
+            {
+                theirs |= kept->data.objects[j].object == object;
+            }
+            reason = !theirs ? CHECK_CORPUS_SYMBOL_DROPPED : reason;
         }
-        reason = !theirs && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
-                 CHECK_CORPUS_SYMBOL_DROPPED : reason;
     }
     const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
     for (uint32_t body = 0; difference->first && local_function && reason == CHECK_CORPUS_SYMBOL_REASONS && body < selected->program.body_count; body += 1)
     {
         const CheckProgramBody* definition = selected->program.bodies + body;
-        const CheckInputAttributes* attributes = input->attributes[definition->declaration];
-        bool always_inline = false;
-        for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+        if (check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name))
         {
-            always_inline |= attributes->records[i].kind == CHECK_ATTRIBUTE_ALWAYS_INLINE && !attributes->records[i].ignored;
+            const CheckInputAttributes* attributes = input->attributes[definition->declaration];
+            bool always_inline = false;
+            for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+            {
+                always_inline |= attributes->records[i].kind == CHECK_ATTRIBUTE_ALWAYS_INLINE && !attributes->records[i].ignored;
+            }
+            reason = always_inline ? CHECK_CORPUS_SYMBOL_INLINED : reason;
         }
-        reason = always_inline && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_INLINED : reason;
     }
     return reason;
 }

@@ -4,9 +4,11 @@
 // test-checker-corpus --symbols' reasons (#129, and #418's CI) on an original fixture, through check_corpus_measure as
 // the command runs it, against clang -O0 -c: the callees of a constant if's dead arms (dropped), a const scalar that
 // clang reads as a constant (folded), a dead ?: arm in a branch's condition (unselected) and a local always_inline
-// function that clang inlines at its call (inlined) must each be explained, and nothing else may differ. Then the same with clang alone given `-Dwide=renamed`: a function that clang's model
-// selects, under a name clang's object doesn't have, and the name it has instead, must stay unexplained. Include after
-// c_check_corpus.c; test-checker calls this through its forward declaration.
+// function that clang inlines at its call (inlined) must each be explained. Asm-labelled objects use their emitted
+// names. Three prototype-only function labels are deliberately unexplained: the current matcher reads the definition's
+// attributes, so name-first pruning must preserve those differences too. With clang alone given `-Dwide=renamed`,
+// the changed emitted name adds two unexplained differences; renaming C identifiers with stable asm labels adds none.
+// Include after c_check_corpus.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_C_CHECK_CORPUS_SYMBOLS_TEST_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_SYMBOLS_TEST_INCLUDED
 
@@ -18,6 +20,19 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         "static const int limit=5;int folded(int n){return n<limit;}\n"
         "static int unselected_call(void){return 1;}int unselected(int n){if(sizeof(n)==4?n:unselected_call())return 1;return 0;}\n"
         "static inline __attribute__((always_inline)) int inlined_call(int n){return n*3;}int inlined(int n){return inlined_call(n)+1;}\n"
+        // Match the emitted asm labels, including after Clang alone renames the C identifiers. Nearby names stay distinct.
+        "static int asm_dropped(int n)__asm__(\"reason.alias.dropped\");static int asm_dropped(int n){return n+8;}"
+        "int asm_dead_if(int n){if(0)return asm_dropped(n);return n;}\n"
+        "int asm_decoy(int n)__asm__(\"reason.alias.dropped.extra\");int asm_decoy(int n){return n;}\n"
+        "static int asm_unselected(void)__asm__(\"reason.alias.unselected\");static int asm_unselected(void){return 2;}"
+        "int asm_dead_conditional(int n){if(sizeof(n)==4?n:asm_unselected())return 1;return 0;}\n"
+        "static int asm_dropped_data __asm__(\"reason.alias.dropped.data\")=7;"
+        "int asm_dead_data(int n){if(0)return asm_dropped_data;return n;}\n"
+        "static int asm_unselected_data __asm__(\"reason.alias.unselected.data\")=8;"
+        "int asm_conditional_data(int n){if(sizeof(n)==4?n:asm_unselected_data)return 1;return 0;}\n"
+        "static const int asm_limit __asm__(\"reason.alias.folded\")=9;int asm_folded(int n){return n<asm_limit;}\n"
+        "static inline int asm_inline(int n)__asm__(\"reason.alias.inlined\");"
+        "static inline __attribute__((always_inline)) int asm_inline(int n){return n+9;}int asm_inlined(int n){return asm_inline(n);}\n"
         // --symbols verifies emitted helper frames too: sqrt/floor reserve stack space, while copysign is frameless.
         "double helper_sqrt(double x){return __builtin_sqrt(x);}float helper_sqrtf(float x){return __builtin_sqrtf(x);}\n"
         "double helper_floor(double x){return __builtin_floor(x);}float helper_floorf(float x){return __builtin_floorf(x);}\n"
@@ -41,7 +56,11 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
     options.semantic_pragmas = true;
     check_test_expect(test, ready, "--symbols' reasons: the fixture is written and its options read");
     static const char* const same[] = { "-std=gnu17" };
-    static const char* const renamed[] = { "-std=gnu17", "-Dwide=renamed" };
+    static const char* const renamed[] = {
+        "-std=gnu17", "-Dwide=renamed", "-Dasm_dropped=renamed_dropped", "-Dasm_unselected=renamed_unselected",
+        "-Dasm_dropped_data=renamed_dropped_data", "-Dasm_unselected_data=renamed_unselected_data",
+        "-Dasm_limit=renamed_limit", "-Dasm_inline=renamed_inline",
+    };
     for (uint32_t run = 0; ready && run < 2; run += 1)
     {
         CheckCorpusSymbols symbols = {
@@ -54,12 +73,12 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         CheckCorpusOutcome outcome;
         check_corpus_measure(path, &options, false, true, &outcome);
         check_corpus_symbols = NULL;
-        const bool explained = symbols.compared == 1 && symbols.failures == 0 && symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED] == 2 &&
-                               symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED] == 1 && symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED] == 1 &&
+        const bool explained = symbols.compared == 1 && symbols.failures == 0 && symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED] == 3 &&
+                               symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED] == 2 && symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED] == 2 &&
                                symbols.documented[CHECK_CORPUS_SYMBOL_INLINED] == 1 &&
-                               symbols.unexplained == (run == 0 ? 0 : 2) && symbols.different == (run == 0 ? 0 : 1);
-        check_test_expect(test, explained, run == 0 ? "--symbols explains a dead if arm's callees, a folded constant, a dead ?: arm's call and an inlined function" :
-                                                      "--symbols leaves a function clang's object names otherwise unexplained");
+                               symbols.unexplained == (run == 0 ? 3 : 5) && symbols.different == 1;
+        check_test_expect(test, explained, run == 0 ? "--symbols preserves explained asm-labelled data and unexplained prototype-labelled function controls" :
+                                                      "--symbols preserves stable asm labels under identifier renames and retains the changed emitted function name differences");
         if (!explained)
         {
             printf("--symbols' reasons, run %u: compared=%" PRIu64 " failures=%" PRIu64 " dropped=%" PRIu64 " folded=%" PRIu64 " unselected=%" PRIu64
