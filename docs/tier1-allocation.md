@@ -106,6 +106,9 @@ value-indexed size, alignment and conservative lifetime columns. Rematerialized
 values allocate no spill slot unless another interval of the same value really
 spills. Output statistics count vector and scalar intervals, transitions,
 maximum pressure, retained arena bytes and peak temporary bytes.
+`vector_intervals` counts the intervals of classes admitted to the
+regular-class path below; that path's matching is scalar code, so the count
+measures admission, not SIMD lanes or instructions.
 
 ## Assignment
 
@@ -144,14 +147,14 @@ after 100 ms of scalar work. The scalar column also has the scan's end-event
 expiry below, and large-pressure, which is overfull, takes the scan on both
 paths.
 
-The [stopgap record](https://github.com/buster14a/buster-performance/tree/41bb521808075a8fe9df56078b0d9eeea680f33b/docs/measurements/tier1-allocation-stopgap-140-2026-10-30) has the logs, the differential against
+The [stopgap record](https://github.com/buster14a/buster-performance/tree/35f63a2eafc3e5471a8818b19cf3c216a89655d4/docs/measurements/tier1-allocation-stopgap-140-2026-10-30) has the logs, the differential against
 the previous code and the method. A data-parallel formulation of the matching
 itself is #140's candidate vector path: heights by byte prefix sums, partners
 by a window-maximum descent, registers by in-register pointer jumping over
 64-lane chunks. Its first prototype assigned about 7.2 cycles per instruction
 on one unconstrained block, tied with a scalar lowest-free loop on short
 temporaries and ahead of it on chains
-([review record](https://github.com/buster14a/buster-performance/tree/6b5836e0e3abe05a056738a12ba836bdc002258a/docs/measurements/tier1-allocation-140-review-2026-10-30)).
+([review record](https://github.com/buster14a/buster-performance/tree/d3fb9c012d666cb13082f4e359d4d25928633768/docs/measurements/tier1-allocation-140-review-2026-10-30)).
 
 The hot functions copy the input's column pointers into a local struct, since
 under `-fno-strict-aliasing` each store into the arena would otherwise make
@@ -313,6 +316,24 @@ bitmap, compares complete allocations with explicitly prefiltered inputs, and
 exercises indexed capacity rollback after an existing arena prefix. The 8,192
 nonoverlapping fixed/value interval fixture checks every resulting register
 without invoking the deliberately quadratic allocation verifier.
+
+`tier1_allocate_expiry_test.c` adds literal traces, on both entry points and
+both classes, which run even with `--count 0`:
+- an evicted interval's old end while its successor still holds the register;
+- a reload of the same value into another register before its original end,
+  which must free that current register;
+- simultaneous and duplicate required uses, and two distinct values that
+  cannot share one register;
+- a capacity layout.
+
+Their expected fragments, logical fields and values are written out, not
+replayed. A byte-by-byte capacity sweep of each entry point's own boundary
+requires the ample output on success, and the prior arena prefix and result
+object on failure. The first three traces each reject a mutant: a register
+freed without `tier1_allocate_scan`'s ownership guard, a stale register freed at
+the end, and eviction that ignores the other operands pinned at its position. In
+`tier1_allocate_scan_uses` that guard cannot fail, since an eviction sets the
+victim's register to `UINT8_MAX` and a reload records the new one.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
