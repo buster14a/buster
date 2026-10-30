@@ -23,6 +23,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
   the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
+- **Tail calls** (#147's musttail): a `TAIL_CALL` calls its row as the function's return, its arguments where the
+  function's own arrived, the frame released before a jump ("Tail calls", below).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
@@ -50,7 +52,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
     whether it pushed rbp first and pointed it at the push, the alignment it rounded rsp down to after the
     reservation and whether it then copied rsp into r15), which `unwind_tier0_frame` reads with the prologue's and
     epilogue's records for the C driver's unwind tables (#395, [the unwind guide](unwind.md)): the prologue is the
-    code's first records and the epilogue's release, pops and ret its last;
+    code's first records and the epilogue's release, pops and ret its last, and each tail call's jump
+    (`Tier0Code.tail_records`) comes right after the same release and pops;
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
@@ -121,7 +124,8 @@ Beside them are three tables, and optional parts for aggregates and for the symb
 - **The parameters' locations** at entry, and the result's.
 - **Calls:** each call's callee `SymbolId`, its arguments' classes and locations, whether it is variadic, and its
   `AbiCall`. A callee of 0 makes the call indirect: the stream pushes the address it calls (U64) before its
-  arguments, and the `CALL` pops it after them.
+  arguments, and the `CALL` pops it after them. An optional column, `call_tails`, marks the rows that `TAIL_CALL`s
+  call ("Tail calls", below).
 - **Aggregates by value,** three optional parts: the arguments' sizes, the objects that receive the calls' results,
   and the function's own result's size ("Structs and unions by value", below).
 - **The symbols' access** (optional, see "Symbols outside the image" below): `symbol_access[s]`, how the code reaches
@@ -175,6 +179,7 @@ table. The kinds are:
 - `JUMP` goes to its target.
 - `JUMP_VALUE` carries an arm's value of `?:`, or a value's `&&` and `||`, to the arm after it.
 - `RETURN` returns at statement level.
+- `TAIL_CALL` calls its row of the calls table as the function's return, at statement level ("Tail calls", below).
 - `JUMP_INDIRECT` pops an address (U64) and goes there: GNU C's `goto *p`, at statement level. Its targets are the
   function's labels whose addresses the code takes (`&&label`), an optional column, `label_entries` (`label_count`
   entry indices, each a statement's start or the count). Tier 0 reports each one's first record
@@ -677,6 +682,57 @@ prologue's records come from a cold helper (`tier0_emit_realignment`). A functio
 frame, the prologue, the epilogue and the code it had before: `sqlite3.c`'s objects and c-testsuite's 220 programs'
 are the same bytes as main's, by both paths. [Measurements](#measurements) has `benchmark-backend`'s.
 
+## Tail calls (#147)
+
+A `TAIL_CALL` entry calls row `value` of the calls table in place of the function's return: clang's `musttail` on a
+return statement, whose callee then returns to the function's caller. It pops its operands as `CALL` does, pushes
+nothing (`class` VOID) and ends the code as `RETURN` does. The rows it calls are marked in an optional column,
+`call_tails` (1 for a tail call's row, 0 for a `CALL`'s, null in a function without tail calls), and `tier0_validate`
+checks the two against each other: a `TAIL_CALL` of a row that isn't marked, a `CALL` of one that is, and a `TAIL_CALL`
+with a class or with values left under its operands are refused. A marked row passes what the function's own entry
+takes, as the front end's check of the signatures makes it (`tier0_tail_call_valid`, whose breaks both compile paths
+refuse too, as metadata):
+
+- neither the row nor the function is variadic;
+- its result (`AbiReturn`) is the function's: its callee returns where the function returns, in the same registers or
+  through the function's own hidden pointer (parameter 0), which the call passes on in rdi, with no result object;
+- its stack arguments end within the function's own incoming ones (`tier0_incoming_bytes`: the most any parameter's
+  slot reaches), which the function's caller made room for.
+
+The emission (`tier0_emit_tail_call`, out of line, as tail calls are rare) starts with a call's moves, with nothing
+under its operands to save: the arguments into their registers and the stack arguments into the outgoing area, every
+argument read from wherever it was, the incoming slots among them. Then `tier0_emit_tail` writes:
+
+1. rdi, set to the function's own hidden pointer for a result through one;
+2. the stack arguments, copied from the outgoing area to the incoming one (from rbp with a frame pointer, from rsp past
+   the frame otherwise) through rax and xmm15, which no argument takes (neither side is variadic, so al passes
+   nothing);
+3. the frame released and the callee-saved registers popped, as the epilogue does (`tier0_emit_teardown`), rbp last
+   with a frame pointer;
+4. the jump: through r11 for an indirect callee, or a `jmp rel32` with a call's fixup.
+
+A function whose tail calls pass a hidden pointer on keeps that pointer's home out of the registers the moves write
+(`BUSTER_TIER0_TAIL_CLOBBERS`). Otherwise a tail call touches nothing a call doesn't, and it makes the function no
+caller: the frame keeps no alignment for it. The epilogue still follows the code's last entry, as unreachable after a
+tail call as after a `RETURN`.
+
+`Tier0Code.tail_records` gives each tail call's jump, in the entries' order. The unwind tables describe each teardown
+and its jump (`unwind_tier0_frame_tails`, [the unwind guide](unwind.md)'s "Tail calls"). The validator's vector path
+leaves a function with tail calls to the scalar one. The shared IR's lowering refuses a `TAIL_CALL` by name, as it
+refuses `FRAME_ADDRESS`, and the typed stream's interpreter has no model of one.
+
+`test-tier0`'s "tail errors" break each of these rules once. Its "tail calls" (`tier0_tail_test.c`) compiles a
+tail-calling function per aggregate fixture ("Structs and unions by value") in five frames: none, a frame pointer that
+an `ALLOCA` moves rsp under, saved registers across a call, a realigned frame, and a realigned frame with a base. Each
+is compiled by both paths, encoded by both encoders and run from a driver, and the probe it jumps to must find:
+
+- each argument where its location says;
+- the driver's slots past the arguments as the driver stored them;
+- rsp where the driver's call left it, and the callee-saved registers as the driver had them, which only a jump that
+  released the whole frame leaves.
+
+What the probe returns must reach the driver, through the hidden pointer too.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
@@ -1169,6 +1225,10 @@ Before the programs, checks of their own:
     that returns nothing or falls off its end, an aggregate's two parts in one register, a register two parameters
     take, a part, a value or a result in a register outside the convention's (rax, xmm8, rbx), as an argument and
     as a parameter, and a low eightbyte alone of 8 bytes, with `HIGH`, in registers and past the call's area.
+- **tail calls** (#147, `tier0_tail_test.c`): a tail-calling function per aggregate fixture in five frames, run from a
+  driver, whose probe must find the arguments, the stack and the callee-saved registers as "Tail calls" (above) says,
+  the saved registers' frame first calling a function that clobbers every register a call may; and **tail errors**,
+  each of the tail calls' rules broken once, the variadic function's metadata valid without its tail call.
 - **parameter errors:** a function of values alone, which no optional part makes the compile paths check: two
   parameters in rdi, one in rbx and one in xmm8, which `tier0_validate` must refuse, and an F64 in rdx, which doesn't
   fit its class.

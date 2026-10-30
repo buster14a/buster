@@ -28,9 +28,9 @@ and explicit register variables as `asm` operands among them) passes.
 ("Bytes per source token" below).
 
 The adapter refuses what no function of those corpora has: vector values
-(`VECTOR`, `IR_ERROR_TYPE`), #136's machine operations (`X86` rows) and #148's
-frame address (`FRAME_ADDRESS`, both `IR_ERROR_OPCODE`), which have no IR type or
-operation. The stable printer's text
+(`VECTOR`, `IR_ERROR_TYPE`), #136's machine operations (`X86` rows), #148's
+frame address (`FRAME_ADDRESS`) and #147's tail calls (`TAIL_CALL`, all three
+`IR_ERROR_OPCODE`), which have no IR type or operation. The stable printer's text
 is read back by `ir_parse.c` (#175).
 
 ## Lifetime and stage contract
@@ -361,8 +361,8 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`VECTOR` values are refused with `IR_ERROR_TYPE`, and `X86` rows and
-`FRAME_ADDRESS` with `IR_ERROR_OPCODE`, at their entry, after validation and
+`VECTOR` values are refused with `IR_ERROR_TYPE`, and `X86` rows,
+`FRAME_ADDRESS` and `TAIL_CALL` with `IR_ERROR_OPCODE`, at their entry, after validation and
 before anything is allocated: no function of the corpora has one. A static
 assertion pins the typed kinds' count, `X86` the last, so that a new kind fails to
 build until this adapter lowers or refuses it, since the plan and the emitter

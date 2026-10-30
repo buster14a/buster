@@ -163,6 +163,12 @@
 //   - FRAME_ADDRESS: pushes the function's frame address (`class` U64; `value` 0), its frame pointer: the address of the
 //     caller's rbp that its prologue pushed, under the return address and 16 bytes below its incoming arguments, as
 //     clang -O0's frame has it (__builtin_frame_address(0)).
+//   - TAIL_CALL: call `value` of the calls table, a tail call (Tier0Function.call_tails says so of its row), as the
+//     function's return (#147, clang's musttail): pops its operands as CALL does, pushes nothing (`class` VOID), and
+//     returns whatever its callee returns, its result being the function's own (the call's AbiReturn the function's);
+//     at statement level, as RETURN. Its arguments go where its callee's parameters arrive, which are where the
+//     function's own arrive (the call's stack arguments within the function's incoming ones), the frame is released,
+//     and it jumps to its callee (tier0_emit_call's tail).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
@@ -242,9 +248,11 @@
 // After the stack's other kinds, so that the four are one range (tier0_moves_stack).
 #define BUSTER_TYPED_FRAME_ADDRESS 45
 #define BUSTER_TYPED_JUMP_INDIRECT 46
+// Right before the vectors' kind, so that the vector validator leaves both to the scalar one with one test.
+#define BUSTER_TYPED_TAIL_CALL 47
 // The vectors' kind, the last, which the validators' paths test as one with the kinds past it.
-#define BUSTER_TYPED_X86 47
-#define BUSTER_TYPED_KINDS 48
+#define BUSTER_TYPED_X86 48
+#define BUSTER_TYPED_KINDS 49
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -416,6 +424,14 @@ struct Tier0Operation
 // increasing order. A table's jump reaches its table's labels alone, and any other JUMP_INDIRECT (a goto *) the labels of
 // no table; Tier 0's code takes every label for a target of every JUMP_INDIRECT all the same.
 //
+// The tail calls (TAIL_CALL entries, #147's musttail) are an optional column too, 0 for a function without them:
+// call_tails[c] is 1 for a row of the calls table that a TAIL_CALL calls, and 0 for a CALL's. A tail call's row passes
+// what the function's own entry takes (a front end checks that their signatures match, as clang does): it isn't
+// variadic, nor is the function (incoming_variadic is null), its result (AbiReturn) is the function's, its stack
+// arguments end within the function's own incoming ones (tier0_incoming_bytes), and it has no result object: a result
+// through a hidden pointer goes where the function's own hidden pointer (parameter 0) points, which the call passes on.
+// Tier0Code.tail_records gives each one's jump.
+//
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
 // compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
 // requests to the form choice (Tier0Code.choice_records and the rest), for measuring the choice on real functions
@@ -468,6 +484,7 @@ struct Tier0Function
     const uint32_t* label_tables;
     const uint32_t* table_jumps;
     uint32_t table_count;
+    const uint8_t* call_tails;
     bool entry_records;
     bool choice_requests;
 };
@@ -547,7 +564,10 @@ typedef enum Tier0Error
 // (0 for none: `and rsp, -alignment`, a frame pointer's alone) and whether it then copied rsp into r15, the realigned
 // frame's base where the body moves rsp (`frame_base`, r15 among the pushes). The prologue's pushes, the frame
 // pointer's mov, the reservation, the realignment and the base's mov are the code's first records, and the epilogue's
-// release (an add, or with a frame pointer the lea or mov), pops and ret its last.
+// release (an add, or with a frame pointer the lea or mov), pops and ret its last. `tail_records` has, for each of the
+// function's TAIL_CALL entries in their order, `tail_count` of them (0 for a function without them), the record of its
+// jump to its callee, which the epilogue's release and pops come right before (tier0_emit_teardown), as the unwind
+// tables' tail calls take them.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -567,6 +587,8 @@ struct Tier0Code
     uint32_t choice_count;
     uint32_t* label_records;
     uint32_t label_count;
+    uint32_t* tail_records;
+    uint32_t tail_count;
     uint32_t deferred;
     uint32_t deep;
     uint32_t frame_saved;
@@ -1054,10 +1076,44 @@ static bool tier0_place_valid(AbiLocation location, uint32_t size, uint64_t stac
     return valid;
 }
 
+// The end of the function's own stack arguments, from its incoming area's start: the most any parameter's slot reaches (an
+// aggregate's slots whole, an eightbyte's 8-byte slot, a value's), 0 for none. A tail call's stack arguments end within
+// it (tier0_tail_call_valid): its callee's parameters arrive where the function's own did, which its caller made room for.
+static uint64_t tier0_incoming_bytes(const Tier0Function* function)
+{
+    uint64_t end = 0;
+    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    {
+        const AbiLocation location = function->parameters[p];
+        const uint32_t size = tier0_is_object(function, p) ? function->local_sizes[p] : 0;
+        const uint64_t slot = size != 0 && tier0_aggregate_whole(location) ? ((uint64_t)size + 7) & ~UINT64_C(7) : BUSTER_ABI_SLOT_BYTES;
+        const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
+        const uint64_t reach = stack ? (uint64_t)location.stack_offset + slot : 0;
+        end = reach > end ? reach : end;
+    }
+    return end;
+}
+
+// Whether call `c` is one a TAIL_CALL may make (Tier0Function.call_tails): neither it nor the function variadic, its
+// result the function's own (so that its callee returns where the function returns, the same registers or the same
+// hidden pointer), no result object, and its stack arguments within the function's incoming ones (tier0_incoming_bytes),
+// which it writes before it jumps.
+static bool tier0_tail_call_valid(const Tier0Function* function, uint32_t c)
+{
+    const AbiReturn result = function->calls[c].result;
+    const AbiReturn own = function->result;
+    const bool same = result.kind == own.kind && result.flags == own.flags && result.part_bytes == own.part_bytes &&
+                      memcmp(result.registers, own.registers, sizeof(result.registers)) == 0;
+    const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
+    return same && object == 0 && !function->call_variadic[c] && function->incoming_variadic == 0 &&
+           function->calls[c].stack_bytes <= tier0_incoming_bytes(function);
+}
+
 // Call `c`'s locations and its aggregates' metadata (argument_sizes and call_result_objects), so that no emitter reads or
 // writes out of place: every argument where tier0_place_valid has it in the call's stack area, no register two arguments
 // take, and an aggregate of 64 KB at most; a result object an object with room for what the call stores, its hidden
-// pointer's rdi no argument's; and no hidden pointer without an object, which would point nowhere.
+// pointer's rdi no argument's; and no hidden pointer without an object, which would point nowhere, but a tail call's,
+// which passes the function's own on (tier0_tail_call_valid).
 static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
 {
     const uint32_t first = function->call_first[c];
@@ -1095,7 +1151,12 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
     }
     else
     {
-        valid = valid && result.kind != BUSTER_ABI_RESULT_MEMORY;
+        const bool tail = function->call_tails != 0 && function->call_tails[c] != 0;
+        valid = valid && (result.kind != BUSTER_ABI_RESULT_MEMORY || (tail && (taken >> X86_REGISTER_RDI & 1) == 0));
+    }
+    if (function->call_tails != 0 && function->call_tails[c] != 0)
+    {
+        valid = valid && tier0_tail_call_valid(function, c);
     }
     return valid;
 }
@@ -2497,6 +2558,8 @@ static void tier0_define_templates(void)
     tier0_begin();
     tier0_end(BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_LAST, 0);
     tier0_defer(BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
+    // TAIL_CALL: tier0_emit_deferred's, a call's moves and then the epilogue's release and pops, and a jump.
+    tier0_defer(BUSTER_TYPED_TAIL_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // COPY: tier0_emit_deferred's, its moves by its size.
     tier0_defer(BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS: tier0_emit_deferred's, which read the frame's outgoing area.
@@ -3015,6 +3078,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_LEAF,
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SINK,
+    [BUSTER_TYPED_TAIL_CALL] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE },
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
     [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
@@ -3084,6 +3148,9 @@ struct Tier0Entries
     uint64_t record_count;
     // The vector path's per-entry words (BUSTER_TIER0_WORD_*).
     uint64_t* words;
+    // The records every tail call of the function ends with but its stack arguments' copy (tier0_count_tail_finish), once
+    // the homes and the frame are known: the vector path's measuring of them (tier0_count_call's).
+    uint32_t tail_finish;
     // The deep entries (tier0_select_deep), 0 in a function without them: each entry's BUSTER_TIER0_DEEP_* flags, and a
     // deep entry's depths before it, where `depths` and `floating_depths` hold the ones its records are made at.
     uint8_t* deep;
@@ -3170,7 +3237,8 @@ static void tier0_raw_effects(const Tier0Function* function, uint32_t i, int32_t
     const uint8_t operand = i > 0 ? function->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
     const Tier0Shape shape = tier0_shapes[kind];
     int32_t counts[3] = { 0, 0, 0 };
-    if (kind == BUSTER_TYPED_CALL)
+    // A tail call's class is VOID: it pops a call's operands and pushes nothing.
+    if (kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL)
     {
         const uint32_t call = (uint32_t)function->values[i];
         const uint32_t first = function->call_first[call];
@@ -3640,7 +3708,19 @@ static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
     return set;
 }
 
-// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count).
+// A tail call whose result goes through a hidden pointer passes the function's own on, parameter 0's (tier0_emit_call's
+// tail), which so has a home: one reference per such call. Both counts' (tier0_count_references), for a function with
+// tail calls alone, out of line.
+static __attribute__((noinline)) void tier0_tail_references(const Tier0Function* function, uint32_t* references)
+{
+    for (uint32_t c = 0; function->local_count != 0 && c < function->call_count; c += 1)
+    {
+        references[0] += function->call_tails[c] != 0 && function->calls[c].result.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0;
+    }
+}
+
+// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count), and
+// the hidden pointer's that tail calls pass on (tier0_tail_references).
 static void tier0_count_references(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
@@ -3653,6 +3733,10 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
         {
             references[values[i]] += 1;
         }
+    }
+    if (function->call_tails != 0)
+    {
+        tier0_tail_references(function, references);
     }
 }
 
@@ -3679,6 +3763,10 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
             bits &= bits - 1;
             references[values[i]] += 1;
         }
+    }
+    if (function->call_tails != 0)
+    {
+        tier0_tail_references(function, references);
     }
 }
 
@@ -4228,6 +4316,8 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     const uint64_t incoming = realigned ? 16 : offset + above;
     frame->incoming_base = realigned ? X86_REGISTER_RBP : X86_REGISTER_RSP;
     frame->incoming = incoming <= INT32_MAX ? (int32_t)incoming : 0;
+    // A tail call's stack arguments' copy reaches as far as the function's own incoming ones (tier0_emit_tail's).
+    valid = valid && (function->call_tails == 0 || incoming + tier0_incoming_bytes(function) <= INT32_MAX);
     if (function->incoming_variadic != 0)
     {
         const uint64_t overflow = incoming + function->incoming_variadic->stack_bytes;
@@ -4684,7 +4774,7 @@ static Tier0Tops tier0_select_scratch(const Tier0Function* function, const Tier0
     {
         bool general = false;
         bool xmm = false;
-        if (function->kinds[i] == BUSTER_TYPED_CALL && entries->absorbed[i] == 0)
+        if ((function->kinds[i] == BUSTER_TYPED_CALL || function->kinds[i] == BUSTER_TYPED_TAIL_CALL) && entries->absorbed[i] == 0)
         {
             const uint32_t call = (uint32_t)function->values[i];
             const uint32_t first = function->call_first[call];
@@ -5070,6 +5160,123 @@ static X86Instruction tier0_x87_register(uint32_t form, uint32_t i)
     return tier0_instruction(form, 0, (uint8_t)i, BUSTER_X86_REGISTER_DIRECT, 0, 0);
 }
 
+// The registers a tail call writes when nothing of the function's is live but what it passes on (tier0_emit_tail's): its
+// argument registers but rdi, and r11, which a function whose tail calls pass its own hidden pointer on keeps that
+// pointer's home out of (parameter 0's, which the call reads after its moves: rdi, where it may stay, they never write).
+// A tail call's moves write the argument registers when the function's values are dead, so it touches nothing else.
+#define BUSTER_TIER0_TAIL_CLOBBERS                                                                                     \
+    (1u << X86_REGISTER_RSI | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_R8 |               \
+     1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R11)
+
+// What tail call entry i touches, both selections': BUSTER_TIER0_TAIL_CLOBBERS where its result goes through the hidden
+// pointer, and otherwise nothing. Unlike a call it saves nothing (nothing is left under its operands) and makes the
+// function no caller: its frame keeps no alignment for it, since it releases the frame before it jumps.
+static uint32_t tier0_tail_clobbers(const Tier0Function* function, uint32_t i)
+{
+    const uint32_t call = (uint32_t)function->values[i];
+    return function->calls[call].result.kind == BUSTER_ABI_RESULT_MEMORY ? BUSTER_TIER0_TAIL_CLOBBERS : 0;
+}
+
+// The frame released (with a frame pointer, rsp back from rbp, past what the body allocated, or the reservation added
+// back) and the saved registers popped, rbp last with a frame pointer: the epilogue's before its ret, and a tail call's
+// before its jump (tier0_emit_tail).
+static void tier0_emit_teardown(const Tier0Frame* frame, Tier0Writer* writer)
+{
+    if (frame->pointer)
+    {
+        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1));
+        tier0_put(writer, pushed != 0 ? tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -pushed, 0)
+                                      : tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else if (frame->size != 0)
+    {
+        const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
+        tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
+    }
+    for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
+    {
+        if ((frame->saved & 1u << (c - 1)) != 0)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, tier0_callee_saved[c - 1], 0, 0, 0));
+        }
+    }
+    if (frame->pointer)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RBP, 0, 0, 0));
+    }
+}
+
+// How many records tier0_emit_teardown writes: the release (an add, or with a frame pointer the lea or mov) and the pops.
+static uint32_t tier0_count_teardown(const Tier0Frame* frame)
+{
+    return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes;
+}
+
+// The records a function's tail calls end with besides their stack arguments' copy (tier0_emit_tail's): the hidden
+// pointer's move or load into rdi where the function's result goes through one (none where parameter 0 stays in rdi),
+// the teardown and the jump. The same for every tail call of a function, whose results are all its own; measuring's,
+// once the homes and the frame are known (Tier0Entries.tail_finish).
+static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes)
+{
+    const bool hidden = function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0 &&
+                        !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
+    return (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+}
+
+// A tail call's last records, once its arguments are where its callee's parameters arrive (tier0_emit_call's): rdi set to
+// the function's own hidden pointer (parameter 0's home) for a result through one, which the callee then writes and
+// returns; the call's stack arguments copied from the outgoing area, where the call put them, to the function's own
+// incoming ones, where its callee's arrive (through rax and xmm15, no argument's register: neither the call nor the
+// function is variadic, so al passes nothing), after every argument has been read from wherever it was, the incoming
+// slots among them; the frame released and the saved registers popped (tier0_emit_teardown), which no argument's
+// register is; and the jump, through r11 for an indirect one, to the callee, which returns to the function's caller.
+// Out of line: tail calls are rare.
+static __attribute__((noinline)) void tier0_emit_tail(const Tier0Function* function, const Tier0Frame* frame, const Tier0Home* homes, uint32_t call,
+                                                     Tier0Writer* writer)
+{
+    if (function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0)
+    {
+        const Tier0Home home = homes[0];
+        if (!home.is_register)
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
+        }
+        else if (home.reg != X86_REGISTER_RDI)
+        {
+            tier0_move(writer, X86_REGISTER_RDI, home.reg);
+        }
+    }
+    const uint32_t bytes = function->calls[call].stack_bytes;
+    if (bytes != 0)
+    {
+        // The incoming area from rbp with a frame pointer, past its push and the return address, as rsp may have moved;
+        // from rsp past the frame otherwise (Tier0Frame.incoming).
+        const uint8_t base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+        const int32_t incoming = frame->pointer ? 16 : frame->incoming;
+        tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15);
+    }
+    tier0_emit_teardown(frame, writer);
+    if (function->call_targets[call] == 0)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_JMP_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        if (writer->records != 0)
+        {
+            writer->references[writer->reference_count] = (LinkReference){
+                .instruction = writer->count,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_CALL,
+                .target = function->call_targets[call],
+                .addend = 0,
+            };
+        }
+        writer->reference_count += 1;
+        tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
+}
+
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
 // ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
 // call, the call, the result moved to its depth, and the saved depths restored.
@@ -5090,9 +5297,11 @@ static X86Instruction tier0_x87_register(uint32_t form, uint32_t i)
 // take and give: constants in the code for functions without them (tier0_emit_deferred_entry's), so that a function
 // without aggregate arguments has its calls' loops over the values without a look at their sizes, and one without memory
 // classes without a look for long doubles; the memory classes' code, out of line, takes `sized` from its function. A
-// struct result in x87 registers, which stores into its object, is any function's.
+// struct result in x87 registers, which stores into its object, is any function's. `tail` says whether the entry is a
+// TAIL_CALL, a constant at each use (tier0_emit_tail_call's alone is true): it has nothing under its operands to save, and
+// rather than the call, al and the result, tier0_emit_tail's records follow its moves.
 static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
-                                                                  const Tier0Home* homes, uint32_t i, bool sized, bool memory, Tier0Writer* writer)
+                                                                  const Tier0Home* homes, uint32_t i, bool sized, bool memory, bool tail, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
     const uint32_t first = function->call_first[call];
@@ -5184,75 +5393,90 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     }
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
     const AbiReturn returned = function->calls[call].result;
-    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
+    if (tail)
     {
-        const Tier0Home home = homes[object - 1];
-        tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
-    }
-    if (function->call_variadic[call])
-    {
-        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
-    }
-    if (indirect)
-    {
-        tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_emit_tail(function, frame, homes, call, writer);
     }
     else
     {
-        if (writer->records != 0)
+        if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
         {
-            writer->references[writer->reference_count] = (LinkReference){
-                .instruction = writer->count,
-                .field = X86_FIXUP_DISPLACEMENT,
-                .kind = BUSTER_LINK_FIXUP_CALL,
-                .target = function->call_targets[call],
-                .addend = 0,
-            };
+            const Tier0Home home = homes[object - 1];
+            tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
         }
-        writer->reference_count += 1;
-        tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
-    }
-    const uint32_t result = tier0_stack(function->classes[i]);
-    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
-    {
-        const Tier0Home home = homes[object - 1];
-        const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-        const uint32_t parts = tier0_x87_parts(returned);
-        // An x87 result's parts popped in order, st0's at 0 and st1's 16 bytes on.
-        for (uint32_t k = 0; k < parts; k += 1)
+        if (function->call_variadic[call])
         {
-            tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
+        if (indirect)
         {
-            if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+            tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+        else
+        {
+            if (writer->records != 0)
             {
-                const uint32_t offset = high ? 8 : 8 * k;
-                tier0_store_part(writer, tier0_abi_register(returned.registers[k]), tier0_result_part_bytes(returned), home, offset);
+                writer->references[writer->reference_count] = (LinkReference){
+                    .instruction = writer->count,
+                    .field = X86_FIXUP_DISPLACEMENT,
+                    .kind = BUSTER_LINK_FIXUP_CALL,
+                    .target = function->call_targets[call],
+                    .addend = 0,
+                };
+            }
+            writer->reference_count += 1;
+            tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+        }
+        const uint32_t result = tier0_stack(function->classes[i]);
+        if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
+        {
+            const Tier0Home home = homes[object - 1];
+            const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+            const uint32_t parts = tier0_x87_parts(returned);
+            // An x87 result's parts popped in order, st0's at 0 and st1's 16 bytes on.
+            for (uint32_t k = 0; k < parts; k += 1)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+            }
+            for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
+            {
+                if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+                {
+                    const uint32_t offset = high ? 8 : 8 * k;
+                    tier0_store_part(writer, tier0_abi_register(returned.registers[k]), tier0_result_part_bytes(returned), home, offset);
+                }
             }
         }
+        else if (memory && tier0_class_x87(function->classes[i]))
+        {
+            // A long double result from st0 into its depth's slot.
+            tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
+        }
+        else if (result == 1 && below != 0)
+        {
+            tier0_move(writer, tier0_integer_depths[below], X86_REGISTER_RAX);
+        }
+        else if (result == 2 && floating_below != 0)
+        {
+            tier0_move(writer, BUSTER_TIER0_XMM(floating_below), BUSTER_TIER0_XMM(0));
+        }
+        for (uint32_t d = 0; d < saved; d += 1)
+        {
+            tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, true);
+        }
+        for (uint32_t d = 0; d < floating_below; d += 1)
+        {
+            tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
+        }
     }
-    else if (memory && tier0_class_x87(function->classes[i]))
-    {
-        // A long double result from st0 into its depth's slot.
-        tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
-    }
-    else if (result == 1 && below != 0)
-    {
-        tier0_move(writer, tier0_integer_depths[below], X86_REGISTER_RAX);
-    }
-    else if (result == 2 && floating_below != 0)
-    {
-        tier0_move(writer, BUSTER_TIER0_XMM(floating_below), BUSTER_TIER0_XMM(0));
-    }
-    for (uint32_t d = 0; d < saved; d += 1)
-    {
-        tier0_spill(writer, frame, tier0_integer_depths[d], frame->save_area + 8 * d, true);
-    }
-    for (uint32_t d = 0; d < floating_below; d += 1)
-    {
-        tier0_spill(writer, frame, BUSTER_TIER0_XMM(d), frame->save_area + 8 * (saved + d), true);
-    }
+}
+
+// A tail call's records (tier0_emit_call's with `tail`), out of line: tail calls are rare, so that the calls' code doesn't
+// grow by them. It takes `sized` and `memory` from the function.
+static __attribute__((noinline)) void tier0_emit_tail_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
+                                                          const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
+{
+    tier0_emit_call(function, entries, frame, homes, i, function->argument_sizes != 0, frame->memory, true, writer);
 }
 
 // Division with its operands where rax and rdx hold other values: those saved in the fixed slots, the dividend moved
@@ -6741,7 +6965,8 @@ static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
 // in the slots. Aggregate copies run before any ABI register is populated, so their scratch registers are free;
 // register parts then load from the saved addresses, without the ordinary path's parallel-move conflicts. A long double
 // argument goes from its slot of the memory classes, at its true depth, into its place by fld and fstp, and a long double
-// result from st0 into its depth's, as tier0_emit_call moves them.
+// result from st0 into its depth's, as tier0_emit_call moves them. A deep tail call ends with tier0_emit_tail's records
+// in the call's place, and fills nothing (tier0_select_deep gives it no fill).
 static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                  Tier0Writer* writer)
 {
@@ -6837,61 +7062,68 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     }
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
     const AbiReturn returned = function->calls[call].result;
-    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
+    if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
     {
-        const Tier0Home home = homes[object - 1];
-        tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
-    }
-    if (function->call_variadic[call])
-    {
-        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
-    }
-    if (indirect)
-    {
-        tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        tier0_emit_tail(function, frame, homes, call, writer);
     }
     else
     {
-        if (writer->records != 0)
+        if (object != 0 && returned.kind == BUSTER_ABI_RESULT_MEMORY)
         {
-            writer->references[writer->reference_count] = (LinkReference){
-                .instruction = writer->count,
-                .field = X86_FIXUP_DISPLACEMENT,
-                .kind = BUSTER_LINK_FIXUP_CALL,
-                .target = function->call_targets[call],
-                .addend = 0,
-            };
+            const Tier0Home home = homes[object - 1];
+            tier0_put(writer, tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RDI, home.reg, home.mode, home.displacement, 0));
         }
-        writer->reference_count += 1;
-        tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
-    }
-    const uint32_t result = tier0_stack(function->classes[i]);
-    if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
-    {
-        const Tier0Home home = homes[object - 1];
-        const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-        const uint32_t parts = tier0_x87_parts(returned);
-        for (uint32_t k = 0; k < parts; k += 1)
+        if (function->call_variadic[call])
         {
-            tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+            tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
+        if (indirect)
         {
-            if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+            tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        }
+        else
+        {
+            if (writer->records != 0)
             {
-                const uint32_t offset = high ? 8 : 8 * k;
-                tier0_store_part(writer, tier0_abi_register(returned.registers[k]), tier0_result_part_bytes(returned), home, offset);
+                writer->references[writer->reference_count] = (LinkReference){
+                    .instruction = writer->count,
+                    .field = X86_FIXUP_DISPLACEMENT,
+                    .kind = BUSTER_LINK_FIXUP_CALL,
+                    .target = function->call_targets[call],
+                    .addend = 0,
+                };
+            }
+            writer->reference_count += 1;
+            tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+        }
+        const uint32_t result = tier0_stack(function->classes[i]);
+        if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
+        {
+            const Tier0Home home = homes[object - 1];
+            const bool high = (returned.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+            const uint32_t parts = tier0_x87_parts(returned);
+            for (uint32_t k = 0; k < parts; k += 1)
+            {
+                tier0_put(writer, tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement + 16 * (int32_t)k, 0));
+            }
+            for (uint32_t k = 0; k < 2 && parts == 0; k += 1)
+            {
+                if (returned.registers[k] != BUSTER_ABI_REGISTER_NONE)
+                {
+                    const uint32_t offset = high ? 8 : 8 * k;
+                    tier0_store_part(writer, tier0_abi_register(returned.registers[k]), tier0_result_part_bytes(returned), home, offset);
+                }
             }
         }
-    }
-    else if (tier0_class_x87(function->classes[i]))
-    {
-        tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
-    }
-    else if (result != 0)
-    {
-        const uint32_t stack = result - 1;
-        tier0_spill(writer, frame, tier0_stack_register(stack, 0), tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
+        else if (tier0_class_x87(function->classes[i]))
+        {
+            tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
+        }
+        else if (result != 0)
+        {
+            const uint32_t stack = result - 1;
+            tier0_spill(writer, frame, tier0_stack_register(stack, 0), tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
+        }
     }
     tier0_deep_leave(writer, frame, &deep, flags & (BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING));
 }
@@ -7034,15 +7266,19 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     const uint32_t kind = entries->key_kinds[i];
     if (kind == BUSTER_TYPED_CALL && memory)
     {
-        tier0_emit_call(function, entries, frame, homes, i, function->argument_sizes != 0, true, writer);
+        tier0_emit_call(function, entries, frame, homes, i, function->argument_sizes != 0, true, false, writer);
     }
     else if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
     {
-        tier0_emit_call(function, entries, frame, homes, i, true, false, writer);
+        tier0_emit_call(function, entries, frame, homes, i, true, false, false, writer);
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
-        tier0_emit_call(function, entries, frame, homes, i, false, false, writer);
+        tier0_emit_call(function, entries, frame, homes, i, false, false, false, writer);
+    }
+    else if (kind == BUSTER_TYPED_TAIL_CALL)
+    {
+        tier0_emit_tail_call(function, entries, frame, homes, i, writer);
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -7113,9 +7349,11 @@ static void tier0_emit_deferred_deep(const Tier0Function* function, const Tier0E
     }
 }
 
-// How many records a call takes, and its reference (tier0_count_deferred's). `sized` and `memory` are tier0_emit_call's.
+// How many records a call takes, and its reference (tier0_count_deferred's). `sized`, `memory` and `tail` are
+// tier0_emit_call's: a tail call's moves are a call's, and its call's place has tier0_emit_tail's records, its stack
+// arguments' copy and the function's tail finish (Tier0Entries.tail_finish).
 static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool sized,
-                                                                       bool memory, uint32_t* references)
+                                                                       bool memory, bool tail, uint32_t* references)
 {
     uint32_t count = 0;
     const uint32_t call = (uint32_t)function->values[i];
@@ -7211,7 +7449,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     }
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
-    count += 1;
+    const uint32_t stack_bytes = function->calls[call].stack_bytes;
+    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -7222,6 +7461,13 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += !stored && ((result == 1 && (below != 0 || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
     *references += indirect ? 0 : 1;
     return count;
+}
+
+// How many records a tail call takes (tier0_count_call's with `tail`), out of line, as its emitter is.
+static __attribute__((noinline)) uint32_t tier0_count_tail_call(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool memory,
+                                                                uint32_t* references)
+{
+    return tier0_count_call(function, entries, i, function->argument_sizes != 0, memory, true, references);
 }
 
 // How many records a deferred entry takes (and references: a call's one), counted from what its emitter decides rather
@@ -7238,15 +7484,19 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     uint32_t count = 0;
     if (kind == BUSTER_TYPED_CALL && memory)
     {
-        count = tier0_count_call(function, entries, i, function->argument_sizes != 0, true, references);
+        count = tier0_count_call(function, entries, i, function->argument_sizes != 0, true, false, references);
     }
     else if (kind == BUSTER_TYPED_CALL && function->argument_sizes != 0)
     {
-        count = tier0_count_call(function, entries, i, true, false, references);
+        count = tier0_count_call(function, entries, i, true, false, false, references);
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
-        count = tier0_count_call(function, entries, i, false, false, references);
+        count = tier0_count_call(function, entries, i, false, false, false, references);
+    }
+    else if (kind == BUSTER_TYPED_TAIL_CALL)
+    {
+        count = tier0_count_tail_call(function, entries, i, memory, references);
     }
     else if (memory && tier0_vector_entry(entries, i))
     {
@@ -7518,7 +7768,7 @@ static bool tier0_x87_returns(const Tier0Function* function)
 
 // The epilogue: an aggregate result's registers loaded (tier0_load_result), or a long double's st0 from slot 0, while the
 // frame they may be in (and what the body allocated) is still there; then the frame released (with a frame pointer, rsp
-// back from rbp, past what the body allocated), the saved registers popped (and rbp last), ret.
+// back from rbp, past what the body allocated), the saved registers popped (and rbp last: tier0_emit_teardown), ret.
 static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame* frame, Tier0Writer* writer)
 {
     if (function->result_size != 0)
@@ -7529,36 +7779,15 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, 0, 0));
     }
-    if (frame->pointer)
-    {
-        const int32_t pushed = (int32_t)(8 * (frame->pushes - 1));
-        tier0_put(writer, pushed != 0 ? tier0_instruction(X86_FORM_LEA_R64_M, X86_REGISTER_RSP, X86_REGISTER_RBP, BUSTER_X86_MEMORY_BASE, -pushed, 0)
-                                      : tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RBP, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
-    }
-    else if (frame->size != 0)
-    {
-        const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
-        tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
-    }
-    for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
-    {
-        if ((frame->saved & 1u << (c - 1)) != 0)
-        {
-            tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, tier0_callee_saved[c - 1], 0, 0, 0));
-        }
-    }
-    if (frame->pointer)
-    {
-        tier0_put(writer, tier0_instruction(X86_FORM_POP_R64, 0, X86_REGISTER_RBP, 0, 0, 0));
-    }
+    tier0_emit_teardown(frame, writer);
     tier0_put(writer, tier0_instruction(X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
 // How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), the
-// frame's release (an add, or with a frame pointer the lea or mov), the pops and the ret.
+// frame's release (an add, or with a frame pointer the lea or mov), the pops (tier0_count_teardown) and the ret.
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
-    const uint32_t records = (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes + 1;
+    const uint32_t records = tier0_count_teardown(frame) + 1;
     return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
@@ -7645,6 +7874,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
                     clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                     calls = true;
+                }
+                else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
+                {
+                    clobbers |= tier0_tail_clobbers(function, i);
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
@@ -7875,9 +8108,11 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             const bool jump_value = kind == BUSTER_TYPED_JUMP_VALUE;
             const uint32_t exit[2] = { (uint8_t)((int32_t)before[0] + entries->integer_effects[i] + (jump_value && stack == 1 ? 1 : 0)),
                                        (uint8_t)((int32_t)before[1] + entries->floating_effects[i] + (jump_value && stack == 2 ? 1 : 0)) };
-            if (kind == BUSTER_TYPED_CALL)
+            if (kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL)
             {
                 const uint32_t call = (uint32_t)function->values[i];
+                // A tail call leaves the function: nothing after it to fill.
+                const bool fills = kind == BUSTER_TYPED_CALL;
                 bool aggregates = false;
                 for (uint32_t a = 0; a < function->call_argument_counts[call] && function->argument_sizes != 0; a += 1)
                 {
@@ -7887,7 +8122,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                                   (aggregates && (before[0] >= limits[0] || before[1] >= limits[1]));
                 for (uint32_t s = 0; s < 2 && deep; s += 1)
                 {
-                    flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0);
+                    flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] && fills ? fill_flags[s] : 0);
                     slots[s] = before[s] > slots[s] ? before[s] : slots[s];
                     slots[s] = exit[s] > slots[s] ? exit[s] : slots[s];
                 }
@@ -8075,10 +8310,12 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         const bool indirect = function->call_targets[call] == 0;
         const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
         const bool stored = object != 0 && function->calls[call].result.kind == BUSTER_ABI_RESULT_REGISTERS;
+        const uint32_t stack_bytes = function->calls[call].stack_bytes;
+        const bool tail = function->kinds[i] == BUSTER_TYPED_TAIL_CALL;
         count += indirect ? 1 : 0;
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
-        count += 1;
+        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + entries->tail_finish;
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         counts->references += indirect ? 0 : 1;
     }
@@ -8442,6 +8679,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
         error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes) : 0;
     }
     if (error == TIER0_OK)
     {
@@ -8526,6 +8764,34 @@ static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0
     return error;
 }
 
+// Each tail call's jump (Tier0Code.tail_records), its entry's last record, from the positions both paths give, after
+// tier0_generate: a pass over the kinds for a function with tail calls alone.
+static Tier0Error tier0_tail_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
+{
+    Tier0Error error = TIER0_OK;
+    if (function->call_tails != 0)
+    {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < function->count; i += 1)
+        {
+            count += function->kinds[i] == BUSTER_TYPED_TAIL_CALL ? 1 : 0;
+        }
+        code->tail_records = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
+        error = count == 0 || code->tail_records != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+        uint32_t k = 0;
+        for (uint32_t i = 0; error == TIER0_OK && i < function->count; i += 1)
+        {
+            if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
+            {
+                code->tail_records[k] = entries->positions[i + 1] - 1;
+                k += 1;
+            }
+        }
+        code->tail_count = error == TIER0_OK ? count : 0;
+    }
+    return error;
+}
+
 // Ends a compilation: on an error, what was pushed to `output` is popped and only the error and its entry are kept.
 static Tier0Code tier0_conclude(Tier0Code code, Tier0Error error, Arena* output, uint64_t output_length)
 {
@@ -8562,6 +8828,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
         tier0_depths_scalar(function, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, false);
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
+        error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
@@ -9349,6 +9616,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                     tier0_reject(&validator, i, "a call past the calls table");
                     break;
                 }
+                if (function->call_tails != 0 && function->call_tails[value] != 0)
+                {
+                    tier0_reject(&validator, i, "a CALL of a tail call's row (call_tails), which a TAIL_CALL makes");
+                }
                 const uint32_t first = function->call_first[value];
                 const uint32_t arguments = function->call_argument_counts[value];
                 for (uint32_t a = arguments; a > 0; a -= 1)
@@ -9384,6 +9655,35 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
                 {
                     tier0_push(&validator, class);
                 }
+                break;
+            }
+            case BUSTER_TYPED_TAIL_CALL:
+            {
+                // A call's operands, nothing left under them, as a RETURN's; its row a tail call's, whose rules
+                // tier0_call_valid checked (tier0_tail_call_valid); and the end of the code falling through, as a RETURN.
+                if (value >= function->call_count || function->call_tails == 0 || function->call_tails[value] == 0 || class != BUSTER_TYPED_CLASS_VOID)
+                {
+                    tier0_reject(&validator, i, "a tail call past the calls table, of a row that isn't a tail call's (call_tails), or with a class");
+                    break;
+                }
+                const uint32_t first = function->call_first[value];
+                const uint32_t arguments = function->call_argument_counts[value];
+                for (uint32_t a = arguments; a > 0; a -= 1)
+                {
+                    if (tier0_pop(&validator, i) != function->argument_classes[first + a - 1])
+                    {
+                        tier0_reject(&validator, i, "a call's argument of another class");
+                    }
+                }
+                if (function->call_targets[value] == 0 && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64)
+                {
+                    tier0_reject(&validator, i, "an indirect call's callee that isn't U64");
+                }
+                if (validator.depth != 0)
+                {
+                    tier0_reject(&validator, i, "a tail call with values left under its operands");
+                }
+                validator.reachable = false;
                 break;
             }
             case BUSTER_TYPED_DISCARD:
@@ -9961,10 +10261,13 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         previous_kinds = kinds;
         previous_classes = classes;
     }
-    // The calls' effects, from the calls table (they are few).
+    // The calls' effects, from the calls table (they are few), and the tail calls' in a function with them.
+    const __m512i tail_kind = _mm512_set1_epi8(function->call_tails != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL);
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t calls = _mm512_cmpeq_epi8_mask(tier0_bytes_at(function->kinds, first, count), _mm512_set1_epi8(BUSTER_TYPED_CALL)) & tier0_lanes(first, count);
+        const __m512i block_kinds = tier0_bytes_at(function->kinds, first, count);
+        uint64_t calls = (_mm512_cmpeq_epi8_mask(block_kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | _mm512_cmpeq_epi8_mask(block_kinds, tail_kind)) &
+                         tier0_lanes(first, count);
         while (calls != 0)
         {
             const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
@@ -10375,6 +10678,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
                 deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
                 clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
                 calls = true;
+            }
+            else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
+            {
+                clobbers |= tier0_tail_clobbers(function, i);
             }
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {
@@ -10831,6 +11138,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
         tier0_vector_depths(function, &bits, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, true);
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
+        error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
@@ -11519,8 +11827,9 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t local_count = function->local_count;
     const uint32_t call_count = function->call_count;
     // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
-    bool valid = !function->vectors && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) && tier0_jump_tables_valid(function) &&
-                 tier0_scan_tables(function);
+    // A function with vectors or tail calls is the scalar validator's (its TAIL_CALL entries are refused below too).
+    bool valid = !function->vectors && function->call_tails == 0 && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) &&
+                 tier0_jump_tables_valid(function) && tier0_scan_tables(function);
     Scratch scratch = scratch_begin(0);
     // Per entry, the depth before it (and room for a block's store past the last); per entry and the end, the depth the
     // forward arrivals there bring (UNREACHED before the first) and what else they bring: the producer just below what
@@ -11626,8 +11935,9 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         const __m512i classes = tier0_bytes_at(function->classes, first, count);
         const __m512i previous_kinds = tier0_shift_back(kinds, _mm512_set1_epi8((char)previous_kind), 1);
         const __m512i previous_classes = tier0_shift_back(classes, _mm512_set1_epi8((char)previous_class), 1);
-        // An unknown kind or class, an X86 entry and a vector's class: the scalar validator's.
-        __mmask64 refused = lanes & (_mm512_cmpeq_epi8_mask(kinds, zero) | _mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86)) |
+        // An unknown kind or class, a tail call, an X86 entry and a vector's class: the scalar validator's.
+        _Static_assert(BUSTER_TYPED_TAIL_CALL + 1 == BUSTER_TYPED_X86, "a tail call and the vectors' kind are the kinds past the others");
+        __mmask64 refused = lanes & (_mm512_cmpeq_epi8_mask(kinds, zero) | _mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_TAIL_CALL)) |
                                      _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)));
         const __m512i shapes = tier0_lookup(tier0_scan_shapes, kinds);
         const __m512i rules = tier0_lookup(tier0_scan_rules, kinds);

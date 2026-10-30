@@ -1116,7 +1116,10 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. An object, or a call's
+  positions, which give their function a frame pointer. A `TAIL_CALL` (#147's
+  musttail) calls its row as the function's return: its arguments where the
+  function's own arrived, the frame released, then a jump
+  (`Tier0Code.tail_records`). An object, or a call's
   outgoing area, aligned past 16 bytes realigns its function's frame (rbp the
   frame pointer, `and rsp` after the reservation, the frame's places rsp's or,
   where rsp moves, r15's, and its incoming places rbp's: docs/tier0.md's
@@ -1167,8 +1170,9 @@ designs and the compilers already built this way.
   dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
   jump through the function's one dispatch block, as clang's indirect gotos go,
   which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
-  long double and `__int128`; it refuses vectors, `X86` rows and the frame
-  address (`FRAME_ADDRESS`), which no corpus function has. `test-ir` checks
+  long double and `__int128`; it refuses vectors, `X86` rows, the frame
+  address (`FRAME_ADDRESS`) and tail calls (`TAIL_CALL`), which no corpus
+  function has. `test-ir` checks
   independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR (values, objects,
   indirect calls, records by value, the dynamic stack) against the typed-stream
@@ -5833,7 +5837,15 @@ rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, and registers outside
 the convention's, among them), and a function of value parameters in one
-register or outside the convention's. Every function must pass `tier0_validate`, both
+register or outside the convention's; then tail calls (#147, `tier0_tail_test.c`):
+a function per aggregate fixture that passes its parameters on to the probe by a
+`TAIL_CALL`, in five frames (plain, an `ALLOCA`'s frame pointer, saved registers
+across a call of a function that clobbers every register a call may, a realigned
+frame and one with a base), run natively from a driver: the probe must find the
+arguments where their locations say, the driver's slots past them, rsp and the
+callee-saved registers as the driver left them, and what it returns must reach
+the driver; and `tier0_validate` refusing each of the tail calls' rules once.
+Every function must pass `tier0_validate`, both
 paths must compile it to the same records, branch columns and references, and
 the records must pass `x86_validate` and the branch columns
 `branch_sizing_validate`, and every record but an X86 entry's must have a form
