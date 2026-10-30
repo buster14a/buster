@@ -1393,7 +1393,13 @@ What the lowering covers past scalars (#145's programs):
   evaluation remain outside that retry. This does not extend the existing
   floating retry-exception conformance claim.
   Atomic vector loads, stores, exchange and compare-exchange retain vector value
-  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  bytes and their declared atomic ABI, including calls and returns. A vector of 4
+  or 8 bytes is read from and written to its plan's buffers, which have 16 bytes
+  at least, through their addresses at its own bytes
+  (`check_lower_atomic_narrow_vector`), as Tier 0's `LOCAL` of a vector reads
+  its object's whole bytes; and a 4-byte one returns as its value alone in xmm0,
+  as LLVM returns a `<4 x i8>` or a `<2 x i16>`, which Tier 0 takes as an
+  eightbyte's part (#137). Read-modify-write
   updates of atomic vectors are explicitly refused until their retry computation
   has a vector lowering.
 
@@ -1596,21 +1602,27 @@ What the lowering covers past scalars (#145's programs):
   which libgcc's `__truncdfhf2` converted at run time before); but in a function
   with `FENV_ACCESS` none folds, as none of
   clang's constrained conversions does, and a float rounds to a `__bf16` by
-  libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
-  unit's target has AVX10.2's, arithmetic and comparisons of `_Complex
-  _Float16`, `_Atomic` ones ("values of
-  this type"), an `_Atomic` integer's update by one ("this operation on
-  half-precision values": clang's code adds the operand converted to an
-  unsigned integer there, not as the usual arithmetic conversions compute), a
-  `_BitInt`'s past 128 bits conversions to and from them, and a conversion to
-  `__bf16` with AVX512-BF16 but not AVX-512VL are refused by name. Of clang 23's code it doesn't follow four things: a
+  libgcc's `__truncsfbf2` whatever the target. An `_Atomic` one (#137) is its
+  type's class too: its atomic loads and stores move its 16 bits through the
+  plan's buffers, and its parameters, results and arguments go as the
+  convention places its value, in an XMM register's low 16 bits. `__bf16`
+  arithmetic where the unit's target has AVX10.2's, arithmetic and comparisons
+  of `_Complex _Float16` and `_Complex __bf16`, an `_Atomic` one's update and an
+  `_Atomic` integer's update by one ("this operation on half-precision values":
+  clang's code adds the operand converted to an unsigned integer there, not as
+  the usual arithmetic conversions compute), a `_BitInt`'s past 128 bits
+  conversions to and from them, and a conversion to `__bf16` with AVX512-BF16
+  but not AVX-512VL are refused by name. Of clang 23's code it doesn't follow five things: a
   conversion between `__fp16` and `__bf16` converts the value through float
   (clang copies the bits one way, and its backend stops the other way); `__bf16`
   under `FENV_ACCESS` extends by its bits as elsewhere (clang's code calls
   libgcc's `__extendbfsf2` with its argument in a general register, which
-  libgcc reads from xmm0); and a `__bf16` parameter keeps its bits (clang's code
+  libgcc reads from xmm0); a `__bf16` parameter keeps its bits (clang's code
   rounds each one on entry, which quiets a signaling NaN, and flushes a
-  subnormal where the rounding is VCVTNEPS2BF16's); and a unary `+` alone in a
+  subnormal where the rounding is VCVTNEPS2BF16's); a `_Complex __bf16`, a
+  `<2 x bfloat>` to clang, keeps its bits as an argument and a result and
+  through `?:` (clang's code quiets a signaling NaN there, 0x7f81 coming back
+  0x7fc1, and with AVX512-BF16 its `?:` of two flushes subnormals to zero); and a unary `+` alone in a
   function with `FENV_ACCESS` is its operand, as elsewhere, where clang's
   constrained round trip quiets a signaling NaN and raises `FE_INVALID` (the
   lowering takes a `+` as it takes a cast, with no test of its type in the
@@ -2050,9 +2062,10 @@ What the lowering covers past scalars (#145's programs):
   vector of 4 or 8 bytes and an integer, a float or a double of its bytes, a
   move between their registers (VMOVD, VMOVQ); and between an integer and a
   float or a double they go through a frame temporary, as clang -O0's go through
-  memory. A `_Complex _Float16` bit cast reads or writes its four bytes through
-  its frame object, keeping both binary16 parts' representations, including
-  signed zeros and NaN payloads; a result gets an object of its own. The other floating elementwise functions and conversions (between
+  memory. A `_Complex _Float16` or `_Complex __bf16` bit cast reads or writes
+  its four bytes through its frame object, keeping both parts'
+  representations, including signed zeros and NaN payloads; a result gets an
+  object of its own. The other floating elementwise functions and conversions (between
   8-bit integers and half-precision elements, between 8- and 16-bit integers and
   bf16 elements, to bf16 elements, and between half-precision elements and other
   types than floats without AVX512-FP16), the bf16 elements' other elementwise
@@ -2138,7 +2151,13 @@ What the lowering covers past scalars (#145's programs):
   FP16 and excess-precision rules and complex runtime calls are not lowered.
   `test-checker`'s half-precision fixtures check all pairs of special binary16
   representations and Clang/Buster calls in both directions, including stack
-  arguments and variadic register-save and overflow areas. A
+  arguments and variadic register-save and overflow areas. The `_Complex
+  __bf16` that the usual arithmetic conversions make (C can't spell it: a
+  `_Complex int` and a `__bf16` give one), a `<2 x bfloat>` to clang, takes the
+  same representation and rules, and its fixtures the same checks, with no
+  signaling NaN and, through `?:`, no subnormal, which clang's code changes
+  (see "Half-precision values"); its arithmetic and comparisons are refused by
+  name too (#137). A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".

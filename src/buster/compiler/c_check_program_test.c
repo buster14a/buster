@@ -825,6 +825,43 @@ static const char check_test_program_harness[] =
     "for(int i=0;i<count;i++){ExternalHC z=va_arg(ap,ExternalHC);h=(h^external_hc_bits(z))*16777619u;}va_end(ap);return h;}"
     "unsigned external_hc_variadic_apply(unsigned(*f)(int,...),unsigned bits){ExternalHC a=external_hc_value(bits),b=external_hc_value(bits^0x80008000u);"
     "return f(10,a,b,a,b,a,b,a,b,a,b);}\n"
+    // The _Complex __bf16 that the usual arithmetic conversions make (C can't spell it) passes as a <2 x bfloat>, its two
+    // parts in one SSE eightbyte as complex binary16's do (#137): the same transport of their bits, both ways, but its
+    // masks flip signs alone, which make no signaling NaN of an infinity: clang 23's code of a <2 x bfloat> argument or
+    // result quiets one, as it does a __bf16 parameter's.
+    "typedef __typeof__((_Complex int)0+(__bf16)0) ExternalHB;"
+    "static unsigned external_hb_bits(ExternalHB z){unsigned b;__builtin_memcpy(&b,&z,4);return b;}"
+    "static ExternalHB external_hb_value(unsigned b){ExternalHB z;__builtin_memcpy(&z,&b,4);return z;}"
+    "ExternalHB external_hb(ExternalHB z,unsigned mask){return external_hb_value(external_hb_bits(z)^mask);}"
+    "unsigned external_hb_apply(ExternalHB(*f)(ExternalHB,unsigned),unsigned bits){return external_hb_bits(f(external_hb_value(bits),0x80008000u));}"
+    "unsigned external_hb_many(ExternalHB a,ExternalHB b,ExternalHB c,ExternalHB d,ExternalHB e,ExternalHB f,ExternalHB g,ExternalHB h,ExternalHB i,ExternalHB j){"
+    "ExternalHB z[]={a,b,c,d,e,f,g,h,i,j};unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^external_hb_bits(z[k]))*16777619u;return r;}"
+    "unsigned external_hb_many_apply(unsigned(*f)(ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB,ExternalHB),"
+    "unsigned bits){ExternalHB a=external_hb_value(bits),b=external_hb_value(bits^0x80008000u);return f(a,b,a,b,a,b,a,b,a,b);}"
+    "unsigned external_hb_variadic(int count,...){va_list ap;va_start(ap,count);unsigned h=2166136261u;"
+    "for(int i=0;i<count;i++){ExternalHB z=va_arg(ap,ExternalHB);h=(h^external_hb_bits(z))*16777619u;}va_end(ap);return h;}"
+    "unsigned external_hb_variadic_apply(unsigned(*f)(int,...),unsigned bits){ExternalHB a=external_hb_value(bits),b=external_hb_value(bits^0x80008000u);"
+    "return f(10,a,b,a,b,a,b,a,b,a,b);}\n"
+    // _Atomic _Float16 and _Atomic __bf16 pass as their values in an XMM register's low 16 bits, which clang's count of
+    // registers leaves out (an _Atomic is MEMORY to its classification, #137): their bits both ways, each loaded and
+    // stored atomically, past eight XMM registers onto the stack, with a double and a float among them. __bf16's mask
+    // flips its sign alone, as _Complex __bf16's do.
+    "typedef _Atomic(_Float16) ExternalAH;typedef _Atomic(__bf16) ExternalAB;"
+    "static unsigned short external_ah_bits(ExternalAH*p){_Float16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+    "static unsigned short external_ab_bits(ExternalAB*p){__bf16 v=*p;unsigned short b;__builtin_memcpy(&b,&v,2);return b;}"
+    "static _Float16 external_ah_value(unsigned b){unsigned short s=(unsigned short)b;_Float16 v;__builtin_memcpy(&v,&s,2);return v;}"
+    "static __bf16 external_ab_value(unsigned b){unsigned short s=(unsigned short)b;__bf16 v;__builtin_memcpy(&v,&s,2);return v;}"
+    "ExternalAH external_ah(ExternalAH x,unsigned mask){return external_ah_value(external_ah_bits(&x)^mask);}"
+    "ExternalAB external_ab(ExternalAB x,unsigned mask){return external_ab_value(external_ab_bits(&x)^mask);}"
+    "unsigned external_ah_apply(ExternalAH(*f)(ExternalAH,unsigned),unsigned bits){ExternalAH r=f(external_ah_value(bits),0x8001u);return external_ah_bits(&r);}"
+    "unsigned external_ab_apply(ExternalAB(*f)(ExternalAB,unsigned),unsigned bits){ExternalAB r=f(external_ab_value(bits),0x8000u);return external_ab_bits(&r);}"
+    "unsigned external_ahb_many(ExternalAH a,ExternalAB b,double c,ExternalAH d,ExternalAB e,float f,ExternalAH g,ExternalAB h,ExternalAH i,ExternalAB j,"
+    "ExternalAH k,ExternalAB l){unsigned long cb;unsigned fb;__builtin_memcpy(&cb,&c,8);__builtin_memcpy(&fb,&f,4);"
+    "unsigned r=((unsigned)cb^(unsigned)(cb>>32))*16777619u^fb;ExternalAH*hs[]={&a,&d,&g,&i,&k};ExternalAB*bs[]={&b,&e,&h,&j,&l};"
+    "for(int m=0;m<5;m++)r=(r^external_ah_bits(hs[m])^((unsigned)external_ab_bits(bs[m])<<16))*16777619u;return r;}"
+    "unsigned external_ahb_many_apply(unsigned(*f)(ExternalAH,ExternalAB,double,ExternalAH,ExternalAB,float,ExternalAH,ExternalAB,ExternalAH,ExternalAB,ExternalAH,"
+    "ExternalAB),unsigned bits){_Float16 a=external_ah_value(bits);__bf16 b=external_ab_value(bits>>16);"
+    "return f(a,b,1.25,a,b,-2.5f,a,b,a,b,a,b);}\n"
     // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
     "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
     "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
@@ -839,6 +876,16 @@ static const char check_test_program_harness[] =
     "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
     "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
     "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    // Atomic vectors of 8 and 4 bytes (#137), which LLVM passes and returns as their values in XMM registers, as it does
+    // a <2 x i16>, which an integer of 4 bytes passes otherwise when it isn't _Atomic.
+    "typedef signed char ExternalAtomicQ8 __attribute__((vector_size(8)));"
+    "_Atomic(ExternalAtomicQ8) external_atomic_q8(_Atomic(ExternalAtomicQ8) x,int k){ExternalAtomicQ8 v=x;return v+(signed char)k;}"
+    "int external_apply_atomic_q8(_Atomic(ExternalAtomicQ8)(*f)(_Atomic(ExternalAtomicQ8),int),int n){ExternalAtomicQ8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=(signed char)(n*3+i);_Atomic(ExternalAtomicQ8) out=f(v,5);ExternalAtomicQ8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef short ExternalAtomicH2 __attribute__((vector_size(4)));"
+    "_Atomic(ExternalAtomicH2) external_atomic_h2(_Atomic(ExternalAtomicH2) x,int k){ExternalAtomicH2 v=x;return v*(short)k;}"
+    "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
+    "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come
