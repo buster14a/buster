@@ -258,6 +258,25 @@ static void check_test_program_fp16_sources(CheckTest* test, const char* clang, 
             "FOLD(v0);FOLD(v1);FOLD(v2);v8di m0=__builtin_convertvector(a8-c8,v8di);v8du m1=__builtin_convertvector(w1,v8du);"
             "v8df m2=__builtin_convertvector(r8,v8df);FOLD(m0);FOLD(m1);FOLD(m2);return (int)h;}",
         },
+        {
+            // The reductions at each width, each in a function of its own, as the headers' intrinsics are: of random bits
+            // (NaNs among them, which both codes' instructions give alike, as they reduce in the same order) and of modest
+            // values, the sums and products with starts of the headers' identities and of others (a NaN and an infinity
+            // among them), the start the last operation's first operand.
+            "x86-fp16-reductions",
+            "#define RED(name,T) __attribute__((target(\"avx512fp16\"),noinline)) static _Float16 name(_Float16 s,T a)"
+            "{return __builtin_ia32_reduce_##name(s,a);}\n"
+            "#define EXT(name,T) __attribute__((target(\"avx512fp16\"),noinline)) static _Float16 name(T a){return __builtin_ia32_reduce_##name(a);}\n"
+            "RED(fadd_ph128,v8hf)RED(fadd_ph256,v16hf)RED(fadd_ph512,v32hf)RED(fmul_ph128,v8hf)RED(fmul_ph256,v16hf)RED(fmul_ph512,v32hf)"
+            "EXT(fmax_ph128,v8hf)EXT(fmax_ph256,v16hf)EXT(fmax_ph512,v32hf)EXT(fmin_ph128,v8hf)EXT(fmin_ph256,v16hf)EXT(fmin_ph512,v32hf)\n"
+            "__attribute__((target(\"avx512fp16\"))) int tested(int n){unsigned h=2166136261u;v8hf a8,m8;v16hf a16,m16;v32hf a32,m32;"
+            "fill(&a8,16,n);fill(&a16,32,n+1);fill(&a32,64,n+2);modest(&m8,8,n+3);modest(&m16,16,n+4);modest(&m32,32,n+5);"
+            "unsigned short starts[]={0x8000,0x3c00,0x3e00,0x7e01,0xfc00};for(int i=0;i<5;i++){union{unsigned short u;_Float16 f;}v={starts[i]};"
+            "_Float16 s=v.f;_Float16 r[]={fadd_ph128(s,a8),fadd_ph256(s,a16),fadd_ph512(s,a32),fmul_ph128(s,a8),fmul_ph256(s,a16),fmul_ph512(s,a32),"
+            "fadd_ph128(s,m8),fadd_ph256(s,m16),fadd_ph512(s,m32),fmul_ph128(s,m8),fmul_ph256(s,m16),fmul_ph512(s,m32)};FOLD(r);}"
+            "_Float16 x[]={fmax_ph128(a8),fmax_ph256(a16),fmax_ph512(a32),fmin_ph128(a8),fmin_ph256(a16),fmin_ph512(a32),"
+            "fmax_ph128(m8),fmax_ph256(m16),fmax_ph512(m32),fmin_ph128(m8),fmin_ph256(m16),fmin_ph512(m32)};FOLD(x);return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

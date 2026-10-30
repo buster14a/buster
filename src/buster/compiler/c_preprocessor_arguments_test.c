@@ -85,8 +85,14 @@ static bool pp_test_argument_invoke_failure(bool vectorized)
             .capture_count = 1,
         };
         context.tokens = &pp.arguments;
+#if BUSTER_SANITIZER_RESOURCES
+        lane_test_resources.arena_limited = true;
+        lane_test_resources.arena_limit = 0;
+        const bool limited = true;
+#else
         const struct rlimit limit = { 0, 0 };
         const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
         if (limited)
         {
             pp_invoke(&pp, 0, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER });
@@ -173,9 +179,15 @@ static bool pp_test_argument_links(void)
     const pid_t child = result ? fork() : -1;
     if (child == 0)
     {
+#if BUSTER_SANITIZER_RESOURCES
+        lane_test_resources.arena_limited = true;
+        lane_test_resources.arena_limit = 0;
+        const bool limited = true;
+#else
         const struct rlimit limit = { 0, 0 };
-        Preprocessor failure = { .options = { .quiet = true } };
         const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
+        Preprocessor failure = { .options = { .quiet = true } };
         const bool indexed = limited && pp_index_arguments(&failure);
         _exit(limited && !indexed && failure.fatal && failure.errors == 1 ? 0 : 1);
     }

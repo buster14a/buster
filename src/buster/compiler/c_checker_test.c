@@ -5067,6 +5067,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_transparent_type_test.c"
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
+#include "c_check_sizeof_test.c"
 #include "c_check_integer_policy_test.c"
 #include "c_check_fp_actions_test.c"
 #include "c_check_query_runtime_test.c"
@@ -5086,6 +5087,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_cleanup_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5169,7 +5171,9 @@ static int run_checker_tests(int argc, char** argv)
     bool program_initializers = false;
     bool const_values = false;
     bool program_vectors = false;
+    bool program_overloads = false;
     bool embed_initializers = false;
+    bool sizeof_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -5189,6 +5193,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             const_values = true;
         }
+        else if (strcmp(argv[i], "--program-overloads") == 0)
+        {
+            program_overloads = true;
+        }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
             program_vectors = true;
@@ -5196,6 +5204,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
+        }
+        else if (strcmp(argv[i], "--sizeof") == 0)
+        {
+            sizeof_only = true;
         }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
@@ -5208,14 +5220,20 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers|--const-values]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-overloads|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized && const_values)
+        if (initialized && sizeof_only)
+        {
+            check_test_sizeof_scaling(&test);
+            check_test_integer_extensions(&test, clang);
+            check_test_vla_sources(&test, clang);
+        }
+        else if (initialized && const_values)
         {
             check_test_const_values(&test);
             check_test_const_sources(&test, clang);
@@ -5230,12 +5248,18 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_initializers(&test, clang);
         }
+        else if (initialized && program_overloads)
+        {
+            check_test_program_overloads(&test, clang);
+            check_test_data_sources(&test);
+        }
         else if (initialized && program_vectors)
         {
             check_test_program_vectors(&test, clang);
             check_test_program_x86(&test, clang);
             check_test_program_vector_builtins(&test, clang);
             check_test_program_fp16(&test, clang);
+            check_test_program_halves(&test, clang);
         }
         else if (initialized)
         {
@@ -5306,6 +5330,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_transparent_types(&test, clang);
             check_test_complex(&test, &types.table, clang);
             check_test_integer_extensions(&test, clang);
+            check_test_sizeof_scaling(&test);
             check_test_integer_policy(&test, &types.table, clang);
             check_test_fp_actions(&test, &types.table);
             check_test_query_runtime(&test, &types.table, clang);
@@ -5323,6 +5348,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_attributes(&test, clang);
             check_test_attribute_sources(&test, clang);
             check_test_programs(&test, clang);
+            check_test_cleanups(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);

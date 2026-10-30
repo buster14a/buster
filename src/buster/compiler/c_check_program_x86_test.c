@@ -57,6 +57,33 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
 {
     static const CheckTestX86Program programs[] = {
         {
+            // XOP's compares of each element's size, signed and not, by every predicate, each in a function of its own whose
+            // result is its return value, as the headers' intrinsics are: clang's code of such a function is AVX-512's
+            // compare and VPMOVM2's vector of its mask, as ours is (of one whose result is stored to memory, XOP's VPCOM,
+            // which neither the VM nor Zen 5 runs). The second operands repeat some of the first's elements, so that every
+            // predicate meets equal ones.
+            "x86-xop-compares",
+            "#define COM(name,T,p) __attribute__((target(\"xop\"),noinline)) static T name##_##p(T a,T b){return __builtin_ia32_##name(a,b,p);}\n"
+            "#define COMS(name,T) COM(name,T,0)COM(name,T,1)COM(name,T,2)COM(name,T,3)COM(name,T,4)COM(name,T,5)COM(name,T,6)COM(name,T,7)\n"
+            "COMS(vpcomb,v16qi)COMS(vpcomw,v8hi)COMS(vpcomd,v4si)COMS(vpcomq,v2di)COMS(vpcomub,v16qi)COMS(vpcomuw,v8hi)COMS(vpcomud,v4si)COMS(vpcomuq,v2di)\n"
+            "#define USE(name,T,a,b) {T r[]={name##_0(a,b),name##_1(a,b),name##_2(a,b),name##_3(a,b),name##_4(a,b),name##_5(a,b),name##_6(a,b),"
+            "name##_7(a,b)};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v16qi a,b;v8hi c,d;v4si e,f;v2di g,k;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);fill(&d,16,n+3);"
+            "fill(&e,16,n+4);fill(&f,16,n+5);fill(&g,16,n+6);fill(&k,16,n+7);for(int i=0;i<16;i+=3)b[i]=a[i];for(int i=0;i<8;i+=3)d[i]=c[i];f[1]=e[1];"
+            "k[0]=g[0];USE(vpcomb,v16qi,a,b)USE(vpcomw,v8hi,c,d)USE(vpcomd,v4si,e,f)USE(vpcomq,v2di,g,k)USE(vpcomub,v16qi,a,b)USE(vpcomuw,v8hi,c,d)"
+            "USE(vpcomud,v4si,e,f)USE(vpcomuq,v2di,g,k)return (int)h;}",
+        },
+        {
+            // AVX10.2's masked load and store of bf16's first element, as the headers' _mm_mask_load_sbh and
+            // _mm_mask_store_sbh call them: the whole vector's elements under the mask, each in a function of its own,
+            // whose code (clang's and ours) is AVX-512BW's alone, under masks of none, the first and others.
+            "x86-bf16-scalar-memory",
+            "__attribute__((target(\"avx10.2\"),noinline)) static v8bf load(const v8bf*p,v8bf w,unsigned char m){return __builtin_ia32_loadsbf16128_mask(p,w,m);}"
+            "__attribute__((target(\"avx10.2\"),noinline)) static void store(v8bf*p,v8bf a,unsigned char m){__builtin_ia32_storesbf16128_mask(p,a,m);}"
+            "int tested(int n){unsigned h=2166136261u;v8bf a,w,o;fill(&a,16,n);fill(&w,16,n+1);unsigned long long m=mask(n);for(int i=0;i<4;i++)"
+            "{unsigned char k=(unsigned char)(i==0?0:i==1?1:m>>(8*i));v8bf l=load(&a,w,k);FOLD(l);o=w;store(&o,a,k);FOLD(o);}return (int)h;}",
+        },
+        {
             // The floating selects, which move bits: each width of ps, pd and pbf, and the scalar ones, whose first element
             // is a's or w's by the mask's first bit and whose others are a's. (ph's rows are pbf's; their builtins need
             // AVX512-FP16, which znver5 hasn't: c_check_program_fp16_test.c calls them.)
@@ -1690,12 +1717,33 @@ static void check_test_program_x86_refusals(CheckTest* test)
     }
 }
 
+// #806: answers must agree with the checker's source scope and actual native lowering.
+static void check_test_program_intrinsic_features(CheckTest* test)
+{
+    uint32_t advertised = 0;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_infos + i;
+        const bool special = strcmp(info->name, "__builtin_assume") == 0 || strcmp(info->name, "__builtin_unpredictable") == 0;
+        const bool implemented = special || check_x86_lower_rule(info->name, info->name_length) != NULL ||
+                                 cbuiltin_x86_helper_kind(info->name, info->name_length) != CBUILTIN_X86_HELPER_NONE;
+        const bool expected = builtin_intrinsic_own_main_prototype_in_scope(info->name, info->name_length) && implemented;
+        const bool actual = cbuiltin_source_intrinsic((const uint8_t*)info->name, info->name_length);
+        char description[192];
+        snprintf(description, sizeof(description), "intrinsic query agrees with source scope and native lowering: %s", info->name);
+        check_test_expect(test, actual == expected, description);
+        advertised += actual;
+    }
+    check_test_expect(test, advertised > 100, "native intrinsic capabilities are not an empty or helper-only list");
+}
+
 // Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
 // (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
 // (check_lower_x86_operand_class); a rule with a rounding control at each value clang takes for it, and one past them.
 static void check_test_program_x86_rows(CheckTest* test)
 {
+    check_test_program_intrinsic_features(test);
     static const uint64_t immediates[] = { 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 63, 0x1b, 0x80, 0xff };
     static const uint64_t rounds[] = { 4, 8, 9, 10, 11, 12, 15 };
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };

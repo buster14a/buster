@@ -774,6 +774,7 @@ static const char check_test_program_harness[] =
     "void terminal_probe(void) __attribute__((weak));\n"
     "int external_data=17; int external_helper(int n){return n*3;}\n"
     "int external_apply(int(*function)(int),int n){return function(n);}\n"
+    "int external_unnamed_apply(long(*function)(int,double,int,double,long),int n){return (int)function(17,1.25,n,7.5,29);}\n"
     "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
     "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
     "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
@@ -2123,6 +2124,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 }
 
 #include "c_check_program_select_test.c"
+#include "c_check_program_overload_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
@@ -2134,6 +2136,8 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_transparent_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
+#include "c_check_program_parameters_test.c"
+#include "c_check_program_half_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -2795,6 +2799,45 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_batch(test);
     check_test_program_many_arguments(test, clang);
     check_test_program_many_aggregate_returns(test, clang);
+    check_test_program_source(test,
+        "#if !__has_attribute(aligned) || !__has_attribute(vector_size) || !__has_attribute(section) || !__has_attribute(visibility)\n"
+        "#error implemented declaration attributes must be advertised\n#endif\n"
+        "#if !__has_feature(c_static_assert) || !__has_feature(c_alignas) || !__has_feature(c_alignof) || !__has_feature(c_generic_selections) || !__has_feature(c_atomic) || !__has_feature(c_thread_local)\n"
+        "#error implemented C11 features must be advertised\n#endif\n"
+        "#if !__has_builtin(__builtin_expect) || !__has_builtin(__builtin_popcount) || !__has_builtin(__builtin_add_overflow) || !__has_builtin(__builtin_memcpy) || !__has_builtin(__c11_atomic_fetch_add) || !__has_builtin(__atomic_fetch_xor) || !__has_builtin(__sync_fetch_and_add) || !__has_builtin(__builtin_fabs) || !__has_builtin(__builtin_constant_p) || !__has_builtin(__builtin_choose_expr) || !__has_builtin(__builtin_types_compatible_p)\n"
+        "#error implemented source builtins must be advertised\n#endif\n"
+        "#if !__has_constexpr_builtin(__builtin_bswap32) || !__has_constexpr_builtin(__builtin_popcount)\n"
+        "#error source constant evaluation must be advertised\n#endif\n"
+        "typedef int v4si __attribute__((vector_size(16)));typedef int wide __attribute__((aligned(32)));"
+        "_Static_assert(sizeof(v4si)==16 && _Alignof(wide)==32,\"attribute effects\");"
+        "_Static_assert(__builtin_popcount(31)==5 && __builtin_bswap32(0x01020304U)==0x04030201U,\"builtin constants\");"
+        "__attribute__((section(\".query_data\"),visibility(\"hidden\"))) int seed=7;"
+        "_Thread_local int local=3;"
+        "int tested(int n){_Alignas(32) int a[4]={n,2,3,4};int b[4];_Atomic(int) value=5;int other=1,out=0;"
+        "__builtin_memcpy(b,a,sizeof(a));int old=__c11_atomic_fetch_add(&value,n,5);"
+        "int prior=__atomic_fetch_xor(&other,3,5);other+=prior;prior=__sync_fetch_and_add(&other,2);other+=prior;"
+        "int overflow=__builtin_add_overflow(n,9,&out);int picked=_Generic(n,int:3,default:9);"
+        "int constant=__builtin_choose_expr(__builtin_types_compatible_p(int,int),11,17)+__builtin_constant_p(42);"
+        "double magnitude=__builtin_fabs((double)(n%97));local=n%13;"
+        "return b[0]+(int)__builtin_popcount((unsigned)n)+__builtin_expect(out,0)+old+value+other+overflow+picked+constant+(int)magnitude+seed+local;}",
+        "implemented-feature-query-native", clang);
+    check_test_program_unnamed_parameters(test, clang);
+    // The independent Clang build selects these effects too; a stale zero must change observable behavior.
+    check_test_program_source(test,
+        "#if __has_attribute(cleanup) && __has_attribute(__cleanup__) && __has_c_attribute(gnu::cleanup)\n"
+        "#define CLEAN __attribute__((cleanup(finish)))\n#else\n#define CLEAN\n#endif\n"
+        "#if __has_c_attribute(gnu::__cleanup__)\n#define SCOPED_CLEAN [[gnu::cleanup(finish)]]\n#else\n#define SCOPED_CLEAN\n#endif\n"
+        "static int seen;static void finish(int*p){seen+=*p+3;}"
+        "int tested(int n){seen=0;{CLEAN int a=n&7;}{SCOPED_CLEAN int b=n&3;}return seen;}",
+        "cleanup-feature-query-native", clang);
+    check_test_program_source(test,
+        "#if __has_attribute(overloadable) && __has_attribute(__overloadable__)\n"
+        "#define O __attribute__((overloadable))\n"
+        "static int pick(int x) O{return x+5;}static double pick(double x) O{return x+0.5;}"
+        "static int(*selected)(int)=pick;"
+        "int tested(int n){int x=n&1023;return pick(x)+(int)(pick((double)(n%9))*2)+selected(x);}\n"
+        "#else\nint tested(int n){return n-991;}\n#endif\n",
+        "overloadable-feature-query-native", clang);
     // A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
     check_test_program_source(test,
         "#if __has_attribute(packed) && __has_attribute(__packed__)\n"
@@ -2846,6 +2889,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_refused(test);
     check_test_program_type_facts(test);
     check_test_program_selection(test, clang);
+    check_test_program_overloads(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
@@ -2856,6 +2900,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_transparent(test, clang);
     check_test_program_vector_builtins(test, clang);
     check_test_program_fp16(test, clang);
+    check_test_program_halves(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
         "for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}", "structured-loops", clang);

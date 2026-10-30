@@ -28,6 +28,13 @@ typedef enum CheckProgramStatus
 // (`token` the label), which does nothing else, and a computed goto (goto *expression) is CHECK_CONTROL_JUMP_INDIRECT of
 // its operand (`node`, converted to const void *), which goes to one of them. It releases no variable-length array's
 // storage on its way out of their blocks, as clang's code doesn't: the function's return does.
+// GNU's cleanup attribute (CheckInput.cleanups): each exit from a variable's scope calls its function with the variable's
+// address, CHECK_CONTROL_CLEANUP (`target` the variable's record, `token` the exit: its block's closing token, or the
+// jump), the innermost variable's first, before the exit's STACK_RESTORE: its block's end, a break, a continue or a goto
+// that leaves the scope, and a return, whose value (`node`) a CHECK_CONTROL_RESULT computes first, which its RETURN, of
+// no node and target BUSTER_CHECK_CONTROL_KEPT, then returns. A for statement's own variables' cleanups come after its
+// end's label, which its break reaches, and a statement expression's block's after its END, which its region counts
+// (CheckProgramRegion.cleanups): its value is computed before them.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -43,11 +50,16 @@ typedef enum CheckControlKind
     CHECK_CONTROL_STACK_RESTORE,
     CHECK_CONTROL_LABEL,
     CHECK_CONTROL_JUMP_INDIRECT,
+    CHECK_CONTROL_CLEANUP,
+    CHECK_CONTROL_RESULT,
     // The kinds from here on go to a label: their `target`.
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
     CHECK_CONTROL_JUMP,
 } CheckControlKind;
+
+// A RETURN's target that returns the value its CHECK_CONTROL_RESULT computed, before the return's cleanups.
+#define BUSTER_CHECK_CONTROL_KEPT UINT32_C(0xfffffffe)
 
 typedef struct CheckControl CheckControl;
 struct CheckControl
@@ -69,6 +81,9 @@ struct CheckProgramBody
     uint32_t entry_count;
     uint32_t reference_first;
     uint32_t reference_count;
+    // Its source labels' places (CheckProgram.label_positions): label_count of them from label_first.
+    uint32_t label_first;
+    uint32_t label_count;
     bool is_main;
     bool return_flow;
     bool falls;
@@ -83,6 +98,8 @@ struct CheckProgramRegion
     uint32_t body;
     uint32_t node;
     uint32_t result;
+    // The last of its `count` controls that are its block's cleanups, which run after its value is computed.
+    uint32_t cleanups;
 };
 
 typedef struct CheckProgramOptions CheckProgramOptions;
@@ -184,6 +201,31 @@ struct CheckProgram
     uint32_t* body_targets;
     X86Target* targets;
     uint32_t target_count;
+    // The function declarations with a target, target_clones, always_inline, flatten or noreturn attribute, as keys of
+    // their object in the high half and their token in the low, sorted by object (per object, the target attributes' in
+    // token order, then the others'), for code generation's check of target features at -c (#775,
+    // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
+    uint64_t* attribute_keys;
+    uint32_t attribute_key_count;
+    // Each body's source labels' places, its controls' indices where code after them begins, in the order the writer
+    // expands their statements (CheckProgramBody.label_first): code generation's check of target features walks from
+    // each, as clang emits a label's block whatever code precedes it. Null in a unit without a label.
+    uint32_t* label_positions;
+    uint32_t label_position_count;
+    // The host's features (predefines_host_of), where check_program_targets read them: they are the CPU's, which
+    // -march=native reads, and code generation's check of target features takes them from here.
+    PredefinesHost host;
+    bool host_read;
+    // Per body of a selection (check_program_select_mode), whether clang's code generation emits its function where the
+    // unit defines it rather than when its emission first refers to it or at the unit's end (ASTContext::
+    // DeclMustBeEmitted, as CodeGenModule::EmitGlobal asks it when the parser hands over the definition): an external
+    // definition, by the selection's rules of GNU's and C99's inline functions, or a function with a used, constructor
+    // or destructor attribute, both by the function's declarations up to the definition (check_program_body_eager),
+    // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
+    // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
+    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
+    // a program that no selection made, or in a unit without a target attribute, which the check skips.
+    uint8_t* body_eager;
 };
 
 #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
@@ -242,12 +284,21 @@ struct CheckControlWriter
     const uint32_t* region_next;
     // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
     const uint8_t* addressed;
+    // The body's cleanups' records (CheckInput.cleanups, cleanup_count of them from cleanup_first), and each record's
+    // parent, by its index there: the innermost record whose scope holds its declaration, BUSTER_CHECK_NONE for none.
+    uint32_t* cleanup_parents;
+    uint32_t cleanup_first;
+    uint32_t cleanup_count;
     // The statement expression's last statement while its region is written: the region's result, never a statement of
     // its own, also where it is a label's (CheckInputRegion.final_statement).
     uint32_t region_final;
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
+    // CheckProgram.label_positions while the bodies are written, a token's room each: each body's labels' numbers, then,
+    // once it is written, their places.
+    uint32_t* label_positions;
+    uint32_t label_position_count;
     // CheckProgram.switches, and its room: a switch recorded there has four of the program's cases or more.
     uint32_t* switches;
     uint32_t switch_count;
@@ -275,20 +326,38 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
     }
 }
 
-// Whether a declaration's `attributes` hold GNU's naked attribute (CheckProgram.object_naked).
-static bool check_program_attribute_naked(const CheckInputAttributes* attributes)
+// The attributes of a declaration that the static objects' pass reads (check_program_static_object), as bits.
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED 1u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE 4u
+
+// Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
+// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and one of a
+// callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
+// CheckProgram.attribute_keys).
+static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
-    bool naked = false;
+    uint32_t bits = 0;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
-        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        const CheckInputAttributeKind kind = attribute->kind;
+        const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
+                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
+                             kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN || kind == CHECK_ATTRIBUTE_NORETURN ?
+                                 BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
+                                 0;
+        bits |= attribute->ignored ? 0 : bit;
     }
-    return naked;
+    return bits;
 }
 
 // The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
 // resolves each body's instruction set from: keys of their object in the high half and their token in the low, in each
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
+// Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
+// only code generation's check of target features reads, and only in a unit with a target attribute (#775,
+// CheckProgram.attribute_keys).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -296,43 +365,43 @@ struct CheckProgramTargetEvents
     uint64_t* keys;
     uint32_t count;
     uint32_t capacity;
+    uint64_t* callee_keys;
+    uint32_t callee_count;
+    uint32_t callee_capacity;
     bool room;
 };
 
-// Whether a declaration's `attributes` hold a target or target_clones attribute (CheckProgramTargetEvents).
-static bool check_program_attribute_target(const CheckInputAttributes* attributes)
+// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling. It and
+// check_program_attribute_keys stay out of line: few declarations reach them, and inlined, they changed how clang
+// compiled the passes around them, so that -c of sqlite3.c, which has no target attribute, ran about 400,000 more
+// instructions, 0.03% (#775).
+__attribute__((noinline)) static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
 {
-    bool target = false;
-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    if (events->room && *count == *capacity)
     {
-        const CheckInputAttribute* attribute = &attributes->records[i];
-        target |= (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES) && !attribute->ignored;
-    }
-    return target;
-}
-
-static void check_program_target_event(CheckProgramTargetEvents* events, uint32_t object, uint32_t token)
-{
-    if (events->room && events->count == events->capacity)
-    {
-        const uint32_t capacity = events->capacity == 0 ? 64 : events->capacity <= UINT32_MAX / 2 ? events->capacity * 2 : 0;
-        uint64_t* keys = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(events->scratch, uint64_t, capacity) : 0;
-        events->room = keys != 0;
+        const uint32_t grown = *capacity == 0 ? 64 : *capacity <= UINT32_MAX / 2 ? *capacity * 2 : 0;
+        uint64_t* moved = grown != 0 ? BUSTER_ARENA_PUSH_ARRAY(events->scratch, uint64_t, grown) : 0;
+        events->room = moved != 0;
         if (events->room)
         {
-            if (events->count != 0)
+            if (*count != 0)
             {
-                memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+                memcpy(moved, *keys, (uint64_t)*count * sizeof(uint64_t));
             }
-            events->keys = keys;
-            events->capacity = capacity;
+            *keys = moved;
+            *capacity = grown;
         }
     }
     if (events->room)
     {
-        events->keys[events->count] = ((uint64_t)object << 32) | token;
-        events->count += 1;
+        (*keys)[*count] = ((uint64_t)object << 32) | token;
+        *count += 1;
     }
+}
+
+static void check_program_target_event(CheckProgramTargetEvents* events, uint32_t object, uint32_t token)
+{
+    check_program_event_push(events, &events->keys, &events->count, &events->capacity, object, token);
 }
 
 // Compact builtin descriptors start with their stable graph node and are source ordered in both schedulers.
@@ -761,6 +830,139 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     }
 }
 
+// The innermost of the body's cleanups whose scope holds `position`: the last one declared before it, or a parent of that.
+static uint32_t check_control_cleanup_at(const CheckControlWriter* writer, uint32_t position)
+{
+    const CheckInputCleanup* cleanups = writer->program->input->cleanups;
+    uint32_t low = writer->cleanup_first;
+    uint32_t high = writer->cleanup_first + writer->cleanup_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = cleanups[middle].declaration < position ? middle + 1 : low;
+        high = cleanups[middle].declaration < position ? high : middle;
+    }
+    uint32_t record = low != writer->cleanup_first ? low - 1 : BUSTER_CHECK_NONE;
+    while (record != BUSTER_CHECK_NONE && cleanups[record].end <= position)
+    {
+        record = writer->cleanup_parents[record];
+    }
+    return record;
+}
+
+// The CLEANUP entries of an exit at `position` (a jump, or a scope's last token), each of a variable whose scope holds the
+// exit, innermost first: up to the first whose scope holds `target` too (BUSTER_CHECK_NONE for a return's: none does), or
+// where `scope` is a scope's opening (its block's end), those of that scope alone. check_control_drain writes the last
+// task pushed first, so the run pushed here is reversed, the innermost's last.
+static void check_control_cleanups(CheckControlWriter* writer, uint32_t position, uint32_t target, uint32_t scope)
+{
+    const CheckInputCleanup* cleanups = writer->program->input->cleanups;
+    const uint32_t depth = writer->depth;
+    uint32_t record = writer->cleanup_count != 0 ? check_control_cleanup_at(writer, position) : BUSTER_CHECK_NONE;
+    while (record != BUSTER_CHECK_NONE && (scope != BUSTER_CHECK_NONE ? cleanups[record].scope == scope :
+                                           cleanups[record].declaration >= target || target >= cleanups[record].end))
+    {
+        check_control_entry(writer, CHECK_CONTROL_CLEANUP, position, BUSTER_CHECK_NONE, record);
+        record = writer->cleanup_parents[record];
+    }
+    for (uint32_t low = depth, high = writer->depth; low + 1 < high; low += 1, high -= 1)
+    {
+        const CheckControlTask task = writer->tasks[low];
+        writer->tasks[low] = writer->tasks[high - 1];
+        writer->tasks[high - 1] = task;
+    }
+}
+
+// The child of `closing` (a block's or a for statement's) of role `role`, its opening, BUSTER_CHECK_NONE for none.
+static uint32_t check_control_opening(const CheckControlWriter* writer, uint32_t closing, uint8_t role)
+{
+    uint32_t child = writer->first[closing];
+    while (child != BUSTER_CHECK_NONE && writer->parser->tree.roles[child] != role)
+    {
+        child = writer->next[child];
+    }
+    return child;
+}
+
+static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high);
+
+// The declaration a return at `jump` names alone, in parentheses or not (clang's IgnoreParens), BUSTER_CHECK_NONE for
+// anything else: its expression's tokens, up to its terminator, whose child it is.
+static uint32_t check_control_returned(const CheckControlWriter* writer, uint32_t jump)
+{
+    const Parser* parser = writer->parser;
+    const uint32_t terminator = parser->tree.parents[jump];
+    uint32_t first = jump + 1;
+    uint32_t last = terminator > jump + 1 && terminator < parser->tokens.count ? terminator - 1 : jump;
+    while (first < last && parser->tokens.kinds[first] == PARSE_KIND_L_PAREN && parser->tree.parents[first] == last)
+    {
+        first += 1;
+        last -= 1;
+    }
+    const bool named = first == last && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER;
+    return named ? writer->program->input->declarations[first] : BUSTER_CHECK_NONE;
+}
+
+// Whether a return at `jump` returns its function's named return value, which clang's code constructs in the return slot
+// (Sema's NRVO, CodeGenFunction::EmitAutoVarAlloca), so that the return's cleanups write the value it returns: a struct or
+// union variable of the function's result type (unqualified), automatic, neither volatile nor aligned past its type, named
+// alone, with every return after its declaration in its scope naming it alone too (Scope::updateNRVOCandidate keeps it its
+// scope's candidate then, which applyNRVO marks).
+static bool check_control_named(const CheckControlWriter* writer, uint32_t jump)
+{
+    const Parser* parser = writer->parser;
+    const CheckInput* input = writer->program->input;
+    const TypeTable* types = writer->program->types;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t function = input->body_declarations[writer->opening];
+    const TypeId type = function < count ? type_strip_aligned(types, input->declared_types[function]) : 0;
+    const TypeId result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION ? type_unqualified(type_strip_aligned(types, type_return(types, type))) : 0;
+    const uint8_t result_kind = result != 0 ? type_kind(types, result) : BUSTER_TYPE_KIND_NONE;
+    const uint32_t variable = result_kind == BUSTER_TYPE_KIND_STRUCT || result_kind == BUSTER_TYPE_KIND_UNION ? check_control_returned(writer, jump) : BUSTER_CHECK_NONE;
+    const TypeId declared = variable < count ? input->declared_types[variable] : 0;
+    const CheckInputAttributes* attributes = variable < count ? input->attributes[variable] : NULL;
+    const bool aligned = attributes != NULL && attributes->alignment_log2 != 0 && attributes->alignment_log2 - 1u > type_alignment_log2(types, declared);
+    bool named = variable > writer->opening && variable < writer->closing && input->declaration_kinds[variable] == C_BINDING_OBJECT &&
+                 !input->static_objects[variable] && declared != 0 && (type_qualifiers(declared) & BUSTER_TYPE_VOLATILE) == 0 && !aligned &&
+                 type_unqualified(type_strip_aligned(types, declared)) == result;
+    // Its scope: its block's to the block's closing token, or its for statement's to the statement's last.
+    uint32_t scope = named ? parser->tree.parents[variable] : count;
+    uint32_t steps = 0;
+    while (scope < count && steps < count && parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BLOCK && parser->tree.roles[scope] != PARSE_ROLE_CLOSE_BODY &&
+           parser->tree.roles[scope] != PARSE_ROLE_CLOSE_FOR)
+    {
+        scope = parser->tree.parents[scope];
+        steps += 1;
+    }
+    uint32_t low = scope;
+    uint32_t end = scope;
+    if (scope < count && parser->tree.roles[scope] == PARSE_ROLE_CLOSE_FOR)
+    {
+        check_control_extent(writer, scope, &low, &end);
+    }
+    named &= scope < count;
+    for (uint32_t token = variable + 1; named && token <= end; token += 1)
+    {
+        named = parser->tree.roles[token] != PARSE_ROLE_RETURN || parser->tokens.kinds[token] != PARSE_KIND_RETURN || check_control_returned(writer, token) == variable;
+    }
+    return named;
+}
+
+// The loop or switch a break or a continue at `jump` leaves: its ancestor whose stop or repeat (in `targets`) is `label`.
+static uint32_t check_control_loop(const CheckControlWriter* writer, uint32_t jump, const uint32_t* targets, uint32_t label)
+{
+    const Parser* parser = writer->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = parser->tree.parents[jump];
+    uint32_t steps = 0;
+    while (ancestor < count && steps < count && targets[ancestor] != label)
+    {
+        ancestor = parser->tree.parents[ancestor];
+        steps += 1;
+    }
+    return ancestor;
+}
+
 // The first and last tokens of the statement `arm`: its first children's first and its last children's last.
 static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high)
 {
@@ -793,6 +995,13 @@ static bool check_control_enterable(const CheckControlWriter* writer, uint32_t a
     return enterable;
 }
 
+// Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
+// loop turns into its place once the label's body is written: a label is a token, so the column has room.
+static void check_control_source_label(CheckControlWriter* writer, uint32_t label)
+{
+    writer->label_positions[writer->label_position_count++] = label;
+}
+
 static void check_control_expand(CheckControlWriter* writer, CheckControlTask task)
 {
     const Parser* parser = writer->parser;
@@ -801,10 +1010,16 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     const uint8_t role = parser->tree.roles[token];
     if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
     {
-        // A block's variable-length arrays are released at its end, after its statements.
+        // A block's variable-length arrays are released at its end, after its statements and its cleanups.
         if (role == PARSE_ROLE_CLOSE_BLOCK && writer->vla_blocks[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
+        }
+        const uint32_t block = role == PARSE_ROLE_CLOSE_BLOCK && writer->cleanup_count != 0 ? check_control_opening(writer, token, PARSE_ROLE_OPEN_BLOCK) :
+                                                                                            BUSTER_CHECK_NONE;
+        if (block != BUSTER_CHECK_NONE)
+        {
+            check_control_cleanups(writer, token, BUSTER_CHECK_NONE, block);
         }
         for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
         {
@@ -981,6 +1196,12 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else
         {
+            // Its own variables' cleanups run where it ends, which its condition and its breaks reach.
+            const uint32_t scope = writer->cleanup_count != 0 ? check_control_opening(writer, token, PARSE_ROLE_OPEN_FOR) : BUSTER_CHECK_NONE;
+            if (scope != BUSTER_CHECK_NONE)
+            {
+                check_control_cleanups(writer, token, BUSTER_CHECK_NONE, scope);
+            }
             check_control_mark(writer, end);
             check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, start);
             check_control_token(writer, token);
@@ -1012,14 +1233,35 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             const uint8_t kind = parser->tokens.kinds[jump];
             if (kind == PARSE_KIND_RETURN)
             {
-                check_control_entry(writer, CHECK_CONTROL_RETURN, jump, input->token_nodes[jump], BUSTER_CHECK_NONE);
+                // With cleanups to run, the value first, then the cleanups, then the return of the value; but the named
+                // return value's, which the cleanups may write, after them.
+                const uint32_t node = input->token_nodes[jump];
+                const bool cleans = writer->cleanup_count != 0 && check_control_cleanup_at(writer, jump) != BUSTER_CHECK_NONE;
+                const bool kept = cleans && node != BUSTER_CHECK_NONE && !check_control_named(writer, jump);
+                check_control_entry(writer, CHECK_CONTROL_RETURN, jump, kept ? BUSTER_CHECK_NONE : node, kept ? BUSTER_CHECK_CONTROL_KEPT : BUSTER_CHECK_NONE);
+                if (cleans)
+                {
+                    check_control_cleanups(writer, jump, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                }
+                if (kept)
+                {
+                    check_control_entry(writer, CHECK_CONTROL_RESULT, jump, node, BUSTER_CHECK_NONE);
+                }
             }
             else if ((kind == PARSE_KIND_BREAK && task.stop != BUSTER_CHECK_NONE) || (kind == PARSE_KIND_CONTINUE && task.repeat != BUSTER_CHECK_NONE))
             {
-                // The entries come out in the reverse of their pushes: the restore, then the jump.
+                // The entries come out in the reverse of their pushes: the cleanups, the restore, then the jump. Its loop's
+                // or switch's token is inside the scopes it doesn't leave: a for statement's own variables' too, whose
+                // cleanups run at its end.
                 const bool stops = kind == PARSE_KIND_BREAK;
-                check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, stops ? task.stop : task.repeat);
-                check_control_leave(writer, jump, BUSTER_CHECK_NONE, stops ? writer->stops : writer->repeats, stops ? task.stop : task.repeat);
+                const uint32_t* targets = stops ? writer->stops : writer->repeats;
+                const uint32_t label = stops ? task.stop : task.repeat;
+                check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, label);
+                check_control_leave(writer, jump, BUSTER_CHECK_NONE, targets, label);
+                if (writer->cleanup_count != 0)
+                {
+                    check_control_cleanups(writer, jump, check_control_loop(writer, jump, targets, label), BUSTER_CHECK_NONE);
+                }
             }
             else if (kind == PARSE_KIND_GOTO && check_input_indirect_goto(writer->parser, jump))
             {
@@ -1040,6 +1282,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 {
                     check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, writer->source_labels[target]);
                     check_control_leave(writer, jump, target, 0, BUSTER_CHECK_NONE);
+                    check_control_cleanups(writer, jump, target, BUSTER_CHECK_NONE);
                 }
                 else
                 {
@@ -1081,6 +1324,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         if (role == PARSE_ROLE_LABEL && writer->addressed != 0 && writer->addressed[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+        if (role == PARSE_ROLE_LABEL)
+        {
+            check_control_source_label(writer, writer->source_labels[token]);
         }
         check_control_mark(writer, writer->source_labels[token]);
     }
@@ -1146,6 +1393,31 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
     writer->opening = opening;
     writer->closing = closing;
     check_control_children(writer, opening, closing);
+    // The body's cleanups, its records in source order, each with its parent: the last before it whose scope holds its
+    // declaration, which the parents of the one before it reach, as nested scopes are.
+    const CheckInput* input = writer->program->input;
+    const CheckInputCleanup* cleanups = input->cleanups;
+    uint32_t first = 0;
+    uint32_t end = input->cleanup_count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        first = cleanups[middle].declaration < opening ? middle + 1 : first;
+        end = cleanups[middle].declaration < opening ? end : middle;
+    }
+    end = first;
+    while (end < input->cleanup_count && cleanups[end].declaration < closing)
+    {
+        uint32_t parent = end != first ? end - 1 : BUSTER_CHECK_NONE;
+        while (parent != BUSTER_CHECK_NONE && cleanups[parent].end <= cleanups[end].declaration)
+        {
+            parent = writer->cleanup_parents[parent];
+        }
+        writer->cleanup_parents[end] = parent;
+        end += 1;
+    }
+    writer->cleanup_first = first;
+    writer->cleanup_count = end - first;
     // A body has its function declarator as an earlier sibling of its opening brace. Only body statements enter
     // this worklist; this also avoids interpreting a function's parameter/declarator expressions as executable.
     for (uint32_t child = writer->last[closing]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
@@ -1295,6 +1567,12 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     const uint32_t closing = writer->parser->tree.parents[opening];
     check_control_begin(writer, opening);
     check_control_drain(writer);
+    // The body's own variables' cleanups, where it ends.
+    if (writer->cleanup_count != 0)
+    {
+        check_control_cleanups(writer, closing, BUSTER_CHECK_NONE, opening);
+        check_control_drain(writer);
+    }
     check_control_end(writer, closing);
     writer->entry_count = writer->count - writer->first_entry;
     for (uint32_t r = writer->region_first[opening]; r != BUSTER_CHECK_NONE && writer->program->status == CHECK_PROGRAM_OK; r = writer->region_next[r])
@@ -1336,6 +1614,15 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             check_control_drain(writer);
             check_control_end(writer, source->closing);
             writer->region_final = BUSTER_CHECK_NONE;
+            // Its block's cleanups, after its END: they run once its value is computed (check_lower_region).
+            const uint32_t ended = writer->count;
+            const uint32_t block = writer->cleanup_count != 0 ? check_control_opening(writer, source->block, PARSE_ROLE_OPEN_BLOCK) : BUSTER_CHECK_NONE;
+            if (block != BUSTER_CHECK_NONE)
+            {
+                check_control_cleanups(writer, source->block, BUSTER_CHECK_NONE, block);
+                check_control_drain(writer);
+            }
+            region->cleanups = writer->count - ended;
             region->count = writer->count - writer->first_entry - region->first;
         }
     }
@@ -1670,6 +1957,16 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
         {
             const CheckInitializer* plan = &program->initializers->plans[controls[i].target];
             reference_count = check_program_reference_initializer(program, plan, epoch, nodes, stack, depth, seen, references, needed, reference_count);
+        }
+        // A cleanup's call of its function.
+        const uint32_t function = controls[i].kind == CHECK_CONTROL_CLEANUP && controls[i].target < program->input->cleanup_count ?
+                                  program->input->cleanups[controls[i].target].function : BUSTER_CHECK_NONE;
+        const uint32_t object = function < program->input->token_count ? program->input->objects[function] : 0;
+        if (object != 0 && object < program->object_count && seen[object] != epoch)
+        {
+            seen[object] = epoch;
+            needed[object] = 1;
+            references[reference_count++] = (uint64_t)object << 32;
         }
     }
     return reference_count;
@@ -2052,8 +2349,9 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
 
 // A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
 // declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
-// function's declaration with a target or target_clones attribute (`events`). Returns whether the column had room, `room`
-// again unless making it failed.
+// function's declaration with a target or target_clones attribute, or an always_inline, flatten or noreturn one
+// (`events`), all found by one pass over its attributes. Returns whether the column had room, `room` again unless
+// making it failed.
 static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
 {
     const CheckInput* input = program->input;
@@ -2063,11 +2361,17 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
     {
         program->object_declarations[object] = token;
         needed[object] |= input->defined[token] || input->tentative[token];
-        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_target(input->attributes[token]))
+        const uint32_t attributes = input->attributes[token] != 0 ? check_program_attribute_bits(input->attributes[token]) : 0;
+        const uint32_t function_attributes = attributes != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION ? attributes : 0;
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0)
         {
             check_program_target_event(events, object, token);
         }
-        if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE) != 0)
+        {
+            check_program_event_push(events, &events->callee_keys, &events->callee_count, &events->callee_capacity, object, token);
+        }
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
             if (program->object_naked == 0 && room)
             {
@@ -2167,8 +2471,6 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
     // The strings of the targets made so far, in their order.
     String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
     valid = valid && (count == 0 || texts != 0);
-    PredefinesHost host = { 0 };
-    bool host_read = false;
     uint32_t last_target = UINT32_MAX;
     // The last string read and how predefines_target_attribute takes it: a header's functions share theirs, so most
     // attributes are the one before.
@@ -2238,14 +2540,14 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
             {
                 program->targets = program->targets == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Target, count) : program->targets;
                 valid = program->targets != 0;
-                if (valid && !host_read)
+                if (valid && !program->host_read)
                 {
-                    host = predefines_host_of(options->predefines);
-                    host_read = true;
+                    program->host = predefines_host_of(options->predefines);
+                    program->host_read = true;
                 }
                 if (valid)
                 {
-                    program->targets[found] = predefines_function_target(options->predefines, &host, program->target, applied->text.pointer,
+                    program->targets[found] = predefines_function_target(options->predefines, &program->host, program->target, applied->text.pointer,
                                                                          (uint32_t)applied->text.length, cpu);
                     texts[found] = applied->text;
                     program->target_count += 1;
@@ -2271,11 +2573,81 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
     return valid;
 }
 
+// The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
+// unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
+// so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
+// object with the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it
+// can lack a feature by clang's rule. Returns false if there was no room.
+__attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+{
+    const uint64_t total = (uint64_t)events->count + events->callee_count;
+    bool valid = events->room && total <= UINT32_MAX;
+    if (valid && events->count != 0)
+    {
+        uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, total);
+        uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, total);
+        valid = keys != 0 && temporary != 0;
+        if (valid)
+        {
+            memcpy(keys, events->keys, (uint64_t)events->count * sizeof(uint64_t));
+            if (events->callee_count != 0)
+            {
+                memcpy(keys + events->count, events->callee_keys, (uint64_t)events->callee_count * sizeof(uint64_t));
+            }
+            uint32_t varying = 0;
+            for (uint64_t e = 1; e < total; e += 1)
+            {
+                varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
+            }
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, !scalar, varying);
+            if (sorted != keys)
+            {
+                memcpy(keys, sorted, total * sizeof(uint64_t));
+            }
+            program->attribute_keys = keys;
+            program->attribute_key_count = (uint32_t)total;
+        }
+    }
+    return valid;
+}
+
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
 
 #include "c_check_x86_diagnostic.c"
+#include "c_check_target_feature.c"
+
+// The entries that cleanups add at most (#147): a CHECK_CONTROL_CLEANUP at each exit from a variable's scope, its end and
+// each jump inside it (whose keywords have the role RETURN), counted from a running count of those tokens, and a RESULT
+// at each return. UINT64_MAX where the count's room can't be taken.
+static uint64_t check_program_cleanup_room(const Parser* parser, const CheckInput* input, Arena* scratch)
+{
+    uint64_t room = 0;
+    if (input->cleanup_count != 0)
+    {
+        const uint64_t mark = scratch->length;
+        const uint32_t count = input->token_count;
+        uint32_t* jumps = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+        room = jumps == NULL ? UINT64_MAX : 0;
+        if (jumps != NULL)
+        {
+            jumps[0] = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                jumps[token + 1] = jumps[token] + (parser->tree.roles[token] == PARSE_ROLE_RETURN);
+            }
+            room = jumps[count];
+            for (uint32_t r = 0; r < input->cleanup_count; r += 1)
+            {
+                const CheckInputCleanup* cleanup = input->cleanups + r;
+                room += cleanup->declaration < cleanup->end && cleanup->end <= count ? (uint64_t)jumps[cleanup->end] - jumps[cleanup->declaration] + 1 : 0;
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return room;
+}
 
 static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
@@ -2304,7 +2676,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
              (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
-    const uint32_t capacity = count * 8 + 16;
+    const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, scratch) : 0;
+    valid = valid && cleanup_room <= UINT32_MAX - ((uint64_t)count * 8 + 16);
+    const uint32_t capacity = valid ? (uint32_t)((uint64_t)count * 8 + 16 + cleanup_room) : 0;
     // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
     // takes the labels and the worklist again from their start, and the controls follow each other. They are in an arena
     // of their own, which check_program unmaps when it returns (#572). In the scratch, their starts and the columns pushed
@@ -2337,11 +2711,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     // Each body's opening brace, in token order: at most one per token, and only the bodies' entries are touched.
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
+    uint32_t* label_positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
-    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
+    // A body's references: its nodes', and its cleanups' functions.
+    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
+    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
+    uint32_t* cleanup_parents = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
     uint8_t* needed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
@@ -2349,9 +2726,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
-            case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
+            case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && openings != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
-            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0;
+            allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0 && (input->cleanup_count == 0 || cleanup_parents != 0);
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -2545,9 +2922,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .region_next = region_next,
         .region_final = BUSTER_CHECK_NONE,
         .addressed = addressed,
+        .cleanup_parents = cleanup_parents,
         .entries = entries,
         .tasks = tasks,
         .labels = labels,
+        .label_positions = label_positions,
         .switches = program->switches,
         .switch_capacity = switch_capacity,
         .capacity = capacity,
@@ -2558,7 +2937,14 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         const uint32_t token = openings[b];
         const uint32_t declaration = input->body_declarations[token];
         const uint32_t start = writer.count;
+        const uint32_t label_first = writer.label_position_count;
         check_control_build(&writer, token);
+        // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
+        for (uint32_t l = label_first; l < writer.label_position_count; l += 1)
+        {
+            const uint32_t label = writer.label_positions[l];
+            writer.label_positions[l] = label < writer.label_count ? writer.labels[label] : BUSTER_CHECK_NONE;
+        }
         CheckProgramBody* body = &program->bodies[program->body_count++];
         *body = (CheckProgramBody)
         {
@@ -2569,6 +2955,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             .count = writer.count - start,
             .entry_count = writer.entry_count,
             .reference_first = reference_count,
+            .label_first = label_first,
+            .label_count = writer.label_position_count - label_first,
         };
         if (options.identifiers != 0)
         {
@@ -2619,10 +3007,16 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         check_program_builtins(&input->graph, nodes, program->builtin_nodes, BUSTER_SCALAR_PATH(options.scalar));
     }
     program->controls = valid && writer.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckControl, writer.count) : 0;
-    valid = valid && (writer.count == 0 || program->controls != 0);
+    program->label_positions = valid && writer.label_position_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, writer.label_position_count) : 0;
+    valid = valid && (writer.count == 0 || program->controls != 0) && (writer.label_position_count == 0 || program->label_positions != 0);
     if (valid)
     {
         program->control_count = writer.count;
+        program->label_position_count = writer.label_position_count;
+        if (writer.label_position_count != 0)
+        {
+            memcpy(program->label_positions, writer.label_positions, (uint64_t)writer.label_position_count * sizeof(uint32_t));
+        }
         program->switch_count = writer.switch_count;
         program->reference_count = reference_count;
         if (writer.count != 0)
@@ -2656,6 +3050,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_attribute_keys(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch))
     {
         program->status = CHECK_PROGRAM_RESOURCE;
     }

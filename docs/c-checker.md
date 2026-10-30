@@ -13,6 +13,12 @@ the semantic driver:
 ./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
 
+The compiler driver accepts `-pipe` in C compilation and preprocessing; it has no effect because its stages run in
+one process. `--version` identifies a development build and prints its target, while `-dumpmachine` prints only the
+target triple. These actions need no source file and accept `-target` or `--target=` for supported x86-64 Linux GNU
+targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
+compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
@@ -540,6 +546,24 @@ mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
 
+Unnamed parameters in definitions (#792) retain their positions in the complete
+function signature. `CheckInput.parameters` stores the first named parameter at
+a body-opening token and a parameter's full-signature ordinal at its name token;
+these token roles are disjoint. `parameter_next` still links only named tokens,
+so binding, prototype-scope restoration and deferred body readers never see an
+invented identifier. The ordinal reuses existing initialized storage: no new
+per-token column, allocation or scan is added, including for ordinary all-named
+functions. K&R identifier lists publish their source-order ordinals too.
+
+Lowering walks the contiguous type signature and consumes a named token only at
+its ordinal. Every parameter gets an incoming ABI local, including unnamed
+integer, SSE, aggregate and stack-passed parameters; only named parameters enter
+the source-object map. This preserves the contiguous incoming-local prefix,
+hidden result pointer, register-exhaustion rollback and fixed variadic offsets.
+Named parameters keep their qualifiers, alignment and K&R entry conversions.
+`test-checker` covers these paths against Clang, including a Clang-built caller
+of a buster definition. This is a correctness change, not a throughput claim.
+
 K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
 decision has it. The declarator records an identifier list's names as the
 definition's parameters, in the list's order, without a prototype
@@ -1065,10 +1089,24 @@ both stop after the first nonzero block/byte. Overlap boundaries reuse the exist
 stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
 constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
-The standalone source bridge refuses a referenced overloadable symbol until
-its ABI symbol name is available, before publishing any Link state. An unused
-overloadable declaration needs no symbol; the lower-level emitter can consume
-an explicitly supplied object-to-symbol map.
+The standalone source bridge and the program emitter share `c_check_mangle.c`
+for selected overloadable symbols (#821). Calls and contextual addresses retain
+the checker's selected object, and each emitted object receives its Itanium ABI
+name once; explicit asm labels override it. Static inline overloads, including
+Clang's `<tgmath.h>` wrappers, follow ordinary reachability and publication.
+Unmarked overload candidates retain C names, and unused declarations need none.
+
+The mangler uses an explicit worklist and canonical type substitutions, with
+scalar/vector substitution lookup. It covers builtin and complex arithmetic,
+qualified pointers, fixed/incomplete arrays, function pointers, vectors,
+atomics, bit-precise integers and file-scope named tags. Signatures requiring
+local/anonymous tag naming, variable array bounds, or an unsupported calling
+convention still fail before publication unless an asm label supplies the ABI
+name. These refusals do not select a different overload or publish an unmangled
+fallback. The focused `test-checker --program-overloads` suite checks independently
+stated encodings, deep signatures, allocation failures, deterministic emission,
+cross-compiler linkage in both directions and the installed `<tgmath.h>` through
+both object and direct-executable driver paths; the full checker suite runs it too.
 
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
@@ -1488,6 +1526,76 @@ What the lowering covers past scalars (#145's programs):
   is refused by name. The overflow builtins take 128-bit operands and
   destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
   in a frame object of its own.
+- **Half-precision values (#136).** `_Float16` and `__fp16` (IEEE binary16)
+  and `__bf16` (bfloat16) are their 16 bits on the integer stack (U16), as
+  clang's IR keeps a `half` or a `bfloat` (`c_check_program_half.c`): their
+  loads, stores, locals, members, globals, static data and vector elements are a
+  16-bit integer's, which keep every bit, a NaN's payload among them. The types
+  have no class of their own, so a place that doesn't take them refuses them by
+  name ("half-precision values here"). What computes with one converts it
+  first. It extends to float exactly: a bfloat16's bits shifted up by 16, a
+  binary16's by F16C's VCVTPH2PS or libgcc's `__extendhfsf2`. A float rounds to
+  one by VCVTPS2PH (after a VMOVD into the register has zeroed the other lanes,
+  so that they raise nothing), by AVX512-BF16's or AVX-NE-CONVERT's
+  VCVTNEPS2BF16 (which flushes subnormals, as clang's code does), or by libgcc's
+  `__truncsfhf2` and `__truncsfbf2`, as LLVM selects them for the function's
+  target. A double and a
+  long double round once, by libgcc's `__truncdfhf2` to `__truncxfbf2`. Integers
+  convert through float, as LLVM converts them, but a 128-bit integer and a
+  binary16 through libgcc's `__floattihf` to `__fixunshfti`, as clang calls
+  them, whose infinities and NaNs saturate as `__fixsfti`'s don't.
+  Arithmetic is clang's excess precision where the unit's target has no native
+  arithmetic of the type (AVX512-FP16 for binary16, AVX10.2 for bfloat16):
+  `+ - * /` and unary `+` and `-` of a chain of them compute in float, and the
+  chain's value rounds once, where it leaves the chain (a store, a cast, a
+  compare, a call's argument, a conditional's or a comma's operand). A compound
+  assignment computes in float and rounds once; into a destination of another
+  type (an integer, a `_Bool`, a bit-field, the other format) it converts the
+  destination's value to float and the result back directly, with no rounding to
+  the half-precision type, as clang's promotion types do
+  (`check_lower_update_through`). `++` and `--` add one in float. With
+  AVX512-FP16, each operator rounds (float's two roundings of one operation
+  round as once). A chain of unary operators alone over its operand
+  is LLVM's fold of it: a binary16's a sign flip per `-`; a bfloat16's an
+  extension, a negation and a rounding where the count of `-` is odd, and the
+  value where it is even; and in a function with `FENV_ACCESS` anywhere in it
+  (clang then emits all of the function's floating operations as constrained
+  intrinsics, outside the pragma's block too) a chain with a `-` is an
+  extension and a rounding, which quiets a signaling NaN and raises
+  `FE_INVALID`. Compares and
+  truth extend their operands and compare floats (truth with +0.0, so that a
+  NaN is true). A call passes and returns one in an XMM register's low 16 bits,
+  and `va_arg` reads one there; structs of them go as the convention classifies
+  them. Their bits move between the stacks by VMOVD where the function's target
+  has AVX, or else through a frame temporary. Constants round in software,
+  correctly (`check_action_half_round`), and the checker folds conversions to
+  the types and negations, unary pluses and compares of their constants, but
+  not their arithmetic, which rounds at run time. An integer constant converted
+  to one rounds once, as clang folds it, where a conversion at run time rounds
+  through float (a `__bf16`'s twice; a conditional's value converts so, as
+  clang's does); but in a function with `FENV_ACCESS` none folds, as none of
+  clang's constrained conversions does, and a float rounds to a `__bf16` by
+  libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
+  unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
+  this type"), an `_Atomic` integer's update by one ("this operation on
+  half-precision values": clang's code adds the operand converted to an
+  unsigned integer there, not as the usual arithmetic conversions compute), a
+  `_BitInt`'s past 128 bits conversions to and from them, and a conversion to
+  `__bf16` with AVX512-BF16 but not AVX-512VL are refused by name. Of clang 23's code it doesn't follow four things: a
+  conversion between `__fp16` and `__bf16` converts the value through float
+  (clang copies the bits one way, and its backend stops the other way); `__bf16`
+  under `FENV_ACCESS` extends by its bits as elsewhere (clang's code calls
+  libgcc's `__extendbfsf2` with its argument in a general register, which
+  libgcc reads from xmm0); and a `__bf16` parameter keeps its bits (clang's code
+  rounds each one on entry, which quiets a signaling NaN, and flushes a
+  subnormal where the rounding is VCVTNEPS2BF16's); and a unary `+` alone in a
+  function with `FENV_ACCESS` is its operand, as elsewhere, where clang's
+  constrained round trip quiets a signaling NaN and raises `FE_INVALID` (the
+  lowering takes a `+` as it takes a cast, with no test of its type in the
+  tasks' loop). `test-checker`'s
+  half-precision programs (`c_check_program_half_test.c`) run every other use
+  above against clang -O0's code for x86-64, x86-64-v3, x86-64-v4, znver5 and
+  sapphirerapids, by both paths, where the host has each one's features.
 - **Vectors (#136).** GNU C's vector types and Clang's extended ones of 4, 8,
   16, 32 or 64 bytes (the intrinsics' `__m64` and `__m128` to `__m512i`, and the
   narrow vectors of their conversions; elements other than `bool`) are Tier 0's
@@ -1648,7 +1756,45 @@ What the lowering covers past scalars (#145's programs):
     KANDN of the mask and 1, as no scalar move of 16 bits is AVX-512F's);
   - the floating reductions of 64 bytes, two rows in clang's order: the
     halvings to 16 bytes, then to the element, the start the last operation's
-    first operand where the reduction has one;
+    first operand where the reduction has one; and AVX512-FP16's of 16, 32 and
+    64 bytes, the halvings to 8 bytes in the first row, whose start and result
+    are their bits in a general register, moved as an unsigned short's to and
+    from the half's U16 (max and min by VMAXSH and VMINSH, which give what
+    clang's compare and VMOVSH give);
+  - XOP's compares (`vpcomb` to `vpcomuq`), XOP's extension's, by the
+    immediate's predicate as clang's code for AVX-512 has them: VPCMP's or
+    VPCMPU's opmask by the same predicate in its own numbering, then VPMOVM2's
+    vector of it;
+  - XOP's own instructions, which clang's code has for every target: VFRCZ's
+    fractions (UNARY), the horizontal sums and differences of adjacent
+    elements into wider ones (`vphaddbw` to `vphaddudq`, `vphsubbw`,
+    `vphsubwd`, `vphsubdq`), the shifts by a vector of counts (`vpshab` to
+    `vpshlq`, BINARY's `swap`: the source in ModRM.rm and the counts in
+    VEX.vvvv, W0's forms, as LLVM emits them), and the multiply-accumulates
+    and VPPERM, whose third vector is the /is4 register (BLENDV's). No host of
+    the tests runs XOP, so `test-x86-intrinsics` compares the compiler's code
+    of their 42 intrinsics with clang -O0's, instruction by instruction
+    (below);
+  - AVX-NE-CONVERT's loads (VECTOR_MEMORY's LOAD, its extension's): a bf16
+    or a half broadcast into every float element (`vbcstnebf162ps`,
+    `vbcstnesh2ps`), and a vector of them's even or odd elements converted to
+    floats (`vcvtneebf162ps` to `vcvtneoph2ps`), at 16 and 32 bytes;
+  - AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products of bytes and words into
+    doublewords (`vpdpbssd` to `vpdpwuuds`, TERNARY's), at 16, 32 and 64 bytes
+    in AVX10.2's EVEX forms, which clang's code of AVX10.2's intrinsics has:
+    the masked ones of 16 and 32 bytes and those of 64. The headers' unmasked
+    ones of 16 and 32 bytes are macros of the builtins, whose VEX forms a
+    function with AVX-VNNI-INT8 or INT16 alone would need; there they are
+    refused by name. No host of the tests runs either extension, and
+    `test-x86-intrinsics` compares them with clang's code too;
+  - SHA512's message steps (BINARY's: forms without vvvv, whose reg is a and
+    the destination, `vsha512msg1`'s b of 16 bytes) and its two rounds
+    (TERNARY's, c of 16 bytes), SM3's message steps (TERNARY's) and AVX10.2's
+    SM4 key expansion and rounds of 64 bytes (BINARY's), each extension's
+    (`X86Extension`'s SHA512, SM3 and SM4), compared with clang's code by
+    `test-x86-intrinsics` as well;
+  - AVX10.2's masked load and store of bf16's first element
+    (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
   - AVX512-FP16's, whose rules name its extension (`CheckX86LowerRule.extensions`),
     which the function's target must have too: the half-precision elements'
@@ -2046,6 +2192,106 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **GNU's `cleanup` attribute** (#147, `c_check_cleanup_input.c`). As clang
+  23's `handleCleanupAttr` checks it: on a block-scope variable of automatic
+  storage (on any other declaration clang warns and ignores it, and the
+  checker ignores it), its argument is an expression whose names are looked
+  up where it is, so the variable isn't visible in its own attribute and an
+  undeclared name is an error wherever the attribute is. It must name a
+  function: an object, a function pointer or an enumerator is "'cleanup'
+  argument 'o' is not a function", and any other expression isn't a function
+  either, an error at its first token without a name. Of those the
+  attribute's reader takes a name in parentheses, whose name it looks up as
+  clang does, and a literal, and refuses the others as malformed (clang puts
+  a binary operator's error at the operator, and an invalid expression's
+  error is its own). A type's name is the parser's error ("unexpected type
+  name"), which skips the rest of the declaration, so the error clang adds
+  after it isn't reported. The function has a prototype of one parameter
+  ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
+  address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
+  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  clang's message without its two types). A pointer of another signedness or
+  to a pointer of other qualifiers, which an assignment only warns about, is
+  an error here. An `__auto_type` variable's parameter type is checked once
+  its initializer gives the type (`check_input_cleanup_deduced`, from the
+  initializer's finish), as clang checks it against the deduced type; the
+  rest, and the variable's record, at its declaration. Another count of
+  arguments is "'cleanup' attribute takes one argument" on a variable it
+  applies to (clang checks the subject first). The last of a declaration's
+  cleanup attributes applies (clang warns about the others; the checker
+  doesn't). A cleanup's error, as the reader's errors but
+  an undeclared name's, ends the unit's checking, where clang goes on to the
+  later declarations' diagnostics (`check_input_diagnostic_recover`). Each
+  applied one is a
+  `CheckInputCleanup` (`CheckInput.cleanups`, in source order: none in a unit
+  without one, which reads no declarator's attributes for it), with its
+  variable's scope: its block's, or its `for` statement's, to the token after
+  the scope's last. A goto or a case must not enter that scope, as a
+  variable-length array's (`check_input_vla_finish`), and a computed goto
+  must neither enter nor leave it: its labels' first and last must be inside
+  the innermost cleanup's scope that holds the goto. The jumps' errors are
+  clang's messages, for variable-length arrays too. A body read on a lane
+  that declares such a variable leaves the unit to source order.
+  The control stream calls the function at each exit from the scope
+  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
+  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
+  switch's token stands for where a break or a continue goes, so that a `for`
+  statement's own variables' cleanups run once, after its end's label), the
+  function's end, and a statement expression's end, after its value is kept
+  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
+  or for a struct or union its bytes copied into a frame object of their own
+  or where the hidden pointer points), then the cleanups, then returns it
+  (`RETURN` of target `BUSTER_CHECK_CONTROL_KEPT`). But a named return value,
+  which clang's code builds in the return slot (Sema's NRVO), is returned
+  after the cleanups, which may write it: a struct or union variable of the
+  function's result type, automatic, neither volatile nor aligned past its
+  type, named alone (in parentheses or not), with every return after its
+  declaration in its scope naming it too (`check_control_named`: what
+  `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
+  lowering's call (`check_lower_cleanup`) takes the variable's address,
+  which makes its local a frame slot, and drops the result. A function of a
+  parameter other than a pointer is refused by name (clang's code bit-casts
+  the address to the `_Bool`, invalid IR that leaves the address's low bit),
+  and so is one whose result is an aggregate (including one returned in
+  registers), a 128-bit integer or a vector. The body's selection references
+  the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
+  54 fixtures' acceptance and first errors with clang's, and run programs of
+  each exit, each class of returned value, the named return value's cases,
+  statement expressions, switches and the functions' kinds natively against
+  clang -O0's build on both paths; `test-checker-driver` compares every error
+  of 39 fixtures with clang's, its place and its message, on both paths
+  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
+  the deferred reader's fixtures and the selection's take a cleanup too.
+- **GNU's `weak`, `constructor` and `destructor` attributes** (#147, the
+  emission's attribute pass). A weak declaration's symbol is weak, defined
+  or undefined; on a declaration without external linkage it is clang's error
+  "weak declaration cannot have internal linkage", at the attribute, and on a
+  typedef it is ignored. One after its entity's definition is dropped, as
+  clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
+  constructors and destructors there (`check_input_attribute_late`, which
+  copies a specifier's list before marking one declarator's). A weak
+  declaration after a use makes the reference weak, as GCC's does; clang's
+  stays global, as its code generation made it at the use (GCC says the
+  behavior is unspecified). A defined function's constructor and destructor
+  each give an entry of the init or fini array: an atom of a pointer to the
+  function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
+  `llvm.global_dtors`, stably by priority from the definitions' order (an
+  attribute's priority, 65535 without one and past it, as
+  `preprocessXXStructorList` clamps it). The latest declaration's attribute
+  applies, and in one declaration the first, as clang takes them. An entry
+  below 65535 has its priority (`link_add_priority`), which the direct path's
+  executable orders and `-c`'s object puts in `.init_array.N` or
+  `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
+  has them. The selection takes constructors and destructors as roots.
+  `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
+  of them by clang and both paths: each symbol's binding must be clang's,
+  both paths' objects the same bytes, and the objects, linked by `cc` alone
+  and with another object's strong definitions, and the direct path's
+  executables, must print what clang's build prints, its constructors' order
+  before `main` and its destructors' after it.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -2413,6 +2659,65 @@ or fixtures were imported. `test-checker-driver` runs the original probes throug
 both checker schedules and, with `--executable`, both production command routes;
 it compares warning decisions, complete messages and presumed line/column pairs
 with Clang, and covers guarded classifier/interval tails and allocation failure.
+
+### Intrinsics no host runs (`test-x86-intrinsics`)
+
+```sh
+./build/compiler test-x86-intrinsics [--clang PATH] [--march CPU] [--executable PATH] [--cases FILE] [--print NAME] [--keep]
+```
+
+The executable programs check a builtin's lowering by running it, which XOP's,
+AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's instructions can't be:
+no host of the tests has them (Zen 5 has none of them).
+`test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
+code of their intrinsics with clang -O0's instead, as the values each
+instruction computes:
+
+- A source includes `<x86intrin.h>` and `<immintrin.h>` and takes each case's
+  address, so that each compiler compiles the case's `always_inline` definition
+  out of line, as `--lower-all` of `main.c` lowers the headers' definitions:
+  clang with `-O0 -march=znver5 -c` (`--march` names another CPU), this
+  executable (or `--executable`'s) by both paths, whose objects must be the
+  same bytes.
+- Each case's function in each object is decoded (`x86_64_disassembler.c`)
+  and followed from its entry. Every general register's, vector register's,
+  opmask's and stack byte's value is an expression of the arguments' bytes:
+  the argument registers (`g0` to `g5`, `v0` to `v7`) and stack slots (`s0`
+  on) at the entry, constants (the object's data, which relocations name), and
+  a node for each instruction that isn't a move, of its form (VEX's and EVEX's
+  encodings of one instruction are one), its immediate and its operands'
+  values, a masked one's a select of its mask, its value and what it keeps.
+  What an instruction reads and writes is its form's effects in
+  `x86_semantics.c`; a form without them fails the case and is listed. Moves,
+  pushes, pops and stack slots carry values, and the trace follows jumps in a
+  function and calls of the object's other functions (the compiler's code calls
+  the definitions clang inlines).
+- A case's result (its return register's bytes of the intrinsic's type) and
+  its stores through pointers must be the same expressions in both objects.
+- Controls: intrinsics that the executable programs run already, unmasked,
+  merged and zeroed (`_mm_add_epi32`, `_mm256_dpbusd_avx_epi32` and their masked
+  forms), and two XOP compares, whose code is AVX-512's, must agree too, and so
+  must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
+  a result stored through a pointer; and one intrinsic called with its two
+  operands in each order must give different expressions in each object.
+- The cases, 145 of them: the intrinsics of XOP's own instructions (VFRCZ's
+  fractions, the horizontal sums and differences, the multiply-accumulates,
+  VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
+  AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
+  masked, merged and zeroed, at each width, and SHA512's, SM3's and SM4's.
+
+The comparison is of the instructions' data flow, not of their meaning: code
+that computes the same values with other instructions differs, and a case would
+then need another check. Rules broken on purpose, a shift's source and counts
+swapped, a saturating multiply-accumulate for a wrapping one, an unsigned
+horizontal sum for a signed one and a packed fraction for a scalar one, each
+make their own case differ and no other.
+
+`--cases FILE` takes other cases, a line each: `X`, `Y` or `Z` for a vector
+result of 16, 32 or 64 bytes, `I` or `L` for an integer of 4 or 8, `V` for
+none, then the intrinsic's name. `--print NAME` prints each object's trace of a
+case, every record it followed with the value it made. The files are removed
+unless `--keep` or a failure.
 
 ## The constraint catalogue
 
@@ -3087,3 +3392,33 @@ first error's line, on both paths, and its programs (`local-labels`,
 `auto-type`) run natively against clang -O0's code. `test-checker-driver`
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
+
+## Ignorable and unsupported pragmas
+
+The checker consumes retained pragmas after their existing semantic handlers. An
+unknown directive is not an unsupported C construct: it is ignored, with
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
+Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
+`#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
+is not an implementation of COFF linker directives or automatic library loading.
+GCC optimization hints such as `ivdep`, `push_options`, `pop_options`, and
+`optimize` use the unknown-pragma policy, as in the Clang oracle.
+
+OpenMP directives are ignored when OpenMP was not requested, with the separately
+enabled `-Wsource-uses-openmp` / `-Wopenmp` policy. Effective driver option order,
+not a definition of `_OPENMP`, determines whether OpenMP was requested. Any
+active `-fopenmp` request, including alternate runtime selections, is refused
+until execution semantics are implemented; it must not silently produce serial
+code. A subsequent `-fno-openmp` restores the ignore behavior.
+
+Known unsupported semantic effects remain hard, named errors, including
+`redefine_extname`, `scalar_storage_order`, `GCC target`, and layout-changing
+`align=packed`. Warning suppression cannot approve these directives. Already
+supported directives keep their original handlers and syntax validation.
+
+Directive warnings are sparse lexical facts with independent preprocessing
+source coordinates. Command-line policy, source-ordered diagnostic push/pop,
+macro invocation locations, system headers, parser recovery, and EOF directives
+use the same warning machinery. A warning promoted to an error prevents object
+emission. Neither classification nor warning policy changes `-E` output.

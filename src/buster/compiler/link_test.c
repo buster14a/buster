@@ -1852,28 +1852,31 @@ static bool link_test_named(const Link* link, SymbolId symbol, const char* text)
 }
 
 // Stand-ins for what a program that calls libc imports: write, strlen, __errno_location and environ. They use no TLS,
-// since the program's TLS block is FS's while it runs.
+// since the program's TLS block is FS's while it runs, and so take no sanitizer's instrumentation, which reads its
+// thread's state through FS.
 static char** link_test_environ;
 static int32_t link_test_errno;
 
-static int64_t link_test_write(int64_t descriptor, const void* bytes, uint64_t count)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION int64_t link_test_write(int64_t descriptor, const void* bytes, uint64_t count)
 {
     int64_t result = 1;
     __asm__ volatile("syscall" : "+a"(result) : "D"(descriptor), "S"(bytes), "d"(count) : "rcx", "r11", "memory");
     return result;
 }
 
-static uint64_t link_test_strlen(const char* text)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION uint64_t link_test_strlen(const char* text)
 {
     uint64_t result = 0;
     while (text[result] != 0)
     {
+        // Keeps clang from making the loop a call of libc's strlen, which a sanitizer intercepts.
+        __asm__("" : "+r"(result));
         result += 1;
     }
     return result;
 }
 
-static int32_t* link_test_errno_location(void)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION int32_t* link_test_errno_location(void)
 {
     return &link_test_errno;
 }
@@ -2211,9 +2214,9 @@ static void link_test_start(const LinkTestImage* image, int output)
 // p_align, which points at itself, and its start keeps p_vaddr's remainder modulo p_align), makes the thread pointer
 // FS's base, and calls the init array's entries, main and the fini array's entries in reverse, each with argc, argv
 // and envp (one argument and one variable); then exits with main's status. Once FS is the program's, it calls nothing
-// that uses TLS.
+// that uses TLS, and takes no sanitizer's instrumentation, which would.
 static void link_test_start_libc(const LinkTestImage* image, int output) __attribute__((noreturn));
-static void link_test_start_libc(const LinkTestImage* image, int output)
+static BUSTER_NO_SANITIZER_INSTRUMENTATION void link_test_start_libc(const LinkTestImage* image, int output)
 {
     typedef int32_t LinkTestMain(int32_t argc, char** argv, char** envp);
     typedef void LinkTestHook(int32_t argc, char** argv, char** envp);

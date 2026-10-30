@@ -3179,6 +3179,12 @@ static X86Architecture predefines_x86_architecture(const char* name)
 // The clang feature behind each of x86_target.c's extensions (X86Extension).
 static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
     [X86_EXTENSION_AVX512FP16] = "avx512fp16",
+    [X86_EXTENSION_AVXNECONVERT] = "avxneconvert",
+    [X86_EXTENSION_AVX10_2] = "avx10.2",
+    [X86_EXTENSION_XOP] = "xop",
+    [X86_EXTENSION_SHA512] = "sha512",
+    [X86_EXTENSION_SM3] = "sm3",
+    [X86_EXTENSION_SM4] = "sm4",
 };
 
 // Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and

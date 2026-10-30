@@ -165,7 +165,8 @@ static uint8_t* tier1_frame_execution_caller(Tier1FrameExecutionTest* test, cons
     return tier1_frame_execution_load(test, &buffer, 1);
 }
 
-static uint64_t tier1_frame_execution_invoke(const uint8_t* entry)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) uint64_t tier1_frame_execution_invoke(const uint8_t* entry)
 {
     uint64_t (*function)(void);
     memcpy(&function, &entry, sizeof(function));

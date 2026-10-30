@@ -184,6 +184,14 @@ struct CheckInputAttribute
     bool ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
+    // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
+    uint32_t cleanup_function;
+    // cleanup's argument is an expression other than a name, which clang's handleCleanupAttr says isn't a function: a
+    // name in parentheses or a literal (check_input_attribute_validate).
+    bool cleanup_expression;
+    // cleanup has another count of arguments than one, an error only on a variable it applies to, as clang checks the
+    // subject first (check_input_cleanup_declaration).
+    bool cleanup_count;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
@@ -682,7 +690,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     valid &= begin == attribute->argument_first || begin < attribute->argument_end;
     count += begin < attribute->argument_end;
     attribute->argument_count = count;
-    valid &= count >= minimum && (maximum == 255 || count <= maximum);
+    // Whether a cleanup attribute's count is an error depends on its declaration's subject.
+    attribute->cleanup_count = valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP && count != 1;
+    valid &= attribute->cleanup_count || (count >= minimum && (maximum == 255 || count <= maximum));
     CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
     if (valid && count > 1)
     {
@@ -706,7 +716,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             attribute->argument_ends[argument] = end;
             begin = end + 1;
         }
-        const bool identifier = attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER || (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
+        // cleanup's argument is an expression, which its own check below reads.
+        const bool identifier = (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER && attribute->kind != CHECK_ATTRIBUTE_CLEANUP) ||
+                                (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
         const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST;
         if (valid && identifier)
         {
@@ -727,6 +739,39 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         {
             // The shared ICE reader validates expression semantics once the declaration's scope is available.
             valid = first < end;
+        }
+    }
+    if (valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->cleanup_count)
+    {
+        // clang parses the argument as an expression, whose names it looks up where it is, on ignored subjects and in
+        // earlier duplicate attributes too: an undeclared one is the bindings' error. Its handleCleanupAttr takes a
+        // function's name; any other expression isn't a function. Of those, a name in parentheses and a literal are taken
+        // (cleanup_expression: the error is at the expression's first token, as clang's); any other is refused here.
+        uint32_t token = attribute->argument_first;
+        uint32_t last = attribute->argument_end - 1;
+        while (token < last && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN && parser->tree.parents[token] == last)
+        {
+            token += 1;
+            last -= 1;
+        }
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool named = token == last && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] != 0;
+        const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
+        const uint32_t name = named ? parser->tokens.names[token] : 0;
+        const uint32_t handle = named ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+        valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
+        reader->output->resource |= named && !valid;
+        error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
+        attribute->cleanup_function = handle != 0 && token == attribute->argument_first ? reader->bindings.declaration[handle - 1] + 1u : 0;
+        attribute->cleanup_expression = valid && (literal || (handle != 0 && token != attribute->argument_first));
+        if (valid && handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
+        {
+            // Keep the typed rejection as the one primary; the generic malformed-attribute fallback must not add one.
+            attributes->error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
+            attributes->error_first = token;
+            attributes->error_end = token + 1u;
+            check_input_report(reader, token, CHECK_INPUT_CLEANUP_FUNCTION);
+            valid = false;
         }
     }
     if (valid && attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)
@@ -753,6 +798,18 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : error);
     }
     return valid;
+}
+
+// Declaration attributes clang drops when first added after a definition. Unscoped [[noreturn]] and [[_Noreturn]]
+// are declaration attributes; GNU noreturn (including [[gnu::noreturn]]) changes the function type instead, and C's
+// _Noreturn keyword is explicitly allowed after a definition. A scoped list item keeps first at its namespace and
+// name_token at its name, so standard syntax alone does not identify the declaration attribute.
+static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute)
+{
+    const CheckInputAttributeKind kind = attribute->kind;
+    const bool standard_noreturn = kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword &&
+                                  attribute->first == attribute->name_token;
+    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR || standard_noreturn;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
@@ -808,6 +865,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
+            reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
+            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
+            reader->late_attributes |= check_input_attribute_late_kind(&attribute);
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)
@@ -1246,6 +1306,34 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         }
     }
     return valid;
+}
+
+// The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
+// declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
+// weak, constructor and destructor, which then make no symbol weak or array entry (#147), and unscoped standard
+// noreturn, which must not stop code generation's target-feature walk (#775). An earlier accepted noreturn remains in
+// that earlier declaration's records. A specifier's list is each declarator's: one declarator's is copied before its
+// records are marked.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
+    const bool after = attributes != 0 && reader->definition_seen[previous] && !reader->defined[token];
+    bool late = false;
+    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    {
+        late |= !attributes->records[i].ignored && check_input_attribute_late_kind(&attributes->records[i]);
+    }
+    CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
+    const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
+    reader->output->resource |= late && !copied;
+    for (uint32_t i = 0; copied && i < copy->count; i += 1)
+    {
+        copy->records[i].ignored |= check_input_attribute_late_kind(&copy->records[i]);
+    }
+    if (copied)
+    {
+        reader->output->attributes[token] = copy;
+    }
 }
 
 // Run after a full declarator is available, including a function-pointer typedef. Prefix attributes cannot perform

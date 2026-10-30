@@ -20,6 +20,7 @@ static bool check_input_builtin_constant_prepare(CheckInputReader* reader, uint3
     {
         const uint32_t index = reader->cached_constant_count++;
         reader->cached_constants[index] = value;
+        check_input_rare_claim(reader, &reader->constant_present[close]);
         reader->constant_present[close] = index + 1;
         for (uint32_t token = keyword; token <= close; token += 1)
         {
@@ -54,6 +55,7 @@ static bool check_input_selection_prepare(CheckInputReader* reader, uint32_t key
             {
                 const bool fallback = parser->tokens.kinds[association] == PARSE_KIND_DEFAULT;
                 valid = !fallback || association + 1 == colon;
+                check_input_rare_claim(reader, &reader->selection_type_ends[association]);
                 reader->selection_type_ends[association] = fallback ? 0 : colon;
                 check_input_visit(reader, association, BUSTER_CHECK_RESOLVE_QUERY);
                 for (uint32_t token = association; token < colon; token += 1)
@@ -94,6 +96,7 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
     const bool valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
     if (valid)
     {
+        check_input_rare_claim(reader, &reader->selection_types[end]);
         reader->selection_types[end] = type;
     }
     else

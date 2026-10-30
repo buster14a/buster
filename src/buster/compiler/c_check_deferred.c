@@ -46,9 +46,17 @@
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
 // The bodies' tokens that pay for a lane past the first, beyond their critical path (check_deferred_bodies): this many,
 // and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
-// grows with the top level (docs/c-deferred-bodies.md, "How many lanes").
+// grows with the top level (docs/c-deferred-bodies.md, "How many lanes" and "The rare columns' pages by the unit's
+// size").
 #define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
 #define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
+// The unit's tokens from which check_input_run's arena of rare columns is base pages where more than one lane reads the
+// bodies (check_deferred_shared, #764, #847). In a smaller unit the top level's walk faults in most of the arena's huge
+// pages, the bodies' lanes write into them at no cost, and the phases after the merge read the huge zero page where
+// nothing wrote; a lane claims each of the others before its first write into it (check_input_rare_claim), so that no
+// two lanes clear one at once. In a larger one, the top level's walk would clear a huge page for each 2 MB its few
+// entries fall in.
+#define BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS 48640
 // A lane's arenas (CheckDeferredArenas), in this order in one mapping: its reader's records, its scratch and its
 // bodies' results of 64 GB each, its copy of the top level's table of 16 GB, the table's index of 4 GB and its per-name
 // columns of 4 GB.
@@ -308,6 +316,18 @@ struct CheckDeferred
     // The lanes the bodies ran on, as the first records it: `lanes`, or fewer when the bodies' tokens pay for fewer or the
     // bodies are fewer.
     uint32_t active;
+    // The lanes the rule gives the bodies, worked out from the parser's tree before the top level's walk
+    // (check_input_deferred), which `active` must be: check_input_run reserves its arena of rare columns by whether they
+    // are more than one in a large unit (check_deferred_shared).
+    uint32_t planned;
+    // The unit has BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS tokens or more (or `base_page_tokens`, for the tests and
+    // benchmark-checker-deferred, where it isn't 0): where more than one lane reads, the rare columns in base pages.
+    bool large;
+    uint32_t base_page_tokens;
+    // Whether the lanes claimed the rare columns' 2 MB regions before their first writes into them, as in a unit that
+    // isn't large read on more than one lane (check_input_rare_claim), and how many regions they claimed.
+    bool claiming;
+    uint32_t claimed;
     uint64_t top_ns;
     uint64_t environment_ns;
     uint64_t lanes_ns;
@@ -2249,6 +2269,26 @@ static void check_deferred_primary_part(CheckDeferred* deferred)
     }
 }
 
+// The lanes the bodies take: one, and one more per `lane_tokens` of the bodies' tokens (`total` of them in `bodies`)
+// beyond their critical path, the larger of the largest body and twice the second largest, no more than the reader's
+// lanes or the bodies (check_deferred_bodies says why).
+static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
+{
+    const uint64_t second = (uint64_t)second_body * 2;
+    const uint64_t path = largest > second ? largest : second;
+    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / lane_tokens;
+    const uint32_t most = deferred->lanes < bodies ? deferred->lanes : bodies;
+    return paid < most ? (uint32_t)paid : most;
+}
+
+// Whether check_input_run's arena of rare columns is base pages throughout: where the rule gives a large unit's bodies
+// more than one lane, which write their entries of the token columns at once (#764, #847).
+static bool check_deferred_shared(const CheckDeferred* deferred)
+{
+    return deferred->planned > 1 && deferred->large;
+}
+
+
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
@@ -2345,15 +2385,21 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint32_t count = reader->parser->tokens.count;
     deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
     deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
-    const uint64_t second = (uint64_t)deferred->second_body * 2;
-    const uint64_t path = deferred->largest_body > second ? deferred->largest_body : second;
-    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / deferred->lane_tokens;
-    const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
-    const uint32_t active = paid < most ? (uint32_t)paid : most;
+    const uint32_t active = check_deferred_rule(deferred, total, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
     deferred->parts = valid && deferred->body_count != 0 ? parts_by_cost(deferred->costs, deferred->body_count, active, deferred->boundaries, deferred->order) : 0;
     check_deferred_primary_part(deferred);
+    // Where more than one lane will write the rare columns and they are huge pages, a claim word per 2 MB region of their
+    // token columns, which the lanes' readers take from this one's (check_input_rare_claim).
+    const uint64_t regions = reader->rare_end > reader->rare_begin ? (((uintptr_t)reader->rare_end - 1) >> 21) - ((uintptr_t)reader->rare_begin >> 21) + 1 : 0;
+    uint32_t* const claims = valid && active > 1 && !input->rare_columns_shared && regions != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, regions) : 0;
+    if (claims != 0)
+    {
+        memset(claims, 0, regions * sizeof(uint32_t));
+    }
+    reader->rare_claims = claims;
+    deferred->claiming = claims != 0;
     // The lanes' arenas, on this thread: those of a lane the state hasn't run reserved, the others taken back. A lane
     // without them takes its parts' bodies for source order's (check_deferred_lane_prepare).
     const uint64_t arenas_begin = deferred->timing ? check_deferred_now() : 0;
@@ -2370,6 +2416,11 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
+    reader->rare_claims = 0;
+    for (uint64_t region = 0; claims != 0 && region < regions; region += 1)
+    {
+        deferred->claimed += claims[region] == 2;
+    }
     deferred->largest_lane = valid && deferred->body_count != 0 ? deferred->results[deferred->largest_index].lane : 0;
     // The first lane arrives after lane_run's dispatch, and the last one after the others' wake-up; a lane that didn't
     // run arrived nowhere (0).
@@ -2476,6 +2527,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const bool late_first = deferred->late_first;
     const bool every_lane = deferred->every_lane;
     const bool scalar_merge = deferred->scalar_merge;
+    const uint32_t base_page_tokens = deferred->base_page_tokens;
     const CheckDeferredMemory memory = deferred->memory;
     *deferred = (CheckDeferred){
         .memory = memory,
@@ -2485,6 +2537,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .cpus = cpus,
         .every_lane = every_lane,
         .scalar_merge = scalar_merge,
+        .base_page_tokens = base_page_tokens,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
         .late_first = late_first,
@@ -2508,6 +2561,9 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     bool valid = mask != 0 && types->types.count == BUSTER_TYPE_BUILTIN_COUNT && types->tags.count == 1 && types->changes == 0 && lanes != 0 &&
                  lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     uint32_t bodies = 0;
+    uint64_t body_tokens = 0;
+    uint32_t largest = 0;
+    uint32_t second = 0;
     if (valid)
     {
         memset(mask, 0, (uint64_t)count + 1);
@@ -2516,12 +2572,22 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
             const uint32_t close = parser->tree.parents[token];
             if (parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
             {
-                memset(mask + token, 1, (uint64_t)close - token + 1);
+                const uint32_t tokens = close - token + 1;
+                memset(mask + token, 1, tokens);
                 bodies += 1;
+                body_tokens += tokens;
+                second = tokens > largest ? largest : tokens > second ? tokens : second;
+                largest = tokens > largest ? tokens : largest;
                 token = close;
             }
         }
     }
+    // The lanes the rule will give the bodies, from the counts check_deferred_bodies takes again from the top level's
+    // cuts, before check_input_run reserves its arena of rare columns by them and the unit's size (check_deferred_shared).
+    const uint32_t top_tokens = count > body_tokens ? (uint32_t)(count - body_tokens) : 0;
+    deferred->large = count >= (deferred->base_page_tokens != 0 ? deferred->base_page_tokens : BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS);
+    deferred->planned = check_deferred_rule(deferred, body_tokens, bodies, largest, second,
+                                            BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS);
     deferred->cuts = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredCut, (uint64_t)bodies + 1) : 0;
     deferred->body_capacity = bodies;
     valid = valid && deferred->cuts != 0;

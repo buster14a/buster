@@ -54,9 +54,12 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             valid = close > token && close < end;
             if (valid)
             {
+                check_input_rare_claim(reader, &reader->designator_indices[token]);
                 reader->designator_indices[token] = close;
+                check_input_rare_claim(reader, &reader->designator_valid[token]);
                 reader->designator_valid[token] = 2;
                 check_input_visit(reader, token, BUSTER_CHECK_RESOLVE_QUERY);
+                check_input_rare_claim(reader, &reader->designator_ranges[token]);
                 reader->designator_ranges[token] = range;
                 memset(reader->ignored + token, 1, close - token + 1);
                 token = close + 1;
@@ -99,7 +102,9 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     if (valid && (incomplete || check_const_eligible(reader->types, type) || check_input_auto_type(type)))
     {
+        check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
+        check_input_rare_claim(reader, &reader->initializer_finish_next[declaration]);
         reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
         reader->initializer_finish_heads[end] = declaration;
         check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
@@ -129,13 +134,19 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     valid = valid && (range == close || (check_input_constant(reader, range + 1, close, &high) && high >= index));
     if (valid)
     {
+        check_input_rare_claim(reader, &reader->designator_indices[token]);
         reader->designator_indices[token] = (uint64_t)index;
+        check_input_rare_claim(reader, &reader->designator_valid[token]);
         reader->designator_valid[token] = 1;
+        check_input_rare_claim(reader, &reader->designator_tokens[range]);
         reader->designator_tokens[range] = token + 1;
         if (range != close)
         {
+            check_input_rare_claim(reader, &reader->designator_indices[range]);
             reader->designator_indices[range] = (uint64_t)high;
+            check_input_rare_claim(reader, &reader->designator_valid[range]);
             reader->designator_valid[range] = 1;
+            check_input_rare_claim(reader, &reader->designator_tokens[close]);
             reader->designator_tokens[close] = range + 1;
         }
     }
@@ -249,7 +260,7 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     if (valid && check_input_auto_type(type))
     {
         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
-        valid = type != 0;
+        valid = type != 0 && check_input_cleanup_deduced(reader, declaration, type);
     }
     if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {

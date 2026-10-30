@@ -216,7 +216,8 @@ static bool x86_decode_form_supported(uint32_t row)
     uint32_t index;
     const uint32_t map = form->opcode_bytes != 0 ? x86_decode_form_map(form, &index) : 0;
     const bool vectors = x86_form_has_class(form, BUSTER_X86_CLASS_XMM) || x86_form_has_class(form, BUSTER_X86_CLASS_YMM) || x86_form_has_class(form, BUSTER_X86_CLASS_ZMM);
-    const bool apx = form->family == BUSTER_X86_FAMILY_EVEX && (map >= 4 || (!vectors && !(form->evex & BUSTER_X86_EVEX_MASK)));
+    // EVEX's maps 4 and 7 are APX's and USER_MSR's; maps 5 and 6 are AVX512-FP16's and AVX10.2's vectors.
+    const bool apx = form->family == BUSTER_X86_FAMILY_EVEX && (map == 4 || map >= 7 || (!vectors && !(form->evex & BUSTER_X86_EVEX_MASK)));
     // UD0/UD1's operand-less spellings omit ModRM in the encoder catalogue. Raw decoding uses their ModRM forms.
     return form->opcode_bytes != 0 && x86_form_exists_in_mode(row, X86_ENCODER_MODE_64) &&
            !x86_form_has_prefix(form, 0xd5) && map < BUSTER_X86_DECODE_MAPS &&
@@ -668,7 +669,7 @@ static X86DecodeStatus x86_decode_header(const uint8_t* bytes, uint32_t size, ui
                     header->b = (~p0 & 0x20) >> 2;
                     if (vector_bytes == 4)
                     {
-                        status = (p0 & 8) != 0 || (middle & 4) == 0 || map >= 4 ? X86_DECODE_UNSUPPORTED : status;
+                        status = (p0 & 8) != 0 || (middle & 4) == 0 || map == 4 || map == 7 ? X86_DECODE_UNSUPPORTED : status;
                         header->r |= ~p0 & 16;
                         header->high_rm = (~p0 & 0x40) >> 2;
                         header->high_index = (~p1 & 8) << 1;

@@ -27,16 +27,18 @@ use the same implementation as the command.
 
 This is a catalogue-based 64-bit decoder, not a complete x86 disassembler.
 Supported rows are the encoder catalogue's 64-bit legacy, x87, MMX, SSE, VEX,
-XOP and EVEX maps 1–3, with 64-bit or 32-bit addresses, FS/GS, immediates,
-relative branches, SIB/VSIB, masks, zeroing, broadcasts and embedded rounding.
-APX/REX2, EVEX maps 4 and above, and 16/32-bit execution modes are excluded.
+XOP and EVEX maps 1–3, 5 and 6 (AVX512-FP16's and AVX10.2's), with 64-bit or
+32-bit addresses, FS/GS, immediates, relative branches, SIB/VSIB, masks,
+zeroing, broadcasts and embedded rounding. APX/REX2, EVEX maps 4 and 7 (APX's
+and USER_MSR's), and 16/32-bit execution modes are excluded.
 An instruction's presence does not imply that the Zen 5 host can execute it.
 APX BMI/NF encodings in EVEX maps 1–3 are also excluded. UD0 and UD1 use the
 ModRM interpretation; their operand-less two-byte catalogue aliases are not
 decoded as complete instructions. A two-byte `0f ff` or `0f b9` is truncated.
-The current catalogue has 5,807 admitted rows and 11,609 valid row/address-size
-combinations. This pass completes verification of that contract; it does not
-add APX, the other excluded EVEX maps, or another execution mode.
+The current catalogue has 6,655 admitted rows and 13,305 valid row/address-size
+combinations, 848 rows of EVEX maps 5 and 6 among them, which
+`test-x86-intrinsics` decodes in clang's code of AVX10.2's intrinsics. It
+doesn't add APX, the other excluded EVEX maps, or another execution mode.
 
 Legacy prefixes must match a catalogue sequence, followed by at most one REX.
 FS/GS and address-size overrides are extracted separately. Repeated overrides,

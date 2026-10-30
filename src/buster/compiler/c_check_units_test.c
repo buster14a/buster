@@ -39,6 +39,11 @@
 //   first duplicate in the units' order (beta, which d3.c defines again, though alpha's first definition comes first)
 //   and the first definition's unit; and units of a pointer whose addend doesn't fit 32 bits (a wide addend) and of no
 //   symbols, by the same commands into the same bytes, a program in which the pointer holds its addend.
+// - A few large units (#777): big.c, of BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS functions, a table of them and their
+//   sum, beside small.c's main, which checks the sum against the test's own: with -c by --lanes 8 and --shared-parts
+//   (its emission pauses after each part it takes itself), each object its own alone, and the six lanes that take no
+//   unit take parts of big.c's functions, by the command's report; linked by --lanes 1, by 8 and by the scalar path on
+//   8, the same bytes, a program whose sum is the test's, and on 8 lanes the parts taken so.
 // - Reservations: two units that include one header, with -c by --lanes 1, in children whose address space may grow a
 //   page less than a run reached (check_units_test_limits, as test-parser fails its driver's): the run's last
 //   reservation or mapping fails, then, a page below the peak that run reached, the one before it, down to the first.
@@ -66,6 +71,8 @@
 #define BUSTER_CHECK_UNITS_TEST_SYNTH_UNITS 12
 #define BUSTER_CHECK_UNITS_TEST_SYNTH_FUNCTIONS 30
 #define BUSTER_CHECK_UNITS_TEST_FUNCTIONS 4
+// The large unit's functions in the test of a few large units (#777): enough tokens for 8 function lanes.
+#define BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS 800
 
 typedef struct CheckUnitsTestTally CheckUnitsTestTally;
 struct CheckUnitsTestTally
@@ -114,8 +121,13 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
         };
         const int out = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 &&
-            (!unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0))
+#if BUSTER_SANITIZER_RESOURCES
+        // The detectors start threads of their own: their builds inject the lanes' start failure instead.
+        const bool limited = !unstarted || setenv("BUSTER_TEST_NO_LANE_THREADS", "1", 1) == 0;
+#else
+        const bool limited = !unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
+        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 && limited)
         {
             alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
             execvp(arguments[0], arguments);
@@ -995,43 +1007,196 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
     printf("  merge: duplicates and a wide addend by %u commands, the twin's\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
 }
 
+// A few large units (see the file's comment), in a directory of its own under `directory`: the shared parts' count from
+// the command's report, or 0 without one.
+static uint64_t check_units_test_shared_count(const char* errors)
+{
+    static const char prefix[] = "shared parts: ";
+    const char* line = errors != NULL ? strstr(errors, prefix) : NULL;
+    return line != NULL ? strtoull(line + strlen(prefix), NULL, 10) : 0;
+}
+
+static void check_units_test_shared(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    char shared_directory[PATH_MAX];
+    char path[PATH_MAX];
+    char errors_path[PATH_MAX];
+    snprintf(shared_directory, sizeof(shared_directory), "%s/shared", directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", shared_directory);
+    bool written = mkdir(shared_directory, 0755) == 0;
+    // big.c: BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS functions, a table of them and their sum; small.c: main, which
+    // checks the sum against the test's own.
+    FILE* big = NULL;
+    if (written)
+    {
+        snprintf(path, sizeof(path), "%s/big.c", shared_directory);
+        big = fopen(path, "w");
+        written = big != NULL;
+    }
+    int64_t expected = 0;
+    for (uint32_t f = 0; written && f < BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS; f += 1)
+    {
+        fprintf(big, "int big_%u(int x)\n{\n    int s = x + %u;\n    for (int i = 0; i < 4; i += 1)\n    {\n        s = (s * 3 + i) & 0xffff;\n    }\n    return s;\n}\n", f, f);
+        int64_t s = 3 + (int64_t)f;
+        for (int64_t i = 0; i < 4; i += 1)
+        {
+            s = (s * 3 + i) & 0xffff;
+        }
+        expected += s;
+    }
+    if (written)
+    {
+        fprintf(big, "static int (*const big_table[%u])(int) = {\n", BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS);
+        for (uint32_t f = 0; f < BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS; f += 1)
+        {
+            fprintf(big, "    big_%u,\n", f);
+        }
+        fprintf(big, "};\nint big_sum(int x)\n{\n    int total = 0;\n    for (int i = 0; i < %u; i += 1)\n    {\n        total += big_table[i](x);\n    }\n    return total;\n}\n",
+                BUSTER_CHECK_UNITS_TEST_SHARED_FUNCTIONS);
+    }
+    written = big != NULL && fclose(big) == 0 && written;
+    char small[256];
+    snprintf(small, sizeof(small), "int big_sum(int x);\nint main(void)\n{\n    return big_sum(3) == %lld ? 0 : 1;\n}\n", (long long)expected);
+    snprintf(path, sizeof(path), "%s/small.c", shared_directory);
+    written = written && parse_test_write(path, small, strlen(small));
+    check_units_test_expect(tally, written, "write the few large units", shared_directory);
+    // Each unit's object alone, by its default lanes.
+    char* alone_big[] = { (char*)executable, "-c", "-o", "alone_big.o", "big.c", NULL };
+    char* alone_small[] = { (char*)executable, "-c", "-o", "alone_small.o", "small.c", NULL };
+    const bool alone = written && check_units_test_run(shared_directory, alone_big, "/dev/null", errors_path, false) == 0 &&
+                       check_units_test_run(shared_directory, alone_small, "/dev/null", errors_path, false) == 0;
+    check_units_test_expect(tally, alone, "each of the few large units writes its object alone", shared_directory);
+    // Both at once with -c by 8 lanes, six of which take no unit: their objects their own alone, and the large one's
+    // functions' parts taken by those lanes too.
+    char* together[] = { (char*)executable, "-c", "--lanes", "8", "--shared-parts", "big.c", "small.c", NULL };
+    const int status = alone ? check_units_test_run(shared_directory, together, "/dev/null", errors_path, false) : -1;
+    uint64_t length = 0;
+    char* text = check_units_test_read(errors_path, &length);
+    const uint64_t taken = check_units_test_shared_count(text);
+    free(text);
+    check_units_test_expect(tally, status == 0 && taken != 0, "-c of the few large units by 8 lanes: the lanes without units take the large one's parts",
+                            shared_directory);
+    const char* const objects[][2] = { { "big.o", "alone_big.o" }, { "small.o", "alone_small.o" } };
+    for (uint32_t o = 0; status == 0 && o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+    {
+        char first[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", shared_directory, objects[o][0]);
+        snprintf(first, sizeof(first), "%s/%s", shared_directory, objects[o][1]);
+        check_units_test_expect(tally, check_test_driver_same_files(path, first), "-c of the few large units by 8 lanes: each object its own alone", objects[o][0]);
+    }
+    // Linked by one lane (no board), by 8 and by the scalar path on 8: the same bytes, which run.
+    static const char* const options[][5] = {
+        { "--lanes", "1", NULL },
+        { "--lanes", "8", "--shared-parts", NULL },
+        { "--scalar", "--lanes", "8", "--shared-parts", NULL },
+    };
+    for (uint32_t o = 0; alone && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        char output[32];
+        snprintf(output, sizeof(output), "shared_%u", o);
+        char* arguments[16];
+        uint32_t used = 0;
+        arguments[used++] = (char*)executable;
+        for (uint32_t i = 0; options[o][i] != NULL; i += 1)
+        {
+            arguments[used++] = (char*)options[o][i];
+        }
+        arguments[used++] = "-o";
+        arguments[used++] = output;
+        arguments[used++] = "big.c";
+        arguments[used++] = "small.c";
+        arguments[used] = NULL;
+        const int linked = check_units_test_run(shared_directory, arguments, "/dev/null", errors_path, false);
+        text = check_units_test_read(errors_path, &length);
+        const uint64_t link_taken = check_units_test_shared_count(text);
+        free(text);
+        char run[48];
+        snprintf(run, sizeof(run), "./%s", output);
+        char* run_arguments[] = { run, NULL };
+        const int ran = linked == 0 ? check_units_test_run(shared_directory, run_arguments, "/dev/null", "/dev/null", false) : -1;
+        char detail[64];
+        snprintf(detail, sizeof(detail), "linked into %s", output);
+        check_units_test_expect(tally, linked == 0 && ran == 0 && (o == 0 || link_taken != 0),
+                                "the few large units linked: the program's sum, and on 8 lanes the lanes without units take parts", detail);
+        char first[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", shared_directory, output);
+        snprintf(first, sizeof(first), "%s/shared_0", shared_directory);
+        check_units_test_expect(tally, o == 0 || check_test_driver_same_files(path, first), "the few large units linked: the same bytes by every lane count and path",
+                                detail);
+    }
+    printf("  shared parts: %llu of the large unit's taken by lanes without units, its objects and executables one lane's\n", (unsigned long long)taken);
+}
+
 // The most runs check_units_test_limits makes, past which its sweep has gone wrong.
 #define BUSTER_CHECK_UNITS_TEST_LIMIT_RUNS 10000
 
 // A run of the driver's `arguments` (run_check_command's) in a child whose address space may grow `limit` bytes past
 // `base` (this process's), in `directory` and with its standard error into `capture`: its exit status (-1 if it didn't
 // report), how far past `base` its address space grew, and whether it left the address space and the descriptors as
-// they were. The child writes them to `shared`, a page both see.
+// they were. The child writes them to `shared`, a page both see. With `warm`, run in the parent before its baseline is
+// frozen, through this same command/observation frame; the caller restores the parent's limits, directory and stderr.
+// Keep the frame out of line so a direct warmup cannot use a shallower call path than the measured child.
 typedef struct CheckUnitsTestProbe CheckUnitsTestProbe;
 struct CheckUnitsTestProbe
 {
     int status;
     uint64_t peak;
+    uint64_t before_size;
+    uint64_t after_command_size;
+    uint64_t after_size;
+    uint64_t before_stack;
+    uint64_t after_stack;
+    uint64_t before_data;
+    uint64_t after_data;
+    int before_descriptor;
+    int after_descriptor;
     bool clean;
 };
 
-static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
-                                                  CheckUnitsTestProbe* shared)
+static __attribute__((noinline)) CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, const char* directory, int capture, uint64_t base, uint64_t limit,
+                                                                         bool warm, CheckUnitsTestProbe* shared)
 {
     *shared = (CheckUnitsTestProbe){ .status = -1 };
     fflush(stdout);
     fflush(stderr);
-    const pid_t child = fork();
+    const pid_t child = warm ? 0 : fork();
     if (child == 0)
     {
-        const struct rlimit core = { 0 };
+        struct rlimit core = { 0 };
         struct rlimit space;
         bool limited = getrlimit(RLIMIT_AS, &space) == 0 && base + limit <= space.rlim_max;
+        // A child can drop its hard core limit; the parent must keep it so the saved limit can be restored.
+        if (warm)
+        {
+            limited = limited && getrlimit(RLIMIT_CORE, &core) == 0;
+            core.rlim_cur = 0;
+        }
         space.rlim_cur = base + limit;
         limited = limited && chdir(directory) == 0 && dup2(capture, 2) == 2 && setrlimit(RLIMIT_CORE, &core) == 0 && setrlimit(RLIMIT_AS, &space) == 0;
-        alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        if (!warm)
+        {
+            alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
+        }
         const int before = parse_test_lowest_descriptor();
+        // These observations can themselves change stack use; keep the whole-process cleanup equality unchanged.
+        shared->before_stack = parse_test_status_bytes("VmStk:");
+        shared->before_data = parse_test_status_bytes("VmData:");
+        shared->before_size = parse_test_status_bytes("VmSize:");
         const int status = limited ? run_check_command(count, arguments, true) : -1;
+        shared->after_command_size = parse_test_status_bytes("VmSize:");
         const int after = parse_test_lowest_descriptor();
         shared->peak = parse_test_status_bytes("VmPeak:") - base;
-        shared->clean = parse_test_status_bytes("VmSize:") == base && after == before;
+        shared->after_size = parse_test_status_bytes("VmSize:");
+        shared->after_stack = parse_test_status_bytes("VmStk:");
+        shared->after_data = parse_test_status_bytes("VmData:");
+        shared->before_descriptor = before;
+        shared->after_descriptor = after;
+        shared->clean = shared->after_size == base && after == before;
         shared->status = status;
-        _exit(0);
+        if (!warm)
+        {
+            _exit(0);
+        }
     }
     int child_status = 0;
     pid_t waited = child;
@@ -1039,14 +1204,15 @@ static CheckUnitsTestProbe check_units_test_probe(char** arguments, int count, c
     {
     }
     CheckUnitsTestProbe result = *shared;
-    result.status = child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0 ? result.status : -1;
+    result.status = warm || (child > 0 && waited == child && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0) ? result.status : -1;
     return result;
 }
 
 // Every reservation and mapping of two units' -c by one lane failed in turn (see the file's comment), in a directory of
-// its own under `directory`. The command runs once in this process first, as the children's runs do, so that what only
-// a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's already.
-static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
+// its own under `directory`. The command and observations run once through the probe in this process first, so that
+// what only a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's
+// already. The parent baseline is frozen only after that same-frame warmup and restoration of the parent's state.
+static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
 {
     static const char header[] = "int limits_square(int value);\n";
     static const char caller[] = "#include \"square.h\"\nint main(void)\n{\n    return limits_square(3) == 9 ? 0 : 1;\n}\n";
@@ -1072,7 +1238,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     // The jobserver's tokens, which MAKEFLAGS would give the run, aren't what this checks.
     const char* makeflags = getenv("MAKEFLAGS");
     char* saved_makeflags = makeflags != NULL ? strdup(makeflags) : NULL;
-    unsetenv("MAKEFLAGS");
+    // Leave the environment untouched if its value could not be saved; do not run an unisolated warmup.
+    const bool isolated_makeflags = (makeflags == NULL || saved_makeflags != NULL) && unsetenv("MAKEFLAGS") == 0;
     char* arguments[] = { "--lanes", "1", "-c", "caller.c", "callee.c", NULL };
     const int count = (int)BUSTER_ARRAY_LENGTH(arguments) - 1;
     char text[1024];
@@ -1080,14 +1247,20 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     int status = -1;
     const int saved_directory = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     const int saved_errors = dup(2);
-    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && chdir(limits) == 0)
+    struct rlimit saved_space = { 0 };
+    struct rlimit saved_core = { 0 };
+    const bool saved_limits = getrlimit(RLIMIT_AS, &saved_space) == 0 && getrlimit(RLIMIT_CORE, &saved_core) == 0;
+    if (capture >= 0 && shared != MAP_FAILED && saved_directory >= 0 && saved_errors >= 0 && saved_limits && isolated_makeflags)
     {
-        if (dup2(capture, 2) == 2)
-        {
-            status = run_check_command(count, arguments, true);
-            dup2(saved_errors, 2);
-        }
-        status = fchdir(saved_directory) == 0 ? status : -1;
+        const uint64_t warm_base = parse_test_status_bytes("VmSize:");
+        const CheckUnitsTestProbe warmed = warm_base != 0 ? check_units_test_probe(arguments, count, limits, capture, warm_base, 1ull << 46, true, shared) :
+                                                         (CheckUnitsTestProbe){ .status = -1 };
+        // Attempt every restoration even if an earlier one failed. The warmup must not calibrate over a leaked descriptor.
+        const bool restored_space = setrlimit(RLIMIT_AS, &saved_space) == 0;
+        const bool restored_core = setrlimit(RLIMIT_CORE, &saved_core) == 0;
+        const bool restored_errors = dup2(saved_errors, 2) == 2;
+        const bool restored_directory = fchdir(saved_directory) == 0;
+        status = restored_space && restored_core && restored_errors && restored_directory && warmed.before_descriptor == warmed.after_descriptor ? warmed.status : -1;
         parse_test_read_capture(capture, text, sizeof(text));
     }
     if (saved_errors >= 0)
@@ -1110,11 +1283,17 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     }
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     const uint64_t base = parse_test_status_bytes("VmSize:");
-    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, shared) : (CheckUnitsTestProbe){ 0 };
+    const CheckUnitsTestProbe whole = status == 0 ? check_units_test_probe(arguments, count, limits, capture, base, 1ull << 46, false, shared) : (CheckUnitsTestProbe){ 0 };
     parse_test_read_capture(capture, text, sizeof(text));
     char detail[1400];
-    snprintf(detail, sizeof(detail), "status %d, peak %llu, %s, printed \"%s\"", whole.status, (unsigned long long)whole.peak,
+    snprintf(detail, sizeof(detail), "status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+             whole.status, (unsigned long long)whole.peak, (unsigned long long)whole.before_size, (unsigned long long)whole.after_size,
+             (unsigned long long)base, whole.before_descriptor, whole.after_descriptor,
              whole.clean ? "clean" : "left memory or a descriptor behind", text);
+    fprintf(stderr, "  reservations' baseline: %s\n", detail);
+    fprintf(stderr, "  reservations' baseline observations: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+            (unsigned long long)whole.after_command_size, (unsigned long long)whole.before_stack, (unsigned long long)whole.after_stack,
+            (unsigned long long)whole.before_data, (unsigned long long)whole.after_data);
     bool released = whole.status == 0 && whole.clean && whole.peak != 0 && base != 0 && text[0] == 0 && rename(objects[0], wholes[0]) == 0 &&
                     rename(objects[1], wholes[1]) == 0;
     check_units_test_expect(tally, released, "the reservations' units compile in a child, leaving its address space as it was", detail);
@@ -1130,15 +1309,23 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
         const uint64_t limit = peak - page;
         unlink(objects[0]);
         unlink(objects[1]);
-        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, shared);
+        const CheckUnitsTestProbe probe = check_units_test_probe(arguments, count, limits, capture, base, limit, false, shared);
         parse_test_read_capture(capture, text, sizeof(text));
         const bool failed = probe.status == 1 && strstr(text, "error: ") != NULL;
         const bool fallen_back = probe.status == 0 && text[0] == 0 && check_test_driver_same_files(objects[0], wholes[0]) &&
                                  check_test_driver_same_files(objects[1], wholes[1]);
         released = (failed || fallen_back) && probe.peak <= limit && probe.clean;
-        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, %s, printed \"%s\"", (unsigned long long)limit, probe.status,
-                 (unsigned long long)probe.peak, probe.clean ? "clean" : "left memory or a descriptor behind", text);
+        snprintf(detail, sizeof(detail), "with %llu bytes of address space: status %d, peak %llu, VmSize %llu -> %llu (parent %llu), descriptors %d -> %d, %s, printed \"%s\"",
+                 (unsigned long long)limit, probe.status, (unsigned long long)probe.peak, (unsigned long long)probe.before_size,
+                 (unsigned long long)probe.after_size, (unsigned long long)base, probe.before_descriptor, probe.after_descriptor,
+                 probe.clean ? "clean" : "left memory or a descriptor behind", text);
         check_units_test_expect(tally, released, "a run whose reservation failed says why or writes the same objects, and releases what it reserved", detail);
+        if (!released)
+        {
+            fprintf(stderr, "  reservations' observations with %llu bytes: VmSize after command %llu, VmStk %llu -> %llu, VmData %llu -> %llu\n",
+                    (unsigned long long)limit, (unsigned long long)probe.after_command_size, (unsigned long long)probe.before_stack,
+                    (unsigned long long)probe.after_stack, (unsigned long long)probe.before_data, (unsigned long long)probe.after_data);
+        }
         // A lane's setup that failed fails both units, with its message.
         setups += strstr(text, "can't reserve the lane's memory") != NULL;
         fallbacks += fallen_back;
@@ -1148,7 +1335,8 @@ static void check_units_test_limits(CheckUnitsTestTally* tally, const char* dire
     check_units_test_expect(tally, !released || (peak == 0 && setups != 0), "every reservation failed in turn, a lane's setup's among them", limits);
     if (saved_makeflags != NULL)
     {
-        setenv("MAKEFLAGS", saved_makeflags, 1);
+        const bool restored_makeflags = setenv("MAKEFLAGS", saved_makeflags, 1) == 0;
+        check_units_test_expect(tally, restored_makeflags, "restore the reservations' caller's MAKEFLAGS", limits);
         free(saved_makeflags);
     }
     if (shared != MAP_FAILED)
@@ -1571,7 +1759,14 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
+        check_units_test_shared(&tally, executable, directory);
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer maps shadow for each mapping a run makes and keeps it, so a run neither returns the address space
+        // to its base nor fails at a limit of its own reservations. The other detectors' builds and plain ones check them.
+        printf("  reservations: not failed in turn under ThreadSanitizer, whose shadow grows the address space\n");
+#else
         check_units_test_limits(&tally, directory);
+#endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
     }

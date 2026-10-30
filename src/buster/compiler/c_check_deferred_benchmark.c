@@ -4,7 +4,8 @@
 // benchmark-checker-deferred: what #113's deferred reader (c_check_deferred.c) costs against source order's check_input,
 // with its position checks apart, beside the parser's time on the same unit.
 //
-//   ./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [preprocessor options] file...
+//   ./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--base-page-tokens N]
+//                                               [preprocessor options] file...
 //
 // Each file is preprocessed once. Each pass then parses it (parse_translation_unit, the vector path), and checks it with
 // check_input, and with check_input_deferred on one lane and on up to --lanes (8), each time into the same arenas taken
@@ -21,10 +22,14 @@
 // that took a part). Then what a lane costs, in nanoseconds: its copy of the reader; lane_run's dispatch, from its call
 // to the first lane's arrival; the others' wake-up, from the first lane's arrival to the last one's, which on one lane
 // is none; and the lanes' arenas before they start, reserved or taken back (`arenas`); and in
-// how many passes the first lane read the largest body (`largest_first`). The unit's line gives its bodies' tokens, the
-// largest body's and the largest of the others' (`second_body`), the top level's tokens and the bodies' tokens that pay
-// for a lane by the reader's rule (`lane_tokens`). A unit the deferred reader leaves to source order is said so. This
-// measures the reader (check_input) alone, not the graph's checking after it.
+// how many passes the first lane read the largest body (`largest_first`); and where more than one lane read the bodies
+// of a unit that isn't large, how many 2 MB regions of the rare columns' huge pages the lanes claimed (`claimed`,
+// check_input_rare_claim). The unit's line gives its bodies' tokens, the
+// largest body's and the largest of the others' (`second_body`), the top level's tokens, the bodies' tokens that pay
+// for a lane by the reader's rule (`lane_tokens`) and whether the unit is large (CheckDeferred.large): from
+// --base-page-tokens N tokens on, which for the measurements of #847 takes the place of
+// BUSTER_CHECK_DEFERRED_BASE_PAGE_TOKENS (0, the default, keeps it). A unit the deferred reader leaves to source order is
+// said so. This measures the reader (check_input) alone, not the graph's checking after it.
 //
 // With --cpus (a comma-separated list of at least --lanes CPUs), the command pins itself to the first, where the parse,
 // source order and the top level run, and its lanes to the list in order, in a team of its own that every run reuses.
@@ -64,6 +69,7 @@ struct CheckDeferredSample
     uint64_t dispatch[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t wake[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t arenas[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    uint64_t claimed[BUSTER_CHECK_SOURCE_MAX_PASSES];
     // The passes in which the first lane read the largest body (the first of the largest in source order).
     uint32_t largest_first;
 };
@@ -71,7 +77,7 @@ struct CheckDeferredSample
 // One check of the parsed unit: source order's (lanes 0) or the deferred reader's, into `arenas` (types, its index,
 // the input and scratch), taken back first. Whether it ran, with the deferred reader's state in `deferred`.
 static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp, Arena* arenas, uint32_t lanes, const uint32_t* cpus, bool every_lane,
-                                         CheckDeferred* deferred, uint64_t* nanoseconds)
+                                         uint32_t base_page_tokens, CheckDeferred* deferred, uint64_t* nanoseconds)
 {
     for (uint32_t i = 0; i < 4; i += 1)
     {
@@ -97,6 +103,7 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
         deferred->timing = true;
         deferred->cpus = cpus;
         deferred->every_lane = every_lane;
+        deferred->base_page_tokens = base_page_tokens;
         check_input_deferred(deferred, &input, parser, pp, &types, arenas + 2, arenas + 3, lanes, CHECK_INPUT_BINDINGS_DEFAULT);
     }
     *nanoseconds = check_source_time() - begin;
@@ -104,7 +111,7 @@ static bool check_deferred_benchmark_run(const Parser* parser, Preprocessor* pp,
 }
 
 static bool check_deferred_benchmark_file(const char* file, char** options, uint32_t option_count, uint64_t passes, uint32_t lanes, const uint32_t* cpus,
-                                          bool every_lane, bool warm)
+                                          bool every_lane, bool warm, uint32_t base_page_tokens)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -140,6 +147,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     uint32_t second_body = 0;
     uint32_t top_tokens = 0;
     uint32_t lane_tokens = 0;
+    bool large = false;
     uint64_t history_reads = 0;
     bool merged = true;
     const char* reason = 0;
@@ -155,7 +163,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
             const uint32_t way = check_deferred_benchmark_orders[pass % BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS][step];
             uint64_t time = 0;
             const uint32_t run_lanes = way == 0 ? 0 : way == 1 ? 1 : lanes;
-            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, &deferred, &time);
+            valid = check_deferred_benchmark_run(&parser, &pp, arenas, run_lanes, cpus, every_lane, base_page_tokens, &deferred, &time);
             if (way == 0)
             {
                 sequential[pass] = time;
@@ -184,6 +192,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 sample->dispatch[pass] = deferred.dispatch_ns;
                 sample->wake[pass] = deferred.wake_ns;
                 sample->arenas[pass] = deferred.arenas_ns;
+                sample->claimed[pass] = deferred.claimed;
                 sample->largest_first += deferred.largest_lane == 0;
                 merged &= !deferred.unsupported;
                 reason = deferred.unsupported ? deferred.reason : reason;
@@ -193,6 +202,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 second_body = deferred.second_body;
                 top_tokens = deferred.top_tokens;
                 lane_tokens = deferred.lane_tokens;
+                large = deferred.large;
                 history_reads = deferred.history_reads;
                 if (!warm)
                 {
@@ -208,8 +218,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         const double tokens = pp.output.count != 0 ? (double)pp.output.count : 1.0;
         const double per_body = bodies != 0 ? (double)bodies : 1.0;
         printf("checker-deferred: file=%s tokens=%u bodies=%" PRIu64 " body_tokens=%" PRIu64 " largest_body=%u second_body=%u top_tokens=%u"
-               " lane_tokens=%u history_reads=%" PRIu64 " merged=%s%s%s%s parse=%.2f source_order=%.2f ns/token\n", file, pp.output.count, bodies,
-               body_tokens, largest_body, second_body, top_tokens, lane_tokens, history_reads, merged ? "yes" : "no",
+               " lane_tokens=%u large=%s history_reads=%" PRIu64 " merged=%s%s%s%s parse=%.2f source_order=%.2f ns/token\n", file, pp.output.count, bodies,
+               body_tokens, largest_body, second_body, top_tokens, lane_tokens, large ? "yes" : "no", history_reads, merged ? "yes" : "no",
                merged ? "" : " (", merged ? "" : (reason != 0 ? reason : "unknown"), merged ? "" : ")", (double)check_source_median(parses, count) / tokens,
                (double)check_source_median(sequential, count) / tokens);
         for (uint32_t way = 0; way < 2; way += 1)
@@ -217,7 +227,7 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
             const CheckDeferredSample* sample = samples + way;
             printf("checker-deferred:   lanes=%u active=%" PRIu64 " copies=%" PRIu64 " whole=%.2f top=%.2f environment=%.3f walks=%.2f positions=%.3f"
                    " lanes_span=%.2f merge=%.2f rest=%.2f ns/token, positions=%.1f ns/body, copy=%" PRIu64 " ns/lane, dispatch=%" PRIu64 " ns,"
-                   " wake=%" PRIu64 " ns, arenas=%" PRIu64 " ns, largest_first=%u/%u\n",
+                   " wake=%" PRIu64 " ns, arenas=%" PRIu64 " ns, claimed=%" PRIu64 ", largest_first=%u/%u\n",
                    way == 0 ? 1 : lanes, check_source_median(sample->active, count), check_source_median(sample->copies, count),
                    (double)check_source_median(sample->whole, count) / tokens,
                    (double)check_source_median(sample->top, count) / tokens, (double)check_source_median(sample->environment, count) / tokens,
@@ -225,7 +235,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                    (double)check_source_median(sample->lanes, count) / tokens, (double)check_source_median(sample->merge, count) / tokens,
                    (double)check_source_median(sample->rest, count) / tokens, (double)check_source_median(sample->positions, count) / per_body,
                    check_source_median(sample->copy, count), check_source_median(sample->dispatch, count), check_source_median(sample->wake, count),
-                   check_source_median(sample->arenas, count), sample->largest_first, count);
+                   check_source_median(sample->arenas, count), check_source_median(sample->claimed, count),
+                   sample->largest_first, count);
             printf("checker-deferred:   lanes=%u merge's parts: replay=%.3f tables=%.3f events=%.3f tags=%.3f pass=%.3f rest=%.3f ns/token\n",
                    way == 0 ? 1 : lanes, (double)check_source_median(sample->merge_parts[0], count) / tokens,
                    (double)check_source_median(sample->merge_parts[1], count) / tokens, (double)check_source_median(sample->merge_parts[2], count) / tokens,
@@ -278,6 +289,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
 {
     uint64_t passes = 24;
     uint64_t lanes = 8;
+    uint64_t base_page_tokens = 0;
     bool every_lane = false;
     bool warm = false;
     uint32_t cpus[BUSTER_CHECK_DEFERRED_MAX_LANES];
@@ -293,6 +305,11 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
         if (strcmp(arguments[i], "--passes") == 0 || strcmp(arguments[i], "--lanes") == 0)
         {
             valid = i + 1 < count && check_corpus_number(arguments[i + 1], strcmp(arguments[i], "--passes") == 0 ? &passes : &lanes);
+            i += 1;
+        }
+        else if (strcmp(arguments[i], "--base-page-tokens") == 0)
+        {
+            valid = i + 1 < count && check_corpus_number(arguments[i + 1], &base_page_tokens) && base_page_tokens <= UINT32_MAX;
             i += 1;
         }
         else if (strcmp(arguments[i], "--every-lane") == 0)
@@ -338,7 +355,7 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     bool measured = valid && (!cpus_given || pinned);
     for (uint32_t i = 0; measured && i < file_count; i += 1)
     {
-        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm);
+        measured &= check_deferred_benchmark_file(files[i], options, option_count, passes, (uint32_t)lanes, pinned ? cpus : 0, every_lane, warm, (uint32_t)base_page_tokens);
         fflush(stdout);
     }
     if (pinned)
@@ -347,7 +364,8 @@ static int run_checker_deferred_benchmark(int count, char** arguments)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [preprocessor options] file...\n"
+        fprintf(stderr, "usage: compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--base-page-tokens N]"
+                        " [preprocessor options] file...\n"
                         "  --passes: a multiple of %u, the readings' orders, up to %u (24 by default)\n",
                         BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS, BUSTER_CHECK_SOURCE_MAX_PASSES / BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS * BUSTER_CHECK_DEFERRED_BENCHMARK_ORDERS);
     }

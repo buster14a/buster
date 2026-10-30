@@ -137,8 +137,17 @@ struct CheckCorpusOracle
 // every first error, including an included header's, and treats process/I/O failures separately from rejection.
 // One invocation owns one translation unit. Included files may themselves be corpus inputs, #line may rename a
 // location, and fatal include errors can survive -ferror-limit=1; none can misattribute acceptance to another file.
+// What check_corpus_clang_phase runs clang for: -fsyntax-only, -E, or -c, whose code generation reports errors of its
+// own (#775's checks of target features). -E's text and -c's object go to /dev/null.
+typedef enum CheckCorpusClangMode
+{
+    CHECK_CORPUS_CLANG_SYNTAX,
+    CHECK_CORPUS_CLANG_PREPROCESS,
+    CHECK_CORPUS_CLANG_COMPILE,
+} CheckCorpusClangMode;
+
 static bool check_corpus_clang_phase(const char* executable, const char* const* arguments, uint32_t argument_count,
-                                     const char* path, bool preprocess, CheckCorpusOracle* result)
+                                     const char* path, CheckCorpusClangMode mode, CheckCorpusOracle* result)
 {
     *result = (CheckCorpusOracle){ 0 };
     char** argv = calloc((size_t)argument_count + 12, sizeof(char*));
@@ -155,13 +164,13 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
             argv[used++] = (char*)arguments[argument];
             result->suppress_warnings |= strcmp(arguments[argument], "-w") == 0;
         }
-        argv[used++] = preprocess ? "-E" : "-fsyntax-only";
+        argv[used++] = mode == CHECK_CORPUS_CLANG_PREPROCESS ? "-E" : mode == CHECK_CORPUS_CLANG_COMPILE ? "-c" : "-fsyntax-only";
         argv[used++] = "-fno-caret-diagnostics";
         argv[used++] = "-fno-color-diagnostics";
         argv[used++] = "-ferror-limit=1";
-        if (preprocess)
+        if (mode != CHECK_CORPUS_CLANG_SYNTAX)
         {
-            // Only its diagnostics are read: the text goes to /dev/null, as it did through standard output.
+            // Only its diagnostics are read: the text or the object goes to /dev/null, as -E's did through standard output.
             argv[used++] = "-o";
             argv[used++] = "/dev/null";
         }
@@ -230,7 +239,14 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
 static bool check_corpus_clang_file(const char* executable, const char* const* arguments, uint32_t argument_count,
                                     const char* path, CheckCorpusOracle* result)
 {
-    return check_corpus_clang_phase(executable, arguments, argument_count, path, false, result);
+    return check_corpus_clang_phase(executable, arguments, argument_count, path, CHECK_CORPUS_CLANG_SYNTAX, result);
+}
+
+// clang -c's first error, its code generation's among them (#775).
+static __attribute__((unused)) bool check_corpus_clang_compile(const char* executable, const char* const* arguments, uint32_t argument_count, const char* path,
+                                                               CheckCorpusOracle* result)
+{
+    return check_corpus_clang_phase(executable, arguments, argument_count, path, CHECK_CORPUS_CLANG_COMPILE, result);
 }
 
 static bool check_corpus_clang(const char* executable, const char* const* arguments, uint32_t argument_count,
@@ -627,7 +643,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
 // check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
 // with check_corpus_deferred_scalar_merge, its merge finds the columns' entries by its scalar twin
-// (CheckDeferred.scalar_merge);
+// (CheckDeferred.scalar_merge); with check_corpus_deferred_base_page_tokens, a unit of that many tokens or more is large
+// (CheckDeferred.base_page_tokens);
 // and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
 // may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
 // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
@@ -643,6 +660,7 @@ static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
 static bool check_corpus_deferred_scalar_merge;
+static uint32_t check_corpus_deferred_base_page_tokens;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
 static uint32_t check_corpus_deferred_reread;
@@ -733,6 +751,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
                         .scalar_merge = check_corpus_deferred_scalar_merge,
+                        .base_page_tokens = check_corpus_deferred_base_page_tokens,
                         .timing = check_corpus_deferred_timing,
                         .cpus = check_corpus_deferred_cpus,
                     };
@@ -2174,6 +2193,15 @@ struct CheckCorpusOutcome
     uint64_t deferred_parts;
     uint32_t deferred_lane_tokens;
     uint32_t deferred_active;
+    uint32_t deferred_planned;
+    // Whether the deferred path's arena of rare columns was base pages throughout, and whether the scalar or the vector
+    // path's was (CheckInput.rare_columns_shared); whether the unit was large (CheckDeferred.large), and whether the
+    // lanes claimed the rare columns' 2 MB regions, and how many (CheckDeferred.claiming and .claimed).
+    bool deferred_shared;
+    bool source_shared;
+    bool deferred_large;
+    bool deferred_claiming;
+    uint32_t deferred_claimed;
     uint64_t deferred_copies;
     uint64_t deferred_lanes_ns;
     uint64_t deferred_dispatch_ns;
@@ -2245,6 +2273,12 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_parts = outcome->deferred ? paths[2].deferred->parts : 0;
     outcome->deferred_lane_tokens = outcome->deferred ? paths[2].deferred->lane_tokens : 0;
     outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
+    outcome->deferred_planned = outcome->deferred ? paths[2].deferred->planned : 0;
+    outcome->deferred_shared = outcome->deferred && paths[2].input.rare_columns_shared;
+    outcome->source_shared = paths[0].input.rare_columns_shared || paths[1].input.rare_columns_shared;
+    outcome->deferred_large = outcome->deferred && paths[2].deferred->large;
+    outcome->deferred_claiming = outcome->deferred && paths[2].deferred->claiming;
+    outcome->deferred_claimed = outcome->deferred ? paths[2].deferred->claimed : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;
     outcome->deferred_dispatch_ns = outcome->deferred ? paths[2].deferred->dispatch_ns : 0;
@@ -2405,7 +2439,7 @@ static bool check_corpus_files(CheckCorpusTally* tally, char** files, uint32_t c
             CheckCorpusOracle preprocessing = { 0 };
             if (rejections && outcomes[i].rejected)
             {
-                valid = check_corpus_clang_phase(clang, arguments, argument_count, file, true, &preprocessing);
+                valid = check_corpus_clang_phase(clang, arguments, argument_count, file, CHECK_CORPUS_CLANG_PREPROCESS, &preprocessing);
             }
             const bool excluded = rejections ? !outcomes[i].rejected || preprocessing.rejected : selection != 0 && outcomes[i].rejected;
             if (valid && rejections)
@@ -2612,7 +2646,7 @@ static bool check_corpus_oracle_controls(const char* directory, const char* clan
     CheckCorpusOracle preprocessing[BUSTER_ARRAY_LENGTH(sources)];
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
-        valid = check_corpus_clang_phase(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths[i], true, preprocessing + i);
+        valid = check_corpus_clang_phase(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths[i], CHECK_CORPUS_CLANG_PREPROCESS, preprocessing + i);
     }
     valid = valid && !preprocessing[0].rejected && !preprocessing[2].rejected && !preprocessing[3].rejected && !preprocessing[5].rejected &&
             preprocessing[1].rejected && preprocessing[4].rejected && preprocessing[1].line == 2 && preprocessing[4].line == 2 &&

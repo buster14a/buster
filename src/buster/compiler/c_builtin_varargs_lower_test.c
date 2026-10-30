@@ -404,7 +404,8 @@ static uint32_t cbuiltin_va_lower_test_class_index(uint32_t class)
     return result;
 }
 
-static void cbuiltin_va_lower_test_read(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t class, void* list, uint64_t expected, uint32_t item)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_va_lower_test_read(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t class, void* list, uint64_t expected, uint32_t item)
 {
     uint8_t bytes[24];
     uint8_t expected_bytes[24];
@@ -453,7 +454,8 @@ static uint32_t cbuiltin_va_lower_test_oracle(va_list list, uint32_t class, uint
     return result;
 }
 
-static __attribute__((noinline)) void cbuiltin_va_lower_test_clang(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t shape, double named, ...)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower_test_clang(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path, uint32_t shape, double named, ...)
 {
     va_list generated;
     va_list oracle;
@@ -469,6 +471,8 @@ static __attribute__((noinline)) void cbuiltin_va_lower_test_clang(CBuiltinVaLow
                                : shape == 1 ? (i < 10 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64) : (i < 10 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64);
     }
     AbiVaList copied;
+    // Generated stores do not update MSan shadow; a nonmatching fill still exposes missing field writes.
+    memset(&copied, 0xa5, sizeof(copied));
     uint64_t (*copy)(void*, void*) = (uint64_t (*)(void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_COPY].bytes;
     copy(&copied, generated);
     cbuiltin_va_lower_test_expect(tally, cbuiltin_va_lower_test_same_list(&copied, generated), "va_copy fields", shape);
@@ -612,7 +616,8 @@ struct CBuiltinVaLowerTestRun
 
 // The run's sequence's arguments, read by the helpers from a list Clang started, each against Clang's va_arg of a copy:
 // an aggregate's data bytes copied out exactly, nothing around them written, and both cursors alike after it.
-static __attribute__((noinline)) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower_test_clang_shapes(CBuiltinVaLowerTestRun* run, double named, ...)
 {
     va_list generated;
     va_list oracle;
@@ -693,7 +698,8 @@ static void cbuiltin_va_lower_test_real_shapes(CBuiltinVaLowerTestTally* tally, 
     }
 }
 
-static void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, const CBuiltinVaLowerTestNative* native, uint32_t path)
 {
     uint8_t save[BUSTER_ABI_SAVE_AREA_BYTES] __attribute__((aligned(16)));
     uint64_t overflow[8] __attribute__((aligned(16)));
@@ -709,6 +715,8 @@ static void cbuiltin_va_lower_test_synthetic(CBuiltinVaLowerTestTally* tally, co
     for (uint32_t spelling = 0; spelling < 2; spelling += 1)
     {
         AbiVaList list;
+        // Define the shadow before generated va_start, without supplying any expected field value.
+        memset(&list, 0xa5, sizeof(list));
         uint64_t (*start)(void*, void*, void*) = (uint64_t (*)(void*, void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_START + spelling].bytes;
         start(&list, save, overflow);
         const AbiVaList expected =

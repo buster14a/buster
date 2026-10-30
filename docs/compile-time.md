@@ -1,5 +1,12 @@
 # Where sqlite3.c's compile time goes
 
+**RSS accounting correction (#865).** The historical RSS figures below retain
+their original `getrusage`/`wait4` scope; they have not been remeasured. Those
+peaks can include the launcher's pre-exec address space. This does not establish
+that any particular historical run was contaminated. Current `--time-stages`
+uses a separate approximate post-exec peak, while subprocess peaks are labelled
+`wait4`. See the [RSS contract and regression](peak-rss.md).
+
 This is [#518](https://github.com/buster14a/buster/issues/518)'s attribution of
 `compiler -c sqlite3.c` on the Ryzen 7 9700X, against tcc: how long the whole
 process takes, which of the compiler's stages take that time, and which

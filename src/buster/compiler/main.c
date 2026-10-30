@@ -324,6 +324,9 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
+// The compiler's code of the headers' x86 intrinsics against clang -O0's, for the test-x86-intrinsics command: the objects
+// decoded by the disassembler and followed by the effects above.
+#include "buster/compiler/x86_intrinsics_test.c"
 
 // Experimental postallocation scheduling over resolved machine-record effects and measured operand costs.
 #include "buster/compiler/tier1_schedule.c"
@@ -617,6 +620,81 @@ int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
 
+// Driver information actions may follow other options, but a value such as `-o --version` is not an action.
+// A null status only tests for an action, so implicit assembly dispatch can leave information actions to the driver.
+// Explicit command names are dispatched first. -dumpmachine wins when both actions are present.
+static bool main_information(int count, char** arguments, int* status)
+{
+    const char* target = NULL;
+    bool missing_target = false;
+    bool version = false;
+    bool machine = false;
+    for (int i = 0; i < count; i += 1)
+    {
+        const char* argument = arguments[i];
+        if (strcmp(argument, "--") == 0)
+        {
+            break;
+        }
+        if (strcmp(argument, "-target") == 0)
+        {
+            missing_target = i + 1 >= count;
+            target = !missing_target ? arguments[++i] : NULL;
+        }
+        else if (strncmp(argument, "--target=", 9) == 0)
+        {
+            target = argument + 9;
+            missing_target = false;
+        }
+        else if (strcmp(argument, "--version") == 0)
+        {
+            version = true;
+        }
+        else if (strcmp(argument, "-dumpmachine") == 0)
+        {
+            machine = true;
+        }
+        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 ||
+                  strcmp(argument, "--worker-budget") == 0 || strcmp(argument, "--id-order") == 0 ||
+                  strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0) && i + 1 < count)
+        {
+            i += 1;
+        }
+    }
+    const bool found = version || machine;
+    if (found && status != NULL)
+    {
+        if (missing_target || (target != NULL && !predefines_target_valid(target)))
+        {
+            fprintf(stderr, "error: unsupported or missing target for driver information\n");
+            *status = 1;
+        }
+        else
+        {
+            const PredefinesOptions options = { .target = target };
+            const size_t length = strlen(target != NULL ? target : BUSTER_CLANG_DEFAULT_TARGET);
+            char* triple = length <= SIZE_MAX - 32 ? malloc(length + 32) : NULL;
+            if (triple == NULL)
+            {
+                fprintf(stderr, "error: cannot allocate target triple\n");
+                *status = 1;
+            }
+            else
+            {
+                predefines_target_triple(&options, triple, length + 32);
+                if (!machine)
+                {
+                    printf("buster (development build)\nTarget: ");
+                }
+                printf("%s\n", triple);
+                free(triple);
+                *status = 0;
+            }
+        }
+    }
+    return found;
+}
+
 // Select the GCC-style preprocessing action without mistaking an option's value for an action. Keep the value-taking
 // options in step with pp_option_takes_value and the C driver's own options.
 static bool main_preprocessing(int count, char** arguments)
@@ -674,7 +752,7 @@ static bool main_assembly_source(int count, char** arguments)
             assembly = length >= 2 && (strcmp(argument + length - 2, ".s") == 0 || strcmp(argument + length - 2, ".S") == 0);
         }
     }
-    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments);
+    return compile && assembly && !explicit_c && !main_preprocessing(count, arguments) && !main_information(count, arguments, NULL);
 }
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
@@ -721,6 +799,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-semantics") == 0)
     {
         result = run_x86_semantics_benchmark(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-intrinsics") == 0)
+    {
+        result = run_x86_intrinsic_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
     {
@@ -1029,6 +1111,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-fortify") == 0)
+    {
+        result = run_check_fortify_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
     {
@@ -1447,8 +1533,11 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
         // Semantic checking and object emission share the same typed source stream in the checker's unit.
-        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
-                 run_source_check_command(argc - 1, argv + 1);
+        if (!main_information(argc - 1, argv + 1, &result))
+        {
+            result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) :
+                     run_source_check_command(argc - 1, argv + 1);
+        }
     }
     else
     {
@@ -1458,8 +1547,16 @@ static int main_command(int argc, char** argv, bool* found)
 }
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
-int main(int argc, char** argv)
+#if BUSTER_FUZZ_AVAILABLE
+#include BUSTER_FUZZ_ENTRY
+extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
+#endif
+static int main_driver(int argc, char** argv)
 {
+#if BUSTER_SANITIZER_RESOURCES
+    const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
+    lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
+#endif
     const int guardian = worker_budget_guardian_command(argc, argv);
     // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
     // dispatch, including -E and parse commands that need no worker lease themselves.
@@ -1508,6 +1605,27 @@ int main(int argc, char** argv)
     if (!found)
     {
         result = main_command(argc, argv, &found);
+    }
+    return result;
+}
+
+int main(int argc, char** argv)
+{
+    int result;
+#if BUSTER_FUZZ_AVAILABLE
+    // The no-main engine takes over before normal command dispatch. Keep its
+    // signal handlers, argument parsing, crash artifacts and replay protocol.
+    if (argc >= 2 && strcmp(argv[1], "--fuzz") == 0)
+    {
+        argv[1] = argv[0];
+        argc -= 1;
+        argv += 1;
+        result = LLVMFuzzerRunDriver(&argc, &argv, buster_fuzz_test_input);
+    }
+    else
+#endif
+    {
+        result = main_driver(argc, argv);
     }
     return result;
 }
