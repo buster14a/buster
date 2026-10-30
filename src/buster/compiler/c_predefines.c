@@ -3199,6 +3199,8 @@ static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
     [X86_EXTENSION_AMXTILE] = "amx-tile",
     [X86_EXTENSION_ENQCMD] = "enqcmd",
     [X86_EXTENSION_USERMSR] = "usermsr",
+    [X86_EXTENSION_KL] = "kl",
+    [X86_EXTENSION_WIDEKL] = "widekl",
 };
 
 // Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and

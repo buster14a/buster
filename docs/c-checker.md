@@ -1877,10 +1877,24 @@ What the lowering covers past scalars (#145's programs):
   VZEROUPPER. `sha256rnds2`, whose round keys are xmm0's, is a leaf of
   vectors: its arguments and result are its builtin's 16-byte vectors, which
   its calls pass and return as a function's (frame objects, in xmm0 to xmm2
-  and xmm0). Each leaf requires its instructions' features of the output
-  target (XGETBV XSAVE's, MONITORX and MWAITX MWAITX's, the others theirs);
-  the baseline target still takes PAUSE, RDTSC, the BSF- and BSR-based counts
-  and the rotates.
+  and xmm0). Key Locker's leaves take both (`CBuiltinX86HelperInfo.vectors`):
+  `aesenc128kl` to `aesdec256kl` their data block in xmm0 between the output's
+  and the handle's pointers, `encodekey128` and `encodekey256` their keys, and
+  `loadiwkey` its three keys and its control; the wide forms take pointers
+  alone. The eight that encrypt or decrypt store the result where ZF is 0 (the
+  handle was valid) and zeros where it is 1, as Intel's manual, clang's own
+  `keylockerintrin.h` and GCC's code have it, through a `jne` over the zeroing,
+  the leaf's branch (`CBuiltinX86HelperInfo.branch`), which branch sizing
+  sizes; clang's code (23, and LLVM's main today) stores them the other way
+  round. `umwait` and `tpause` put their deadline's halves in edx:eax and
+  return CF; `xbegin` sets eax to -1, then begins the transaction with its
+  fallback the leaf's `ret` (its displacement 0), so that it returns -1 where
+  the transaction runs and its abort status where it aborts. Each leaf
+  requires its instructions' features of the output target (XGETBV XSAVE's,
+  MONITORX and MWAITX MWAITX's, the others theirs) and its extensions
+  (`X86Target.extensions`: Key Locker's KL, and WIDEKL for the wide forms,
+  WAITPKG and RTM); the baseline target still takes PAUSE, RDTSC, the BSF- and
+  BSR-based counts and the rotates.
   `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
   nothing: its operand isn't evaluated, as clang's isn't. clang's header
   builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
@@ -2713,7 +2727,9 @@ AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and AVX512-BMM's
 instructions can't be: no host of the tests has them (Zen 5 has none of them);
 nor can the extensions' system instructions, whose extensions no host has or
 whose effects are the machine's (a transaction's, the user interrupts', the
-tiles' configuration, MSRs).
+tiles' configuration, MSRs), or the leaves of Key Locker's, WAITPKG's and RTM's
+instructions (`c_builtin_x86_helpers.c`), whose extensions the 9700X and the
+hosted runners haven't.
 `test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
 code of their intrinsics with clang -O0's instead, as the values each
 instruction computes:
@@ -2738,12 +2754,30 @@ instruction computes:
   `x86_semantics.c`; a form without them fails the case and is listed. Moves,
   pushes, pops and stack slots carry values, and the trace follows jumps in a
   function and calls of the object's other functions (the compiler's code calls
-  the definitions clang inlines).
+  the definitions clang inlines). An implicit general register is read whole,
+  but UMWAIT's, TPAUSE's and LOADIWKEY's EDX:EAX and EAX, which are 32-bit
+  halves; Key Locker's XMM registers that no role names (`x86_implicit_vectors`)
+  are operands after the explicit ones, and each one written is the node's part
+  for it, `node.x<i>`.
+- At a conditional jump or `xbegin` the trace follows both paths (up to 8),
+  each with its conditions: a jump's is a condition code's boolean of the flags
+  it tests, `set<cc>(flags)` of the even code of its pair (`e` for `e` and
+  `ne`), holding or not where the jump is taken; a jump on `e` or `ne` after a
+  test of a condition's boolean with 1 or itself, or its compare with 0
+  (clang's `sete`, then `test $1`), is the boolean's own condition; and
+  `xbegin`'s is its node, holding on the path to its fallback, where EAX is the
+  abort status, `status(xbegin#...)`. A trace of several paths is each path's
+  conditions' line (`path ...`, its conditions in their texts' order, `=1`
+  where one holds and `=0` where it doesn't) and its result and stores, the
+  paths in those lines' order. A vector register's zero idiom (`pxor`) leaves
+  the flags, which a general register's (`xor eax, eax`) defines.
 - A case's result (its return register's bytes of the intrinsic's type) and
   its stores through pointers must be the same expressions in both objects, and
   so must its effects, in order among the stores: each instruction that writes
-  no register, memory or flag (a fence, a system instruction) as its node, and
-  each prefetch's and cache line's hint as its form and its address. A memory
+  no register or memory, and no flag or is a system instruction (a fence,
+  SERIALIZE, LOADIWKEY, and UMWAIT, TESTUI and ENQCMD, whose flags its result
+  may read), as its node, and each prefetch's and cache line's hint as its form
+  and its address. A memory
   operand the form's table gives no size reads or writes its effects' width
   (`ldtilecfg`'s, `sttilecfg`'s and `enqcmd`'s 64 bytes).
 - Controls: intrinsics that the executable programs run already, unmasked,
@@ -2752,7 +2786,7 @@ instruction computes:
   must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
   a result stored through a pointer; and one intrinsic called with its two
   operands in each order must give different expressions in each object.
-- The cases, 421 of them: the intrinsics of XOP's own instructions (VFRCZ's
+- The cases, 435 of them: the intrinsics of XOP's own instructions (VFRCZ's
   fractions, the horizontal sums and differences, the multiply-accumulates,
   VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
   AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
@@ -2763,14 +2797,27 @@ instruction computes:
   matrices, each unmasked, merged and zeroed where the headers have them; and
   the system instructions of RAO-INT, CLDEMOTE, SERIALIZE, UINTR, PTWRITE,
   WAITPKG's UMONITOR, LWP, MOVRS (its integer loads and prefetch), RTM's XEND
-  and XTEST, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR.
+  and XTEST, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR; and the
+  leaves' intrinsics, Key Locker's 11, WAITPKG's UMWAIT and TPAUSE and RTM's
+  XBEGIN.
+- Inverted cases: clang's code of Key Locker's eight that encrypt and decrypt
+  stores the result where ZF is 1 and zeros where it is 0, the other way from
+  Intel's manual, clang's own `keylockerintrin.h` (`ZF := 1`, `MEM[__odata] :=
+  0` for a handle that isn't valid) and GCC's code, which the compiler's leaves
+  follow; their cases compare clang's paths with each condition negated
+  (`X86IntrinsicCase.inverted`). Compared as they are (`--cases`, which has no
+  such flag), they differ, and the cases without a branch agree.
 
 The comparison is of the instructions' data flow, not of their meaning: code
 that computes the same values with other instructions differs, and a case would
 then need another check. Rules broken on purpose, a shift's source and counts
 swapped, a saturating multiply-accumulate for a wrapping one, an unsigned
 horizontal sum for a signed one and a packed fraction for a scalar one, each
-make their own case differ and no other.
+make their own case differ and no other; and so do leaves broken on purpose: the
+one-block Key Locker leaves' branch on `je`, the wide ones' first two blocks
+stored the other way round, `encodekey128`'s type from esi, `encodekey256`'s
+last part from xmm2, `loadiwkey`'s keys swapped, the waits' halves swapped and
+`xbegin`'s -1 for 0, which made exactly their 14 cases differ.
 
 `--cases FILE` takes other cases, a line each: `X`, `Y` or `Z` for a vector
 result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or

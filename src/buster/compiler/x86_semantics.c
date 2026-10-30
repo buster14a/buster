@@ -151,6 +151,8 @@
 //     operand that no role names (an /is4 register, in the immediate's bits 7 to 4, or a VSIB memory operand's vector
 //     index, a gather's or a scatter's, which clears its opmask too), or writes a pair of opmask registers
 //     (vp2intersect's). The initialization's, from the form's operands.
+//   - IMPLICIT_VECTORS: reads or writes vector registers that no role names: Key Locker's XMM0 to XMM7, whose sets
+//     x86_implicit_vectors gives. The scalar resolver takes the record alone, as RARE's, and adds them.
 #define BUSTER_X86_EFFECT_FAULT 0x0001
 #define BUSTER_X86_EFFECT_ZERO_IDIOM 0x0002
 #define BUSTER_X86_EFFECT_RARE 0x0004
@@ -167,6 +169,7 @@
 #define BUSTER_X86_EFFECT_OPMASK_RM 0x1000
 #define BUSTER_X86_EFFECT_OPMASK_VVVV 0x2000
 #define BUSTER_X86_EFFECT_OPMASKS (BUSTER_X86_EFFECT_OPMASK_REG | BUSTER_X86_EFFECT_OPMASK_RM | BUSTER_X86_EFFECT_OPMASK_VVVV)
+#define BUSTER_X86_EFFECT_IMPLICIT_VECTORS 0x4000
 #define BUSTER_X86_EFFECT_KEEP_UPPER 0x8000
 
 // How the form's immediate becomes a value (X86Effects.kinds's low nibble; NONE without an immediate):
@@ -1837,6 +1840,22 @@ typedef enum X86Pattern
     X(ENQCMD_R64_M512, ENQCMDS_R64_M512, SYSTEM, READ, 64, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_FAULT) \
     X(URDMSR_R64_R64, URDMSR_R64_R64, SYSTEM, MOVE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_FAULT) \
     X(UWRMSR_R64_R64, UWRMSR_R64_R64, SYSTEM, READ, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_FAULT) \
+    X(AESENC128KL_X_M384, AESDEC128KL_X_M384, VECTOR_CRYPTO, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 16), 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(AESENC256KL_X_M512, AESDEC256KL_X_M512, VECTOR_CRYPTO, MODIFY, 64, BUSTER_X86_VECTOR_WRITE(WHOLE, 16), 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(AESENCWIDE128KL_M384, AESDECWIDE128KL_M384, VECTOR_CRYPTO, READ, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_IMPLICIT_VECTORS | BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(AESENCWIDE256KL_M512, AESDECWIDE256KL_M512, VECTOR_CRYPTO, READ, 64, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_IMPLICIT_VECTORS | BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(ENCODEKEY128_R32_R32, ENCODEKEY256_R32_R32, SYSTEM, MOVE, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_FAULT | BUSTER_X86_EFFECT_IMPLICIT_VECTORS | BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(LOADIWKEY_X_X, LOADIWKEY_X_X, SYSTEM, READ, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_GPR(RAX), 0, 0, NONE, NONE, \
+      BUSTER_X86_EFFECT_FAULT | BUSTER_X86_EFFECT_IMPLICIT_VECTORS) \
+    X(TPAUSE_R32, TPAUSE_R32, SYSTEM, READ, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_GPR(RAX) | BUSTER_X86_GPR(RDX), 0, 0, NONE, NONE, BUSTER_X86_EFFECT_FAULT) \
+    X(UMWAIT_R32, UMWAIT_R32, SYSTEM, READ, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_GPR(RAX) | BUSTER_X86_GPR(RDX), 0, 0, NONE, NONE, BUSTER_X86_EFFECT_FAULT) \
+    X(XBEGIN_REL32, XBEGIN_REL32, SYSTEM, NONE, 4, 0, 0, 0, 0, BUSTER_X86_GPR(RAX), BUSTER_X86_GPR(RAX), BUSTER_X86_MEMORY_EFFECT_FENCE, NONE, BRANCH, \
+      BUSTER_X86_EFFECT_CONDITIONAL) \
     X(VPMADD52LUQ_Z_Z_ZM512, VPMADD52LUQ_Z_Z_M64BCST, VECTOR_ARITHMETIC, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VPMADD52LUQ_X_X_XM128_EVEX, VPMADD52LUQ_X_X_M64BCST, VECTOR_ARITHMETIC, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VPMADD52LUQ_Y_Y_YM256_EVEX, VPMADD52LUQ_Y_Y_M64BCST, VECTOR_ARITHMETIC, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
@@ -2380,6 +2399,21 @@ static __attribute__((unused)) uint32_t x86_effects_control(const X86Effects* ef
     return effects->kinds >> 4;
 }
 
+// The vector registers an IMPLICIT_VECTORS form reads and writes besides its roles', XMM0 at bit 0, each write's rest
+// as KEEP_UPPER says (LLVM's X86InstrKL.td has the same): aesencwide128kl to aesdecwide256kl read and write XMM0 to
+// XMM7, their 8 blocks; encodekey128 reads its key from XMM0 and writes its handle to XMM0 to XMM2 and zeros to XMM4 to
+// XMM6, encodekey256 its key from XMM0 and XMM1 and its handle to XMM0 to XMM3; and loadiwkey reads its integrity key
+// from XMM0. Both are 0 for every other form.
+static __attribute__((unused)) void x86_implicit_vectors(uint32_t form, uint32_t* reads, uint32_t* writes)
+{
+    const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
+    const bool wide = number >= X86_FORM_AESENCWIDE128KL_M384 && number <= X86_FORM_AESDECWIDE256KL_M512;
+    const bool key128 = number == X86_FORM_ENCODEKEY128_R32_R32;
+    const bool key256 = number == X86_FORM_ENCODEKEY256_R32_R32;
+    *reads = wide ? 0xffu : key256 ? 0x03u : key128 || number == X86_FORM_LOADIWKEY_X_X ? 0x01u : 0;
+    *writes = wide ? 0xffu : key256 ? 0x7fu : key128 ? 0x77u : 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The immediate's contract
 
@@ -2654,15 +2688,15 @@ static uint64_t x86_register_resource(uint8_t value, bool vector)
 
 // What one record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
 // memory operand's base and index (read, as lea's are; a VSIB operand's index is a vector register) and the memory read
-// or written; a narrower write's register (which keeps the rest, so it is read), and a legacy SSE write's vector register
-// (which keeps its bits above 127); a zero idiom's register not read (but a legacy SSE one's, whose upper bits still
-// pass through); an /is4 register; a shift's flags by its immediate count (x86_instruction_flags); the stack and fences
-// as memory; control; the x87's state and control word, and vzeroupper's vector registers. With `opmasks` (which may be
-// null), also the opmask registers it reads (bits 0 to 7: K0 to K7) and writes (bits 8 to 15): an opmask role's
-// register, and the record's opmask (an EVEX form's: x86_validate refuses one in any other's), which it reads, as a
-// vector destination of it reads its old elements unless it zeroes them, and which a gather or a scatter clears. Without
-// `opmasks`, a record that reads or writes an opmask register reads and writes everything, as an uncovered form does
-// (its opmask set, 0xffff).
+// or written; a narrower write's register (which keeps the rest, so it is read), and a legacy SSE write's vector
+// register (which keeps its bits above 127); a zero idiom's register not read (but a legacy SSE one's, whose upper bits
+// still pass through); an /is4 register; a shift's flags by its immediate count (x86_instruction_flags); the stack and
+// fences as memory; control; the x87's state and control word, vzeroupper's vector registers, and Key Locker's vector
+// registers that no role names (x86_implicit_vectors). With `opmasks` (which may be null), also the opmask registers it
+// reads (bits 0 to 7: K0 to K7) and writes (bits 8 to 15): an opmask role's register, and the record's opmask (an EVEX
+// form's: x86_validate refuses one in any other's), which it reads, as a vector destination of it reads its old
+// elements unless it zeroes them, and which a gather or a scatter clears. Without `opmasks`, a record that reads or
+// writes an opmask register reads and writes everything, as an uncovered form does (its opmask set, 0xffff).
 static void x86_instruction_resolve(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes, uint16_t* opmasks)
 {
     const X86Effects* effects = x86_effects(instruction->form);
@@ -2753,8 +2787,17 @@ static void x86_instruction_resolve(const X86Instruction* instruction, uint64_t*
         opmask_read |= mask != 0 ? 1u << mask : 0;
         read |= mask != 0 && !(instruction->decorations & BUSTER_X86_DECORATION_ZEROING) ? vector_writes : 0;
         opmask_write |= mask != 0 && (description->rm & BUSTER_X86_OPERAND_VSIB) ? 1u << mask : 0;
+        // Key Locker's vector registers that no role names (x86_implicit_vectors).
+        uint32_t implicit_vector_reads = 0;
+        uint32_t implicit_vector_writes = 0;
+        if (effects->properties & BUSTER_X86_EFFECT_IMPLICIT_VECTORS)
+        {
+            x86_implicit_vectors(instruction->form, &implicit_vector_reads, &implicit_vector_writes);
+        }
+        read |= (uint64_t)implicit_vector_reads << BUSTER_X86_RESOURCE_VECTOR_SHIFT;
+        write |= (uint64_t)implicit_vector_writes << BUSTER_X86_RESOURCE_VECTOR_SHIFT;
         // A legacy SSE write keeps its vector register's bits above 127, so the form reads every vector register it writes,
-        // a zero idiom's too (only explicit operands write vector registers).
+        // a zero idiom's too.
         read |= (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) ? write & BUSTER_X86_RESOURCE_VECTORS : 0;
         read |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
         write |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_WRITE | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
@@ -2783,9 +2826,11 @@ static __attribute__((unused)) void x86_instruction_effects_opmasks_scalar(const
 }
 
 // The records x86_instructions_effects leaves to x86_instruction_resolve: a covered form's (with opmasks, or without one
-// that touches an opmask register) with an x87 property, vzeroupper's, or RARE's operands. BUSTER_X86_EFFECTS_RARE is
-// the same test on the effects record's first 8 bytes (its properties in the upper quarter), as the vector path makes it.
-#define BUSTER_X86_EFFECTS_RARE_PROPERTIES (BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_ZERO_UPPER | BUSTER_X86_EFFECT_RARE)
+// that touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers.
+// BUSTER_X86_EFFECTS_RARE is the same test on the effects record's first 8 bytes (its properties in the upper quarter),
+// as the vector path makes it.
+#define BUSTER_X86_EFFECTS_RARE_PROPERTIES \
+    (BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_ZERO_UPPER | BUSTER_X86_EFFECT_RARE | BUSTER_X86_EFFECT_IMPLICIT_VECTORS)
 #define BUSTER_X86_EFFECTS_RARE ((uint64_t)BUSTER_X86_EFFECTS_RARE_PROPERTIES << 48)
 static __attribute__((unused)) bool x86_instruction_rare(const X86Instruction* instruction, bool opmasks)
 {

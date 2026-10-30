@@ -284,8 +284,10 @@ designs and the compilers already built this way.
   #126); `test-checker` runs them against clang's code and checks that a
   misaligned one is refused exactly where clang calls libatomic. The x86
   builtins whose instructions no Tier 0 row takes (`rdtsc`, `pause`, `xgetbv`,
-  `monitorx`, `mwaitx`, `tzcnt`) are per-unit leaves too
-  (`c_builtin_x86_helpers.c`).
+  `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
+  `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
+  of vectors and pointers both, and its encryptions' with a branch that branch
+  sizing sizes.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -984,17 +986,21 @@ designs and the compilers already built this way.
 - `src/buster/compiler/x86_intrinsics_test.c` is `test-x86-intrinsics` (#136):
   the compiler's code of the headers' x86 intrinsics whose instructions no
   host of the tests runs (XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's,
-  SM4's, MOVRS's, AVX512-BMM's and the extensions' system instructions')
-  against clang -O0's. A source takes each case's address, both compilers
-  compile it (this one by both paths into the same bytes), and each case's
-  function is decoded (`x86_64_disassembler.c`) and followed through
-  `x86_semantics.c`'s effects, every register's and stack byte's value an
-  expression of the arguments: its result, stores and effects (an instruction
-  that writes no register, memory or flag; a prefetch's address) must be the
-  same expressions in both objects, controls that run natively must agree
-  too, and an intrinsic's two orders of operands must differ. `--cases FILE`
-  takes other cases and `--print NAME` prints a case's traces; the checker
-  guide's "Intrinsics no host runs" has the details.
+  SM4's, MOVRS's, AVX512-BMM's, the extensions' system instructions' and the
+  leaves' of Key Locker, WAITPKG and RTM) against clang -O0's. A source takes
+  each case's address, both compilers compile it (this one by both paths into
+  the same bytes), and each case's function is decoded
+  (`x86_64_disassembler.c`) and followed through `x86_semantics.c`'s effects,
+  every register's and stack byte's value an expression of the arguments, both
+  paths of a conditional jump or `xbegin`, each with its conditions: its
+  result, stores and effects (an instruction that writes no register or memory,
+  and no flag or is a system instruction; a prefetch's address) must be the
+  same expressions in both objects, path by path (Key Locker's encryptions
+  with clang's conditions negated: clang's code stores them the other way from
+  Intel's manual, its own header and GCC's code), controls that run natively
+  must agree too, and an intrinsic's two orders of operands must differ.
+  `--cases FILE` takes other cases and `--print NAME` prints a case's traces;
+  the checker guide's "Intrinsics no host runs" has the details.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
   clang's record layout (one record at a time, and 16 at once in vectors), each

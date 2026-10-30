@@ -5,8 +5,11 @@
 // its record fields; the preprocessor discards every field except the name. No encoder types are needed there.
 
 #define BUSTER_CBUILTIN_X86_HELPER(name, parameters, result, records, features) \
-    name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false, false
-
+    name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false, 0
+// A leaf of an extension's instructions, with its vectors and its branch.
+#define BUSTER_CBUILTIN_X86_EXTENSION_HELPER(name, parameters, result, records, extensions, vectors, branch_count, branch, target) \
+    name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), 0, "x86 builtins whose instructions the target hasn't", 0, false, \
+      vectors, extensions, branch_count, branch, target
 
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_RDTSC, BUSTER_CBUILTIN_X86_HELPER("__rdtsc", 0, true, cbuiltin_x86_helper_rdtsc, 0))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_PAUSE, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_pause", 0, false, cbuiltin_x86_helper_pause, 0))
@@ -61,5 +64,33 @@
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_VZEROUPPER, BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_vzeroupper", 0, false, cbuiltin_x86_helper_vzeroupper, BUSTER_X86_FEATURE(AVX)))
     BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_SHA256RNDS2, "__builtin_ia32_sha256rnds2", sizeof("__builtin_ia32_sha256rnds2") - 1, 3, true, cbuiltin_x86_helper_sha256rnds2,
                                           BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_sha256rnds2), BUSTER_X86_FEATURE(SHA), "x86 builtins whose instructions the target hasn't", 0, false,
-                                          true)
+                                          0x07 | BUSTER_CBUILTIN_X86_VECTOR_RESULT)
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESENC128KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesenc128kl_u8", 3, true, cbuiltin_x86_helper_aesenc128kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESDEC128KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdec128kl_u8", 3, true, cbuiltin_x86_helper_aesdec128kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESENC256KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesenc256kl_u8", 3, true, cbuiltin_x86_helper_aesenc256kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESDEC256KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdec256kl_u8", 3, true, cbuiltin_x86_helper_aesdec256kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESENCWIDE128KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesencwide128kl_u8", 3, true, cbuiltin_x86_helper_aesencwide128kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESDECWIDE128KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdecwide128kl_u8", 3, true, cbuiltin_x86_helper_aesdecwide128kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESENCWIDE256KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesencwide256kl_u8", 3, true, cbuiltin_x86_helper_aesencwide256kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_AESDECWIDE256KL, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdecwide256kl_u8", 3, true, cbuiltin_x86_helper_aesdecwide256kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_ENCODEKEY128, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_encodekey128_u32", 3, true, cbuiltin_x86_helper_encodekey128,
+                                                                             BUSTER_X86_EXTENSION(KL), 0x02, 0, 0, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_ENCODEKEY256, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_encodekey256_u32", 4, true, cbuiltin_x86_helper_encodekey256,
+                                                                             BUSTER_X86_EXTENSION(KL), 0x06, 0, 0, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_LOADIWKEY, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_loadiwkey", 4, false, cbuiltin_x86_helper_loadiwkey, BUSTER_X86_EXTENSION(KL),
+                                                                          0x07, 0, 0, 0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_UMWAIT, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_umwait", 3, true, cbuiltin_x86_helper_umwait, BUSTER_X86_EXTENSION(WAITPKG), 0, 0, 0,
+                                                                       0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_TPAUSE, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_tpause", 3, true, cbuiltin_x86_helper_tpause, BUSTER_X86_EXTENSION(WAITPKG), 0, 0, 0,
+                                                                       0))
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_XBEGIN, BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_xbegin", 0, true, cbuiltin_x86_helper_xbegin, BUSTER_X86_EXTENSION(RTM), 0, 0, 0, 0))
+#undef BUSTER_CBUILTIN_X86_EXTENSION_HELPER
 #undef BUSTER_CBUILTIN_X86_HELPER
