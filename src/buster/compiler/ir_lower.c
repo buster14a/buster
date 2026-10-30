@@ -52,7 +52,7 @@ struct IrTypedPlan
     uint64_t* stack_offsets;
     uint32_t maximum_depth;
     uint32_t maximum_spill_depth;
-    // The depth slots' bytes and alignment: 16 for a function with values of the memory classes, else 8.
+    // The depth slots' bytes and alignment: at least 8, 16 for scalar memory classes, or the widest admitted vector.
     uint32_t spill_bytes;
     const IrSimdTypedOperation* operations;
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch

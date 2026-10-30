@@ -62,13 +62,13 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
     const uint8_t local_flags[] = { 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     // Deliberately not vector-aligned: the typed object's guarantee is one byte, not its value's width.
     const uint8_t local_alignments[] = { 3, 0 };
-    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
+    const AbiLocation parameter = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } };
     uint32_t cases = 0;
     uint32_t native_cases = 0;
     for (uint32_t width = 0; ready && width < 3; width += 1)
     {
         const uint32_t bytes = 16u << width;
-        const uint32_t local_sizes[] = { 8, bytes };
+        const uint32_t local_sizes[] = { 0, bytes };
         const uint8_t constant_bytes[] = { bytes, bytes };
         uint64_t constants[16];
         memset(constants, 0xcd, sizeof(constants));
@@ -106,7 +106,7 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                     };
                     uint64_t values[] = { 0, 0, 0, 1, condition, 8, 1, 9, 1, 0, 0, 1, 0, 0, bytes, 0, 1, bytes, 1, 0 };
                     // Binary rows consume the second operand; unary rows discard it at the join first. For a binary
-                    // row the join's no-op is DUP then DISCARD before X86, retaining the same CFG and result shape.
+                    // row the join executes X86, then duplicates/stores its result, retaining the same CFG.
                     if (row.operand_count == 2)
                     {
                         kinds[9] = BUSTER_TYPED_X86;
@@ -141,7 +141,7 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                     ir_lower_test_expect(tally, lowered, "whole VECTOR/X86 functions lower identically with width-qualified edge spills", width, operation);
                     if (!lowered)
                     {
-                        fprintf(stderr, "  SIMD lowering: errors %u/%u entry %u detail %u; typed %u at %u\n", ca.error, cb.error, ca.instruction, ca.detail, tier0_validate(&source).error, tier0_validate(&source).node);
+                        fprintf(stderr, "  SIMD lowering: errors %u/%u entry %u detail %u; typed %u at %u (%s)\n", ca.error, cb.error, ca.instruction, ca.detail, tier0_validate(&source).error, tier0_validate(&source).node, tier0_validate(&source).rule);
                     }
                     uint8_t expected[80];
                     memset(expected, 0xa5, sizeof(expected));
