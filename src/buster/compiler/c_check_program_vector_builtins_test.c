@@ -520,6 +520,8 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
           "elementwise vector builtins of floating elements", 3 },
         { "znver5", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal", 2 },
+        { "znver5", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}",
+          "vector bit reversal of bytes without AVX512-BMM", 2 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements", 3 },
