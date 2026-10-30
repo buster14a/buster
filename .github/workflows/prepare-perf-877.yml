@@ -1,0 +1,52 @@
+name: Prepare compact runtime declaration scan
+on:
+  push:
+    branches: [codex/prepare-perf-877-runtime-20261030]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 4
+      - name: Build candidate independently from pinned main
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/perf-877.patch "$RUNNER_TEMP/runtime.patch"
+          cp src/buster/compiler/c_check_runtime_scan_test.c "$RUNNER_TEMP/c_check_runtime_scan_test.c"
+          git checkout --detach d12fd5831f9c73bb7b30505da2ce9616e915143e
+          test "$(git hash-object src/buster/compiler/c_check_program_lower.c)" = af8b09ad80bffa5b9082b3cde96b604713ac3e0c
+          test "$(git hash-object src/buster/compiler/c_check_program_test.c)" = 60f7b91374be329e389474bb50ee377c1d76798f
+          git apply --check "$RUNNER_TEMP/runtime.patch"
+          git apply "$RUNNER_TEMP/runtime.patch"
+          cp "$RUNNER_TEMP/c_check_runtime_scan_test.c" src/buster/compiler/c_check_runtime_scan_test.c
+          git diff --check
+          git diff --stat
+      - name: Install approved toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build and exercise full checker on hosted baseline
+        shell: bash
+        env:
+          BUSTER_HOST_ARCH: x86-64
+          BUSTER_DEBUG_INFO: '0'
+        run: |
+          set -euo pipefail
+          clang --version
+          ./build.sh
+          ./build/compiler test-checker
+      - name: Publish implementation without preparation workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${BUSTER_DCO_SIGN_OFF:-}"
+          test "$(git rev-parse HEAD)" = d12fd5831f9c73bb7b30505da2ce9616e915143e
+          git add src/buster/compiler/c_check_program_lower.c src/buster/compiler/c_check_program_test.c src/buster/compiler/c_check_runtime_scan_test.c
+          git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'perf(lowering): reuse compact runtime declarations' -m 'Refs #877 item 2. Reuse the existing declaring list, retain full-token scalar traversal, and check source-order symbol selection at guarded tails. Other sparse scans and label sizing are outside this change. Human contribution certification remains pending.'
+          git push origin HEAD:refs/heads/codex/perf-877-runtime-declarations
+          git show --stat --oneline HEAD
