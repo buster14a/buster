@@ -412,9 +412,11 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
         check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "atomic program source fits");
         check_test_program_source(test, source, programs[i][0], clang);
     }
-    // #932's review: a GNU lock-free query of a tag the unit completes after the call answers by when clang emits its
-    // function, the call's answer in an external function, which clang emits where the unit defines it (0, and libatomic's
-    // query), and the completed type's in a static or inline one, which it emits at the unit's end (1); and a function's
+    // #932's reviews: a GNU lock-free query of a tag the unit completes after the call answers by when clang emits its
+    // function, once it has read the whole definition of an external function, which it emits where the unit defines it:
+    // the incomplete type's answer of a tag completed after the function (0, and libatomic's query), and the complete
+    // type's of a block-scope tag completed later in the same body (1), whose _Static_assert reads it at the call (0); and
+    // the completed type's in a static or inline function, which clang emits at the unit's end (1); and a function's
     // pointee, complete and aligned to 4 bytes. Through the selection, as -c compiles it (check_test_program_includes),
     // which makes CheckProgram.body_eager.
     check_test_program_includes = true;
@@ -424,7 +426,11 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
         "static inline int inline_query(struct Late*p){return __atomic_always_lock_free(8,p);}struct Late{long x;};"
         "int early_query(struct Late*p){return __atomic_always_lock_free(8,p);}"
         "int function_query(void(*p)(void)){return __atomic_always_lock_free(4,p)*4+__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(4,p);}"
-        "int tested(int n){struct Late s={n};return external_query(&s)+static_query(&s)*8+inline_query(&s)*64+early_query(&s)*128+function_query(0)*256;}",
+        "int same_body(void*v){struct S;struct S*p=v;_Static_assert(!__atomic_always_lock_free(8,p),\"incomplete at the call\");"
+        "int r=__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);struct S{long x;};return r;}"
+        "static int same_static(void*v){struct S;struct S*p=v;int r=__atomic_always_lock_free(8,p);struct S{long x;};return r;}"
+        "int tested(int n){struct Late s={n};return external_query(&s)+static_query(&s)*8+inline_query(&s)*64+early_query(&s)*128+function_query(0)*256"
+        "+same_body(&s)*1024+same_static(&s)*4096;}",
         "lock-free-queries-by-emission", clang);
     check_test_program_includes = false;
 }
