@@ -205,7 +205,7 @@ static void check_builtin_atomic_c11_one(TypeTable* table, const CheckBuiltinAto
     // A power of two up to the target's inline width (check_builtin_atomic_lock_free: 16 bytes with cx16).
     const bool constant_query = lock_free && output->action.diagnostic == CHECK_DIAG_NONE && values[0].constant_kind == CHECK_CONSTANT_INTEGER &&
                                 values[0].fault == CHECK_FAULT_NONE &&
-                                check_builtin_atomic_lock_free(table, CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, (uint64_t)values[0].integer, NULL) == 1;
+                                check_builtin_atomic_lock_free(table, input, CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, (uint64_t)values[0].integer, NULL, false) == 1;
     output->action.value.constant_kind = constant_query ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
     output->action.value.integer = constant_query;
     output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL);

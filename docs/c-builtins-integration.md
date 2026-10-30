@@ -670,10 +670,20 @@ code whose runs equal clang -O0's on both paths.
   (`check_builtin_atomic_lock_free`: a power of two, 0 among them, up to the
   target's inline width, 16 bytes with cx16 (`TypeTable.atomic_inline_16`) and 8
   without, for one byte, a constant address aligned to the size or a pointee at
-  least as aligned), their arguments then never evaluated, as clang folds them;
-  otherwise `__atomic_is_lock_free` calls libatomic's and
-  `__atomic_always_lock_free`, of a size that isn't a constant, is refused as
-  clang's code generation refuses it. The C11 query follows the same width now,
+  least as aligned that isn't incomplete: a function's, whose type GNU aligns to
+  4 bytes, or one complete where clang evaluates the call), their arguments then
+  never evaluated, as clang folds them; otherwise `__atomic_is_lock_free` calls
+  libatomic's and `__atomic_always_lock_free`, of a size that isn't a constant, is
+  refused as clang's code generation refuses it. Clang evaluates a constant
+  context's call where it reads it, and folds one in code where it emits the
+  function: an external function where the unit defines it, a static or inline
+  one at the unit's end. So a pointee whose tag the unit completes after the call
+  answers by the incomplete type in a constant context and an external
+  function's code, and by the complete type in a deferred function's: the checker
+  folds a constant context's call by the type at the call, and leaves a call in
+  code to the lowering, which takes the answer of its function's emission
+  (`CheckBuiltinAtomicResult.late_completion`, `CheckProgram.body_eager`, which
+  the selection makes for such a unit; #932's review). The C11 query follows the same width now,
   and the declaration-time evaluator checks every family
   (`check_builtin_atomic_family`), so the queries fold in enumerators and bounds.
 - **GNU's generic forms**, `__atomic_load`, `__atomic_store`, `__atomic_exchange`

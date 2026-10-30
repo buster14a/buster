@@ -58,6 +58,8 @@ struct CheckBuiltinAtomicAction
     bool alignment_known;
     // A C11 operation on an object that isn't _Atomic: clang's __hip_atomic_* (check_builtin_atomic_family).
     bool plain_object;
+    // The call is in a constant context (CheckStream.constant_evaluated), which clang's Sema evaluates where it reads it.
+    bool constant_evaluated;
 };
 
 typedef struct CheckBuiltinAtomicResult CheckBuiltinAtomicResult;
@@ -91,6 +93,13 @@ struct CheckBuiltinAtomicResult
     // A conservative compiler ordering boundary is permitted for every supported request. Consumers may
     // strengthen valid orderings to sequential consistency while retaining all argument evaluations.
     bool compiler_barrier;
+    // A GNU lock-free query outside a constant context whose answer depends on when clang emits its function (#932's
+    // review): its pointee's tag, incomplete at the call, is complete at the unit's end. Clang folds the call as it emits
+    // it, where the unit defines an eager function and at the unit's end a deferred one, so the checker folds none of it,
+    // and the lowering takes `answers[0]` (the call's) in an eager function and `answers[1]` (the unit end's) in a
+    // deferred one (CheckProgram.body_eager): 1 or 0, or -1 for libatomic's runtime query.
+    bool late_completion;
+    int8_t answers[2];
 };
 
 static bool check_builtin_atomic_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAtomicAction* input)
@@ -412,10 +421,14 @@ static void check_builtin_atomic_order(TypeTable* table, const CheckBuiltinAtomi
 // __atomic_is_lock_free and __c11_atomic_is_lock_free): a size that is a power of two, 0 among them, up to the target's
 // inline width (16 bytes where it has CMPXCHG16B, 8 otherwise) is lock-free for the C11 query, which takes an _Atomic
 // object, and for one byte; for the GNU queries, also where `pointer`, their argument before its conversion to const
-// volatile void *, is a constant address aligned to the size (0 alone for a size of 0), or points to a complete type of
-// at least the size's alignment. 1 or 0, or -1 for no constant: __atomic_is_lock_free's runtime query of libatomic,
-// which __atomic_always_lock_free answers 0.
-static int32_t check_builtin_atomic_lock_free(const TypeTable* table, CBuiltinId id, uint64_t size, const CheckValue* pointer)
+// volatile void *, is a constant address aligned to the size (0 alone for a size of 0), or points to a type of at least
+// the size's alignment that isn't incomplete: complete at the call's source position (check_builtin_atomic_source_complete,
+// as clang emits an external function's code where it reads it: a tag completed after the call is incomplete there), or
+// a function, whose type GNU aligns to 4 bytes (ASTContext::getTypeInfo). 1 or 0, or -1 for no constant:
+// __atomic_is_lock_free's runtime query of libatomic, which __atomic_always_lock_free answers 0. `input` is the call's,
+// for its source position; with `at_end`, completeness is the unit end's instead, where clang emits a deferred function.
+static int32_t check_builtin_atomic_lock_free(const TypeTable* table, const CheckBuiltinAtomicAction* input, CBuiltinId id, uint64_t size,
+                                              const CheckValue* pointer, bool at_end)
 {
     const uint64_t inline_bytes = table->atomic_inline_16 ? 16 : 8;
     int32_t result = -1;
@@ -427,9 +440,11 @@ static int32_t check_builtin_atomic_lock_free(const TypeTable* table, CBuiltinId
         const bool aligned = constant && (size == 0 ? address == 0 : (address & (size - 1)) == 0);
         const TypeId pointee = pointer != NULL && check_action_kind(table, pointer->type) == BUSTER_TYPE_KIND_POINTER ?
                                type_element(table, type_strip_aligned(table, pointer->type)) : 0;
-        const bool typed = pointee != 0 && check_action_kind(table, pointee) != BUSTER_TYPE_KIND_VOID &&
-                           check_action_kind(table, pointee) != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(table, type_strip_aligned(table, pointee)) &&
-                           type_alignment(table, pointee) >= size;
+        const uint8_t kind = pointee != 0 ? check_action_kind(table, pointee) : BUSTER_TYPE_KIND_NONE;
+        const bool complete = pointee != 0 && (at_end ? type_is_complete(table, type_strip_aligned(table, pointee)) :
+                                                        check_builtin_atomic_source_complete(table, pointee, input));
+        const bool typed = pointee != 0 && kind != BUSTER_TYPE_KIND_VOID &&
+                           (kind == BUSTER_TYPE_KIND_FUNCTION ? size <= 4 : complete && type_alignment(table, pointee) >= size);
         result = id == CBUILTIN_C11_ATOMIC_IS_LOCK_FREE || size == 1 || aligned || typed ? 1 : -1;
     }
     return result < 0 && id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE ? 0 : result;
@@ -470,8 +485,13 @@ static void check_builtin_atomic_query(TypeTable* table, const CheckBuiltinAtomi
         check_builtin_atomic_convert(table, input, output, values + 1, 1, parameter);
         const bool sized = output->action.diagnostic == CHECK_DIAG_NONE && values[0].constant_kind == CHECK_CONSTANT_INTEGER &&
                            values[0].fault == CHECK_FAULT_NONE && (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
-        const int32_t answer = sized ? check_builtin_atomic_lock_free(table, input->id, (uint64_t)values[0].integer, &pointer) : -1;
-        if (answer >= 0)
+        const int32_t answer = sized ? check_builtin_atomic_lock_free(table, input, input->id, (uint64_t)values[0].integer, &pointer, false) : -1;
+        const int32_t at_end = sized ? check_builtin_atomic_lock_free(table, input, input->id, (uint64_t)values[0].integer, &pointer, true) : -1;
+        // Code, where the unit completes the pointee after the call: the lowering's, by its function's emission.
+        output->late_completion = answer != at_end && !input->constant_evaluated;
+        output->answers[0] = (int8_t)answer;
+        output->answers[1] = (int8_t)at_end;
+        if (answer >= 0 && !output->late_completion)
         {
             output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
             output->action.value.integer = answer;

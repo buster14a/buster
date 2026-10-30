@@ -400,6 +400,9 @@ struct CheckBuiltinAtomicEffect
     bool writes_memory;
     bool rmw;
     bool compiler_barrier;
+    // A lock-free query whose answer in code is its function's emission's (CheckBuiltinAtomicResult.late_completion).
+    bool late_completion;
+    int8_t answers[2];
 };
 
 typedef struct CheckStream CheckStream;
@@ -1849,6 +1852,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .extensions = action->extensions,
             .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
             .alignment_known = walked < 64,
+            .constant_evaluated = action->constant_evaluated,
         };
         // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what the
         // effect records.
@@ -1884,6 +1888,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .rmw = checked.rmw,
             .compiler_barrier = checked.compiler_barrier,
+            .late_completion = checked.late_completion,
+            .answers = { checked.answers[0], checked.answers[1] },
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_VECTOR)

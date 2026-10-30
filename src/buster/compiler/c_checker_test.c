@@ -3810,6 +3810,17 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            // #932's review: a function's pointee is complete and aligned to 4 bytes, and a tag is complete where the query's
+            // constant context reads it, not at the unit's end.
+            "the lock-free queries of a function's pointee and of a tag completed after them",
+            "struct Late;\nint late(struct Late* p) { _Static_assert(!__atomic_always_lock_free(8, p), \"incomplete here\"); return 0; }\n"
+            "struct Late { long x; };\nint early(struct Late* p) { _Static_assert(__atomic_always_lock_free(8, p), \"complete here\"); return 0; }\n"
+            "int function(void (*p)(void))\n{\n    _Static_assert(__atomic_always_lock_free(4, p) && __atomic_is_lock_free(4, p), \"function alignment\");\n"
+            "    _Static_assert(!__atomic_always_lock_free(8, p), \"past it\");\n    return 0;\n}\n",
+            false,
+            false
+        },
+        {
             "an atomic wrapping increment of a float refused",
             "float f(float* p) { return __atomic_fetch_uinc(p, 1, 5); }\n",
             true,

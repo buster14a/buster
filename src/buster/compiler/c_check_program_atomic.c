@@ -474,12 +474,25 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
 // A GNU lock-free query that clang doesn't fold (check_builtin_atomic_query, whose constant ones the lowering emits as
 // constants): __atomic_is_lock_free's call of libatomic's __atomic_is_lock_free (size, pointer), its arguments evaluated
 // in order; __atomic_always_lock_free's, of a size that isn't a constant, is refused, as clang's code generation refuses it.
+// A query whose answer is its function's emission's (late_completion) takes the call's answer in a function clang emits
+// where the unit defines it, and the unit end's in one it defers (CheckProgram.body_eager; a program no selection made has
+// none, whose functions take the call's): a constant, its arguments never evaluated, or libatomic's query.
 static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
-    if ((CBuiltinId)graph->members[node] == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE)
+    const uint32_t index = check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node);
+    const CheckBuiltinAtomicEffect* effect = index != BUSTER_CHECK_NONE ? stream->atomics + index : NULL;
+    const uint32_t body = (uint32_t)(writer->body - program->bodies);
+    const bool deferred = program->body_eager != NULL && body < program->body_count && program->body_eager[body] == 0;
+    const int32_t answer = effect != NULL && effect->late_completion ? effect->answers[deferred ? 1 : 0] : -1;
+    if (answer >= 0)
+    {
+        const CheckValue constant = { .type = stream->values[node].type, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = (unsigned)answer };
+        check_lower_constant(writer, &constant);
+    }
+    else if ((CBuiltinId)graph->members[node] == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE)
     {
         check_lower_unsupported(writer, "__atomic_always_lock_free of a size that isn't a constant, which clang doesn't compile either");
     }

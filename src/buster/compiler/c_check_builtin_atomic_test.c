@@ -892,8 +892,9 @@ static void check_builtin_atomic_test_families(CheckBuiltinAtomicTest* test, Typ
     // The queries: a size that is a power of two up to the inline width is lock-free for one byte, a constant address
     // aligned to it or a pointee aligned to it; __atomic_always_lock_free answers 0 where __atomic_is_lock_free asks
     // libatomic, and neither is a constant of a size that isn't one.
+    // A function's pointee too, whose type GNU aligns to 4 bytes (#932's review: clang's evaluator takes it as complete).
     const uint64_t sizes[] = { 0, 1, 2, 3, 4, 8, 16, 32 };
-    const TypeId pointees[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_CHAR, BUSTER_TYPE_INT, BUSTER_TYPE_LONG };
+    const TypeId pointees[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_CHAR, BUSTER_TYPE_INT, BUSTER_TYPE_LONG, type_function(table, BUSTER_TYPE_VOID, NULL, 0, 0) };
     for (uint32_t wide = 0; wide < 2; wide += 1)
     {
         table->atomic_inline_16 = wide != 0;
@@ -913,7 +914,8 @@ static void check_builtin_atomic_test_families(CheckBuiltinAtomicTest* test, Typ
                 arguments[0].flags |= BUSTER_CHECK_ICE;
                 const uint64_t size = sizes[s];
                 const bool fits = (size & (size - 1)) == 0 && size <= (wide != 0 ? 16u : 8u);
-                const bool typed = !null && !address && p != 0 && type_alignment(table, pointees[p]) >= size;
+                const bool function = !null && !address && p == BUSTER_ARRAY_LENGTH(pointees) - 1;
+                const bool typed = !null && !address && p != 0 && (function ? size <= 4 : type_alignment(table, pointees[p]) >= size);
                 const bool aligned = null ? true : address ? size != 0 && 8 % size == 0 : false;
                 const bool lock_free = fits && (size == 1 || typed || aligned);
                 for (uint32_t always = 0; always < 2; always += 1)

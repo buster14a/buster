@@ -335,10 +335,16 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  objects == data->object_count && objects == (uint64_t)input->token_count + 1 && definitions64 < UINT32_MAX && references64 < UINT32_MAX &&
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
-    // Only code generation's check of target features reads CheckProgram.body_eager, and only in a unit with a target
-    // attribute (CheckProgram.attribute_keys): others make none. It is made by check_program_body_eager, from each
+    // Only code generation's check of target features reads CheckProgram.body_eager, in a unit with a target attribute
+    // (CheckProgram.attribute_keys), and the lowering of a lock-free query whose answer is its function's emission's
+    // (CheckBuiltinAtomicEffect.late_completion): others make none. It is made by check_program_body_eager, from each
     // selected body's declarations up to its definition, not by the definitions' flags, which hold the unit's final ones.
-    const bool eager_needed = full->attribute_keys != 0;
+    bool late = false;
+    for (uint32_t i = 0; full->stream != 0 && i < full->stream->atomic_count; i += 1)
+    {
+        late |= full->stream->atomics[i].late_completion;
+    }
+    const bool eager_needed = full->attribute_keys != 0 || late;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;

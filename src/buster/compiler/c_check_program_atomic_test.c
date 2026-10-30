@@ -412,6 +412,21 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
         check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "atomic program source fits");
         check_test_program_source(test, source, programs[i][0], clang);
     }
+    // #932's review: a GNU lock-free query of a tag the unit completes after the call answers by when clang emits its
+    // function, the call's answer in an external function, which clang emits where the unit defines it (0, and libatomic's
+    // query), and the completed type's in a static or inline one, which it emits at the unit's end (1); and a function's
+    // pointee, complete and aligned to 4 bytes. Through the selection, as -c compiles it (check_test_program_includes),
+    // which makes CheckProgram.body_eager.
+    check_test_program_includes = true;
+    check_test_program_source(test,
+        "struct Late;int external_query(struct Late*p){return __atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);}"
+        "static int static_query(struct Late*p){return __atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);}"
+        "static inline int inline_query(struct Late*p){return __atomic_always_lock_free(8,p);}struct Late{long x;};"
+        "int early_query(struct Late*p){return __atomic_always_lock_free(8,p);}"
+        "int function_query(void(*p)(void)){return __atomic_always_lock_free(4,p)*4+__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(4,p);}"
+        "int tested(int n){struct Late s={n};return external_query(&s)+static_query(&s)*8+inline_query(&s)*64+early_query(&s)*128+function_query(0)*256;}",
+        "lock-free-queries-by-emission", clang);
+    check_test_program_includes = false;
 }
 
 // The lowering's verdict on a unit: lowered on both paths alike, or refused as one atomic object that may be misaligned.
