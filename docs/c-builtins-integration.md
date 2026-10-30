@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 239 audited SemaX86 constraint facts for 237
+`c_check_builtin_x86.c` adds 282 audited SemaX86 constraint facts for 280
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 85 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 128 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -802,7 +802,18 @@ the existing families or of new ones:
 - the rotates by an immediate at each width (`prold`, `prolq`, `prord` and
   `prorq` of 128, 256 and 512 bits), VPROL's and VPROR's: the count is the
   immediate's whole byte, which the instruction takes modulo the elements' bits
-  as clang's funnel shifts take theirs.
+  as clang's funnel shifts take theirs;
+- one vector or two by an immediate at the widths the inventory lacked: the
+  aligns (`alignd`, `alignq`), the shuffles of 128-bit lanes (`shuf_f32x4` to
+  `shuf_i64x2_256`), of floats and doubles (`shufps256` to `shufpd512`) and of
+  words (`pshufhw256` to `pshuflw512`), the byte shifts and align of each lane
+  (`pslldqi256_byteshift` to `psrldqi512_byteshift`, `palignr512`), the
+  permutes by an immediate (`permdf256`, `permdf512`, `permdi512`, `vpermilpd`
+  to `vpermilps512`, and VEX's `vperm2f128_*` and `permti256`) and VEX's blends
+  (`blendps`, `blendpd`, `pblendd`, `pblendw256`). The immediate is the
+  instruction's whole byte, which reads the bits clang's code reads: an align's
+  low bits, a shuffle's and a blend's bit per element, a permute's bits 3 and
+  7, which zero its lanes, and a byte shift past its lane, which gives zeros.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

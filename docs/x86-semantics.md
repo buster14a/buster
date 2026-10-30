@@ -691,9 +691,11 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vprolq, vprord, vprorq), and AVX512VBMI2's concatenating vpshldv and
     vpshrdv (w, d, q);
   - the moves of elements: the permutes (vpermb, vpermw, vpermd, vpermq,
-    vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd),
-    vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,
-    vshufi32x4, vshufi64x2, the broadcasts
+    vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd,
+    and VEX's vperm2f128 and vperm2i128), vpshufb, vpshufd, vpshuflw,
+    vpshufhw, vshufps, vshufpd, vpalignr, valignd, valignq, vshuff32x4,
+    vshuff64x2, vshufi32x4, vshufi64x2, VEX's blends by an immediate
+    (vblendps, vblendpd, vpblendd, vpblendw), the broadcasts
     (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
     register too), the inserts and extracts (vinserti32x4, vinserti64x4,
     vinsertf64x4, vextract in f32x4, f64x4, i32x4 and i64x4, vpinsr and vpextr
