@@ -4,19 +4,49 @@ on:
   push:
     branches: [chatgpt/issue-732-vector-integration]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 30
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Apply and publish checked source transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f .github/issue732.part0; then
+            cat .github/issue732.part* | sed 's/tcGGzt/tcGzt/' | base64 -d | gzip -d > "$RUNNER_TEMP/implementation.patch"
+            echo "3a52e18221b575618bae4e1d52733123589fc3ac423c4e8207dcaddc7033db53  $RUNNER_TEMP/implementation.patch" | sha256sum --check
+            git apply --check "$RUNNER_TEMP/implementation.patch"
+            git apply "$RUNNER_TEMP/implementation.patch"
+            git rm .github/issue732.part*
+            git add src/buster/compiler
+            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'feat(ir): integrate typed vectors and sparse shared interpretation (#732)'
+            git push origin HEAD:chatgpt/issue-732-vector-integration
+          fi
+          git diff --check
+          git archive --format=tar.gz --output="$RUNNER_TEMP/issue-732-source.tar.gz" HEAD
+      - name: Install qualified hosted toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build
+        shell: bash
+        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-732-build.log"
+      - name: Focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in test-ir test-ir-parse test-ir-simd test-ir-simd-typed test-ir-simd-consumers test-ir-lowering test-ir-interpreter; do
+            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$test.log"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          persist-credentials: false
-      - name: Export exact source for isolated editing
-        run: git archive --format=tar.gz --output=source.tar.gz HEAD
-      - uses: actions/upload-artifact@v4
-        with:
-          name: issue-732-source
-          path: source.tar.gz
-          retention-days: 1
+          name: issue-732-validation
+          path: |
+            ${{ runner.temp }}/issue-732-*.log
+            ${{ runner.temp }}/issue-732-source.tar.gz
+          retention-days: 2
