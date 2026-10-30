@@ -314,4 +314,13 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
     return result;
 }
 
+// The language modes' token of clang 23.1.1's table for a catalog name, which the preprocessor's __has_builtin reads
+// (#148): C23_LANG for __builtin_c23_va_start, a builtin in C23 alone, and ALL_LANGUAGES for every other name.
+// test-preprocessor checks each name's against the table.
+static __attribute__((unused)) const char* cbuiltin_languages(const uint8_t* name, uint32_t length)
+{
+    const char* result = cbuiltin_resolve((const char*)name, length) == CBUILTIN_C23_VA_START ? "C23_LANG" : "ALL_LANGUAGES";
+    return result;
+}
+
 #endif
