@@ -799,7 +799,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
-static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features)
+static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features)
 {
     (void)vector;
 
@@ -953,6 +953,12 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     return check;
 }
 
+// Preserve scalar clients of the internal path as well as the public entry points.
+static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0);
+}
+
 // The legacy typed stream erases pointer categories into U64, so its i64 values
 // cross explicit ptrtoint/inttoptr instructions at memory/address boundaries.
 // result_type is mandatory semantic information; it is not inferred from the
@@ -969,13 +975,13 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 #if !BUSTER_HOST_VECTOR
     return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
 #else
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, true, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0);
 #endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, false, 0);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -983,10 +989,10 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features);
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, false, target_features);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features);
 }

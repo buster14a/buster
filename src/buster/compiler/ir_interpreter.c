@@ -364,6 +364,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         verified = checked[function_index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena, false);
         checked[function_index] = verified.error == IR_OK;
     }
+    const bool simd = verified.error == IR_OK && ir_function_has_simd(function);
     if (verified.error == IR_ERROR_MEMORY)
     {
         status = INTERPRETER_RESOURCE;
@@ -374,7 +375,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         // A variadic definition's anchors take its call's arguments' places (#148); no other frame takes any.
         status = INTERPRETER_INVALID;
     }
-    else if (!ir_interpreter_simd_supported(function))
+    else if (simd && !ir_interpreter_simd_supported(function))
     {
         status = INTERPRETER_UNSUPPORTED;
     }
@@ -414,7 +415,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
                 frame->arguments[p] = ir_interpreter_value(ir_interpreter_integer(arguments[p]), function->parameter_types[p]);
             }
         }
-        if (status == INTERPRETER_OK)
+        if (status == INTERPRETER_OK && simd)
         {
             status = ir_interpreter_simd_storage(frame, arena);
         }
