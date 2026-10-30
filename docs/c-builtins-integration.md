@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 353 audited SemaX86 constraint facts for 351
+`c_check_builtin_x86.c` adds 427 audited SemaX86 constraint facts for 405
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 87
-rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 199 direct ranges.
+rounding sets, 83 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 251 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -836,7 +836,18 @@ the existing families or of new ones:
   PCLMUL, to `pclmulqdq512`) and the affine transforms of GF(2^8)
   (`vgf2p8affineqb_v16qi` to `vgf2p8affineinvqb_v64qi`), each with the
   immediate's whole byte; and the masks' other shifts (`kshiftliqi` to
-  `kshiftridi`), whose count past the mask's bits gives 0.
+  `kshiftridi`), whose count past the mask's bits gives 0;
+- the rest of AVX-512's operations of floats by an immediate: the mantissas
+  (`getmantps128_mask` to `getmantsd_round_mask`), the reductions
+  (`reduceps128_mask` to `reducesd_mask`) and the roundings to a scale
+  (`rndscaleps_128_mask` to `rndscalesd_round_mask`) into w under a mask, the
+  ranges of two vectors (`rangeps128_mask` to `rangesd128_round_mask`) merged
+  into w, the classes into a mask (`fpclassps128_mask` to `fpclasssd_mask`,
+  the mask family's of an immediate) and the fix-ups (`fixupimmps128_mask` to
+  `fixupimmsd_maskz`, the ternary family's, merged into a or zeroed). The
+  64-byte and scalar ones take the exceptions' suppression their last argument
+  asks for; a scalar one's immediate follows its mask (but getmant's), which
+  the lowering finds past it.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

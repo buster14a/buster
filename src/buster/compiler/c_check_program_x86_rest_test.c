@@ -203,6 +203,81 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             0,
             true,
         },
+        {
+            // The rest of AVX-512's operations of floats by an immediate under masks of none, some and all: the mantissas,
+            // the reductions and the roundings to a scale at each width, the ranges of two vectors (and the other way
+            // round), the classes into masks, the fix-ups merged and zeroed by tables of every token, and the scalar ones,
+            // each at its immediate's edges and past them, of zeros, infinities, NaNs, denormals and other values, with
+            // the exceptions' suppression and without.
+            "x86-rest-float-immediates",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "#define GM(name,T,a,w,k) {T r[]={__builtin_ia32_##name(a,0,w,k),__builtin_ia32_##name(a,1,w,k),__builtin_ia32_##name(a,2,w,k),"
+            "__builtin_ia32_##name(a,3,w,k),__builtin_ia32_##name(a,4,w,k),__builtin_ia32_##name(a,6,w,k),__builtin_ia32_##name(a,8,w,k),"
+            "__builtin_ia32_##name(a,11,w,k),__builtin_ia32_##name(a,15,w,k),__builtin_ia32_##name(a,16,w,k),__builtin_ia32_##name(a,255,w,k)};FOLD(r);}\n"
+            "#define GMS(name,T,a,w,k,s) {T r[]={__builtin_ia32_##name(a,0,w,k,s),__builtin_ia32_##name(a,1,w,k,s),__builtin_ia32_##name(a,2,w,k,s),"
+            "__builtin_ia32_##name(a,3,w,k,s),__builtin_ia32_##name(a,4,w,k,s),__builtin_ia32_##name(a,6,w,k,s),__builtin_ia32_##name(a,8,w,k,s),"
+            "__builtin_ia32_##name(a,11,w,k,s),__builtin_ia32_##name(a,15,w,k,s),__builtin_ia32_##name(a,16,w,k,s),__builtin_ia32_##name(a,255,w,k,s)};"
+            "FOLD(r);}\n"
+            "#define RU(name,T,a,w,k) {T r[]={__builtin_ia32_##name(a,0,w,k),__builtin_ia32_##name(a,1,w,k),__builtin_ia32_##name(a,3,w,k),"
+            "__builtin_ia32_##name(a,4,w,k),__builtin_ia32_##name(a,8,w,k),__builtin_ia32_##name(a,0x11,w,k),__builtin_ia32_##name(a,0x23,w,k),"
+            "__builtin_ia32_##name(a,0x3b,w,k),__builtin_ia32_##name(a,0x5c,w,k),__builtin_ia32_##name(a,0x8f,w,k),__builtin_ia32_##name(a,0xf0,w,k),"
+            "__builtin_ia32_##name(a,0xff,w,k),__builtin_ia32_##name(a,256,w,k)};FOLD(r);}\n"
+            "#define RUS(name,T,a,w,k,s) {T r[]={__builtin_ia32_##name(a,0,w,k,s),__builtin_ia32_##name(a,1,w,k,s),__builtin_ia32_##name(a,3,w,k,s),"
+            "__builtin_ia32_##name(a,4,w,k,s),__builtin_ia32_##name(a,8,w,k,s),__builtin_ia32_##name(a,0x11,w,k,s),__builtin_ia32_##name(a,0x23,w,k,s),"
+            "__builtin_ia32_##name(a,0x3b,w,k,s),__builtin_ia32_##name(a,0x5c,w,k,s),__builtin_ia32_##name(a,0x8f,w,k,s),__builtin_ia32_##name(a,0xf0,w,"
+            "k,s),__builtin_ia32_##name(a,0xff,w,k,s),__builtin_ia32_##name(a,256,w,k,s)};FOLD(r);}\n"
+            "#define RG(name,T,a,b,w,k) {T r[]={__builtin_ia32_##name(a,b,0,w,k),__builtin_ia32_##name(a,b,1,w,k),__builtin_ia32_##name(a,b,2,w,k),"
+            "__builtin_ia32_##name(a,b,3,w,k),__builtin_ia32_##name(a,b,4,w,k),__builtin_ia32_##name(a,b,6,w,k),__builtin_ia32_##name(a,b,9,w,k),"
+            "__builtin_ia32_##name(a,b,13,w,k),__builtin_ia32_##name(a,b,15,w,k),__builtin_ia32_##name(a,b,16,w,k),__builtin_ia32_##name(b,a,7,w,k)};"
+            "FOLD(r);}\n"
+            "#define RGS(name,T,a,b,w,k,s) {T r[]={__builtin_ia32_##name(a,b,0,w,k,s),__builtin_ia32_##name(a,b,1,w,k,s),__builtin_ia32_##name(a,b,2,w,k,"
+            "s),__builtin_ia32_##name(a,b,3,w,k,s),__builtin_ia32_##name(a,b,4,w,k,s),__builtin_ia32_##name(a,b,6,w,k,s),__builtin_ia32_##name(a,b,9,w,k,"
+            "s),__builtin_ia32_##name(a,b,13,w,k,s),__builtin_ia32_##name(a,b,15,w,k,s),__builtin_ia32_##name(a,b,16,w,k,s),__builtin_ia32_##name(b,a,7,"
+            "w,k,s)};FOLD(r);}\n"
+            "#define FC(name,a,k) {unsigned short r[]={__builtin_ia32_##name(a,0,k),__builtin_ia32_##name(a,1,k),__builtin_ia32_##name(a,2,k),"
+            "__builtin_ia32_##name(a,4,k),__builtin_ia32_##name(a,8,k),__builtin_ia32_##name(a,0x10,k),__builtin_ia32_##name(a,0x20,k),"
+            "__builtin_ia32_##name(a,0x40,k),__builtin_ia32_##name(a,0x80,k),__builtin_ia32_##name(a,0x81,k),__builtin_ia32_##name(a,0x5a,k),"
+            "__builtin_ia32_##name(a,0xff,k),__builtin_ia32_##name(a,256,k)};FOLD(r);}\n"
+            "#define FX(name,T,a,b,c,k) {T r[]={__builtin_ia32_##name(a,b,c,0,k),__builtin_ia32_##name(a,b,c,1,k),__builtin_ia32_##name(a,b,c,0x22,k),"
+            "__builtin_ia32_##name(a,b,c,0x5a,k),__builtin_ia32_##name(a,b,c,0x80,k),__builtin_ia32_##name(a,b,c,0xff,k),__builtin_ia32_##name(a,b,c,256,"
+            "k)};FOLD(r);}\n"
+            "#define FXS(name,T,a,b,c,k,s) {T r[]={__builtin_ia32_##name(a,b,c,0,k,s),__builtin_ia32_##name(a,b,c,1,k,s),__builtin_ia32_##name(a,b,c,"
+            "0x22,k,s),__builtin_ia32_##name(a,b,c,0x5a,k,s),__builtin_ia32_##name(a,b,c,0x80,k,s),__builtin_ia32_##name(a,b,c,0xff,k,s),"
+            "__builtin_ia32_##name(a,b,c,256,k,s)};FOLD(r);}\n"
+            "#define SM(name,T,a,b,w,k,s) {T r[]={__builtin_ia32_##name(a,b,w,k,0,s),__builtin_ia32_##name(a,b,w,k,1,s),__builtin_ia32_##name(a,b,w,k,3,"
+            "s),__builtin_ia32_##name(a,b,w,k,4,s),__builtin_ia32_##name(a,b,w,k,0x13,s),__builtin_ia32_##name(a,b,w,k,0x2c,s),__builtin_ia32_##name(a,b,"
+            "w,k,0xf1,s),__builtin_ia32_##name(a,b,w,k,0xff,s),__builtin_ia32_##name(a,b,w,k,256,s)};FOLD(r);}\n"
+            "#define SG(name,T,a,b,w,k,s) {T r[]={__builtin_ia32_##name(a,b,0,w,k,s),__builtin_ia32_##name(a,b,3,w,k,s),__builtin_ia32_##name(a,b,6,w,k,"
+            "s),__builtin_ia32_##name(a,b,9,w,k,s),__builtin_ia32_##name(a,b,15,w,k,s),__builtin_ia32_##name(a,b,16,w,k,s)};FOLD(r);}\n"
+            "#define K8(k,s) GM(getmantps128_mask,v4sf,a4,w4,k)GM(getmantps256_mask,v8sf,a8,w8,k)GM(getmantpd128_mask,v2df,p2,x2,k)GM(getmantpd256_mask,"
+            "v4df,p4,x4,k)GMS(getmantpd512_mask,v8df,p8,x8,k,s)RU(reduceps128_mask,v4sf,a4,w4,k)RU(reduceps256_mask,v8sf,a8,w8,k)RU(reducepd128_mask,"
+            "v2df,p2,x2,k)RU(reducepd256_mask,v4df,p4,x4,k)RUS(reducepd512_mask,v8df,p8,x8,k,s)RU(rndscaleps_128_mask,v4sf,a4,w4,k)"
+            "RU(rndscaleps_256_mask,v8sf,a8,w8,k)RU(rndscalepd_128_mask,v2df,p2,x2,k)RU(rndscalepd_256_mask,v4df,p4,x4,k)RG(rangeps128_mask,v4sf,a4,b4,"
+            "w4,k)RG(rangeps256_mask,v8sf,a8,b8,w8,k)RG(rangepd128_mask,v2df,p2,q2,x2,k)RG(rangepd256_mask,v4df,p4,q4,x4,k)RGS(rangepd512_mask,v8df,p8,"
+            "q8,x8,k,s)FC(fpclassps128_mask,a4,k)FC(fpclassps256_mask,a8,k)FC(fpclasspd128_mask,p2,k)FC(fpclasspd256_mask,p4,k)FC(fpclasspd512_mask,p8,k)"
+            "FC(fpclassss_mask,a4,k)FC(fpclasssd_mask,p2,k)FX(fixupimmps128_mask,v4sf,a4,b4,t4,k)FX(fixupimmps128_maskz,v4sf,a4,b4,t4,k)"
+            "FX(fixupimmps256_mask,v8sf,a8,b8,t8,k)FX(fixupimmps256_maskz,v8sf,a8,b8,t8,k)FX(fixupimmpd128_mask,v2df,p2,q2,u2,k)FX(fixupimmpd128_maskz,"
+            "v2df,p2,q2,u2,k)FX(fixupimmpd256_mask,v4df,p4,q4,u4,k)FX(fixupimmpd256_maskz,v4df,p4,q4,u4,k)FXS(fixupimmpd512_mask,v8df,p8,q8,u8,k,s)"
+            "FXS(fixupimmpd512_maskz,v8df,p8,q8,u8,k,s)SM(rangess128_round_mask,v4sf,a4,b4,w4,k,s)SM(rangesd128_round_mask,v2df,p2,q2,x2,k,s)"
+            "SM(reducess_mask,v4sf,a4,b4,w4,k,s)SM(reducesd_mask,v2df,p2,q2,x2,k,s)SM(rndscaless_round_mask,v4sf,a4,b4,w4,k,s)SM(rndscalesd_round_mask,"
+            "v2df,p2,q2,x2,k,s)SG(getmantss_round_mask,v4sf,a4,b4,w4,k,s)SG(getmantsd_round_mask,v2df,p2,q2,x2,k,s)FXS(fixupimmss_mask,v4sf,a4,b4,t4,k,s)"
+            "FXS(fixupimmss_maskz,v4sf,a4,b4,t4,k,s)FXS(fixupimmsd_mask,v2df,p2,q2,u2,k,s)FXS(fixupimmsd_maskz,v2df,p2,q2,u2,k,s)\n"
+            "#define K16(k,s) GMS(getmantps512_mask,v16sf,a16,w16,k,s)RUS(reduceps512_mask,v16sf,a16,w16,k,s)RGS(rangeps512_mask,v16sf,a16,b16,w16,k,s)"
+            "FC(fpclassps512_mask,a16,k)FXS(fixupimmps512_mask,v16sf,a16,b16,t16,k,s)FXS(fixupimmps512_maskz,v16sf,a16,b16,t16,k,s)\n"
+            "static const float fs[16]={0.0f,-0.0f,1.5f,-2.75f,1e30f,-1e-30f,1e-40f,__builtin_inff(),-__builtin_inff(),__builtin_nanf(\"\"),3.14159f,"
+            "-7.0f,123456.79f,0.1f,-0.5f,2.0f};\n"
+            "static const double ds[16]={0.0,-0.0,1.5,-2.75,1e300,-1e-300,4e-320,__builtin_inf(),-__builtin_inf(),__builtin_nan(\"\"),3.14159,-7.0,"
+            "123456.789,0.1,-0.5,2.0};\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a4,b4,w4;v8sf a8,b8,w8;v16sf a16,b16,w16;v2df p2,q2,x2;v4df p4,q4,x4;v8df p8,q8,x8;v4si t4;"
+            "v8si t8;v16si t16;v2di u2;v4di u4;v8di u8;\n"
+            "for(int i=0;i<16;i++){float f=fs[(i*5+n)&15],g=fs[(i*3+n*7+1)&15];double d=ds[(i*7+n)&15],e=ds[(i*11+n*3+2)&15];if(i<4){a4[i]=f;b4[i]=g;"
+            "w4[i]=(float)(i-n);}if(i<2){p2[i]=d;q2[i]=e;x2[i]=-d;}if(i<8){a8[i]=g;b8[i]=f;w8[i]=(float)(n*i);p8[i]=d;q8[i]=e;x8[i]=(double)(i+n);}"
+            "if(i<4){p4[i]=e;q4[i]=d;x4[i]=(double)i;}a16[i]=f*(float)(i%3);b16[i]=g;w16[i]=-(float)i;}\n"
+            "fill(&t4,16,n+1);fill(&t8,32,n+2);fill(&t16,64,n+3);fill(&u2,16,n+4);fill(&u4,32,n+5);fill(&u8,64,n+6);unsigned long long m=mask(n);"
+            "unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "K8(k8,4)K8(0,8)K8(0xff,12)K16(k16,8)K16(0,4)K16(0xffff,12)\n"
+            "return (int)h;}",
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

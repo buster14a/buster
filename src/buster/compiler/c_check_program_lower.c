@@ -7343,12 +7343,13 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
             constants &= a == BUSTER_CHECK_X86_NO_IMMEDIATE;
         }
     }
-    // A MASK_UNARY's or MASK_MERGE's mask, its last argument before a rounding control, where it is a constant.
+    // A MASK_UNARY's or MASK_MERGE's mask, its last argument but a rounding control and an immediate (which follows the
+    // mask of the scalar range, reduce and rndscale builtins), where it is a constant.
     uint64_t mask = 0;
-    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) &&
-        count > (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u))
+    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) && count >= 3)
     {
-        const uint32_t a = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t last = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t a = last == skipped ? last - 1 : last;
         CheckValue value = stream->values[graph->argument_nodes[first + a]];
         check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
         mask = value.constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)value.integer : 0;

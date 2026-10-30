@@ -662,7 +662,8 @@ Mutations of the tables, each built and run once, are caught. Among them:
     multiply-adds (vfmadd213, vfmadd231, vfmsub231, vfmaddsub213,
     vfmaddsub231, vfmsubadd231) and AVX512-FP16's complex multiplies (vfmulc,
     vfcmulc, vfmaddc, vfcmaddc); the approximations (vrcp, vrsqrt, their 14-bit
-    and half-precision forms); vgetexp, vscalef and vrndscale; AVX512BF16's
+    and half-precision forms); vgetexp, vscalef and vrndscale; vgetmant,
+    vreduce, vrange and vfixupimm in ps, pd, ss and sd; AVX512BF16's
     vdpbf16ps;
   - the conversions: between floating formats (vcvtss2sd, vcvtsd2ss,
     vcvtpd2ps, the half-precision ones, F16C's vcvtph2ps and vcvtps2ph,
@@ -672,8 +673,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
     uw to ph);
   - the compares: vcmp (VEX's into a vector, EVEX's into an opmask), vcomis
     and vucomis into the flags, vpcmp and vpcmpu in b, w, d and q, vpcmpeqb,
-    vptestm and vptestnm, vp2intersectd and vp2intersectq; the tests into the
-    flags: vptest, vtestps, vtestpd, kortest and ktest;
+    vptestm and vptestnm, vp2intersectd and vp2intersectq, and the classes into
+    an opmask, vfpclass in ps, pd, ss and sd; the tests into the flags: vptest,
+    vtestps, vtestpd, kortest and ktest;
   - integer arithmetic: vpadd and vpsub in b, w, d and q and their
     saturating forms (vpadds, vpaddus, vpsubs, vpsubus in b and w), vpmin and
     vpmax (signed and unsigned, b, w, d and q), vpabs, vpavgb and vpavgw,

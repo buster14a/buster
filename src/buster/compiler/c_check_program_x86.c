@@ -67,8 +67,9 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_UNARY_IMMEDIATE,
     // (vector a): the form's dest, a (VPCONFLICTD).
     CHECK_X86_LOWER_UNARY,
-    // (vector a, vector b, vector c[, int immediate][, mask m]): the form's a (the destination too), b, c: VPERMT2's,
-    // VPDPBUSD's, and VPTERNLOG's with its immediate, under m merged into a, or zeroed (`fixed`, CHECK_X86_INTO_A_ZEROED).
+    // (vector a, vector b, vector c[, int immediate][, mask m][, int rounding]): the form's a (the destination too), b,
+    // c: VPERMT2's, VPDPBUSD's, and VPTERNLOG's and VFIXUPIMM's with their immediate, under m merged into a, or zeroed
+    // (`fixed`, CHECK_X86_INTO_A_ZEROED), VFIXUPIMM's with the exceptions' suppression its rounding control asks for.
     CHECK_X86_LOWER_TERNARY,
     // (vector a, vector w, mask m): VPMOV's truncation of a's elements under m, merged into w, of `other` bytes.
     CHECK_X86_LOWER_TRUNCATE,
@@ -80,7 +81,7 @@ typedef enum CheckX86LowerFamily
     CHECK_X86_LOWER_SCATTER,
     // (vector a, vector b, vector m): VPBLENDVB's b's bytes where m's have their top bits, a's elsewhere.
     CHECK_X86_LOWER_BLENDV,
-    // (vector a, vector b, mask m): VPSHUFBITQMB's mask under m.
+    // (vector a, vector b, mask m): VPSHUFBITQMB's mask under m; or (vector a, int immediate, mask m): VFPCLASS's of a.
     CHECK_X86_LOWER_MASK_BINARY,
     // (element* p, vector a, mask m): VPMOV's truncation of a's elements, each stored at its place at p where m's bit is
     // set (the form's memory destination); a's lanes are the mask's.
@@ -90,7 +91,8 @@ typedef enum CheckX86LowerFamily
     // (VRCP14PS, VGETEXPPS, VCVTPD2DQ, VGETMANTPS).
     CHECK_X86_LOWER_MASK_UNARY,
     // (vector a, vector b[, int immediate], vector w, mask m): the form's operation of a (vvvv) and b (rm) into w (reg)
-    // under m, b of `other` bytes where they aren't a's (VSCALEFPS, VRCP14SS, VMAXSD, VCVTSD2SS).
+    // under m, b of `other` bytes where they aren't a's (VSCALEFPS, VRCP14SS, VMAXSD, VCVTSD2SS, VRANGEPS); a scalar
+    // one's immediate may follow m (VRANGESS's, VREDUCESS's, VRNDSCALESS's).
     CHECK_X86_LOWER_MASK_MERGE,
     // (vector a): the form's dest, a, a: a scalar operation of a's first element, the others a's (VRCPSS, VRSQRTSS).
     CHECK_X86_LOWER_UNARY_SCALAR,
@@ -985,20 +987,22 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_TERNARY)
         {
-            // VPTERNLOG's (the one with an immediate) under its mask, merged into a, or with `fixed` INTO_A_ZEROED zeroed
-            // where the mask's bits are clear (the maskz builtins).
-            const bool ternary_logic = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
+            // VPTERNLOG's and VFIXUPIMM's (those with an immediate) under their mask, merged into a, or with `fixed`
+            // INTO_A_ZEROED zeroed where the mask's bits are clear (the maskz builtins), VFIXUPIMM's with the exceptions'
+            // suppression its rounding control asks for.
+            const bool masked_immediate = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
             const uint8_t zeroing = rule->fixed == CHECK_X86_INTO_A_ZEROED ? BUSTER_X86_DECORATION_ZEROING : 0;
             uint32_t r = 0;
-            if (ternary_logic)
+            if (masked_immediate)
             {
                 row->records[r++] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(3));
             }
             row->records[r] = check_x86_lower_record(rule->form, v0, v1, v2);
-            row->records[r].immediate = ternary_logic ? (int32_t)(immediate & 0xff) : 0;
-            row->records[r].decorations = ternary_logic ? (uint8_t)(1 | zeroing) : 0;
+            row->records[r].immediate = masked_immediate ? (int32_t)(immediate & 0xff) : 0;
+            row->records[r].decorations = masked_immediate ? (uint8_t)(1 | zeroing) : 0;
+            check_x86_lower_round(rule, round, &row->records[r]);
             row->record_count = (uint8_t)(r + 1);
-            row->operand_count = ternary_logic ? 4 : 3;
+            row->operand_count = masked_immediate ? 4 : 3;
             for (uint32_t j = 0; j < 3; j += 1)
             {
                 row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
@@ -1389,18 +1393,21 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else
         {
-            // MASK_BINARY: the form's mask into k2 under the mask in k1.
-            row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(2));
-            row->records[1] = check_x86_lower_record(rule->form, 2, v0, v1);
+            // MASK_BINARY: the form's mask into k2 under the mask in k1, of a and b, or with an immediate of a alone (VFPCLASS's
+            // classes, the immediate's whole byte), whose mask is then its second operand.
+            const bool classes = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
+            row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(classes ? 1 : 2));
+            row->records[1] = check_x86_lower_record(rule->form, 2, classes ? 0 : v0, classes ? v0 : v1);
+            row->records[1].immediate = classes ? (int32_t)(immediate & 0xff) : 0;
             row->records[1].decorations = 1;
             row->records[2] = check_x86_lower_record(check_x86_lower_mask_out(lanes), BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, 2);
             row->record_count = 3;
-            row->operand_count = 3;
+            row->operand_count = classes ? 2 : 3;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
-            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
-            row->operand_bytes[1] = rule->bytes;
-            row->operand_classes[2] = mask_class;
+            row->operand_classes[1] = classes ? mask_class : BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = classes ? 0 : rule->bytes;
+            row->operand_classes[2] = classes ? 0 : mask_class;
             row->result_class = mask_class;
             row->result_bytes = 0;
         }
