@@ -2043,8 +2043,15 @@ static void lane_test_session_main(void* argument)
         {
             alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
             const bool forgot = lane_session_current() == 0 && lane_count() == 1 && lane_index() == 0;
+#if __has_feature(thread_sanitizer)
+            // ThreadSanitizer kills a child that starts a thread after a fork from several, as this one was forked: its
+            // group is of one there.
+            const uint32_t own_lanes = 1;
+#else
+            const uint32_t own_lanes = 2;
+#endif
             LaneSessionTest own = { 0 };
-            const bool ran = lane_run(2, lane_test_session_count, &own, 0) && own.calls[0] == 1 && own.calls[1] == 1;
+            const bool ran = lane_run(own_lanes, lane_test_session_count, &own, 0) && own.calls[0] == 1 && own.calls[1] == own_lanes - 1;
             _exit(forgot && ran ? 0 : 1);
         }
         int status = 0;

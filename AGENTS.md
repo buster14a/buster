@@ -2781,7 +2781,9 @@ lane entry. `test-checker-driver` and `test-check-units` run on one session of
 8 lanes each (`check_test_in_session`): lane 0 runs the tests, and the driver's
 commands they run in-process are regions of the session's lanes, which the
 others serve, so that none of them creates or joins a thread; a child they
-fork forgets the session.
+fork forgets the session. Under ThreadSanitizer, which kills a child that
+starts a thread after a fork from several, they run on no session, each
+in-process command starting its own.
 
 ## Deterministic output tests
 
