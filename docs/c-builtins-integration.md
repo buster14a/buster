@@ -139,12 +139,13 @@ for the integer actions and the remaining source families. The original
 integer IDs and their sentinel retain their values. Each catalog entry keeps
 folding, source checking, source constant evaluation, Tier 0 and Tier 1
 capabilities separate. A standalone checker or runtime test must not set the
-source capability. Source availability requires the source path and both
-runtime consumers; constexpr additionally requires source constant evaluation.
+source capability. Source availability now requires the source checker and the shipped Tier 0
+source path (#806); Tier 1 remains a separate capability, not a gate on the
+existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
-its separate Clang compatibility mode. Until source and two-tier acceptance
-are established, these new entries remain unavailable to `__has_builtin`.
+its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
+but refused GNU atomic variants and elementwise bit reversal remain zero.
 `test-preprocessor` checks the exact catalog and the advertised list, including
 raw macro names, unknown bounded names and guarded input boundaries.
 
@@ -460,8 +461,8 @@ ordered comparisons use its quiet `fucomip` directly. `islessgreater` is
 `(a == a) & (b == b) & (a != b)` and `isunordered` `(a != a) | (b != b)`, of
 temporaries that hold the two.
 
-`__has_builtin` answers 0 for them, as it does for the rest of the floating
-family, since the catalog's source capability asks for Tier 1 too.
+`__has_builtin` now advertises these source-lowered floating builtins (#806).
+This does not grant their separate source-constexpr or experimental Tier 1 capabilities.
 `test-check-builtins-float` checks every pair of formats' foldings against
 IEEE's rule stated apart, the conversions and the refusals. `test-checker`'s
 `floating-comparison-builtins` program checks their results and the exceptions

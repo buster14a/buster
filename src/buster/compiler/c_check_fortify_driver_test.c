@@ -48,6 +48,21 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
     } cases[] =
     {
         {
+            "query-selected fortified native calls",
+            "#if !(__has_builtin(__builtin___memcpy_chk) && __has_builtin(__builtin___memmove_chk) && __has_builtin(__builtin___mempcpy_chk) && "
+            "__has_builtin(__builtin___memset_chk) && __has_builtin(__builtin___strcpy_chk) && __has_builtin(__builtin___stpcpy_chk) && "
+            "__has_builtin(__builtin___strncpy_chk) && __has_builtin(__builtin___stpncpy_chk) && __has_builtin(__builtin___strcat_chk) && "
+            "__has_builtin(__builtin___strncat_chk) && __has_builtin(__builtin___sprintf_chk) && __has_builtin(__builtin___snprintf_chk) && "
+            "__has_builtin(__builtin___vsprintf_chk) && __has_builtin(__builtin___vsnprintf_chk) && __has_builtin(__builtin_dynamic_object_size))\n"
+            "#error implemented fortified calls must be available\n#endif\n"
+            "static volatile unsigned long limit=32;\n"
+            "int main(void){char b[32],format[]=\"ab%n\";int n=0,e=0;"
+            "if(__builtin_dynamic_object_size(b,0)!=32)return 1;"
+            "if(__builtin___memcpy_chk((e++,b),\"xy\",3,limit)!=b||e!=1||__builtin_memcmp(b,\"xy\",3))return 2;"
+            "int r=__builtin___snprintf_chk(b,32,0,limit,format,&n);return r!=2||n!=2||__builtin_memcmp(b,\"ab\",3);}",
+            0
+        },
+        {
             "checked memory/string results",
             "static volatile unsigned long limit=64;\n"
             "int main(void){char a[64],b[64];if(__builtin___memset_chk(a,0,64,limit)!=a)return 1;if(__builtin___memcpy_chk(a,\"abcd\",5,limit)!=a)return 2;"
