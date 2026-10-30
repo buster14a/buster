@@ -1755,7 +1755,7 @@ typedef enum X86Pattern
     X(VMINBF16_Z_Z_ZM512, VMINBF16_Z_Z_M16BCST, FMIN, MOVE, 2, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VMINBF16_X_X_XM128, VMINBF16_X_X_M16BCST, FMIN, MOVE, 2, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VMINBF16_Y_Y_YM256, VMINBF16_Y_Y_M16BCST, FMIN, MOVE, 2, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
-    X(VCOMISBF16_X_XM16, VCOMISBF16_X_XM16, FCOMPARE_SIGNALING, READ, 2, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION) \
+    X(VCOMISBF16_X_XM16, VCOMISBF16_X_XM16, FCOMPARE_SIGNALING, READ, 2, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, 0) \
     /* AVX10.2's conversions to and from 8-bit floats (bf8 and hf8, saturating or not, with a bias or of two vectors), \
        without MXCSR or exceptions; its conversion of two vectors of floats to halves and its dot products of halves \
        into floats, which read MXCSR. */ \
