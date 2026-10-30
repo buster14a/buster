@@ -1941,6 +1941,9 @@ static bool lane_serving(void)
 
 static void lane_serve_begin(void)
 {
+    // Serving doesn't nest on one lane: a region's operation starts serving nothing (lane_session_region), and may serve
+    // its own region's lanes.
+    assert(!thread_context.serving);
     // The lanes it serves must exist: a lazy session's lane 0 learns first how they started, and with none serves a group
     // of one.
     lane_session_settle();
