@@ -4820,10 +4820,8 @@ once on the futex (`lane_park`), and each wide part on the lanes it pays for and
 the worker budget gives (`lane_narrow`), which meet at the narrowed group's sync.
 Under a session nothing creates a thread: a command's wide parts are rounds of
 its flow (`LaneFlow`), which lane 0 announces and every lane runs; `lane_run`
-runs a region of lane 0's on the lanes that serve it (`lane_serve`, for serial
-code with `lane_run` calls: the in-process driver tests'), or a lane's
-operation alone, and a team, a cold group of several or a second session is
-refused. Its lanes start with the asynchronous
+runs a lane's operation alone, and a team, a cold group of several or a second
+session is refused. Its lanes start with the asynchronous
 signals blocked, so a signal sent to the process reaches lane 0. A lazy session
 (`BUSTER_LANE_SESSION_LAZY`, the compiler's commands') takes the threads'
 creation off lane 0's path: lane 0 creates lane 1 alone and runs the flow, and

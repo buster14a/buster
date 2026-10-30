@@ -2489,9 +2489,9 @@ static void check_driver_flow(void* argument)
 // Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
 // (one per CPU it may run on, or --lanes N, at most --worker-budget N), but one for one source file without code to emit
 // (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`) leaves
-// its lanes parked for the process's exit. In a session, the flow is a region of lane 0's, which serves the other lanes
-// (a test's session), a collective call's, which every lane makes (run_check_command_mode), whose other lanes lane 0
-// tells of the flow (`*announced`), or a lane's alone. Returns the command's exit status.
+// its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
+// (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's alone. Returns the
+// command's exit status.
 static int check_driver_run(CheckDriverRun* run, bool* announced)
 {
     const CheckDriverCommand* command = run->command;
@@ -2521,10 +2521,6 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
         {
             arena_release(&memory);
         }
-    }
-    else if (lane_serving())
-    {
-        lane_run(capacity, check_driver_flow, run, NULL);
     }
     else if (lane_count() > 1)
     {
@@ -2967,14 +2963,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
 }
 
 // The semantic driver's command (check_driver_command), run by the calling thread, or collectively by every lane of a
-// session's group that doesn't serve (#905): lane 0 runs the command, and tells the other lanes of its flow, which they
-// run with it, and of its exit status, which they return too.
+// session's group (#905): lane 0 runs the command, and tells the other lanes of its flow, which they run with it, and of
+// its exit status, which they return too.
 static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
 {
     int result = 1;
     // A lazy session's lane 0 learns how its lanes started before it meets them: on a failed start it is alone.
     lane_session_settle();
-    const bool collective = lane_session_current() != NULL && lane_count() > 1 && !lane_serving();
+    const bool collective = lane_session_current() != NULL && lane_count() > 1;
     if (collective && lane_index() != 0)
     {
         CheckDriverRun* run = (CheckDriverRun*)(uintptr_t)lane_park_broadcast(0, 0);

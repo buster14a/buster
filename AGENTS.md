@@ -2730,11 +2730,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   process's threads) and joined after, none for one lane; in the flow, the created lanes' asynchronous signals blocked
   and the synchronous ones not, a signal sent to the process handled on lane
   0, parked broadcasts, narrowings to 1, 2, 3, every lane and more, nested,
-  each narrowed group syncing, broadcasting and taking parts, lane 0 serving
-  regions of 1, 3, every lane and more, and regions whose lane 0 serves the
-  region's lanes, after which it serves the session's again, a flow of rounds
+  each narrowed group syncing, broadcasting and taking parts, a flow of rounds
   (`LaneFlow`) of 1, 3, every lane and more, of two kinds, lane 0 running its
-  part itself and the others theirs by kind, a run, a team, a
+  part itself and the others theirs by kind, a nested run in a round refused,
+  a run, a team, a
   cold group and a session of several refused where they would create a
   thread, and a child forked from lane 0, which forgets the session; then
   sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
@@ -2772,20 +2771,16 @@ one lane, which run the command's flow together until it ends. Their sessions
 are lazy (`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts
 the command, while lane 1 creates the others and says how their start went,
 which lane 0 learns (`lane_session_settle`) before it first meets them. Under a session
-nothing creates a thread: `lane_run` runs a region of lane 0's on the lanes
-that serve it, or a lane's alone, and a team, a cold group of several or a
-second session is refused. A session whose lanes can't start runs on one lane,
+nothing creates a thread: a command's wide parts are rounds of its flow
+(`LaneFlow`), `lane_run` runs on a lane alone, and a team, a cold group of
+several or a second session is refused. A session whose lanes can't start runs on one lane,
 never retrying. A terminal command's lanes stay parked for the process's exit
 (but in sanitizer builds), a test's are joined. Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
 operations. An operation's phases stay direct calls within its whole-operation
-lane entry. `test-checker-driver` and `test-check-units` run on one session of
-8 lanes each (`check_test_in_session`): lane 0 runs the tests, and the driver's
-commands they run in-process are regions of the session's lanes, which the
-others serve, so that none of them creates or joins a thread; a child they
-fork forgets the session. Under ThreadSanitizer, which kills a child that
-starts a thread after a fork from several, they run on no session, each
-in-process command starting its own.
+lane entry. `test-checker-driver` and `test-check-units` are serial code that
+runs the driver's commands in-process: each command starts and joins a
+session of its own, as alone.
 
 ## Deterministic output tests
 
@@ -5315,10 +5310,8 @@ commands in one process, on a session of 4 lanes: a failing command, objects
 on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
-throughout, no thread created, each object `--lanes 1`'s; then the same from
-lane 0 alone, the others serving its regions, lane 0 serving the session's
-lanes again after each (two sources' command runs rounds of its own on its
-region's).
+throughout, no thread created, each object `--lanes 1`'s; then the same on a
+lazy session.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the

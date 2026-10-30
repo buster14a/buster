@@ -43,10 +43,8 @@
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team or a session, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
-//   - Sessions: lane_session_run, lane_session_current, and lane_serve_begin, lane_serve_end, lane_serve and
-//     lane_serving, with which lane 0 runs the regions of serial code with lane_run calls (the in-process driver
-//     tests'); and a command's flow of rounds: LaneFlow, lane_flow_begin, lane_flow_lanes, lane_flow_round_begin,
-//     lane_flow_round_end, lane_flow_next and lane_flow_end.
+//   - Sessions: lane_session_run, lane_session_current, lane_session_settle, and a command's flow of rounds: LaneFlow,
+//     lane_flow_begin, lane_flow_lanes, lane_flow_round_begin, lane_flow_round_end, lane_flow_next and lane_flow_end.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -414,10 +412,6 @@ struct ThreadContext
     LaneTeam* team;
     // The process's lane session the thread is a lane of (#905), or 0. Under a session nothing creates a thread.
     LaneSession* session;
-    // Lane 0 serving its group's other lanes (lane_serve_begin): the group its lane_run regions run on, while lane 0
-    // itself runs alone between them.
-    Lane served;
-    bool serving;
     // lane_narrow's narrowings, innermost last.
     LaneNarrowing narrowing[BUSTER_LANE_NARROW_DEPTH];
     uint32_t narrow_depth;
@@ -636,10 +630,11 @@ struct LaneSessionStart
 
 // A process's lanes (#905): the calling thread as lane 0 and capacity - 1 threads, created once, before the command's
 // work, which run its outer flow (entry) together, every lane calling it, until it ends. A session of one creates no
-// thread. Under a session nothing creates a thread: lane_run runs its regions on the session's lanes.
+// thread. Under a session nothing creates a thread: a command's wide parts are rounds of its flow (LaneFlow) on the
+// session's lanes, and lane_run runs an operation on a lane alone.
 struct LaneSession
 {
-    // Every lane's group: the outer flow's rendezvous and the announcements of lane 0's regions (lane_serve).
+    // Every lane's group: the outer flow's rendezvous and the announcements of its rounds (LaneFlow).
     LaneGroup group;
     // lane_narrow's groups, one per depth. A narrowing's lanes leave its group as they found it (every sync complete,
     // the take counter back at 0), so the next narrowing at its depth takes it as it is.
@@ -1242,10 +1237,9 @@ static void lane_widen(void)
 // Without a team, starts count - 1 threads and joins them before returning, preserving the standalone and cold-start
 // path. A failed thread creation runs no entry; a pinning failure on this path runs unpinned and returns false.
 //
-// Under a session (#905) it creates no thread. Lane 0 serving its group (lane_serve_begin) announces the operation as a
-// region, which the first count lanes of the group run and the others skip; a lane alone (lane 0's serial work between
-// regions, a session of one) runs it on its own; and a lane of a group of several that serves nothing is refused, as a
-// nested run is. cpus must be null or a prefix of the session's.
+// Under a session (#905) it creates no thread: a lane alone (lane 0 between its flow's rounds, a session of one) runs
+// the operation on its own, and a lane of a group of several is refused, as a nested run is; a command's wide parts are
+// rounds of its flow (LaneFlow). cpus must be null or start with the session's first.
 static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 
 // lane_session_run's flags. PARK_AT_END: the lanes stay parked when the flow ends, for the process's exit to end them (a
@@ -1274,15 +1268,6 @@ static __attribute__((unused)) uint32_t lane_session_settle(void);
 // The session the calling thread is a lane of, or 0. A child forked from a lane of a session forgets it here, and runs as
 // one lane: its other lanes don't exist in the child.
 static __attribute__((unused)) LaneSession* lane_session_current(void);
-// Lane 0 of a session's group serves the others' regions (lane_run) from its serial work: lane_serve_begin, which settles
-// a lazy session first (lane_session_settle), makes it run alone between them, and lane_serve_end ends the serving
-// lanes' lane_serve. The other lanes of the group call lane_serve meanwhile (#905): for serial code with lane_run calls,
-// which the in-process driver tests are, where a command's flow is a LaneFlow (below).
-static __attribute__((unused)) void lane_serve_begin(void);
-static __attribute__((unused)) void lane_serve_end(void);
-static __attribute__((unused)) void lane_serve(void);
-// Whether the calling thread is lane 0 serving its group's other lanes.
-static __attribute__((unused)) bool lane_serving(void);
 
 // A command's flow of rounds (#905), which every lane of a session's group runs: lane 0 runs the command alone from
 // lane_flow_begin, and each of its wide parts is a round, which lane 0 announces with its kind (the command's own,
@@ -1680,64 +1665,27 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     return started && pinned;
 }
 
-// lane_run under a session: a region of lane 0's announced to the lanes that serve it, or an operation of a lane alone.
-// The operation may serve lanes of its own (a command of several units, run as a region of a test's served lanes), which
-// lane_serve_begin records over the caller's: the caller's serving is restored after it.
-static bool lane_session_region(LaneSession* session, uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
+// lane_run under a session: an operation of a lane alone, run on it as lane 0 of 1.
+static bool lane_session_alone(LaneSession* session, uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
 {
-    const Lane served = thread_context.served;
-    const bool serving = thread_context.serving;
-    const uint32_t room = serving ? served.count : thread_context.lane.count;
-    const uint32_t lanes = count < room ? count : room;
-    bool result = count >= 1 && entry != 0 && (cpus == 0 || session->has_cpus);
-    for (uint32_t i = 0; result && cpus != 0 && i < lanes; i += 1)
+    const bool result = count >= 1 && entry != 0 && thread_context.lane.count == 1 && (cpus == 0 || (session->has_cpus && cpus[0] == session->cpus[0]));
+    if (result)
     {
-        result = cpus[i] == session->cpus[i];
-    }
-    const uint64_t taken = thread_context.taken;
-    if (result && serving && served.count > 1)
-    {
-        // The region's operation goes on the served group's line of lane_run's (each group served at its own depth has
-        // its own), which only the region's lanes read, before they arrive at its end (lane_widen), which lane 0 waits
-        // for before it writes the line again. The lanes the region leaves out read nothing but the announcement: lane
-        // 0 doesn't wait for them, and they may still be on their way to the next announcement when it writes.
-        const Lane alone = thread_context.lane;
-        thread_context.lane = served;
-        thread_context.serving = false;
-        thread_context.lane.group->entry = entry;
-        thread_context.lane.group->argument = argument;
-        lane_park_broadcast(lanes, 0);
-        if (lane_narrow(lanes))
-        {
-            entry(argument);
-        }
-        lane_widen();
-        thread_context.lane = alone;
-    }
-    else if (result && thread_context.lane.count == 1)
-    {
-        // A lane alone, or lane 0 serving a group of one, which is alone too, and serves nothing in the operation.
         const Lane previous = thread_context.lane;
+        const uint64_t taken = thread_context.taken;
         thread_context.lane = (Lane){ .count = 1 };
-        thread_context.serving = false;
         thread_context.taken = 0;
         entry(argument);
         thread_context.lane = previous;
+        thread_context.taken = taken;
     }
-    else
-    {
-        result = false;
-    }
-    thread_context.served = served;
-    thread_context.serving = serving;
-    thread_context.taken = taken;
     return result;
 }
 
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
 {
     LaneSession* session = lane_session_current();
-    return session != 0                ? lane_session_region(session, count, entry, argument, cpus) :
+    return session != 0                ? lane_session_alone(session, count, entry, argument, cpus) :
            thread_context.team != 0 ? lane_team_run(thread_context.team, count, entry, argument, cpus) :
                                         lane_run_cold(count, entry, argument, cpus);
 }
@@ -1757,7 +1705,6 @@ static LaneSession* lane_session_current(void)
         // fork copied this lane but not the others, as with a team (lane_team_stop): there is no group to meet here.
         thread_context.session = 0;
         thread_context.lane = (Lane){ .count = 1 };
-        thread_context.serving = false;
         thread_context.narrow_depth = 0;
         thread_context.running = false;
         thread_context.taken = 0;
@@ -1970,46 +1917,6 @@ static uint32_t lane_session_settle(void)
     }
     result = session != 0 ? session->count : 1;
     return result;
-}
-
-static bool lane_serving(void)
-{
-    return thread_context.serving;
-}
-
-static void lane_serve_begin(void)
-{
-    // Serving doesn't nest on one lane: a region's operation starts serving nothing (lane_session_region), and may serve
-    // its own region's lanes.
-    assert(!thread_context.serving);
-    // The lanes it serves must exist: a lazy session's lane 0 learns first how they started, and with none serves a group
-    // of one.
-    lane_session_settle();
-    thread_context.served = thread_context.lane;
-    thread_context.serving = true;
-    thread_context.lane = (Lane){ .count = 1 };
-}
-
-static void lane_serve_end(void)
-{
-    thread_context.lane = thread_context.served;
-    thread_context.serving = false;
-    lane_park_broadcast(0, 0);
-}
-
-// Each announcement is a region's lanes, or 0 for the end; the region's operation is on the group's lane_run line, which
-// only the region's lanes read (lane_session_region).
-static void lane_serve(void)
-{
-    LaneGroup* group = thread_context.lane.group;
-    for (uint64_t lanes = lane_park_broadcast(0, 0); lanes != 0; lanes = lane_park_broadcast(0, 0))
-    {
-        if (lane_narrow((uint32_t)lanes))
-        {
-            group->entry(group->argument);
-        }
-        lane_widen();
-    }
 }
 
 static void lane_flow_begin(LaneFlow* flow)

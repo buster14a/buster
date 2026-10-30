@@ -1110,7 +1110,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
     {
-        result = check_test_in_session(run_checker_driver_tests, argc - 2, argv + 2);
+        result = run_checker_driver_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-fortify") == 0)
     {
@@ -1130,7 +1130,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-units") == 0)
     {
-        result = check_test_in_session(run_check_units_tests, argc - 2, argv + 2);
+        result = run_check_units_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {

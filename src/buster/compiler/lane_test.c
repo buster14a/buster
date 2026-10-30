@@ -56,12 +56,10 @@
 //     threads) and joined after; a session of one creates none. In the flow: every lane but lane 0 with the
 //     asynchronous signals blocked and the synchronous ones not; a signal sent to the process handled on lane 0; parked
 //     broadcasts from each lane; narrowings to 1, 2, 3, every lane and more, nested, each narrowed group syncing,
-//     broadcasting and taking parts, the others untouched; lane 0 serving regions of 1, 3, every lane and more lanes,
-//     each region's lanes running it once, a nested run in a region refused, and regions whose lane 0 serves the
-//     region's lanes, after which it serves the session's again; a flow of rounds (LaneFlow) of 1, 3, every lane and
-//     more, of two kinds, lane 0 running its part itself and the others theirs by kind; a lane alone running lane_run on
-//     itself;
-//     a run, a team, a cold group and a session of several refused where they would create a thread; and a child forked
+//     broadcasting and taking parts, the others untouched; a flow of rounds (LaneFlow) of 1, 3, every lane and more, of
+//     two kinds, lane 0 running its part itself and the others theirs by kind, each round's lanes running it once, a
+//     nested run in a round refused; a lane alone running lane_run on itself; a run, a team, a cold group and a session
+//     of several refused where they would create a thread; and a child forked
 //     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
 //     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
 //     lane 0 alone; and in a child, a session that leaves its lanes parked at its end (but in sanitizer builds, which
@@ -1814,10 +1812,6 @@ struct LaneSessionTest
     uint32_t calls[BUSTER_LANE_TEST_MAX_LANES];
     pid_t threads[BUSTER_LANE_TEST_MAX_LANES];
     uint64_t failures[BUSTER_LANE_TEST_MAX_LANES];
-    uint32_t region_calls[BUSTER_LANE_TEST_MAX_LANES];
-    uint32_t region_lanes;
-    // The calls of a region that a region's lane 0 serves (lane_test_session_nested), by lane.
-    uint32_t nested_calls[2];
     // A flow of rounds (LaneFlow), lane 0's, which the others follow, and each lane's calls of each of its two kinds.
     LaneFlow flow;
     uint32_t round_calls[2][BUSTER_LANE_TEST_MAX_LANES];
@@ -1859,62 +1853,17 @@ static void lane_test_session_alone(void* argument)
     *calls += lane_count() == 1 && lane_index() == 0 ? 1 : 100;
 }
 
-// A region's operation: each of its lanes records itself, then they sync and broadcast, and a nested run of several
-// lanes inside it is refused.
-static void lane_test_session_region(void* argument)
-{
-    LaneSessionTest* test = argument;
-    const uint32_t index = lane_index();
-    const uint32_t lanes = lane_count();
-    uint64_t failures = lanes != test->region_lanes || index >= lanes ? 1 : 0;
-    if (index < BUSTER_LANE_TEST_MAX_LANES)
-    {
-        test->region_calls[index] += 1;
-    }
-    lane_sync();
-    failures += lane_broadcast(index + 7, lanes - 1) != lanes - 1 + 7 ? 1 : 0;
-    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
-    if (index < BUSTER_LANE_TEST_MAX_LANES)
-    {
-        test->failures[index] += failures;
-    }
-}
-
-// A region of a region that serves its own lanes: each of its lanes counts itself.
-static void lane_test_session_nested_count(void* argument)
-{
-    LaneSessionTest* test = argument;
-    if (lane_index() < 2)
-    {
-        test->nested_calls[lane_index()] += 1;
-    }
-}
-
-// A region whose lane 0 serves the region's other lanes, as a command of several units run as a region does: it runs a
-// region of 2 of them, and ends their serving.
-static void lane_test_session_nested(void* argument)
-{
-    LaneSessionTest* test = argument;
-    if (lane_index() == 0)
-    {
-        lane_serve_begin();
-        test->failures[0] += lane_run(2, lane_test_session_nested_count, test, 0) ? 0 : 1;
-        lane_serve_end();
-    }
-    else
-    {
-        lane_serve();
-    }
-}
-
-// A flow's round of `kind` (1 or 2): each of its lanes counts itself, and they sync and broadcast in their own group.
+// A flow's round of `kind` (1 or 2): each of its lanes counts itself, and they sync and broadcast in their own group; a
+// nested run of a round of several lanes is refused.
 static void lane_test_session_round(LaneSessionTest* test, uint32_t kind)
 {
     const uint32_t index = lane_index();
     test->round_calls[kind - 1][index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += 1;
     lane_sync();
     const uint32_t lanes = lane_count();
-    test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
+    uint64_t failures = lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
+    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += failures;
 }
 
 // A narrowing of every lane of the current group to `lanes` of them: the narrowed lanes sync, broadcast and take every
@@ -2009,45 +1958,6 @@ static void lane_test_session_main(void* argument)
     LaneSession nested;
     failures += lane_session_run(&nested, 2, 0, lane_test_session_forbidden, test, 0) != 0 ? 1 : 0;
     lane_restore(group);
-    // Lane 0 serves regions of 1, 3, every lane and more lanes than the session has; each region's lanes run it once.
-    static const uint32_t regions[] = { 1, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 9 };
-    if (index == 0)
-    {
-        lane_serve_begin();
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(regions); i += 1)
-        {
-            test->region_lanes = regions[i] < lanes ? regions[i] : lanes;
-            memset(test->region_calls, 0, sizeof(test->region_calls));
-            failures += lane_run(regions[i], lane_test_session_region, test, 0) ? 0 : 1;
-            for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
-            {
-                failures += test->region_calls[lane] != (lane < test->region_lanes ? 1u : 0u) ? 1 : 0;
-            }
-        }
-        // Regions of 1, 3 and every lane whose lane 0 serves the region's other lanes, then a region of every lane: after
-        // each, lane 0 serves the session's lanes again.
-        static const uint32_t nestings[] = { 1, 3, BUSTER_LANE_TEST_MAX_LANES };
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(nestings); i += 1)
-        {
-            const uint32_t region = nestings[i] < lanes ? nestings[i] : lanes;
-            memset(test->nested_calls, 0, sizeof(test->nested_calls));
-            failures += lane_run(nestings[i], lane_test_session_nested, test, 0) ? 0 : 1;
-            failures += test->nested_calls[0] != 1 || test->nested_calls[1] != (region > 1 ? 1u : 0u) ? 1 : 0;
-            failures += lane_serving() && thread_context.served.count == lanes ? 0 : 1;
-        }
-        test->region_lanes = lanes;
-        memset(test->region_calls, 0, sizeof(test->region_calls));
-        failures += lane_run(lanes, lane_test_session_region, test, 0) ? 0 : 1;
-        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
-        {
-            failures += test->region_calls[lane] != (lane < lanes ? 1u : 0u) ? 1 : 0;
-        }
-        lane_serve_end();
-    }
-    else
-    {
-        lane_serve();
-    }
     // A flow of rounds (LaneFlow): lane 0 runs rounds of 1, 3, every lane and more lanes than the session has, of each of
     // two kinds, its part itself; the others run each by its kind on its lanes; each round's lanes run it once, and lane
     // 0 is a lane of the session's group again at the end.

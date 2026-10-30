@@ -132,9 +132,7 @@ reservation in turn are not run: TSan maps shadow for each new mapping and keeps
 neither returns to its base nor bounds the run's own reservations. ASan, MSan,
 UBSan and ordinary builds still run it. TSan also kills a child that starts a
 thread after a fork from a process of several threads, so under it
-`test-checker-driver` and `test-check-units` run on no session of lanes (#905),
-each command they run in-process starting its own as it would alone, and
-`test-lanes`' child forked from a session's lane 0 runs a group of one.
+`test-lanes`' child forked from a session's lane 0 (#905) runs a group of one.
 
 `tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
 policy and matching symbolizer. Deliberate faults prove each enabled detector,

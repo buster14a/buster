@@ -238,8 +238,7 @@ rounds (an executable's emission takes another round when binding finds the
 runtime's snapshot damaged). Several units' command runs its wide parts as
 rounds of its flow too (`CheckUnitsFlow`, the [translation units
 guide](translation-units.md)), and so does `link-foreign` (the [driver's
-contract](foreign-driver.md)): only the in-process driver tests' session
-serves regions (`lane_serve`).
+contract](foreign-driver.md)).
 
 ### Memory
 
