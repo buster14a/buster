@@ -189,6 +189,7 @@ static void check_test_driver_alias_overloads(CheckTest* test, const char* clang
             fprintf(stderr, "%s", text);
         }
         free(text);
+        text = NULL;
         check_test_expect(test, compiled, "aliases of overloadable functions compile through clang and both checker paths");
         for (uint32_t a = 0; compiled && a < BUSTER_ARRAY_LENGTH(placed); a += 1)
         {
@@ -218,8 +219,19 @@ static void check_test_driver_alias_overloads(CheckTest* test, const char* clang
     unlink(path);
 }
 
+// A failed compiler records the fixture's expected failures and skips linking, without freeing its capture twice.
+static void check_test_driver_alias_compile_failure(CheckTest* test, const char* directory)
+{
+    // These eight intentional failures must not print as failures of the driver command (check_test_expect's limit).
+    CheckTest rejected = { .failures = 24 };
+    check_test_driver_alias_overloads(&rejected, "/bin/false", "/bin/false", directory);
+    check_test_expect(test, rejected.checks == 9 && rejected.failures == 32,
+                      "failed overload-alias compilation records its failures and safely skips linking");
+}
+
 static void check_test_driver_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_alias_compile_failure(test, directory);
     check_test_driver_alias_overloads(test, clang, executable, directory);
     static const char source[] =
         "#include <stdio.h>\n"
