@@ -1670,21 +1670,12 @@ static bool foreign_driver_test_large(ForeignTestTally* tally, const char* direc
     return made;
 }
 
-// The lanes link-foreign takes by default for an object of `path` alone: those its bytes pay for, at most
-// BUSTER_FOREIGN_DRIVER_LANES and one per CPU.
-static uint32_t foreign_driver_test_default_lanes(const char* path)
-{
-    struct stat status;
-    const uint64_t bytes = stat(path, &status) == 0 ? (uint64_t)status.st_size : 0;
-    const uint32_t cpus = foreign_driver_cpus();
-    return foreign_driver_lanes(bytes, BUSTER_FOREIGN_DRIVER_LANES < cpus ? BUSTER_FOREIGN_DRIVER_LANES : cpus);
-}
-
-// --time: a link reports every stage (the first inputs' opening and the team's start among them) and the phases of the
-// resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by default, and still writes the
-// program; a link that fails reports no stages, only its diagnostic; one of 8 lanes started on one CPU runs on one lane,
-// the most the command takes (foreign_driver_cpus); and by default, a link of one small object runs on one lane, and
-// its opening reports the objects' bytes that chose it.
+// --time: a link reports every stage (the first inputs' opening and the session's start among them, with the session's
+// lanes) and the phases of the resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by
+// default, and still writes the program; a link that fails reports no stages, only its diagnostic; one of 8 lanes
+// started on one CPU runs on one lane, the most the command takes (foreign_driver_cpus), on a session of one; and by
+// default, a link of one small object runs on one lane of a session of the most its objects may pay for, and its
+// opening reports the objects' bytes that chose it.
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1758,6 +1749,12 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         snprintf(opened, sizeof(opened), " objects %llu bytes\n", sized ? (unsigned long long)object.st_size : 0ull);
         const bool counted = report.pointer != 0 && memmem(report.pointer, report.length, " objects ", strlen(" objects ")) != 0;
         complete = complete && (chosen ? sized && memmem(report.pointer, report.length, opened, strlen(opened)) != 0 : !counted);
+        // The session's lanes (#905): as many as the link may take, the most its objects may pay for by default, though
+        // it runs on fewer.
+        const uint32_t session = way == 1 ? lanes : chosen ? (cpus < BUSTER_FOREIGN_DRIVER_LANES ? cpus : BUSTER_FOREIGN_DRIVER_LANES) : 1;
+        char sessioned[64];
+        snprintf(sessioned, sizeof(sessioned), " session %u of %u\n", session, session);
+        complete = complete && (fails || memmem(report.pointer, report.length, sessioned, strlen(sessioned)) != 0);
         bool none = report.pointer != 0;
         for (uint32_t i = 0; report.pointer != 0 && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {
@@ -1777,11 +1774,11 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
     }
 }
 
-// A link whose threads can't start (#501): in a child limited to the processes it has, link-foreign on 3 lanes must
-// fail before its resolution, say why and leave the output as it was, and on one lane, which starts no thread, link;
-// and by default (#594), the large object, whose bytes pay for lanes, link on one lane, and a small one, which takes
-// one, link. RLIMIT_NPROC doesn't limit root, and with one CPU the command takes one lane. An alarm, which execve keeps,
-// ends a child that hangs.
+// A link whose threads can't start (#501, #905): in a child limited to the processes it has, link-foreign on 3 lanes
+// must run on one lane (its session's fallback, which no later stage retries) and link, as on one lane, which starts no
+// thread; and by default (#594), the large object, whose bytes pay for lanes, link on one lane, and a small one, which
+// takes one, link. RLIMIT_NPROC doesn't limit root, and with one CPU the command takes one lane. An alarm, which execve
+// keeps, ends a child that hangs.
 static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, bool large)
 {
     static const char sentinel[] = "existing driver output\000must survive failed link\377";
@@ -1839,18 +1836,11 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
         int status = 0;
         const bool waited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status);
         const int exited = waited ? WEXITSTATUS(status) : -1;
-        const String8 bytes = foreign_test_read(arena, executable);
         if (laned)
         {
-            const String8 expected = {
-                .pointer = (char*)sentinel,
-                .length = sizeof(sentinel),
-            };
             const String8 diagnostic = foreign_test_read(arena, errors);
-            const char message[] = "link-foreign: cannot start linker workers\n";
-            const bool said = diagnostic.pointer != 0 && diagnostic.length == strlen(message) && memcmp(diagnostic.pointer, message, diagnostic.length) == 0;
-            foreign_test_expect(tally, exited == 1 && said && foreign_driver_test_same(bytes, expected), "a link whose threads can't start fails before resolving, says so and leaves the output",
-                                errors);
+            foreign_test_expect(tally, exited == 0 && diagnostic.length == 0 && foreign_driver_test_run(directory, executable, output, errors, arena) == 42,
+                                "a link of --lanes whose threads can't start runs on one lane", errors);
         }
         else if (way == 2 && !skipped)
         {
@@ -1864,12 +1854,13 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
     }
 }
 
-// The command's threads (#501): a library preloaded into link-foreign counts its calls of pthread_create, which it
-// makes once for the whole command, one per lane past the first: none on one lane, and on 3 (or the CPUs') as many as
-// the lanes past the first, for a static executable, a PIE, and with section GC, unwind deduplication and string
-// merging after the conversion; and by default (#594) none for a small object, and for the large one a thread per lane
-// its bytes pay for past the first (foreign_driver_lanes), into the bytes of its link on one lane, which starts none.
-// Each program must still run.
+// The command's threads (#501, #905): a library preloaded into link-foreign counts its calls of pthread_create, which
+// its session makes once for the whole command, before any input is opened, one per lane past the first: none on one
+// lane, and on 3 (or the CPUs') as many as the lanes past the first, for a static executable, a PIE, and with section
+// GC, unwind deduplication and string merging after the conversion; and by default, whatever lanes its objects' bytes
+// then pay for (#594), the most the command takes (BUSTER_FOREIGN_DRIVER_LANES, at most the CPUs), for a small object and
+// for the large one, whose link on the lanes its bytes pay for writes the bytes of its link on one lane, which starts
+// none. Each program must still run.
 static void foreign_driver_test_threads(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter, bool large)
 {
     static const char counter[] = "#define _GNU_SOURCE\n"
@@ -1923,7 +1914,8 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         const uint64_t saved = arena->length;
         const bool chosen = way == 4 || way == 5;
         const bool on_large = way == 5 || way == 6;
-        const uint32_t lanes = way == 0 || way == 4 || way == 6 ? 1 : way == 5 ? foreign_driver_test_default_lanes(files->large) : cpus < 3 ? cpus : 3;
+        const uint32_t most = BUSTER_FOREIGN_DRIVER_LANES < cpus ? BUSTER_FOREIGN_DRIVER_LANES : cpus;
+        const uint32_t lanes = way == 0 || way == 6 ? 1 : chosen ? most : cpus < 3 ? cpus : 3;
         ForeignTestPath executable;
         ForeignTestPath counted;
         char preload[BUSTER_FOREIGN_TEST_PATH_BYTES + 16];

@@ -91,10 +91,20 @@ struct CheckValue
     uint32_t flags;
     CheckConstantKind constant_kind;
     unsigned __int128 integer;
-    long double floating;
+    // Integer storage comes first so omitted payloads in aggregate initializers are zeroed without x87.
+    // The floating view preserves the existing format, alignment and all arithmetic consumers.
+    union
+    {
+        uint64_t floating_storage[2];
+        long double floating;
+    };
     // Floating complex constants retain both source-format components. GNU integer-complex constants use
     // integer's low/high 64-bit halves, each masked to the component type's width.
-    long double imaginary;
+    union
+    {
+        uint64_t imaginary_storage[2];
+        long double imaginary;
+    };
     uint32_t object;
     // An immutable overload-set head plus one. It must obtain a contextual function identity before ordinary use.
     uint32_t overload_head;
@@ -2773,7 +2783,11 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             default: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
         }
     }
-    check_action_fp_environment(table, action, result);
+    // Keep the usual ACCESS-off action out of the environment walk and its stack frame.
+    if ((action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+    {
+        check_action_fp_environment(table, action, result);
+    }
     if (result->diagnostic != CHECK_DIAG_NONE)
     {
         result->value.constant_kind = CHECK_CONSTANT_NONE;

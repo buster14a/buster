@@ -6,6 +6,58 @@
 #ifndef BUSTER_C_CHECK_FP_ACTIONS_TEST_INCLUDED
 #define BUSTER_C_CHECK_FP_ACTIONS_TEST_INCLUDED
 
+// The call guard must not clear an inherited witness, mark integer-only actions, or disturb an error.
+// Mix those cases with newly sensitive arithmetic/conversions across complete and partial action batches.
+static void check_test_fp_action_guards(CheckTest* test, TypeTable* table)
+{
+    CheckValue inherited = check_test_float(BUSTER_TYPE_DOUBLE, 1);
+    inherited.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+    const CheckAction fixtures[] =
+    {
+        { .op = CHECK_OP_DIVIDE, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_DOUBLE, 3) } },
+        { .op = CHECK_OP_CAST, .operands = { check_test_integer(BUSTER_TYPE_INT, 16777217) }, .type = BUSTER_TYPE_FLOAT },
+        { .op = CHECK_OP_SELECT, .operands = { inherited } },
+        { .op = CHECK_OP_ADD, .operands = { check_test_integer(BUSTER_TYPE_INT, 1), check_test_integer(BUSTER_TYPE_INT, 2) } },
+        { .op = CHECK_OP_CAST, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1) }, .type = 0 },
+        { .op = CHECK_OP_LOGICAL_AND, .operands = { check_test_integer(BUSTER_TYPE_INT, 0), inherited } },
+    };
+    for (uint32_t rotation = 0; rotation < BUSTER_ARRAY_LENGTH(fixtures); rotation += 1)
+    {
+        for (uint32_t phase = 0; phase < 2; phase += 1)
+        {
+            for (uint32_t count = 0; count <= 17; count += 1)
+            {
+                CheckAction actions[17];
+                CheckActionResult scalar[17];
+                CheckActionResult vector[18];
+                CheckActionResult untouched;
+                memset(vector, 0xa5, sizeof(vector));
+                memset(&untouched, 0xa5, sizeof(untouched));
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const uint32_t kind = (rotation + i) % BUSTER_ARRAY_LENGTH(fixtures);
+                    const bool enabled = ((i + phase) & 1) != 0;
+                    actions[i] = fixtures[kind];
+                    actions[i].fp_environment = enabled ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
+                    check_action_scalar(table, actions + i, scalar + i);
+                    const bool marked = kind == 2 || (kind < 2 && enabled);
+                    check_test_expect(test, ((scalar[i].value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) == marked &&
+                                           ((scalar[i].diagnostic != CHECK_DIAG_NONE) == (kind == 4)),
+                                      "ACCESS call guard preserves new/inherited witnesses, short circuiting and invalid actions");
+                }
+                check_actions(table, actions, vector, count);
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    check_test_expect(test, check_test_action_equal(scalar + i, vector + i),
+                                      "mixed ACCESS-on/off action batches match scalar values, conversions and diagnostics");
+                }
+                check_test_expect(test, memcmp(vector + count, &untouched, sizeof(untouched)) == 0,
+                                  "empty and partial ACCESS action batches leave the following result untouched");
+            }
+        }
+    }
+}
+
 static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
 {
     CheckAction divide = { .op = CHECK_OP_DIVIDE, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1),
@@ -146,6 +198,7 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
 
 static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
 {
+    check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
     check_test_fp_graph(test, table);
 }

@@ -2336,6 +2336,150 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     return result;
 }
 
+// A command of the semantic driver as its flow runs it (#905): what check_driver_command made of its options, the flow's
+// rounds' rendezvous (a unit's emission's, CheckEmitFlow), and the command's exit status, lane 0's.
+typedef struct CheckDriverRun CheckDriverRun;
+struct CheckDriverRun
+{
+    const CheckDriverCommand* command;
+    char** inputs;
+    uint32_t input_count;
+    const char* path;
+    CheckProgramLanes* lanes;
+    CheckClock* stage_clock;
+    uint64_t* pp_ticks;
+    Arena* arena;
+    Arena* scratch;
+    Arena* output_arena;
+    bool release;
+    CheckEmitFlow flow;
+    // The lanes the command asks for (check_driver_run), which --time-stages reports with those its flow ran on.
+    uint32_t capacity;
+    int result;
+};
+
+// One source file's command, on lane 0: the unit's intern table, preprocessor and parser, which the process's commands
+// take in turn, initialized for it (and with `release`, released after it).
+static int check_driver_one_unit(const CheckDriverRun* run)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const bool interned = intern_initialize(&identifiers);
+    const int result = check_driver_unit(run->command, &run->command->options, run->path, interned ? &identifiers : NULL, &pp, &parser, run->arena, run->scratch,
+                                         run->output_arena, run->lanes, run->stage_clock, run->pp_ticks, stderr, NULL, run->release);
+    if (run->release)
+    {
+        intern_release(&identifiers);
+    }
+    return result;
+}
+
+// The command's flow, which every lane of its session runs (#905). One source file: lane 0 runs the unit's stages alone,
+// and every lane runs each round of its emission (check_program_emit_round), the bodies' parts on as many lanes as the
+// bodies' tokens and the worker budget pay for. Several (#152): lane 0 runs their driver, whose operations are regions
+// of the lanes, which the others serve (lane_serve) until their flow is the lanes' own. The command's lanes are the
+// session's at most: one after a failed start.
+static void check_driver_flow(void* argument)
+{
+    CheckDriverRun* run = argument;
+    if (lane_index() == 0)
+    {
+        check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
+        run->lanes->lanes = run->lanes->lanes < lane_count() ? run->lanes->lanes : lane_count();
+    }
+    if (run->input_count > 1)
+    {
+        // Lane 0 starts serving once the units' tables are built (check_driver_units), the lanes' start having gone on
+        // meanwhile; a command that ends before begins serving here, to end it.
+        if (lane_index() == 0)
+        {
+            run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            if (!lane_serving())
+            {
+                lane_serve_begin();
+            }
+            lane_serve_end();
+        }
+        else
+        {
+            lane_serve();
+        }
+    }
+    else if (lane_index() == 0)
+    {
+        run->lanes->flow = &run->flow;
+        check_program_emit_flow_begin(&run->flow);
+        run->result = check_driver_one_unit(run);
+        check_program_emit_flow_end(&run->flow);
+        run->lanes->flow = NULL;
+    }
+    else
+    {
+        check_program_emit_follow(&run->flow);
+    }
+    // The lanes the flow ran on, whose group lane 0 is a lane of again at its end: one after a failed start.
+    if (lane_index() == 0)
+    {
+        check_clock_lanes(run->stage_clock, run->capacity, lane_count());
+    }
+}
+
+// Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
+// (at most its allowed CPUs, --lanes N and --worker-budget N), but one for one source file without code to emit
+// (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`) leaves
+// its lanes parked for the process's exit. In a session, the flow is a region of lane 0's, which serves the other lanes
+// (a test's session), a collective call's, which every lane makes (run_check_command_mode), whose other lanes lane 0
+// tells of the flow (`*announced`), or a lane's alone. Returns the command's exit status.
+static int check_driver_run(CheckDriverRun* run, bool* announced)
+{
+    const CheckDriverCommand* command = run->command;
+    const uint32_t cap = run->lanes->budget != NULL && run->lanes->budget->maximum != 0 ? run->lanes->budget->maximum : UINT32_MAX;
+    uint32_t capacity = run->lanes->lanes < cap ? run->lanes->lanes : cap;
+    const uint32_t cpus = check_driver_cpus();
+    capacity = capacity < cpus ? capacity : cpus;
+    capacity = capacity == 0 || (run->input_count <= 1 && !command->emit_object && !command->link) ? 1 : capacity;
+    run->capacity = capacity;
+    // The options are the setup's; the session's start, or the flow's dispatch, is lanes-start's (check_driver_flow).
+    check_clock_mark(run->stage_clock, CHECK_STAGE_SETUP);
+    if (lane_session_current() == NULL)
+    {
+        // The session in a mapping of its own, in base pages: past the command's arena's first pages, which the options
+        // take some of, or in .bss, its first touch could clear a huge page. A terminal command leaves it to the
+        // process's exit, its lanes parked on it, and a reusable one releases it once the lanes have joined.
+        Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
+        LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
+        // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY).
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
+        if (session == NULL || lane_session_run(session, capacity, NULL, check_driver_flow, run, flags) == 0)
+        {
+            // A thread already in a team's or a cold group's operation, which a session can't nest in: alone.
+            const Lane group = lane_alone();
+            check_driver_flow(run);
+            lane_restore(group);
+        }
+        if (run->release)
+        {
+            arena_release(&memory);
+        }
+    }
+    else if (lane_serving())
+    {
+        lane_run(capacity, check_driver_flow, run, NULL);
+    }
+    else if (lane_count() > 1)
+    {
+        lane_park_broadcast((uint64_t)(uintptr_t)run, 0);
+        *announced = true;
+        check_driver_flow(run);
+    }
+    else
+    {
+        check_driver_flow(run);
+    }
+    return run->result;
+}
+
 // These options require code generation or ABI behavior the C driver does not yet implement. The preprocessor may
 // still accept them to model predefined macros; a semantic-driver command must not silently emit an unprotected or
 // differently instrumented object. Negative/default forms that do not request those behaviors are left alone.
@@ -2367,7 +2511,7 @@ static bool check_driver_unsupported_codegen_option(const char* argument)
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
 // one executable of them all.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
-static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
     WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
@@ -2721,22 +2865,25 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
-    else if (input_count > 1)
-    {
-        result = check_driver_units(&command, inputs, input_count, &lanes, stage_clock);
-    }
     else
     {
-        static InternTable identifiers;
-        static Preprocessor pp;
-        static Parser parser;
-        const bool interned = intern_initialize(&identifiers);
-        result = check_driver_unit(&command, &command.options, path, interned ? &identifiers : NULL, &pp, &parser, &arena, &scratch, &output_arena, &lanes,
-                                   stage_clock, pp_ticks, stderr, NULL, release);
-        if (release)
-        {
-            intern_release(&identifiers);
-        }
+        // The command runs on its session's lanes (#905), which start here, after its options and before any source is
+        // read (check_driver_run).
+        CheckDriverRun run = {
+            .command = &command,
+            .inputs = inputs,
+            .input_count = input_count,
+            .path = path,
+            .lanes = &lanes,
+            .stage_clock = stage_clock,
+            .pp_ticks = pp_ticks,
+            .arena = &arena,
+            .scratch = &scratch,
+            .output_arena = &output_arena,
+            .release = release,
+            .result = 1,
+        };
+        result = check_driver_run(&run, announced);
     }
     if (release)
     {
@@ -2757,6 +2904,40 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
     }
     worker_budget_close(&worker_budget);
+    return result;
+}
+
+// The semantic driver's command (check_driver_command), run by the calling thread, or collectively by every lane of a
+// session's group that doesn't serve (#905): lane 0 runs the command, and tells the other lanes of its flow, which they
+// run with it, and of its exit status, which they return too.
+static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
+{
+    int result = 1;
+    // A lazy session's lane 0 learns how its lanes started before it meets them: on a failed start it is alone.
+    lane_session_settle();
+    const bool collective = lane_session_current() != NULL && lane_count() > 1 && !lane_serving();
+    if (collective && lane_index() != 0)
+    {
+        CheckDriverRun* run = (CheckDriverRun*)(uintptr_t)lane_park_broadcast(0, 0);
+        if (run != NULL)
+        {
+            check_driver_flow(run);
+        }
+        result = (int)lane_park_broadcast(0, 0);
+    }
+    else
+    {
+        bool announced = false;
+        result = check_driver_command(count, arguments, executable, release, &announced);
+        if (collective && !announced)
+        {
+            lane_park_broadcast(0, 0);
+        }
+        if (collective)
+        {
+            lane_park_broadcast((uint64_t)(uint32_t)result, 0);
+        }
+    }
     return result;
 }
 

@@ -17,6 +17,13 @@ _Static_assert(IR_VOID == BUSTER_SSA_TYPE_VOID && IR_I1 == BUSTER_SSA_TYPE_I1 &&
 
 static __attribute__((unused)) IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
 static __attribute__((unused)) IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
+// The vector path's promotion (or the scalar twin's, without `vector`) with ssa.c's verifier run on the core's view of
+// the function and its result before the IR is built (#134's tests): every use dominated by its definition, a phi
+// operand per predecessor, no trivial phi, and its reaching-definition equations. `*verified` is its check, whose rule
+// names what failed (SSA_OK with no rule if the promotion failed before it), and a failure fails the promotion as
+// IR_ERROR_PHI (or as the memory's). The vector path's constructor runs here wherever its memory bound admits, past the
+// cells where ssa_ir_promote takes the twin's (#787).
+static __attribute__((unused)) IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified);
 
 typedef struct SsaIrWork SsaIrWork;
 struct SsaIrWork
@@ -577,7 +584,7 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
 // function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
 #define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
 
-static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector)
+static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified)
 {
     (void)vector;
 
@@ -621,8 +628,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         // Match the builder's combined reserved-frontier/temporary-matrix cap, a memory bound; and past
         // BUSTER_SSA_IR_VECTOR_CELLS, the measured crossover, the vector path costs more than it saves (#787). Both
-        // larger cases use the independent scalar constructor.
-        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (uint64_t)input->block_count * work.source.local_count <= BUSTER_SSA_IR_VECTOR_CELLS;
+        // larger cases use the independent scalar constructor. A verified promotion, a test's, takes the vector
+        // constructor past the crossover too, so that it is checked on every function its memory bound admits.
+        const uint64_t cells = (uint64_t)input->block_count * work.source.local_count;
+        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (verified != 0 || cells <= BUSTER_SSA_IR_VECTOR_CELLS);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
         check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector)));
@@ -649,6 +658,15 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         // The private emitter only appends; its result may safely share scratch with completed construction work.
         // Nothing temporary is placed in the caller's output arena.
         check.error = ssa_ir_error(ssa_emit(&work.work, scratch, &work.ssa));
+    }
+    if (check.error == IR_OK && verified != 0)
+    {
+        // The core's result is the IR's phis and replacements one for one (ssa_ir_fill), so its checks are the output's.
+        *verified = ssa_verify(&work.source, &work.ssa, scratch);
+        if (verified->error != SSA_OK)
+        {
+            check = ir_check(verified->error == SSA_ERROR_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_PHI, verified->instruction, 0);
+        }
     }
     if (check.error == IR_OK)
     {
@@ -678,6 +696,34 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     return check;
 }
 
+// The phis of `f`, and in `*trivial` how many of them are trivial: of one value but themselves, however many times
+// (Braun et al.'s), which a promotion leaves none of among those it makes (#134's tests and benchmark-ir-source's phi
+// counts; ir_lower.c makes no phi, so every phi of a function promoted from its IR is the promotion's).
+static __attribute__((unused)) uint32_t ssa_ir_phis(const IrFunction* f, uint32_t* trivial)
+{
+    uint32_t phis = 0;
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        if (f->op[i] == IR_PHI)
+        {
+            uint32_t same = BUSTER_IR_NONE;
+            bool distinct = false;
+            for (uint32_t p = 0; p < f->b[i]; p += 1)
+            {
+                const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
+                if (value != i)
+                {
+                    distinct |= same != BUSTER_IR_NONE && same != value;
+                    same = value;
+                }
+            }
+            phis += 1;
+            *trivial += distinct ? 0 : 1;
+        }
+    }
+    return phis;
+}
+
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
 
 static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
@@ -685,11 +731,17 @@ static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scr
 #if !BUSTER_HOST_VECTOR
     return ssa_ir_promote_scalar(input, output, scratch, result);
 #else
-    return ssa_ir_promote_path(input, output, scratch, result, true);
+    return ssa_ir_promote_path(input, output, scratch, result, true, 0);
 #endif
 }
 
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ssa_ir_promote_path(input, output, scratch, result, false);
+    return ssa_ir_promote_path(input, output, scratch, result, false, 0);
+}
+
+static IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified)
+{
+    *verified = (SsaCheck){ .error = SSA_OK, .instruction = BUSTER_SSA_NONE };
+    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), verified);
 }
