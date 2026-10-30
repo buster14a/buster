@@ -491,6 +491,11 @@ struct CheckLowerWriter
     // (`aggregates`).
     uint32_t* argument_sizes;
     uint32_t* call_result_objects;
+    // Tail calls (#147's musttail): whether the function has one, which its TAIL_CALL entries' rows then say
+    // (Tier0Function.call_tails); and the call node a musttail return lowers now (check_lower_tail_return), which
+    // check_lower_call_body makes a TAIL_CALL.
+    uint32_t tail;
+    bool tails;
     CBuiltinLowerCall* builtins;
     CheckLowerBuiltinOperands* builtin_operands;
     CBuiltinLowerScratch builtin_scratch;
@@ -1524,9 +1529,10 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
         pop = value < writer->operation_count ? writer->operations[value].operand_count : 0;
         push = class != BUSTER_TYPED_CLASS_VOID;
     }
-    else if (kind == BUSTER_TYPED_CALL)
+    else if (kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL)
     {
-        // An indirect call (callee 0) pops the address it calls too, which the stream pushed before the arguments.
+        // An indirect call (callee 0) pops the address it calls too, which the stream pushed before the arguments. A tail
+        // call's class is VOID.
         pop = value < writer->call_count ? writer->call_counts[value] + (writer->call_targets[value] == 0) : 0;
         push = class != BUSTER_TYPED_CLASS_VOID;
     }
@@ -1578,7 +1584,7 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
         }
         writer->reachable = kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE;
     }
-    else if (kind == BUSTER_TYPED_RETURN || kind == BUSTER_TYPED_JUMP_INDIRECT)
+    else if (kind == BUSTER_TYPED_RETURN || kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_TAIL_CALL)
     {
         if (writer->stack_head != 0)
         {
@@ -5112,6 +5118,8 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const TypeTable* types = writer->program->types;
     const bool builtin = runtime != CHECK_LOWER_RUNTIMES;
     const uint32_t callee = builtin ? node : graph->operand0[node];
+    // A musttail return's call (check_lower_tail_return): a TAIL_CALL, whose result is the function's own, with no object.
+    const bool tail = node == writer->tail;
     // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
     // parenthesis, which a call across lines ends on).
     check_lower_source(writer, graph->tokens[callee]);
@@ -5186,15 +5194,17 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
         const uint32_t canonical = aggregate_result ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
         const uint32_t call = writer->call_count++;
         const uint8_t result_class = check_lower_class(writer, result);
-        const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
-                                wide_result      ? check_lower_temporary_of(writer, result) :
-                                                   BUSTER_CHECK_NONE;
+        const bool object_result = !tail && (aggregate_result || wide_result);
+        const uint32_t object = !object_result ? BUSTER_CHECK_NONE :
+                                aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
+                                                   check_lower_temporary_of(writer, result);
         writer->call_targets[call] = builtin ? check_lower_runtime(writer, runtime) : direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
         writer->call_counts[call] = count;
         writer->call_variadic[call] = variadic;
-        writer->call_result_objects[call] = aggregate_result || wide_result ? object + 1 : 0;
-        writer->aggregates |= aggregate_result || wide_result;
+        writer->call_result_objects[call] = object_result ? object + 1 : 0;
+        writer->aggregates |= object_result;
+        writer->tails |= tail;
         abi->first[abi->count] = abi->argument_count;
         abi->results[abi->count] = result;
         abi->counts[abi->count] = count;
@@ -5236,15 +5246,16 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             writer->aggregates |= aggregate || wide;
             writer->argument_classes[writer->argument_count++] = class;
         }
-        if (aggregate_result)
+        if (aggregate_result && object_result)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
-        else if (wide_result)
+        else if (wide_result && object_result)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, result_class, object);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_CALL, aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
+        check_lower_instruction(writer, tail ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL,
+                                tail || aggregate_result || wide_result ? BUSTER_TYPED_CLASS_VOID : result_class, call);
         for (uint32_t kept = count; kept-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const uint32_t a = kept + (kept >= omit ? omitted : 0);
@@ -9672,6 +9683,30 @@ static void check_lower_return_kept(CheckLowerWriter* writer)
     }
 }
 
+// A musttail return (#147, CHECK_CONTROL_RETURN of BUSTER_CHECK_CONTROL_TAIL): its value's call, as a tail call, the
+// return's conversion (none: c_check_musttail.c checked that the call's result is the function's own) and the selections
+// around the call (_Generic's, __builtin_choose_expr's, __extension__'s) looked through. Its call's own lowering
+// (check_lower_call_body, which takes it for `writer->tail`) writes the TAIL_CALL, after which nothing of the function
+// runs; neither the conversions nor the result objects of a call's value expression are there.
+static void check_lower_tail_return(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckGraph* graph = &writer->program->input->graph;
+    uint32_t call = node < graph->count && graph->ops[node] == CHECK_OP_CONVERT ? graph->operand0[node] : node;
+    for (uint32_t steps = 0; call < graph->count && steps < graph->count && graph->ops[call] == CHECK_OP_SELECT; steps += 1)
+    {
+        call = graph->operand0[call];
+    }
+    if (call < graph->count && graph->ops[call] == CHECK_OP_CALL)
+    {
+        writer->tail = call;
+        check_lower_call(writer, call);
+    }
+    else
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -9738,6 +9773,10 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_RETURN && control.target == BUSTER_CHECK_CONTROL_KEPT)
     {
         check_lower_return_kept(writer);
+    }
+    else if (control.kind == CHECK_CONTROL_RETURN && control.target == BUSTER_CHECK_CONTROL_TAIL)
+    {
+        check_lower_tail_return(writer, control.node);
     }
     else if (control.kind == CHECK_CONTROL_SWITCH)
     {
@@ -10557,6 +10596,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->reachable = true;
         writer->objects = false;
         writer->aggregates = false;
+        writer->tails = false;
+        writer->tail = BUSTER_CHECK_NONE;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
@@ -10857,7 +10898,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
-                                                                            writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN);
+                                                                            writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
+                                                                                                   writer->kinds[writer->count - 1] != BUSTER_TYPED_TAIL_CALL));
         check_lower_place(writer, body.count);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.
@@ -10972,6 +11014,27 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             BUSTER_CHECK_LOWER_COPY(argument_sizes, argument_sizes, uint32_t, writer->argument_count);
             BUSTER_CHECK_LOWER_COPY(call_result_objects, call_result_objects, uint32_t, writer->call_count);
+        }
+        if (writer->tails && status->status == CHECK_PROGRAM_OK)
+        {
+            // Each TAIL_CALL's row, a tail call's (Tier0Function.call_tails): a pass over the entries of a function with one.
+            uint8_t* tails = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, writer->call_count);
+            if (tails != 0)
+            {
+                memset(tails, 0, writer->call_count);
+                for (uint32_t e = 0; e < writer->count; e += 1)
+                {
+                    if (writer->kinds[e] == BUSTER_TYPED_TAIL_CALL && writer->values[e] < writer->call_count)
+                    {
+                        tails[writer->values[e]] = 1;
+                    }
+                }
+                function->call_tails = tails;
+            }
+            else
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
         }
         if (writer->x87)
         {

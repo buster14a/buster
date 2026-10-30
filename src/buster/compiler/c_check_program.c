@@ -60,6 +60,9 @@ typedef enum CheckControlKind
 
 // A RETURN's target that returns the value its CHECK_CONTROL_RESULT computed, before the return's cleanups.
 #define BUSTER_CHECK_CONTROL_KEPT UINT32_C(0xfffffffe)
+// A RETURN's target that makes its value's call a tail call: a musttail return's (#147, CheckInput.musttails), whose
+// call c_check_musttail.c checked, which has no cleanup to run.
+#define BUSTER_CHECK_CONTROL_TAIL UINT32_C(0xfffffffd)
 
 typedef struct CheckControl CheckControl;
 struct CheckControl
@@ -776,6 +779,40 @@ static void check_control_entry(CheckControlWriter* writer, CheckControlKind kin
     });
 }
 
+// The return under a chain of attribute specifiers, a musttail return's (check_input_statement_attributes), from the
+// closer of the first: each closer's child after it is the next specifier's closer, or the statement. BUSTER_CHECK_NONE
+// where the statement isn't a return (another statement's attributes, which the reader refuses but a null statement's).
+static uint32_t check_control_attributed(const CheckControlWriter* writer, uint32_t closer)
+{
+    const Parser* parser = writer->parser;
+    uint32_t at = closer;
+    for (uint32_t steps = 0; at != BUSTER_CHECK_NONE && steps < parser->tokens.count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER; steps += 1)
+    {
+        uint32_t next = BUSTER_CHECK_NONE;
+        for (uint32_t child = writer->first[at]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+        {
+            next = child > at ? child : next;
+        }
+        at = next;
+    }
+    return at != BUSTER_CHECK_NONE && parser->tree.roles[at] == PARSE_ROLE_RETURN && parser->tokens.kinds[at] == PARSE_KIND_RETURN ? at : BUSTER_CHECK_NONE;
+}
+
+// Whether return `token` is a musttail return's (CheckInput.musttails, in source order: a binary search).
+static bool check_control_musttail(const CheckInput* input, uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = input->musttail_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = input->musttails[middle].statement < token;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < input->musttail_count && input->musttails[low].statement == token;
+}
+
 static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
 {
     if (token != BUSTER_CHECK_NONE)
@@ -1224,14 +1261,21 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         for (uint32_t child = writer->first[token]; child != BUSTER_CHECK_NONE; child = writer->next[child])
         {
             const uint8_t child_role = parser->tree.roles[child];
-            jump = child_role == PARSE_ROLE_RETURN ? child : jump;
+            // A return's attributes' specifiers are its parents (a musttail return's), the last one its terminator's child.
+            const uint32_t attributed = child_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? check_control_attributed(writer, child) : BUSTER_CHECK_NONE;
+            jump = attributed != BUSTER_CHECK_NONE ? attributed : child_role == PARSE_ROLE_RETURN ? child : jump;
             body = child_role == PARSE_ROLE_DO ? child : body;
             condition = child_role == PARSE_ROLE_CLOSE_CONDITION ? child : condition;
         }
         if (jump != BUSTER_CHECK_NONE)
         {
             const uint8_t kind = parser->tokens.kinds[jump];
-            if (kind == PARSE_KIND_RETURN)
+            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump))
+            {
+                // A musttail return's call, a tail call: no cleanup is in its scopes (c_check_musttail.c).
+                check_control_entry(writer, CHECK_CONTROL_RETURN, jump, input->token_nodes[jump], BUSTER_CHECK_CONTROL_TAIL);
+            }
+            else if (kind == PARSE_KIND_RETURN)
             {
                 // With cleanups to run, the value first, then the cleanups, then the return of the value; but the named
                 // return value's, which the cleanups may write, after them.

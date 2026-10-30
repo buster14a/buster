@@ -16,7 +16,7 @@ Issue #147 stays open until the rows that say so are done.
 | Construct | Implemented here or already available | Remaining source integration |
 | --- | --- | --- |
 | GNU attribute lists | Generic names and argument trees; structured bounded records, including unknown names and empty lists | Attribute-specific argument checking and application to declarations/types |
-| Statement and label attributes | Clang's grammar at block boundaries, after control heads and after labels | Applicability, warnings and effects |
+| Statement and label attributes | Clang's grammar at block boundaries, after control heads and after labels; clang's `musttail` on a return checked by clang 23's rules and lowered to a tail call ([the checker guide](c-checker.md)'s "Tail calls (#147)") | The other statement attributes' applicability, warnings and effects; a label's attributes |
 | Asm labels | Separate records for declarator labels, retaining adjacent string tokens and source identity | Literal decoding, redeclaration consistency and actual linker-symbol renaming |
 | `mode` | `type_machine_mode` transforms supported target types with Clang-checked results | Attribute argument resolution and declaration elaboration |
 | `packed`, `aligned`, `vector_size` | Existing type/layout actions and scalar/vector layout | Applying parsed attributes to those actions |

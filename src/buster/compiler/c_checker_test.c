@@ -2289,6 +2289,18 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                         const uint32_t source = token < parsers[p].tokens.count ? parsers[p].tokens.sources[token] : BUSTER_CHECK_NONE;
                         first = source < first ? source : first;
                     }
+                    // The musttail returns' errors (#147, c_check_musttail.c), as the driver reports them after the expressions'.
+                    CheckMusttails musttails = { 0 };
+                    const bool tails = check_musttail_run(&musttails, &input[p], &parsers[p], &streams[p], &types[p].table, &output_storage[p]);
+                    check_test_expect(test, tails, "source musttail fixture exhausted resources");
+                    rejected[p] |= musttails.count != 0;
+                    for (uint32_t m = 0; m < musttails.count; m += 1)
+                    {
+                        const CheckMusttailDiagnostic* diagnostic = musttails.diagnostics + m;
+                        unsupported[p] |= diagnostic->error == CHECK_MUSTTAIL_BUILTIN;
+                        const uint32_t source = diagnostic->token < parsers[p].tokens.count ? parsers[p].tokens.sources[diagnostic->token] : BUSTER_CHECK_NONE;
+                        first = source < first ? source : first;
+                    }
                 }
             }
             const char* name = NULL;
@@ -5088,6 +5100,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
 #include "c_check_cleanup_test.c"
+#include "c_check_musttail_test.c"
 #include "c_check_const_source_test.c"
 #include "c_check_const_alias_test.c"
 #include "c_check_comma_input_test.c"
@@ -5368,6 +5381,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_attribute_sources(&test, clang);
             check_test_programs(&test, clang);
             check_test_cleanups(&test, clang);
+            check_test_musttails(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);

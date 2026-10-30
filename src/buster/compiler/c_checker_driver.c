@@ -91,8 +91,58 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_BIT_FIELD: result = "cannot pass bit-field as __auto_type initializer in C"; break;
         case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
+        case CHECK_INPUT_MUSTTAIL_ARGUMENTS: result = "'musttail' attribute takes no arguments"; break;
+        case CHECK_INPUT_MUSTTAIL_DECLARATION: result = "'musttail' attribute cannot be applied to a declaration"; break;
+        case CHECK_INPUT_MUSTTAIL_STATEMENT: result = "'musttail' attribute only applies to return statements"; break;
     }
     return result;
+}
+
+// clang's musttail attribute (#147) as clang's messages spell it, from its first token (`token`: GNU's name, or the
+// scope's of clang::musttail): 'musttail' or 'clang::musttail', or as it is `written`, its name's own spelling
+// (__musttail__ too), which clang's reading of an attribute's arguments says. Into `text`, `capacity` bytes.
+static void check_driver_musttail_spelling(const Parser* parser, const Preprocessor* pp, uint32_t token, bool written, char* text, uint32_t capacity)
+{
+    const bool scoped = token + 3 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+    const uint32_t name = token < parser->tokens.count ? parser->tokens.names[scoped ? token + 3 : token] : 0;
+    const bool spelled = written && name != 0;
+    snprintf(text, capacity, "%s%.*s", scoped ? "clang::" : "", spelled ? (int)intern_length(pp->table, name) : 8,
+             spelled ? (const char*)intern_bytes(pp->table, name) : "musttail");
+}
+
+// The message of a musttail return's error (c_check_musttail.c), clang's, in `arena`: the attribute spelled as clang's
+// messages spell it, and the callee's name where the message names one. Null where the arena is full.
+static const char* check_driver_musttail_message(const Parser* parser, const Preprocessor* pp, const CheckInput* input,
+                                                 const CheckMusttailDiagnostic* diagnostic, Arena* arena)
+{
+    char spelling[96];
+    check_driver_musttail_spelling(parser, pp, input->musttails[diagnostic->musttail].name, false, spelling, sizeof(spelling));
+    const uint32_t name = diagnostic->callee < parser->tokens.count ? parser->tokens.names[diagnostic->callee] : 0;
+    const int name_length = name != 0 ? (int)intern_length(pp->table, name) : 0;
+    const char* name_bytes = name != 0 ? (const char*)intern_bytes(pp->table, name) : "";
+    const uint64_t capacity = 192 + (uint64_t)name_length;
+    char* text = arena_push(arena, capacity, 1);
+    if (text != NULL)
+    {
+        switch (diagnostic->error)
+        {
+            case CHECK_MUSTTAIL_CALL: snprintf(text, capacity, "'%s' attribute requires that the return value is the result of a function call", spelling); break;
+            case CHECK_MUSTTAIL_BUILTIN: snprintf(text, capacity, "construct is not yet supported by the type checker"); break;
+            case CHECK_MUSTTAIL_PROTOTYPE: snprintf(text, capacity, "'%s' attribute requires that both caller and callee functions have a prototype", spelling); break;
+            case CHECK_MUSTTAIL_CONVENTION:
+                snprintf(text, capacity, "cannot perform a tail call to function%s%.*s%s because it uses an incompatible calling convention", name != 0 ? " '" : "",
+                         name_length, name_bytes, name != 0 ? "'" : "");
+                break;
+            case CHECK_MUSTTAIL_VARIADIC: snprintf(text, capacity, "'%s' attribute may not be used with variadic functions", spelling); break;
+            case CHECK_MUSTTAIL_NORETURN: snprintf(text, capacity, "'%s' attribute may not be used with no-return-attribute functions", spelling); break;
+            case CHECK_MUSTTAIL_SIGNATURE:
+                snprintf(text, capacity, "cannot perform a tail call to function%s%.*s%s because its signature is incompatible with the calling function",
+                         name != 0 ? " '" : "", name_length, name_bytes, name != 0 ? "'" : "");
+                break;
+            case CHECK_MUSTTAIL_SCOPE: snprintf(text, capacity, "cannot perform a tail call from this return statement"); break;
+        }
+    }
+    return text;
 }
 
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
@@ -152,6 +202,9 @@ struct CheckDriverDiagnostic
     const char* message;
     uint32_t position;
     uint32_t completion;
+    // An error clang reports again at its place, where the reports' walk keeps every one rather than a token's first: a
+    // musttail return's for each cleanup scope it leaves (#147).
+    bool repeated;
 };
 
 // The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
@@ -608,7 +661,9 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
         {
-            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32))
+            const uint32_t extra_index = (uint32_t)firsts[i] - input->report_count - stream_reports;
+            const bool repeated = (uint32_t)firsts[i] >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated;
+            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated)
             {
                 firsts[first_count++] = firsts[i];
             }
@@ -766,7 +821,7 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                 }
                 packed += 1;
             }
-            if (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
+            while (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
@@ -818,7 +873,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         // The input's reports whose messages name their token's identifier.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
-                        if (kind == CHECK_INPUT_UNDECLARED && named)
+                        if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
+                        {
+                            // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
+                            char spelling[96];
+                            check_driver_musttail_spelling(parser, pp, token, kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS, spelling, sizeof(spelling));
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%s' attribute %s", spelling,
+                                                 kind == CHECK_INPUT_MUSTTAIL_ARGUMENTS ? "takes no arguments" :
+                                                 kind == CHECK_INPUT_MUSTTAIL_DECLARATION ? "cannot be applied to a declaration" : "only applies to return statements");
+                        }
+                        else if (kind == CHECK_INPUT_UNDECLARED && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
                             pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of undeclared identifier '%.*s'",
@@ -2137,13 +2201,29 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
                 if (ready)
                 {
-                    CheckDriverDiagnostic additional[3] = { 0 };
+                    // The musttail returns' errors (c_check_musttail.c), each clang's, with the three below.
+                    CheckMusttails musttails = { 0 };
+                    const bool expression_valid = input_valid && stream.report_count == 0;
+                    const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena);
+                    CheckDriverDiagnostic fallback[4] = { 0 };
+                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 4 + (uint64_t)musttails.count);
+                    CheckDriverDiagnostic* additional = pushed != NULL ? pushed : fallback;
                     uint32_t additional_count = 0;
+                    if (pushed == NULL || !musttails_checked)
+                    {
+                        additional[additional_count++] = (CheckDriverDiagnostic){ 0, "musttail checking capacity exhausted", 0 };
+                    }
+                    for (uint32_t m = 0; pushed != NULL && m < musttails.count; m += 1)
+                    {
+                        const CheckMusttailDiagnostic* musttail = musttails.diagnostics + m;
+                        const char* message = check_driver_musttail_message(checking, pp, &input, musttail, output_arena);
+                        additional[additional_count++] = (CheckDriverDiagnostic){ musttail->token, message != NULL ? message : "musttail checking capacity exhausted",
+                                                                                 musttail->position, musttail->completion, musttail->error == CHECK_MUSTTAIL_SCOPE };
+                    }
                     const uint32_t* excess_tokens = NULL;
                     uint32_t excess_count = 0;
                     CheckAsms asms = { 0 };
                     CheckInitializers initializers = { 0 };
-                    const bool expression_valid = input_valid && stream.report_count == 0;
                     if (expression_valid && !repairing)
                     {
                         if (!check_asms_run(&asms, &input, &stream, &types, output_arena, scratch))

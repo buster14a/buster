@@ -3596,6 +3596,50 @@ first error's line, on both paths, and its programs (`local-labels`,
 compares each error's line and column, and its text where the driver's message
 is clang's (`c_checker_driver_gnu_test.c`).
 
+## Tail calls (#147)
+
+clang's `musttail` on a return statement (GNU's spelling, `__attribute__((musttail))`, and `[[clang::musttail]]`)
+makes the call it returns run in place of the function, so that recursion through it takes no stack.
+
+**The reader.** The parser reads C23 attributes before a statement's keyword as that statement's. The reader records
+each musttail return (`CheckInput.musttails`, `check_input_statement_attributes`) and reports the attribute's own
+errors at clang's places: arguments, which it takes none of, and any place but a return (a declaration's, another
+statement's, a null statement's). `[[gnu::musttail]]`, which clang ignores as an unknown attribute, and another
+attribute on a return are refused as unsupported, as the checker's unknown attributes are.
+
+**The rules.** `c_check_musttail.c` checks each recorded return once the expressions have their types, in source
+order, the first rule each breaks in the order of clang 23's `Sema::checkMustTailAttr`:
+
+1. its value is a call, of its expression with parentheses, `__extension__` and a selection's chosen operand looked
+   through, but no cast;
+2. both the function and the callee have prototypes;
+3. both have the same calling convention;
+4. neither is variadic;
+5. the callee isn't declared `[[noreturn]]`;
+6. both have the same signature, as similar types (`hasSimilarType`: the same canonical type once each pointer level's
+   qualifiers are gone).
+
+A return that keeps them can't leave a cleanup variable's scope: an error for each such variable, the innermost first,
+which clang reports as its function ends. The driver spells clang's messages (`check_driver_musttail_message`), each
+scope's error at its place even where one return leaves several: the reports' walk keeps every one of them
+(`CheckDriverDiagnostic.repeated`) rather than a token's first alone. A call of a builtin's, which the checker
+computes with no call, is refused as unsupported.
+
+**The lowering.** `check_program` lowers a musttail return as its call alone, a `TAIL_CALL` entry
+(`check_lower_tail_return`): no conversion, since the call's result is the function's own, and no result object, since
+a result through a hidden pointer goes where the function's own hidden pointer points. The function's tail calls' rows
+are marked (`Tier0Function.call_tails`). Tier 0 emits the call's moves as a call's, copies its stack arguments into the
+function's own incoming area, tears the frame down as the epilogue does and jumps ([the Tier 0 guide](tier0.md)'s
+"Tail calls"), and the unwind tables describe each teardown ([the unwind guide](unwind.md)'s "Tail calls"). The
+region reader takes a musttail return for a return, inside a statement expression too.
+
+**Tests.** `test-checker` compares 48 source fixtures' acceptance and first errors with clang's
+(`c_check_musttail_test.c`). Its programs run natively against clang -O0's build of the same source, by both paths:
+`musttail-shapes`, 23 shapes of recursion 20,000 calls deep and more, each checking at its deepest call that its
+frame is where its first was; `musttail-external-callees`, tail calls of the harness's clang functions and of the C
+library's `isatty`; and `musttail-vectors`, for x86-64-v4. `test-checker-driver` compares every error's place and
+message and the exit status with clang's on 41 fixtures (`c_check_musttail_driver_test.c`).
+
 ## Ignorable and unsupported pragmas
 
 The checker consumes retained pragmas after their existing semantic handlers. An

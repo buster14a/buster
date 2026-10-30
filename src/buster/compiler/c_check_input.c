@@ -68,6 +68,11 @@ typedef enum CheckInputMessage
     // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
+    // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
+    // among them), and on a statement other than a return.
+    CHECK_INPUT_MUSTTAIL_ARGUMENTS,
+    CHECK_INPUT_MUSTTAIL_DECLARATION,
+    CHECK_INPUT_MUSTTAIL_STATEMENT,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -113,6 +118,9 @@ static const char* const check_input_messages[] =
     "cannot pass bit-field as __auto_type initializer in C",
     "bit-precise integer constants wider than 128 bits are not supported",
     "unsupported semantic pragma",
+    "'musttail' attribute takes no arguments",
+    "'musttail' attribute cannot be applied to a declaration",
+    "'musttail' attribute only applies to return statements",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -245,6 +253,19 @@ struct CheckInputCleanup
     uint32_t end;
 };
 
+// A return statement with clang's musttail attribute (#147, check_input_statement_attributes): its `return` token, the
+// first token of its attributes (where clang's statement starts, which its scope's error names), the first token of its
+// first musttail attribute (`__attribute__`'s name, or clang::'s scope, which spells it), and its function's body (its
+// `{`). c_check_musttail.c checks it once the types are known, and check_program lowers it to a tail call.
+typedef struct CheckInputMusttail CheckInputMusttail;
+struct CheckInputMusttail
+{
+    uint32_t statement;
+    uint32_t attributes;
+    uint32_t name;
+    uint32_t body;
+};
+
 struct CheckInput
 {
     CheckGraph graph;
@@ -348,6 +369,10 @@ struct CheckInput
     CheckInputCleanup* cleanups;
     uint32_t cleanup_count;
     uint32_t cleanup_capacity;
+    // The musttail return statements, in source order: none in a unit without one.
+    CheckInputMusttail* musttails;
+    uint32_t musttail_count;
+    uint32_t musttail_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -781,6 +806,9 @@ struct CheckInputReader
     // a constructor, a destructor or unscoped standard noreturn, which only then each redeclaration's are for those after a definition
     // (check_input_attribute_late).
     bool cleanup_attributes;
+    // While a statement's attributes are read (check_input_statement_attributes): musttail's place, which anywhere else is
+    // a declaration's, clang's error.
+    bool statement_attributes;
     bool weak_attributes;
     bool late_attributes;
     // Allocated only after the first late attribute: accepted attribute kinds indexed by linked object.
@@ -4363,6 +4391,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
 #include "c_check_asm_input.c"
+#include "c_check_musttail.c"
 
 // A GNU attribute's items are never expressions of the graph: the attribute reader takes them by range. Marking
 // them before any declaration is read keeps them out of the diagnostic graph of a declaration that fails before its
