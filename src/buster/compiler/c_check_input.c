@@ -6412,8 +6412,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .implicit_function_system = pp->options.implicit_function_system };
     check_input_kr_warning_policy(input, &pp->options);
-    // Plain char's signedness, which every phase after the reader reads from the table too.
+    // Plain char's signedness, which every phase after the reader reads from the table too, and whether the target
+    // inlines 16-byte atomics (cx16), which the lock-free queries read.
     types->char_unsigned = pp->options.predefines.char_unsigned;
+    types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     const char* const vararg_spellings[] =

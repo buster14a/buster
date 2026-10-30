@@ -696,8 +696,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_QUERY;
     }
-    else if (check_builtin_atomic_c11(id) || id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_SYNC_SYNCHRONIZE ||
-             id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE || check_builtin_atomic_rmw_rule(id) != NULL)
+    else if (check_builtin_atomic_checked(id))
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
     }
@@ -1851,30 +1850,13 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
             .alignment_known = walked < 64,
         };
+        // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what the
+        // effect records.
         CheckBuiltinAtomicResult checked;
-        if (check_builtin_atomic_c11(input.id))
-        {
-            check_builtin_atomic_c11_one(types, &input, &checked);
-        }
-        else if (check_builtin_atomic_rmw_rule(input.id) != NULL)
-        {
-            // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what
-            // the effect records.
-            const CheckBuiltinAtomicRmwAction rmw = {
-                .source = input,
-                .order_ice_arguments = check_builtin_atomic_rmw_order_ice(input.id, action->arguments, action->argument_count),
-            };
-            CheckBuiltinAtomicRmwResult full;
-            check_builtin_atomic_rmw(types, &rmw, &full, 1);
-            checked = full.atomic;
-        }
-        else
-        {
-            check_builtin_atomic(types, &input, &checked, 1);
-        }
+        check_builtin_atomic_family(types, &input, &checked);
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_ATOMIC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 6; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < BUSTER_ARRAY_LENGTH(checked.argument_conversions); i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }

@@ -145,7 +145,9 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused GNU atomic variants and elementwise bit reversal remain zero.
+but refused names (elementwise bit reversal, for one) remain zero.
+clang's sized legacy atomics (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog resolves
+each to its family's builtin, with its capabilities (`cbuiltin_sized_entry`).
 `test-preprocessor` checks the exact catalog and the advertised list, including
 raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
@@ -633,6 +635,100 @@ alignment rule they were refused, and a numeric conversion would have
 changed their values. No module
 grants source, constant-expression or either-tier capability merely because
 typed checking or an isolated helper succeeds.
+
+### The rest of clang's atomics (#148)
+
+clang 23.1.1 answers `__has_builtin` 1 for 160 more atomic names in C on x86-64, of
+five kinds. All are implemented, checked as clang checks them and lowered to
+code whose runs equal clang -O0's on both paths.
+
+- **The sized legacy forms**, `__sync_fetch_and_add_1` to `_16` and the other 16
+  families' (`__sync_swap` among them, 85 names). clang's Sema rewrites a call of one
+  by its object's size alone, whatever its suffix says (`BuiltinAtomicOverloaded`:
+  `__sync_fetch_and_add_1` of a `long` is an 8-byte addition), so the catalog
+  resolves each to its family's builtin (`cbuiltin_sized_entry`), whose checking and
+  leaves it is. `__sync_swap` is `__sync_lock_test_and_set`'s sequentially consistent
+  exchange, with a rule and a leaf of its own. A 16-byte object stays refused, as
+  the unsized forms' is ("atomic objects of other than 1, 2, 4 or 8 bytes").
+- **clang's legacy minimum and maximum**, `__sync_fetch_and_min`, `_max`, `_umin`
+  and `_umax`: ordinary prototypes, `int (volatile int *, int)` and `unsigned int
+  (volatile unsigned int *, unsigned int)` (the rule's `prototype`). Their first
+  argument converts to the parameter's pointer as a call's does (a pointer to the
+  other signedness with clang's pointer-sign warning, an incompatible one an
+  error), they take exactly two arguments, and the leaves are the min and max
+  ones, signed for the first two. A `void *` argument's object has the
+  parameter's alignment, as clang's code generation gives it.
+- **GNU's other forms**: the wrapping increment and decrement (`__atomic_fetch_uinc`
+  and `_udec`, clang's `atomicrmw uinc_wrap` and `udec_wrap`: integers alone, bool
+  among them, compared unsigned in the object's width) are read/modify/write rules
+  with leaves of their own; the byte flag (`__atomic_test_and_set` and
+  `__atomic_clear`) takes a pointer to any object that isn't const, void and
+  incomplete ones too, and accesses its first byte, the order its second argument
+  (a clear's a store's order); the lock-free queries (`__atomic_always_lock_free`
+  and `__atomic_is_lock_free`, prototypes of `bool (size_t, const volatile void
+  *)`) are constants where clang's evaluator answers them
+  (`check_builtin_atomic_lock_free`: a power of two, 0 among them, up to the
+  target's inline width, 16 bytes with cx16 (`TypeTable.atomic_inline_16`) and 8
+  without, for one byte, a constant address aligned to the size or a pointee at
+  least as aligned), their arguments then never evaluated, as clang folds them;
+  otherwise `__atomic_is_lock_free` calls libatomic's and
+  `__atomic_always_lock_free`, of a size that isn't a constant, is refused as
+  clang's code generation refuses it. The C11 query follows the same width now,
+  and the declaration-time evaluator checks every family
+  (`check_builtin_atomic_family`), so the queries fold in enumerators and bounds.
+- **GNU's generic forms**, `__atomic_load`, `__atomic_store`, `__atomic_exchange`
+  and `__atomic_compare_exchange` (`check_builtin_atomic_generic_one`): any
+  complete object of a size but an `_Atomic` or `_BitInt` one (records, unions,
+  arrays and long double among them), whose values are pointers converting to
+  pointers to its unqualified type, but a store's value and a compare-exchange's
+  desired one to the first argument's own pointer type, qualifiers kept, as
+  clang's ByValType. The lowering copies the values into C11's representation
+  buffers and the results back out (`CheckLowerAtomic.by_pointer`), through the
+  native leaves for aligned objects of 1, 2, 4 or 8 bytes and libatomic's generic
+  functions otherwise, as clang's code calls them.
+- **The scoped families**: clang's `__scoped_atomic_*` (GNU's operations), its
+  `__hip_atomic_*` (C11's on an object that isn't `_Atomic`, any type of a size,
+  their pointer arithmetic scaled as C11's) and its `__opencl_atomic_*` (C11's)
+  are their base builtins' operations (`check_builtin_atomic_base`) with a scope
+  after their arguments (but `__opencl_atomic_init`). x86-64 has the system's
+  scope alone (clang's code switches over a scope that isn't a constant to the
+  same code), so a scope converts to int, is checked against its family's model
+  where it is an integer constant expression (the generic scopes 0 to 5, HIP's 1
+  to 6, OpenCL's 1 to 4: clang's "synchronization scope argument to atomic
+  operation is invalid"), and is evaluated after the base's arguments and
+  dropped; `__scoped_atomic_thread_fence (int, int)`'s scope is an ordinary int.
+  The helper planner and the lowering plan and call the base's helpers on the
+  base's arguments.
+
+- clang's atomic IEEE 754-2019 maximum and minimum, `__atomic_fetch_fmaximum`,
+  `_fmaximum_num`, `_fminimum` and `_fminimum_num` (and their scoped forms), are
+  read/modify/write rules of clang's floating types alone (complex ones among
+  them) but long double ("must be a pointer to floating point type"). A float's
+  and a double's have leaves; the other types are valid and refused by name at
+  the lowering. clang's code computes them through LLVM's x86 expansion of
+  `llvm.maximum` and the others on every target without AVX10.2 (baseline to
+  znver5 alike, at -O0 and -O2): `maxss` or `minss` of the old value and the
+  operand, the result's sign cleared where the old value's is clear (maximum) or
+  set where it is set (minimum), the old value where it is a NaN, and in the
+  `_num` forms the operand where only the old value is one. So their NaN results
+  aren't IEEE's (for one, `fmaximum(+0, sNaN)` is the signaling NaN, unquieted),
+  and the leaves (`cbuiltin_atomic_rmw_ieee_body`) compute the same sequence.
+  With AVX10.2 clang's code takes `vminmaxss` instead, whose NaN results differ,
+  so a function whose target has AVX10.2 refuses them by name.
+
+`test-check-builtins-atomic` checks the queries' constants against clang's
+evaluator's rules, the generic forms' conversions and constraints and the scoped
+families' models (`check_builtin_atomic_test_families`);
+`test-check-builtins-atomic-rmw` the added rules
+(`check_builtin_atomic_rmw_test_added`); `test-builtin-atomic-rmw-helpers` the new
+leaves against the host compiler's own builtins at every width (the IEEE
+maximum's and minimum's on every pair of 14 values of each width);
+`test-preprocessor` the sized names' resolution, also at a guard page; and
+`test-checker` their acceptance and first errors against clang's (35 fixtures
+of the IEEE family's among them) and five programs of them against clang -O0's
+builds (`c_check_program_atomic_test.c`: sized legacy forms, wrapping, flags and
+lock-free queries, generic forms, scoped families, and the IEEE maximum and
+minimum on every pair of 13 values, signaling NaNs among them).
 
 `c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
 conservative realization of unreachable behavior. Its source consumer must

@@ -20,7 +20,11 @@
 #define BUSTER_CBUILTIN_RMW_TEST_RELEASE 0x08u
 // clang's min and max, also of signed integers.
 #define BUSTER_CBUILTIN_RMW_TEST_ORDERED 0x10u
-#define BUSTER_CBUILTIN_RMW_TEST_CASES 176u
+// GNU's byte flag (test_and_set and clear): one byte, its order its second argument.
+#define BUSTER_CBUILTIN_RMW_TEST_BYTE 0x20u
+// clang's IEEE maximum and minimum: of a float's and a double's bits alone.
+#define BUSTER_CBUILTIN_RMW_TEST_FLOAT 0x40u
+#define BUSTER_CBUILTIN_RMW_TEST_CASES 237u
 #define BUSTER_CBUILTIN_RMW_TEST_PAGE 4096u
 #define BUSTER_CBUILTIN_RMW_TEST_PREFIX UINT64_C(0x713596a2d84bc0ef)
 #define BUSTER_CBUILTIN_RMW_TEST_THREADS 4u
@@ -78,6 +82,19 @@ static const CBuiltinAtomicRmwTestSpec cbuiltin_atomic_rmw_test_specs[] =
     { CBUILTIN_ATOMIC_FETCH_MAX, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
     { CBUILTIN_ATOMIC_MIN_FETCH, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
     { CBUILTIN_ATOMIC_MAX_FETCH, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_SYNC_SWAP, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL },
+    { CBUILTIN_SYNC_FETCH_AND_MIN, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_SYNC_FETCH_AND_MAX, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_SYNC_FETCH_AND_UMIN, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_SYNC_FETCH_AND_UMAX, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_ATOMIC_FETCH_UINC, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL },
+    { CBUILTIN_ATOMIC_FETCH_UDEC, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL },
+    { CBUILTIN_ATOMIC_TEST_AND_SET, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_BYTE },
+    { CBUILTIN_ATOMIC_CLEAR, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_BYTE | BUSTER_CBUILTIN_RMW_TEST_RELEASE },
+    { CBUILTIN_ATOMIC_FETCH_FMAXIMUM, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_FLOAT },
+    { CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_FLOAT },
+    { CBUILTIN_ATOMIC_FETCH_FMINIMUM, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_FLOAT },
+    { CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_FLOAT },
 };
 
 typedef struct CBuiltinAtomicRmwTestProgram CBuiltinAtomicRmwTestProgram;
@@ -156,7 +173,10 @@ static bool cbuiltin_atomic_rmw_test_expect(CBuiltinAtomicRmwTest* test, bool co
     return condition;
 }
 
-// Each branch invokes the host compiler's builtin directly; no arithmetic/result recipe from the leaf is reused.
+// Each branch invokes the host compiler's builtin directly; no arithmetic/result recipe from the leaf is reused. clang's
+// legacy minimum and maximum, whose prototypes take int or unsigned int alone, are its atomicrmw min, max, umin and umax,
+// which __atomic_fetch_min and __atomic_fetch_max are at every width. A float's and a double's are GNU's exchange and
+// clang's IEEE maximum and minimum, whose NaN results the host compiler's code gives as the leaves must.
 // The legacy NAND warning describes the intended current semantics being compared here.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsync-fetch-and-nand-semantics-changed"
@@ -199,6 +219,15 @@ static bool cbuiltin_atomic_rmw_test_expect(CBuiltinAtomicRmwTest* test, bool co
     case CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP: result = __sync_val_compare_and_swap(object, *expected, (Type)value); break; \
     case CBUILTIN_SYNC_LOCK_TEST_AND_SET: result = __sync_lock_test_and_set(object, (Type)value); break; \
     case CBUILTIN_SYNC_LOCK_RELEASE: __sync_lock_release(object); result = 0; break; \
+    case CBUILTIN_SYNC_SWAP: result = __sync_swap(object, (Type)value); break; \
+    case CBUILTIN_SYNC_FETCH_AND_MIN: \
+    case CBUILTIN_SYNC_FETCH_AND_UMIN: result = (Unsigned)__atomic_fetch_min(object, (Type)value, __ATOMIC_SEQ_CST); break; \
+    case CBUILTIN_SYNC_FETCH_AND_MAX: \
+    case CBUILTIN_SYNC_FETCH_AND_UMAX: result = (Unsigned)__atomic_fetch_max(object, (Type)value, __ATOMIC_SEQ_CST); break; \
+    case CBUILTIN_ATOMIC_FETCH_UINC: result = __atomic_fetch_uinc(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_FETCH_UDEC: result = __atomic_fetch_udec(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_TEST_AND_SET: result = __atomic_test_and_set(object, order); break; \
+    case CBUILTIN_ATOMIC_CLEAR: __atomic_clear(object, order); result = 0; break; \
     default: break; \
     }
 
@@ -213,7 +242,15 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
             uint32_t bits;
             float value;
         } desired = { .bits = (uint32_t)value }, previous;
-        previous.value = __atomic_exchange_n((volatile float*)object_pointer, desired.value, order);
+        volatile float* object = object_pointer;
+        switch (id)
+        {
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM: previous.value = __atomic_fetch_fmaximum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM: previous.value = __atomic_fetch_fmaximum_num(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM: previous.value = __atomic_fetch_fminimum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM: previous.value = __atomic_fetch_fminimum_num(object, desired.value, order); break;
+        default: previous.value = __atomic_exchange_n(object, desired.value, order); break;
+        }
         result = previous.bits;
     }
     else if (item->format == CBUILTIN_ATOMIC_RMW_F64_BITS)
@@ -223,7 +260,15 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
             uint64_t bits;
             double value;
         } desired = { .bits = value }, previous;
-        previous.value = __atomic_exchange_n((volatile double*)object_pointer, desired.value, order);
+        volatile double* object = object_pointer;
+        switch (id)
+        {
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM: previous.value = __atomic_fetch_fmaximum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM: previous.value = __atomic_fetch_fmaximum_num(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM: previous.value = __atomic_fetch_fminimum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM: previous.value = __atomic_fetch_fminimum_num(object, desired.value, order); break;
+        default: previous.value = __atomic_exchange_n(object, desired.value, order); break;
+        }
         result = previous.bits;
     }
     else if (item->format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS && item->bytes == 1)
@@ -517,7 +562,7 @@ static void cbuiltin_atomic_rmw_test_refusals(CBuiltinAtomicRmwTest* test)
             cbuiltin_atomic_rmw_test_expect(test, cbuiltin_atomic_rmw_test_empty(&rejected, TIER0_ERROR_UNSUPPORTED) && arena.length == 16,
                 "only min and max take signed integer bits", i);
         }
-        if (spec.id != CBUILTIN_ATOMIC_EXCHANGE_N)
+        if (spec.id != CBUILTIN_ATOMIC_EXCHANGE_N && (spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) == 0)
         {
             for (uint32_t floating = 0; floating < 2; floating += 1)
             {
@@ -528,10 +573,26 @@ static void cbuiltin_atomic_rmw_test_refusals(CBuiltinAtomicRmwTest* test)
                     "floating arithmetic/CAS and legacy exchange remain explicitly unsupported", i);
             }
         }
+        if ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0)
+        {
+            // The IEEE maximum and minimum take floating bits alone, and a float's of 4 bytes and a double's of 8.
+            const uint32_t widths_of[] = { 4, 8, 8, 4 };
+            const CBuiltinAtomicRmwFormat formats[] = { CBUILTIN_ATOMIC_RMW_INTEGER_BITS, CBUILTIN_ATOMIC_RMW_SIGNED_BITS, CBUILTIN_ATOMIC_RMW_F32_BITS,
+                                                        CBUILTIN_ATOMIC_RMW_F64_BITS };
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(formats); f += 1)
+            {
+                Arena arena = { .base = storage, .length = 16, .capacity = sizeof(storage) };
+                const CBuiltinAtomicRmwHelper rejected = cbuiltin_atomic_rmw_helper_emit(spec.id, widths_of[f], formats[f], &arena);
+                cbuiltin_atomic_rmw_test_expect(test, cbuiltin_atomic_rmw_test_empty(&rejected, TIER0_ERROR_UNSUPPORTED) && arena.length == 16,
+                    "the IEEE maximum and minimum take a float's 4 bytes or a double's 8 alone", i * 4 + f);
+            }
+        }
         memset(storage, 0xa5, sizeof(storage));
         memcpy(snapshot, storage, sizeof(storage));
         Arena arena = { .base = storage, .length = 16, .capacity = 16 + sizeof(X86Instruction) - 1 };
-        const CBuiltinAtomicRmwHelper exhausted = cbuiltin_atomic_rmw_helper_emit(spec.id, 8, CBUILTIN_ATOMIC_RMW_INTEGER_BITS, &arena);
+        const uint32_t bytes = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_BYTE) != 0 ? 1 : 8;
+        const CBuiltinAtomicRmwFormat format = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0 ? CBUILTIN_ATOMIC_RMW_F64_BITS : CBUILTIN_ATOMIC_RMW_INTEGER_BITS;
+        const CBuiltinAtomicRmwHelper exhausted = cbuiltin_atomic_rmw_helper_emit(spec.id, bytes, format, &arena);
         cbuiltin_atomic_rmw_test_expect(test, cbuiltin_atomic_rmw_test_empty(&exhausted, TIER0_ERROR_MEMORY) && arena.length == 16 &&
             memcmp(storage, snapshot, sizeof(storage)) == 0, "allocation exhaustion is transactional for every operation", i);
     }
@@ -560,7 +621,8 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
         x86_target_validate(allowed, helper.code.records, helper.code.count) == helper.code.count, "ABI, branch, alignment, compiler-barrier and baseline contracts", ordinal);
     for (uint32_t i = 0; result && i < 6; i += 1)
     {
-        const bool order = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_GNU) != 0 && i >= (cas ? 3u : 2u);
+        const bool order = ((item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_GNU) != 0 && i >= (cas ? 3u : 2u)) ||
+                           ((item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_BYTE) != 0 && i >= 1);
         const uint8_t expected = i >= item->spec.parameters ? 0 : order ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64;
         result = cbuiltin_atomic_rmw_test_expect(test, helper.parameter_classes[i] == expected, "independent six-register parameter classes", ordinal);
     }
@@ -628,11 +690,36 @@ static void cbuiltin_atomic_rmw_test_values(CBuiltinAtomicRmwTest* test, const C
     const uint64_t fp32[] = { 0, UINT64_C(0x80000000), UINT64_C(0x7f800000), UINT64_C(0xff800000), UINT64_C(0x7f800001), UINT64_C(0x00000001) };
     const uint64_t fp64[] = { 0, UINT64_C(0x8000000000000000), UINT64_C(0x7ff0000000000000), UINT64_C(0xfff0000000000000), UINT64_C(0x7ff0000000000001), 1 };
     const int failures[] = { __ATOMIC_RELAXED, __ATOMIC_CONSUME, __ATOMIC_ACQUIRE, __ATOMIC_SEQ_CST };
+    // Zeros of both signs, ones, infinities, quiet NaNs of both signs and payloads, signaling NaNs, the smallest
+    // subnormals and values whose order differs from their bits' (a float's, then a double's).
+    const uint64_t ieee32[] = { 0, UINT64_C(0x80000000), UINT64_C(0x3f800000), UINT64_C(0xbf800000), UINT64_C(0x7f800000), UINT64_C(0xff800000),
+                                UINT64_C(0x7fc00000), UINT64_C(0xffc00123), UINT64_C(0x7f800001), UINT64_C(0xff80abcd), 1, UINT64_C(0x80000001),
+                                UINT64_C(0x40200000), UINT64_C(0xc0200000) };
+    const uint64_t ieee64[] = { 0, UINT64_C(0x8000000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0xbff0000000000000), UINT64_C(0x7ff0000000000000),
+                                UINT64_C(0xfff0000000000000), UINT64_C(0x7ff8000000000000), UINT64_C(0xfff8000000000123), UINT64_C(0x7ff0000000000001),
+                                UINT64_C(0xfff00000abcd0000), 1, UINT64_C(0x8000000000000001), UINT64_C(0x4004000000000000), UINT64_C(0xc004000000000000) };
+    _Static_assert(BUSTER_ARRAY_LENGTH(ieee32) == BUSTER_ARRAY_LENGTH(ieee64), "a double for each float");
     for (uint32_t i = 0; i < count; i += 1)
     {
         const CBuiltinAtomicRmwTestCase* item = items + i;
         const bool boolean = item->format == CBUILTIN_ATOMIC_RMW_BOOL_BITS;
         const bool cas = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_CAS) != 0;
+        // The IEEE maximum and minimum on every pair of the values, the orders in turn.
+        for (uint32_t path = 0; (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0 && path < 2; path += 1)
+        {
+            const uint64_t* values = item->bytes == 4 ? ieee32 : ieee64;
+            for (uint32_t variant = 0; variant < 3; variant += 1)
+            {
+                for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(ieee32); a += 1)
+                {
+                    for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(ieee32); b += 1)
+                    {
+                        const int order = (int)((a + b) % 6);
+                        cbuiltin_atomic_rmw_test_sample(test, item, path, variant, values[a], values[b], 0, false, order, __ATOMIC_RELAXED, i);
+                    }
+                }
+            }
+        }
         const uint64_t* samples = item->format == CBUILTIN_ATOMIC_RMW_F32_BITS ? fp32 : item->format == CBUILTIN_ATOMIC_RMW_F64_BITS ? fp64 : patterns;
         for (uint32_t path = 0; path < 2; path += 1)
         {
@@ -914,7 +1001,10 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
     {
         const CBuiltinAtomicRmwTestSpec spec = cbuiltin_atomic_rmw_test_specs[i];
         const bool ordered = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_ORDERED) != 0;
-        const uint32_t variants = 4 + ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_BOOL) != 0) + (spec.id == CBUILTIN_ATOMIC_EXCHANGE_N ? 2u : 0u) + (ordered ? 4u : 0u);
+        // The byte flag's one byte is its only width, and the IEEE maximum and minimum's a float's and a double's.
+        const bool ieee = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0;
+        const uint32_t variants = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_BYTE) != 0 ? 1u : ieee ? 2u :
+            4 + ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_BOOL) != 0) + (spec.id == CBUILTIN_ATOMIC_EXCHANGE_N ? 2u : 0u) + (ordered ? 4u : 0u);
         for (uint32_t v = 0; valid && v < variants; v += 1)
         {
             valid = cbuiltin_atomic_rmw_test_expect(&test, count < BUSTER_CBUILTIN_RMW_TEST_CASES, "bounded complete helper inventory", i);
@@ -922,15 +1012,16 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
             {
                 CBuiltinAtomicRmwTestCase* item = items + count;
                 item->spec = spec;
-                item->bytes = v < 4 ? 1u << v : v == 4 ? 1 : ordered ? 1u << (v - 5) : v == 5 ? 4 : 8;
-                item->format = v < 4 ? CBUILTIN_ATOMIC_RMW_INTEGER_BITS : v == 4 ? CBUILTIN_ATOMIC_RMW_BOOL_BITS :
+                item->bytes = ieee ? 4u << v : v < 4 ? 1u << v : v == 4 ? 1 : ordered ? 1u << (v - 5) : v == 5 ? 4 : 8;
+                item->format = ieee ? (v == 0 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS) :
+                    v < 4 ? CBUILTIN_ATOMIC_RMW_INTEGER_BITS : v == 4 ? CBUILTIN_ATOMIC_RMW_BOOL_BITS :
                     ordered ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : v == 5 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS;
                 valid = cbuiltin_atomic_rmw_test_prepare(&test, &arena, allowed, item, count);
                 count += 1;
             }
         }
     }
-    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all 34 IDs, four integer widths, 22 bool formats, two FP exchanges and min/max's four signed widths are represented", count);
+    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all 47 IDs, four integer widths (the byte flag's one), 29 bool formats, two FP exchanges, min/max's four signed widths and the IEEE maximum and minimum's float and double are represented", count);
     CBuiltinAtomicRmwTest* shared = MAP_FAILED;
     if (valid)
     {

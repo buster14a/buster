@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's atomic lowering against clang's code of the same source: every read/modify/write kind at each width through the
-// leaves, the legacy __sync forms, floating loads, stores and exchanges, which cross the helpers as bits, and objects
-// reached through members, elements and casts (c_checker.c's check_graph_atomic_alignment). Then the accesses clang calls
-// libatomic for, which the lowering refuses as misaligned, and no others. Include after c_check_program_test.c's runners.
+// #148's atomic lowering against clang's code of the same source: every read/modify/write kind at each width through
+// the leaves, the legacy __sync forms (their sized forms too), floating loads, stores and exchanges, which cross the
+// helpers as bits, objects reached through members, elements and casts (c_checker.c's check_graph_atomic_alignment),
+// the wrapping increment and decrement, the byte flag, the lock-free queries, GNU's generic forms, the scoped families
+// and the IEEE maximum and minimum. Then the accesses clang calls libatomic for, which the lowering refuses as
+// misaligned, and no others. Include after c_check_program_test.c's runners.
 
 static const char check_test_atomic_fold[] =
     "static unsigned fold(unsigned h,unsigned long long v){return (h^(unsigned)v^(unsigned)(v>>32))*16777619u;}\n";
@@ -224,10 +226,188 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "for(int i=0;i<254;i++){__c11_atomic_fetch_add(&bit,1,5);}h=fold(h,bit);"
             "h=fold(h,__c11_atomic_is_lock_free(0));h=fold(h,__c11_atomic_is_lock_free(4));h=fold(h,(unsigned)parameter(n));return (int)h;}",
         },
+        {
+            // clang's sized legacy forms are their families' builtins whatever their suffixes say, __sync_swap is
+            // __sync_lock_test_and_set's exchange, and its legacy minimum and maximum take their prototypes' int and
+            // unsigned int through any pointer converting to them (void * among them).
+            "sized-legacy-atomics",
+            "#pragma clang diagnostic ignored \"-Wsync-fetch-and-nand-semantics-changed\"\n"
+            "static signed char c8;static unsigned short u16;static int i32;static unsigned u32;static long s64;static unsigned long u64;"
+            "static _Bool flag;static char buffer[32];static char*pointer;\n"
+            "int tested(int n){unsigned h=2166136261u;c8=(signed char)(n*37);u16=(unsigned short)(n*4099);i32=n*100003;u32=(unsigned)n*2654435761u;"
+            "s64=-(long)n*7;u64=(unsigned long)n*0x9e3779b97f4a7c15ul;"
+            "h=fold(h,(unsigned long long)__sync_fetch_and_add_1(&c8,(signed char)n));h=fold(h,__sync_add_and_fetch_2(&u16,77));"
+            "h=fold(h,(unsigned long long)__sync_fetch_and_sub_4(&i32,n));h=fold(h,__sync_sub_and_fetch_8(&u64,3));"
+            "h=fold(h,(unsigned long long)__sync_fetch_and_and_16(&s64,~(long)n));h=fold(h,(unsigned long long)__sync_or_and_fetch_1(&c8,0x41));"
+            "h=fold(h,__sync_fetch_and_xor_2(&u16,(unsigned short)n));h=fold(h,(unsigned long long)__sync_nand_and_fetch_4(&i32,0x5555));"
+            "h=fold(h,__sync_fetch_and_nand_8(&u64,0xff00ff));h=fold(h,(unsigned long long)__sync_lock_test_and_set_8(&s64,(long)n<<40));"
+            "h=fold(h,__sync_bool_compare_and_swap_4(&i32,i32,n));h=fold(h,(unsigned long long)__sync_val_compare_and_swap_8(&s64,3,4));"
+            "h=fold(h,__sync_fetch_and_or_4(&u16,0x100));h=fold(h,__sync_xor_and_fetch_8(&u16,7));h=fold(h,(unsigned long long)__sync_and_and_fetch_1(&s64,-2L));"
+            "h=fold(h,(unsigned long long)__sync_swap(&c8,(signed char)(n-9)));h=fold(h,__sync_swap_2(&u16,(unsigned short)(n*3)));"
+            "h=fold(h,__sync_swap_16(&flag,n&1));__sync_lock_release_1(&u16);__sync_lock_release_4(&flag);"
+            "h=fold(h,(unsigned)__sync_fetch_and_max(&i32,n*-3+5));h=fold(h,(unsigned)__sync_fetch_and_min(&i32,n-2));"
+            "h=fold(h,__sync_fetch_and_umax(&u32,(unsigned)n<<28));h=fold(h,__sync_fetch_and_umin(&u32,(unsigned)n*1000));"
+            "h=fold(h,(unsigned)__sync_fetch_and_max((int*)&u32,-5));h=fold(h,__sync_fetch_and_umin((unsigned*)&i32,7u));"
+            "void*v=&u32;h=fold(h,__sync_fetch_and_umax(v,99u));"
+            "pointer=buffer+(n&7);h=fold(h,(unsigned long long)(__sync_fetch_and_add_2(&pointer,(char*)5)-buffer));"
+            "h=fold(h,(unsigned long long)(__sync_swap_8(&pointer,buffer+3)-buffer));"
+            "h=fold(h,(unsigned long long)c8);h=fold(h,u16);h=fold(h,(unsigned)i32);h=fold(h,u32);h=fold(h,(unsigned long long)s64);h=fold(h,u64);"
+            "h=fold(h,flag);h=fold(h,(unsigned long long)(pointer-buffer));return (int)h;}",
+        },
+        {
+            // clang's wrapping increment and decrement, GNU's byte flag of any object, and the lock-free queries, constant
+            // where clang's evaluator answers them (their arguments then never evaluated) and libatomic's otherwise.
+            "wrapping-flags-and-lock-free-atomics",
+            "static unsigned char u8;static signed char s8;static unsigned short u16;static int i32;static unsigned u32;static long s64;"
+            "static unsigned long u64;static _Bool flag;static char byte;static int word;struct S{char a,b;}pair;struct Incomplete;static long cell;\n"
+            "_Static_assert(__atomic_always_lock_free(sizeof(long),0),\"long\");_Static_assert(!__atomic_always_lock_free(16,0),\"16\");"
+            "_Static_assert(__atomic_always_lock_free(4,&i32),\"int\");_Static_assert(__atomic_is_lock_free(2,0),\"short\");"
+            "enum{E=__atomic_always_lock_free(8,&cell)*10+__atomic_always_lock_free(8,&i32)+__c11_atomic_is_lock_free(4)*100};"
+            "static int calls;static int*counted(int*p){calls+=1;return p;}\n"
+            "int tested(int n){unsigned h=2166136261u;u8=(unsigned char)(n*37);s8=(signed char)(n*-11);u16=(unsigned short)(n*4099);"
+            "i32=n*3-7;u32=(unsigned)n*5;s64=-(long)n;u64=(unsigned long)n*9;"
+            "for(int i=0;i<4;i+=1){h=fold(h,__atomic_fetch_uinc(&u8,(unsigned char)(n*13),__ATOMIC_SEQ_CST));"
+            "h=fold(h,(unsigned long long)__atomic_fetch_udec(&s8,(signed char)(n-3),__ATOMIC_RELAXED));"
+            "h=fold(h,__atomic_fetch_uinc(&u16,5,__ATOMIC_ACQUIRE));h=fold(h,(unsigned)__atomic_fetch_udec(&i32,9,__ATOMIC_RELEASE));"
+            "h=fold(h,__atomic_fetch_uinc(&u32,(unsigned)n,__ATOMIC_ACQ_REL));h=fold(h,(unsigned long long)__atomic_fetch_udec(&s64,n,__ATOMIC_SEQ_CST));"
+            "h=fold(h,__atomic_fetch_uinc(&u64,2,__ATOMIC_SEQ_CST));h=fold(h,__atomic_fetch_udec(&u64,0,__ATOMIC_SEQ_CST));"
+            "h=fold(h,__atomic_fetch_uinc(&flag,n&1,__ATOMIC_SEQ_CST));h=fold(h,__atomic_fetch_udec(&flag,1,__ATOMIC_SEQ_CST));}"
+            "byte=(char)(n&3);word=n<<8;h=fold(h,__atomic_test_and_set(&byte,__ATOMIC_SEQ_CST));h=fold(h,__atomic_test_and_set(&byte,__ATOMIC_ACQUIRE));"
+            "__atomic_clear(&byte,__ATOMIC_RELEASE);h=fold(h,__atomic_test_and_set(&word,__ATOMIC_RELAXED));h=fold(h,(unsigned)word);"
+            "__atomic_clear(&word,__ATOMIC_SEQ_CST);void*pv=&pair.b;h=fold(h,__atomic_test_and_set(pv,__ATOMIC_SEQ_CST));"
+            "h=fold(h,__atomic_test_and_set((struct Incomplete*)&pair,n));__atomic_clear((volatile void*)&pair.b,n&1?0:5);"
+            "h=fold(h,(unsigned)pair.a+256u*(unsigned)pair.b);calls=0;h=fold(h,__atomic_is_lock_free(4,counted(&i32)));"
+            "h=fold(h,__atomic_is_lock_free(8,counted(&i32)));h=fold(h,__atomic_is_lock_free(16,0));h=fold(h,__atomic_is_lock_free(3,0));"
+            "h=fold(h,__atomic_is_lock_free((unsigned)n&7,&cell));h=fold(h,__atomic_always_lock_free(8,counted(&word)));h=fold(h,(unsigned)calls);"
+            "h=fold(h,E);h=fold(h,u8);h=fold(h,(unsigned long long)s8);h=fold(h,u16);h=fold(h,(unsigned)i32);h=fold(h,u32);"
+            "h=fold(h,(unsigned long long)s64);h=fold(h,u64);h=fold(h,flag);h=fold(h,(unsigned)byte);return (int)h;}",
+        },
+        {
+            // GNU's generic forms, whose values are where their arguments point: native objects through the leaves, and
+            // records, long double and packed members through libatomic's generic functions, as clang's code calls them.
+            "generic-atomics",
+            "static unsigned fold_bytes(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i+=1){h=fold(h,b[i]);}return h;}"
+            "struct S3{char c[3];};struct S8{int a,b;};struct S16{long a,b;};struct S24{long a,b,c;};struct __attribute__((packed)) P{char tag;int x;};"
+            "static int i32;static long s64;static short s16;static double d;static float f;static long double ld;static char bytes4[4];"
+            "static struct S3 s3;static struct S8 s8;static struct S16 s16b;static struct S24 s24;static struct P packed;\n"
+            "int tested(int n){unsigned h=2166136261u;i32=n*7;s64=(long)n<<33;s16=(short)(n*13);d=n*0.5;f=(float)n*0.25f;ld=(long double)n/3;"
+            "for(int i=0;i<4;i+=1){bytes4[i]=(char)n;}s3=(struct S3){{(char)n,(char)(n+1),(char)(n+2)}};s8=(struct S8){n,-n};s16b=(struct S16){n,n*3};"
+            "s24=(struct S24){n,n+1,n+2};packed.x=n*5;"
+            "int ri;long rl;short rs;double rd;float rf;long double rld;struct S3 r3;struct S8 r8;struct S16 r16;struct S24 r24;char rb[4];"
+            "__atomic_load(&i32,&ri,__ATOMIC_SEQ_CST);h=fold(h,(unsigned)ri);__atomic_load(&s64,&rl,__ATOMIC_ACQUIRE);h=fold(h,(unsigned long long)rl);"
+            "__atomic_load(&s16,&rs,__ATOMIC_RELAXED);h=fold(h,(unsigned)rs);__atomic_load(&d,&rd,__ATOMIC_SEQ_CST);h=fold_bytes(h,&rd,sizeof rd);"
+            "__atomic_load(&f,&rf,__ATOMIC_SEQ_CST);h=fold_bytes(h,&rf,sizeof rf);__atomic_load(&ld,&rld,__ATOMIC_SEQ_CST);h=fold_bytes(h,&rld,10);"
+            "__atomic_load(&s3,&r3,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r3,sizeof r3);__atomic_load(&s8,&r8,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r8,sizeof r8);"
+            "__atomic_load(&s16b,&r16,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r16,sizeof r16);__atomic_load(&s24,&r24,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r24,sizeof r24);"
+            "__atomic_load(&bytes4,&rb,__ATOMIC_SEQ_CST);h=fold_bytes(h,rb,4);"
+            "int vi=n*100;long vl=-(long)n;struct S3 v3={{'a',(char)n,'c'}};struct S8 v8={n*2,n*4};struct S24 v24={7,(long)n,9};long double vld=1.5L*n;"
+            "__atomic_store(&i32,&vi,__ATOMIC_SEQ_CST);h=fold(h,(unsigned)i32);__atomic_store(&s64,&vl,__ATOMIC_RELEASE);h=fold(h,(unsigned long long)s64);"
+            "__atomic_store(&s3,&v3,__ATOMIC_SEQ_CST);h=fold_bytes(h,&s3,sizeof s3);__atomic_store(&s8,&v8,__ATOMIC_RELAXED);h=fold_bytes(h,&s8,sizeof s8);"
+            "__atomic_store(&s24,&v24,__ATOMIC_SEQ_CST);h=fold_bytes(h,&s24,sizeof s24);__atomic_store(&ld,&vld,__ATOMIC_SEQ_CST);h=fold_bytes(h,&ld,10);"
+            "__atomic_store(&packed.x,&vi,__ATOMIC_SEQ_CST);h=fold(h,(unsigned)packed.x);"
+            "vi=n-1;__atomic_exchange(&i32,&vi,&ri,__ATOMIC_SEQ_CST);h=fold(h,(unsigned)ri);h=fold(h,(unsigned)i32);"
+            "v8.a+=1;__atomic_exchange(&s8,&v8,&r8,__ATOMIC_ACQ_REL);h=fold_bytes(h,&r8,sizeof r8);h=fold_bytes(h,&s8,sizeof s8);"
+            "v3.c[0]='z';__atomic_exchange(&s3,&v3,&r3,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r3,sizeof r3);"
+            "v24.c=n*11;__atomic_exchange(&s24,&v24,&r24,__ATOMIC_SEQ_CST);h=fold_bytes(h,&r24,sizeof r24);h=fold_bytes(h,&s24,sizeof s24);"
+            "__atomic_exchange(&packed.x,&vi,&ri,__ATOMIC_SEQ_CST);h=fold(h,(unsigned)ri);"
+            "int ei=i32,di=n*3;h=fold(h,__atomic_compare_exchange(&i32,&ei,&di,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));h=fold(h,(unsigned)ei);h=fold(h,(unsigned)i32);"
+            "ei=12345;h=fold(h,__atomic_compare_exchange(&i32,&ei,&di,n&1,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED));h=fold(h,(unsigned)ei);"
+            "struct S8 e8=s8,d8={5,(int)n};h=fold(h,__atomic_compare_exchange(&s8,&e8,&d8,1,__ATOMIC_SEQ_CST,__ATOMIC_ACQUIRE));h=fold_bytes(h,&s8,sizeof s8);"
+            "e8.a=-77;h=fold(h,__atomic_compare_exchange(&s8,&e8,&d8,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));h=fold_bytes(h,&e8,sizeof e8);"
+            "struct S24 e24=s24,d24={1,2,(long)n};h=fold(h,__atomic_compare_exchange(&s24,&e24,&d24,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));"
+            "h=fold_bytes(h,&s24,sizeof s24);e24.a=99;h=fold(h,__atomic_compare_exchange(&s24,&e24,&d24,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));"
+            "h=fold_bytes(h,&e24,sizeof e24);struct S3 e3=s3,d3={{1,2,3}};h=fold(h,__atomic_compare_exchange(&s3,&e3,&d3,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));"
+            "h=fold_bytes(h,&s3,sizeof s3);double ed=d,dd=n*1.25;h=fold(h,__atomic_compare_exchange(&d,&ed,&dd,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST));"
+            "h=fold_bytes(h,&d,sizeof d);return (int)h;}",
+        },
+        {
+            // The scoped families: GNU's operations with a scope (__scoped_atomic_*), C11's on plain objects (__hip_atomic_*,
+            // whose pointer arithmetic scales as C11's) and on _Atomic ones (__opencl_atomic_*), each scope evaluated once.
+            "scoped-atomics",
+            "static unsigned fold_bytes(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i+=1){h=fold(h,b[i]);}return h;}"
+            "struct S8{int a,b;};struct T3{char c[3];};static int i32;static unsigned u32;static long s64;static unsigned char u8;static int arr[8];"
+            "static int*pointer;static float f;static double d;static struct S8 s8;static _Atomic int ai;static _Atomic long al;static _Atomic(int*)ap;"
+            "static _Atomic(struct S8)as8;static _Atomic(struct T3)at3;static _Atomic float af;static int scopes;static int scope(int s){scopes+=1;return s;}\n"
+            "int tested(int n){unsigned h=2166136261u;i32=n*7;u32=(unsigned)n*3;s64=(long)n<<20;u8=(unsigned char)n;pointer=arr+(n&3);f=(float)n;d=n*0.5;"
+            "s8=(struct S8){n,n+1};scopes=0;"
+            "h=fold(h,(unsigned)__scoped_atomic_load_n(&i32,__ATOMIC_SEQ_CST,__MEMORY_SCOPE_SYSTEM));"
+            "__scoped_atomic_store_n(&i32,n*9,__ATOMIC_RELEASE,scope(__MEMORY_SCOPE_DEVICE));"
+            "h=fold(h,(unsigned)__scoped_atomic_exchange_n(&i32,n,__ATOMIC_SEQ_CST,__MEMORY_SCOPE_WRKGRP));int e=i32;"
+            "h=fold(h,__scoped_atomic_compare_exchange_n(&i32,&e,5,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,scope(n&3)));"
+            "h=fold(h,(unsigned)__scoped_atomic_fetch_add(&i32,3,__ATOMIC_SEQ_CST,__MEMORY_SCOPE_SINGLE));"
+            "h=fold(h,(unsigned)__scoped_atomic_fetch_sub(&i32,1,__ATOMIC_SEQ_CST,__MEMORY_SCOPE_CLUSTR));"
+            "h=fold(h,__scoped_atomic_fetch_and(&u32,0xff,__ATOMIC_SEQ_CST,0));h=fold(h,__scoped_atomic_fetch_or(&u32,0x100,__ATOMIC_SEQ_CST,1));"
+            "h=fold(h,__scoped_atomic_fetch_xor(&u32,0x55,__ATOMIC_SEQ_CST,2));h=fold(h,__scoped_atomic_fetch_nand(&u32,0x3c,__ATOMIC_SEQ_CST,3));"
+            "h=fold(h,(unsigned)__scoped_atomic_fetch_max(&i32,n*2,__ATOMIC_SEQ_CST,4));h=fold(h,(unsigned)__scoped_atomic_fetch_min(&i32,-n,__ATOMIC_SEQ_CST,5));"
+            "h=fold(h,__scoped_atomic_fetch_uinc(&u8,7,__ATOMIC_SEQ_CST,0));h=fold(h,__scoped_atomic_fetch_udec(&u8,2,__ATOMIC_SEQ_CST,0));"
+            "h=fold(h,(unsigned long long)__scoped_atomic_add_fetch(&s64,3,__ATOMIC_SEQ_CST,0));h=fold(h,(unsigned long long)__scoped_atomic_sub_fetch(&s64,4,__ATOMIC_SEQ_CST,0));"
+            "h=fold(h,__scoped_atomic_and_fetch(&u32,0x7f,__ATOMIC_SEQ_CST,0));h=fold(h,__scoped_atomic_or_fetch(&u32,0x80,__ATOMIC_SEQ_CST,0));"
+            "h=fold(h,__scoped_atomic_xor_fetch(&u32,0x11,__ATOMIC_SEQ_CST,0));h=fold(h,__scoped_atomic_nand_fetch(&u32,0x22,__ATOMIC_SEQ_CST,0));"
+            "h=fold(h,(unsigned long long)__scoped_atomic_max_fetch(&s64,100,__ATOMIC_SEQ_CST,0));h=fold(h,(unsigned long long)__scoped_atomic_min_fetch(&s64,50,__ATOMIC_SEQ_CST,0));"
+            "h=fold(h,(unsigned long long)(__scoped_atomic_fetch_add(&pointer,4,__ATOMIC_SEQ_CST,0)-arr));int r;int v=n+40;"
+            "__scoped_atomic_load(&i32,&r,__ATOMIC_SEQ_CST,0);h=fold(h,(unsigned)r);__scoped_atomic_store(&i32,&v,__ATOMIC_SEQ_CST,scope(1));h=fold(h,(unsigned)i32);"
+            "v+=1;__scoped_atomic_exchange(&i32,&v,&r,__ATOMIC_SEQ_CST,1);h=fold(h,(unsigned)r);"
+            "e=i32;v=77;h=fold(h,__scoped_atomic_compare_exchange(&i32,&e,&v,1,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,2));h=fold(h,(unsigned)i32);"
+            "__scoped_atomic_thread_fence(__ATOMIC_SEQ_CST,scope(9));"
+            "h=fold(h,(unsigned)__hip_atomic_load(&i32,__ATOMIC_SEQ_CST,1));__hip_atomic_store(&i32,n*3,__ATOMIC_SEQ_CST,scope(2));"
+            "h=fold(h,(unsigned)__hip_atomic_exchange(&i32,n+2,__ATOMIC_SEQ_CST,3));e=i32;h=fold(h,__hip_atomic_compare_exchange_strong(&i32,&e,8,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,4));"
+            "e=9999;h=fold(h,__hip_atomic_compare_exchange_weak(&i32,&e,8,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,5));h=fold(h,(unsigned)e);"
+            "h=fold(h,(unsigned)__hip_atomic_fetch_add(&i32,2,__ATOMIC_SEQ_CST,6));h=fold(h,(unsigned)__hip_atomic_fetch_sub(&i32,1,__ATOMIC_SEQ_CST,1));"
+            "h=fold(h,__hip_atomic_fetch_and(&u32,0xf0,__ATOMIC_SEQ_CST,1));h=fold(h,__hip_atomic_fetch_or(&u32,0x3,__ATOMIC_SEQ_CST,1));"
+            "h=fold(h,__hip_atomic_fetch_xor(&u32,0x5,__ATOMIC_SEQ_CST,1));h=fold(h,(unsigned)__hip_atomic_fetch_max(&i32,n,__ATOMIC_SEQ_CST,1));"
+            "h=fold(h,(unsigned)__hip_atomic_fetch_min(&i32,n-5,__ATOMIC_SEQ_CST,1));"
+            "h=fold(h,(unsigned long long)(__hip_atomic_fetch_add(&pointer,1,__ATOMIC_SEQ_CST,1)-arr));h=fold(h,(unsigned long long)(pointer-arr));"
+            "struct S8 r8=__hip_atomic_load(&s8,__ATOMIC_SEQ_CST,1);h=fold_bytes(h,&r8,sizeof r8);"
+            "__hip_atomic_store(&s8,((struct S8){3,n}),__ATOMIC_SEQ_CST,1);h=fold_bytes(h,&s8,sizeof s8);"
+            "h=fold(h,(unsigned)(int)__hip_atomic_fetch_add(&f,1.5f,__ATOMIC_SEQ_CST,1));h=fold(h,(unsigned)(int)(f*4));"
+            "h=fold(h,(unsigned)(int)__hip_atomic_fetch_max(&d,2.0,__ATOMIC_SEQ_CST,1));h=fold(h,(unsigned)(int)(d*4));"
+            "__opencl_atomic_init(&ai,n);h=fold(h,(unsigned)__opencl_atomic_load(&ai,__ATOMIC_SEQ_CST,__OPENCL_MEMORY_SCOPE_DEVICE));"
+            "__opencl_atomic_store(&ai,n*5,__ATOMIC_SEQ_CST,scope(2));h=fold(h,(unsigned)__opencl_atomic_exchange(&ai,n,__ATOMIC_SEQ_CST,1));"
+            "e=n;h=fold(h,__opencl_atomic_compare_exchange_strong(&ai,&e,4,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,3));"
+            "e=-1;h=fold(h,__opencl_atomic_compare_exchange_weak(&ai,&e,4,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST,4));h=fold(h,(unsigned)e);"
+            "h=fold(h,(unsigned)__opencl_atomic_fetch_add(&ai,10,__ATOMIC_SEQ_CST,2));h=fold(h,(unsigned)__opencl_atomic_fetch_sub(&ai,3,__ATOMIC_SEQ_CST,2));"
+            "h=fold(h,(unsigned)__opencl_atomic_fetch_and(&ai,0xff,__ATOMIC_SEQ_CST,2));h=fold(h,(unsigned)__opencl_atomic_fetch_or(&ai,0x100,__ATOMIC_SEQ_CST,2));"
+            "h=fold(h,(unsigned)__opencl_atomic_fetch_xor(&ai,0x7,__ATOMIC_SEQ_CST,2));h=fold(h,(unsigned)__opencl_atomic_fetch_max(&ai,n*50,__ATOMIC_SEQ_CST,2));"
+            "h=fold(h,(unsigned)__opencl_atomic_fetch_min(&ai,n*10,__ATOMIC_SEQ_CST,2));"
+            "__opencl_atomic_init(&al,(long)n<<40);h=fold(h,(unsigned long long)__opencl_atomic_fetch_add(&al,1,__ATOMIC_SEQ_CST,2));"
+            "__opencl_atomic_init(&ap,arr);h=fold(h,(unsigned long long)(__opencl_atomic_fetch_add(&ap,2,__ATOMIC_SEQ_CST,2)-arr));"
+            "h=fold(h,(unsigned long long)(__opencl_atomic_load(&ap,__ATOMIC_SEQ_CST,2)-arr));"
+            "__opencl_atomic_init(&as8,((struct S8){n,2}));struct S8 o8=__opencl_atomic_load(&as8,__ATOMIC_SEQ_CST,2);h=fold_bytes(h,&o8,sizeof o8);"
+            "__opencl_atomic_init(&at3,((struct T3){{1,2,(char)n}}));struct T3 o3=__opencl_atomic_exchange(&at3,((struct T3){{4,5,6}}),__ATOMIC_SEQ_CST,2);"
+            "h=fold_bytes(h,&o3,sizeof o3);__opencl_atomic_init(&af,(float)n);h=fold(h,(unsigned)(int)__opencl_atomic_fetch_add(&af,0.5f,__ATOMIC_SEQ_CST,2));"
+            "h=fold(h,(unsigned)scopes);h=fold(h,(unsigned)i32);h=fold(h,u32);h=fold(h,(unsigned long long)s64);h=fold(h,u8);return (int)h;}",
+        },
+        {
+            // clang's atomic IEEE maximum and minimum of floats and doubles, GNU's and the scoped forms, every pair of 13
+            // values by their bits: both zeros, ones, both infinities, quiet NaNs of each sign and of a payload, signaling
+            // NaNs and both signs' smallest denormals.
+            "ieee-maximum-minimum-atomics",
+            "static float f;static double d;"
+            "static unsigned fb(float x){union{float f;unsigned u;}v={x};return v.u;}static float bf(unsigned u){union{unsigned u;float f;}v={u};return v.f;}"
+            "static unsigned long long db(double x){union{double d;unsigned long long u;}v={x};return v.u;}"
+            "static double bd(unsigned long long u){union{unsigned long long u;double d;}v={u};return v.d;}\n"
+            "int tested(int n){static const unsigned fs[]={0x00000000u,0x80000000u,0x3f800000u,0xbf800000u,0x7f800000u,0xff800000u,0x7fc00000u,"
+            "0xffc00000u,0x7fc00123u,0x7f800001u,0xff800123u,0x00000001u,0x80000001u};"
+            "static const unsigned long long ds[]={0,0x8000000000000000ull,0x3ff0000000000000ull,0xbff0000000000000ull,0x7ff0000000000000ull,"
+            "0xfff0000000000000ull,0x7ff8000000000000ull,0xfff8000000000000ull,0x7ff8000000000123ull,0x7ff0000000000001ull,0xfff0000000000123ull,1,"
+            "0x8000000000000001ull};"
+            "unsigned h=2166136261u;const unsigned count=sizeof fs/sizeof fs[0];const unsigned i=(unsigned)n%count;for(unsigned j=0;j<count;j+=1){"
+            "f=bf(fs[i]);h=fold(h,fb(__atomic_fetch_fmaximum(&f,bf(fs[j]),__ATOMIC_SEQ_CST)));h=fold(h,fb(f));"
+            "f=bf(fs[i]);h=fold(h,fb(__atomic_fetch_fminimum(&f,bf(fs[j]),__ATOMIC_RELAXED)));h=fold(h,fb(f));"
+            "f=bf(fs[i]);h=fold(h,fb(__atomic_fetch_fmaximum_num(&f,bf(fs[j]),__ATOMIC_ACQUIRE)));h=fold(h,fb(f));"
+            "f=bf(fs[i]);h=fold(h,fb(__atomic_fetch_fminimum_num(&f,bf(fs[j]),__ATOMIC_RELEASE)));h=fold(h,fb(f));"
+            "d=bd(ds[i]);h=fold(h,db(__atomic_fetch_fmaximum(&d,bd(ds[j]),__ATOMIC_SEQ_CST)));h=fold(h,db(d));"
+            "d=bd(ds[i]);h=fold(h,db(__atomic_fetch_fminimum(&d,bd(ds[j]),__ATOMIC_ACQ_REL)));h=fold(h,db(d));"
+            "d=bd(ds[i]);h=fold(h,db(__scoped_atomic_fetch_fmaximum_num(&d,bd(ds[j]),__ATOMIC_SEQ_CST,__MEMORY_SCOPE_DEVICE)));h=fold(h,db(d));"
+            "d=bd(ds[i]);h=fold(h,db(__scoped_atomic_fetch_fminimum_num(&d,bd(ds[j]),__ATOMIC_SEQ_CST,0)));h=fold(h,db(d));"
+            "f=bf(fs[j]);h=fold(h,fb(__scoped_atomic_fetch_fmaximum(&f,(float)n,__ATOMIC_SEQ_CST,1)));h=fold(h,fb(f));"
+            "f=bf(fs[j]);h=fold(h,fb(__scoped_atomic_fetch_fminimum(&f,(float)-n,__ATOMIC_SEQ_CST,2)));h=fold(h,fb(f));}"
+            "return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
-        char source[8192];
+        char source[16384];
         const int length = snprintf(source, sizeof(source), "%s%s", check_test_atomic_fold, programs[i][1]);
         check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "atomic program source fits");
         check_test_program_source(test, source, programs[i][0], clang);

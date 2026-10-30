@@ -48,8 +48,10 @@
     X(MUL_OVERFLOW, "__builtin_mul_overflow")
 
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
-// source path. In particular the generic GNU atomics and vector bit reversal remain refused. Availability does not
-// promise every operand type, ISA or ABI: the typed checker and lowering retain their explicit restrictions.
+// source path. In particular vector bit reversal remains refused. The scoped families (__scoped_atomic_*,
+// __hip_atomic_* and __opencl_atomic_*) are their base builtins' operations with a scope (c_check_builtin_atomic_c11.c).
+// Availability does not promise every operand type, ISA or ABI: the typed checker and lowering retain their explicit
+// restrictions.
 // Family ranges leave room for later additions without renumbering any published identity.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -120,13 +122,13 @@
     X(STRLEN, 0x164u, "__builtin_strlen", BUSTER_CBUILTIN_SOURCE) \
     X(ALLOCA, 0x165u, "__builtin_alloca", BUSTER_CBUILTIN_SOURCE) \
     X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_LOAD, 0x180u, "__atomic_load", 0) \
+    X(ATOMIC_LOAD, 0x180u, "__atomic_load", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_LOAD_N, 0x181u, "__atomic_load_n", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_STORE, 0x182u, "__atomic_store", 0) \
+    X(ATOMIC_STORE, 0x182u, "__atomic_store", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_STORE_N, 0x183u, "__atomic_store_n", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_EXCHANGE, 0x184u, "__atomic_exchange", 0) \
+    X(ATOMIC_EXCHANGE, 0x184u, "__atomic_exchange", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_EXCHANGE_N, 0x185u, "__atomic_exchange_n", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_COMPARE_EXCHANGE, 0x186u, "__atomic_compare_exchange", 0) \
+    X(ATOMIC_COMPARE_EXCHANGE, 0x186u, "__atomic_compare_exchange", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_COMPARE_EXCHANGE_N, 0x187u, "__atomic_compare_exchange_n", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_FETCH_ADD, 0x188u, "__atomic_fetch_add", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_FETCH_SUB, 0x189u, "__atomic_fetch_sub", BUSTER_CBUILTIN_SOURCE) \
@@ -140,16 +142,18 @@
     X(ATOMIC_XOR_FETCH, 0x191u, "__atomic_xor_fetch", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_OR_FETCH, 0x192u, "__atomic_or_fetch", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_NAND_FETCH, 0x193u, "__atomic_nand_fetch", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_TEST_AND_SET, 0x194u, "__atomic_test_and_set", 0) \
-    X(ATOMIC_CLEAR, 0x195u, "__atomic_clear", 0) \
+    X(ATOMIC_TEST_AND_SET, 0x194u, "__atomic_test_and_set", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_CLEAR, 0x195u, "__atomic_clear", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_THREAD_FENCE, 0x196u, "__atomic_thread_fence", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_SIGNAL_FENCE, 0x197u, "__atomic_signal_fence", BUSTER_CBUILTIN_SOURCE) \
-    X(ATOMIC_ALWAYS_LOCK_FREE, 0x198u, "__atomic_always_lock_free", 0) \
-    X(ATOMIC_IS_LOCK_FREE, 0x199u, "__atomic_is_lock_free", 0) \
+    X(ATOMIC_ALWAYS_LOCK_FREE, 0x198u, "__atomic_always_lock_free", BUSTER_CBUILTIN_CONSTANT) \
+    X(ATOMIC_IS_LOCK_FREE, 0x199u, "__atomic_is_lock_free", BUSTER_CBUILTIN_CONSTANT) \
     X(ATOMIC_FETCH_MIN, 0x19au, "__atomic_fetch_min", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_FETCH_MAX, 0x19bu, "__atomic_fetch_max", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_MIN_FETCH, 0x19cu, "__atomic_min_fetch", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_MAX_FETCH, 0x19du, "__atomic_max_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_FETCH_UINC, 0x19eu, "__atomic_fetch_uinc", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_FETCH_UDEC, 0x19fu, "__atomic_fetch_udec", BUSTER_CBUILTIN_SOURCE) \
     X(C11_ATOMIC_INIT, 0x1a0u, "__c11_atomic_init", BUSTER_CBUILTIN_SOURCE) \
     X(C11_ATOMIC_LOAD, 0x1a1u, "__c11_atomic_load", BUSTER_CBUILTIN_SOURCE) \
     X(C11_ATOMIC_STORE, 0x1a2u, "__c11_atomic_store", BUSTER_CBUILTIN_SOURCE) \
@@ -166,7 +170,11 @@
     X(C11_ATOMIC_FETCH_MAX, 0x1adu, "__c11_atomic_fetch_max", BUSTER_CBUILTIN_SOURCE) \
     X(C11_ATOMIC_THREAD_FENCE, 0x1aeu, "__c11_atomic_thread_fence", BUSTER_CBUILTIN_SOURCE) \
     X(C11_ATOMIC_SIGNAL_FENCE, 0x1afu, "__c11_atomic_signal_fence", BUSTER_CBUILTIN_SOURCE) \
-    X(C11_ATOMIC_IS_LOCK_FREE, 0x1b0u, "__c11_atomic_is_lock_free", BUSTER_CBUILTIN_SOURCE) \
+    X(C11_ATOMIC_IS_LOCK_FREE, 0x1b0u, "__c11_atomic_is_lock_free", BUSTER_CBUILTIN_CONSTANT) \
+    X(ATOMIC_FETCH_FMAXIMUM, 0x1b8u, "__atomic_fetch_fmaximum", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_FETCH_FMAXIMUM_NUM, 0x1b9u, "__atomic_fetch_fmaximum_num", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_FETCH_FMINIMUM, 0x1bau, "__atomic_fetch_fminimum", BUSTER_CBUILTIN_SOURCE) \
+    X(ATOMIC_FETCH_FMINIMUM_NUM, 0x1bbu, "__atomic_fetch_fminimum_num", BUSTER_CBUILTIN_SOURCE) \
     X(SYNC_FETCH_AND_ADD, 0x1c0u, "__sync_fetch_and_add", BUSTER_CBUILTIN_SOURCE) \
     X(SYNC_FETCH_AND_SUB, 0x1c1u, "__sync_fetch_and_sub", BUSTER_CBUILTIN_SOURCE) \
     X(SYNC_FETCH_AND_OR, 0x1c2u, "__sync_fetch_and_or", BUSTER_CBUILTIN_SOURCE) \
@@ -184,6 +192,11 @@
     X(SYNC_SYNCHRONIZE, 0x1ceu, "__sync_synchronize", BUSTER_CBUILTIN_SOURCE) \
     X(SYNC_LOCK_TEST_AND_SET, 0x1cfu, "__sync_lock_test_and_set", BUSTER_CBUILTIN_SOURCE) \
     X(SYNC_LOCK_RELEASE, 0x1d0u, "__sync_lock_release", BUSTER_CBUILTIN_SOURCE) \
+    X(SYNC_SWAP, 0x1d1u, "__sync_swap", BUSTER_CBUILTIN_SOURCE) \
+    X(SYNC_FETCH_AND_MIN, 0x1d2u, "__sync_fetch_and_min", BUSTER_CBUILTIN_SOURCE) \
+    X(SYNC_FETCH_AND_MAX, 0x1d3u, "__sync_fetch_and_max", BUSTER_CBUILTIN_SOURCE) \
+    X(SYNC_FETCH_AND_UMIN, 0x1d4u, "__sync_fetch_and_umin", BUSTER_CBUILTIN_SOURCE) \
+    X(SYNC_FETCH_AND_UMAX, 0x1d5u, "__sync_fetch_and_umax", BUSTER_CBUILTIN_SOURCE) \
     X(FRAME_ADDRESS, 0x1f0u, "__builtin_frame_address", BUSTER_CBUILTIN_SOURCE) \
     X(RETURN_ADDRESS, 0x1f1u, "__builtin_return_address", BUSTER_CBUILTIN_SOURCE) \
     X(EXTRACT_RETURN_ADDR, 0x1f2u, "__builtin_extract_return_addr", BUSTER_CBUILTIN_SOURCE) \
@@ -211,7 +224,63 @@
     X(NONDETERMINISTIC_VALUE, 0x314u, "__builtin_nondeterministic_value", BUSTER_CBUILTIN_SOURCE) \
     X(NONTEMPORAL_LOAD, 0x315u, "__builtin_nontemporal_load", BUSTER_CBUILTIN_SOURCE) \
     X(NONTEMPORAL_STORE, 0x316u, "__builtin_nontemporal_store", BUSTER_CBUILTIN_SOURCE) \
-    X(BIT_CAST, 0x317u, "__builtin_bit_cast", BUSTER_CBUILTIN_SOURCE)
+    X(BIT_CAST, 0x317u, "__builtin_bit_cast", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_ADD_FETCH, 0x400u, "__scoped_atomic_add_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_AND_FETCH, 0x401u, "__scoped_atomic_and_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_COMPARE_EXCHANGE, 0x402u, "__scoped_atomic_compare_exchange", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_COMPARE_EXCHANGE_N, 0x403u, "__scoped_atomic_compare_exchange_n", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_EXCHANGE, 0x404u, "__scoped_atomic_exchange", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_EXCHANGE_N, 0x405u, "__scoped_atomic_exchange_n", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_ADD, 0x406u, "__scoped_atomic_fetch_add", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_AND, 0x407u, "__scoped_atomic_fetch_and", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_FMAXIMUM, 0x408u, "__scoped_atomic_fetch_fmaximum", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_FMAXIMUM_NUM, 0x409u, "__scoped_atomic_fetch_fmaximum_num", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_FMINIMUM, 0x40au, "__scoped_atomic_fetch_fminimum", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_FMINIMUM_NUM, 0x40bu, "__scoped_atomic_fetch_fminimum_num", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_MAX, 0x40cu, "__scoped_atomic_fetch_max", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_MIN, 0x40du, "__scoped_atomic_fetch_min", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_NAND, 0x40eu, "__scoped_atomic_fetch_nand", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_OR, 0x40fu, "__scoped_atomic_fetch_or", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_SUB, 0x410u, "__scoped_atomic_fetch_sub", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_UDEC, 0x411u, "__scoped_atomic_fetch_udec", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_UINC, 0x412u, "__scoped_atomic_fetch_uinc", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_FETCH_XOR, 0x413u, "__scoped_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_LOAD, 0x414u, "__scoped_atomic_load", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_LOAD_N, 0x415u, "__scoped_atomic_load_n", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_MAX_FETCH, 0x416u, "__scoped_atomic_max_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_MIN_FETCH, 0x417u, "__scoped_atomic_min_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_NAND_FETCH, 0x418u, "__scoped_atomic_nand_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_OR_FETCH, 0x419u, "__scoped_atomic_or_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_STORE, 0x41au, "__scoped_atomic_store", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_STORE_N, 0x41bu, "__scoped_atomic_store_n", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_SUB_FETCH, 0x41cu, "__scoped_atomic_sub_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_THREAD_FENCE, 0x41du, "__scoped_atomic_thread_fence", BUSTER_CBUILTIN_SOURCE) \
+    X(SCOPED_ATOMIC_XOR_FETCH, 0x41eu, "__scoped_atomic_xor_fetch", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_COMPARE_EXCHANGE_STRONG, 0x420u, "__hip_atomic_compare_exchange_strong", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_COMPARE_EXCHANGE_WEAK, 0x421u, "__hip_atomic_compare_exchange_weak", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_EXCHANGE, 0x422u, "__hip_atomic_exchange", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_ADD, 0x423u, "__hip_atomic_fetch_add", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_AND, 0x424u, "__hip_atomic_fetch_and", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_MAX, 0x425u, "__hip_atomic_fetch_max", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_MIN, 0x426u, "__hip_atomic_fetch_min", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_OR, 0x427u, "__hip_atomic_fetch_or", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_SUB, 0x428u, "__hip_atomic_fetch_sub", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_FETCH_XOR, 0x429u, "__hip_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_LOAD, 0x42au, "__hip_atomic_load", BUSTER_CBUILTIN_SOURCE) \
+    X(HIP_ATOMIC_STORE, 0x42bu, "__hip_atomic_store", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_COMPARE_EXCHANGE_STRONG, 0x430u, "__opencl_atomic_compare_exchange_strong", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_COMPARE_EXCHANGE_WEAK, 0x431u, "__opencl_atomic_compare_exchange_weak", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_EXCHANGE, 0x432u, "__opencl_atomic_exchange", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_ADD, 0x433u, "__opencl_atomic_fetch_add", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_AND, 0x434u, "__opencl_atomic_fetch_and", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_MAX, 0x435u, "__opencl_atomic_fetch_max", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_MIN, 0x436u, "__opencl_atomic_fetch_min", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_OR, 0x437u, "__opencl_atomic_fetch_or", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_SUB, 0x438u, "__opencl_atomic_fetch_sub", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_FETCH_XOR, 0x439u, "__opencl_atomic_fetch_xor", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_INIT, 0x43au, "__opencl_atomic_init", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_LOAD, 0x43bu, "__opencl_atomic_load", BUSTER_CBUILTIN_SOURCE) \
+    X(OPENCL_ATOMIC_STORE, 0x43cu, "__opencl_atomic_store", BUSTER_CBUILTIN_SOURCE)
 
 typedef enum CBuiltinId
 {
@@ -267,23 +336,49 @@ _Static_assert(CBUILTIN_BSWAP16 == 1 && CBUILTIN_FFSLL == 18 && CBUILTIN_ADD_OVE
                "integer builtin action identities remain stable");
 _Static_assert(CBUILTIN_VA_START == 0x100 && CBUILTIN_VA_END == 0x104, "special builtin identities remain outside integer actions");
 
+// The catalog's entry of an exact spelling, or null. A name's bytes are inspected only after its length matches.
+static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_entry(const char* name, uint32_t length)
+{
+    const CBuiltinCatalogEntry* result = NULL;
+    const uint32_t count = sizeof(cbuiltin_catalog) / sizeof(cbuiltin_catalog[0]);
+    for (uint32_t i = 0; i < count && result == NULL; i += 1)
+    {
+        if (length == cbuiltin_catalog[i].length && memcmp(name, cbuiltin_catalog[i].name, length) == 0)
+        {
+            result = cbuiltin_catalog + i;
+        }
+    }
+    return result;
+}
+
+// clang's sized legacy builtins, __sync_fetch_and_add_4 and the others of 1, 2, 4, 8 and 16 bytes (#148): Sema rewrites a
+// call of one by its object's size alone, whatever the suffix says (BuiltinAtomicOverloaded: __sync_fetch_and_add_1 of a
+// long is an 8-byte addition), so each is its family's builtin, which the name less its suffix spells. The family's
+// entry, for the legacy families whose rows in clang's table have sized forms (all but __sync_synchronize and the minimum
+// and maximum), or null for any other name. Only a name that ends in a suffix and starts with __sync_ is looked up again.
+static __attribute__((unused)) const CBuiltinCatalogEntry* cbuiltin_sized_entry(const char* name, uint32_t length)
+{
+    const char last = length > 9 ? name[length - 1] : 0;
+    const uint32_t suffix = length > 9 && name[length - 2] == '_' && (last == '1' || last == '2' || last == '4' || last == '8') ? 2 :
+                            length > 10 && name[length - 3] == '_' && name[length - 2] == '1' && last == '6'                  ? 3 :
+                                                                                                                                  0;
+    const CBuiltinCatalogEntry* entry = suffix != 0 && memcmp(name, "__sync_", 7) == 0 ? cbuiltin_entry(name, length - suffix) : NULL;
+    const bool sized = entry != NULL && entry->id >= CBUILTIN_SYNC_FETCH_AND_ADD && entry->id <= CBUILTIN_SYNC_SWAP && entry->id != CBUILTIN_SYNC_SYNCHRONIZE;
+    return sized ? entry : NULL;
+}
+
 // Binding and feature queries resolve bounded exact spellings. The integer action layer's SIMD/scalar lookups
-// deliberately retain their old integer-only contract. A name's bytes are inspected only after its length matches.
-// Every catalog name starts with "__" (test-preprocessor checks it), so a name that doesn't is no builtin's, which the
-// checker asks of each distinct identifier of a unit (#529).
+// deliberately retain their old integer-only contract. Every catalog name starts with "__" (test-preprocessor checks
+// it), so a name that doesn't is no builtin's, which the checker asks of each distinct identifier of a unit (#529). A
+// sized legacy name resolves to its family (cbuiltin_sized_entry).
 static __attribute__((unused)) CBuiltinId cbuiltin_resolve(const char* name, uint32_t length)
 {
     CBuiltinId result = CBUILTIN_NONE;
     if (name != 0 && length >= 2 && length < BUSTER_CBUILTIN_MAX_NAME && name[0] == '_' && name[1] == '_')
     {
-        const uint32_t count = sizeof(cbuiltin_catalog) / sizeof(cbuiltin_catalog[0]);
-        for (uint32_t i = 0; i < count && result == CBUILTIN_NONE; i += 1)
-        {
-            if (length == cbuiltin_catalog[i].length && memcmp(name, cbuiltin_catalog[i].name, length) == 0)
-            {
-                result = cbuiltin_catalog[i].id;
-            }
-        }
+        const CBuiltinCatalogEntry* entry = cbuiltin_entry(name, length);
+        entry = entry != NULL ? entry : cbuiltin_sized_entry(name, length);
+        result = entry != NULL ? entry->id : CBUILTIN_NONE;
     }
     return result;
 }
@@ -304,12 +399,10 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
     }
     if (name != 0 && required != 0 && (required & ~allowed) == 0 && length != 0 && length < BUSTER_CBUILTIN_MAX_NAME)
     {
-        const uint32_t count = sizeof(cbuiltin_catalog) / sizeof(cbuiltin_catalog[0]);
-        for (uint32_t i = 0; i < count && !result; i += 1)
-        {
-            result = (cbuiltin_catalog[i].capabilities & required) == required && length == cbuiltin_catalog[i].length &&
-                     memcmp(name, cbuiltin_catalog[i].name, length) == 0;
-        }
+        // A sized legacy name has its family's capabilities (cbuiltin_sized_entry).
+        const CBuiltinCatalogEntry* entry = cbuiltin_entry((const char*)name, length);
+        entry = entry != NULL ? entry : cbuiltin_sized_entry((const char*)name, length);
+        result = entry != NULL && (entry->capabilities & required) == required;
     }
     return result;
 }

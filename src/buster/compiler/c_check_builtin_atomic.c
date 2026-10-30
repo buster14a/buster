@@ -2,9 +2,11 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original typed GNU atomic actions (#148). Include after c_builtin_catalog.c and c_check_actions.c.
-// This bounded slice checks load_n, store_n, synchronize and thread/signal fences. Other identities are explicitly
-// unsupported. The producer owns argument graph identities, evaluation order and address provenance. Every listed
-// argument is evaluated exactly once, including dynamic memory orders; no action reads the source program's memory.
+// This bounded slice checks load_n, store_n, synchronize, thread/signal fences and the GNU lock-free queries
+// (__atomic_always_lock_free and __atomic_is_lock_free, constant where clang's evaluator answers them). Other identities
+// are explicitly unsupported. The producer owns argument graph identities, evaluation order and address provenance. Every
+// listed argument is evaluated exactly once, including dynamic memory orders, but for a query clang folds, which
+// evaluates none; no action reads the source program's memory.
 //
 // alignment_known supplies the addressed object's alignment as clang's code generation gives its address (c_checker.c's
 // check_graph_atomic_alignment): a pointer value's pointee type's, and a packed member's, a declaration's or an element's
@@ -54,13 +56,16 @@ struct CheckBuiltinAtomicAction
     uint32_t extensions;
     uint64_t minimum_alignment;
     bool alignment_known;
+    // A C11 operation on an object that isn't _Atomic: clang's __hip_atomic_* (check_builtin_atomic_family).
+    bool plain_object;
 };
 
 typedef struct CheckBuiltinAtomicResult CheckBuiltinAtomicResult;
 struct CheckBuiltinAtomicResult
 {
     CheckActionResult action;
-    CheckConversion argument_conversions[6];
+    // A scoped compare-exchange's seven arguments' (the scope's last).
+    CheckConversion argument_conversions[7];
     // Converted pointer/value metadata, never an invented load result or an already executed store.
     CheckValue object_address;
     CheckValue store_value;
@@ -403,15 +408,93 @@ static void check_builtin_atomic_order(TypeTable* table, const CheckBuiltinAtomi
     }
 }
 
+// clang's constant answer to a lock-free query of `size` bytes (ExprConstant's evaluation of __atomic_always_lock_free,
+// __atomic_is_lock_free and __c11_atomic_is_lock_free): a size that is a power of two, 0 among them, up to the target's
+// inline width (16 bytes where it has CMPXCHG16B, 8 otherwise) is lock-free for the C11 query, which takes an _Atomic
+// object, and for one byte; for the GNU queries, also where `pointer`, their argument before its conversion to const
+// volatile void *, is a constant address aligned to the size (0 alone for a size of 0), or points to a complete type of
+// at least the size's alignment. 1 or 0, or -1 for no constant: __atomic_is_lock_free's runtime query of libatomic,
+// which __atomic_always_lock_free answers 0.
+static int32_t check_builtin_atomic_lock_free(const TypeTable* table, CBuiltinId id, uint64_t size, const CheckValue* pointer)
+{
+    const uint64_t inline_bytes = table->atomic_inline_16 ? 16 : 8;
+    int32_t result = -1;
+    if ((size & (size - 1)) == 0 && size <= inline_bytes)
+    {
+        const bool constant = pointer != NULL && pointer->fault == CHECK_FAULT_NONE && (pointer->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                              (pointer->constant_kind == CHECK_CONSTANT_INTEGER || (pointer->constant_kind == CHECK_CONSTANT_ADDRESS && pointer->object == 0));
+        const uint64_t address = !constant ? 1 : pointer->constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)pointer->integer : pointer->offset;
+        const bool aligned = constant && (size == 0 ? address == 0 : (address & (size - 1)) == 0);
+        const TypeId pointee = pointer != NULL && check_action_kind(table, pointer->type) == BUSTER_TYPE_KIND_POINTER ?
+                               type_element(table, type_strip_aligned(table, pointer->type)) : 0;
+        const bool typed = pointee != 0 && check_action_kind(table, pointee) != BUSTER_TYPE_KIND_VOID &&
+                           check_action_kind(table, pointee) != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(table, type_strip_aligned(table, pointee)) &&
+                           type_alignment(table, pointee) >= size;
+        result = id == CBUILTIN_C11_ATOMIC_IS_LOCK_FREE || size == 1 || aligned || typed ? 1 : -1;
+    }
+    return result < 0 && id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE ? 0 : result;
+}
+
+// The GNU lock-free queries, of clang's prototype bool (size_t, const volatile void *): constant where clang's evaluator
+// answers (check_builtin_atomic_lock_free) a size that is a constant, its arguments then never evaluated, as clang folds
+// the call; otherwise __atomic_is_lock_free evaluates both and asks libatomic at run time, and __atomic_always_lock_free
+// is valid source that clang's code generation refuses ("cannot compile this builtin function yet"), as the lowering does.
+static void check_builtin_atomic_query(TypeTable* table, const CheckBuiltinAtomicAction* input, CheckBuiltinAtomicResult* output)
+{
+    CheckValue values[2] = { 0 };
+    if (input->argument_count != 2)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+    }
+    else if (input->arguments == NULL)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+    }
+    else
+    {
+        output->runtime_builtin = input->id;
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_BOOL, .category = CHECK_RVALUE };
+        output->evaluated_operands = 3;
+        for (uint32_t i = 0; i < 2 && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+        {
+            values[i] = check_builtin_atomic_argument(table, input, output, i);
+            check_action_inherit(&output->action.value, values + i);
+        }
+        const CheckValue pointer = values[1];
+        const TypeId parameter = type_pointer(table, type_qualify(table, BUSTER_TYPE_VOID, BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+        if (output->action.diagnostic == CHECK_DIAG_NONE && parameter == 0)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 1);
+        }
+        check_builtin_atomic_convert(table, input, output, values, 0, BUSTER_TYPE_ULONG);
+        check_builtin_atomic_convert(table, input, output, values + 1, 1, parameter);
+        const bool sized = output->action.diagnostic == CHECK_DIAG_NONE && values[0].constant_kind == CHECK_CONSTANT_INTEGER &&
+                           values[0].fault == CHECK_FAULT_NONE && (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        const int32_t answer = sized ? check_builtin_atomic_lock_free(table, input->id, (uint64_t)values[0].integer, &pointer) : -1;
+        if (answer >= 0)
+        {
+            output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
+            output->action.value.integer = answer;
+            output->action.value.flags = (values[0].flags & BUSTER_CHECK_ICE) != 0 ? BUSTER_CHECK_ICE : 0;
+            output->evaluated_operands = 0;
+        }
+    }
+}
+
 static __attribute__((unused)) void check_builtin_atomic_one(TypeTable* table, const CheckBuiltinAtomicAction* input, CheckBuiltinAtomicResult* output)
 {
     *output = (CheckBuiltinAtomicResult){ 0 };
+    const bool query = input->id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || input->id == CBUILTIN_ATOMIC_IS_LOCK_FREE;
     const bool load = input->id == CBUILTIN_ATOMIC_LOAD_N;
     const bool store = input->id == CBUILTIN_ATOMIC_STORE_N;
     const bool synchronize = input->id == CBUILTIN_SYNC_SYNCHRONIZE;
     const bool fence = input->id == CBUILTIN_ATOMIC_THREAD_FENCE || input->id == CBUILTIN_ATOMIC_SIGNAL_FENCE;
     const uint32_t arity = load ? 2 : store ? 3 : fence ? 1 : 0;
-    if (!load && !store && !synchronize && !fence)
+    if (query)
+    {
+        check_builtin_atomic_query(table, input, output);
+    }
+    else if (!load && !store && !synchronize && !fence)
     {
         output->unsupported = BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_ID;
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
@@ -470,9 +553,13 @@ static __attribute__((unused)) void check_builtin_atomic_one(TypeTable* table, c
             output->fence_scope = CHECK_BUILTIN_ATOMIC_FENCE_SYSTEM;
         }
     }
-    // An atomic access is never a source constant expression, even if its address/store bits are known.
-    output->action.value.constant_kind = CHECK_CONSTANT_NONE;
-    output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL);
+    // An atomic access is never a source constant expression, even if its address/store bits are known; a lock-free
+    // query is one where clang's evaluator answers it.
+    if (!query || output->action.value.constant_kind == CHECK_CONSTANT_NONE)
+    {
+        output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+        output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL);
+    }
 }
 
 static __attribute__((unused)) void check_builtin_atomic(TypeTable* table, const CheckBuiltinAtomicAction* actions, CheckBuiltinAtomicResult* results, uint32_t count)
