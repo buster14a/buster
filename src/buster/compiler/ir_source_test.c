@@ -119,7 +119,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     {
         own[i] = options[i];
     }
-    PPOptions pp_options;
+    PPOptions pp_options = {0};
     const char* input = 0;
     const char* output_file = 0;
     bool markers = false;
