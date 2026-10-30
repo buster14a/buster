@@ -1557,9 +1557,13 @@ static int main_driver(int argc, char** argv)
     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
 #endif
-    // A test's hook, in every build (#905): the session's lane of this index fails to start (lane_session_fail_at).
+    // A test's hook, in every build (#905): the session's lane of this index fails to start (LaneProcess.fail_at),
+    // written only when it is set.
     const char* fail_at = getenv("BUSTER_TEST_LANE_FAIL_AT");
-    lane_session_fail_at = fail_at != 0 ? (uint32_t)strtoul(fail_at, 0, 10) : 0;
+    if (fail_at != 0)
+    {
+        lane_process.fail_at = (uint32_t)strtoul(fail_at, 0, 10);
+    }
     const int guardian = worker_budget_guardian_command(argc, argv);
     // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
     // dispatch, including -E and parse commands that need no worker lease themselves.

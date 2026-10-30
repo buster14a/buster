@@ -1665,6 +1665,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             source_bytes += units[u].bytes;
         }
+        // The command's session's lanes (#905), which a lazy session's lane 1 started while the tables above were built:
+        // lane 0 learns how they started, and serves them from here, the units' run, the merge, the link's check and the
+        // write each a region of them.
+        lane_session_settle();
+        lanes->lanes = lanes->lanes < lane_count() ? lanes->lanes : lane_count();
+        lane_serve_begin();
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
         const uint64_t paid = (uint64_t)count + source_bytes / BUSTER_CHECK_UNITS_LANE_BYTES;
         const uint32_t wanted = most < paid ? most : (uint32_t)paid;

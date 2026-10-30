@@ -476,19 +476,24 @@ static bool arena_test_reservation_allowed(uint64_t bytes)
 }
 #endif
 
-// The threads the compiler has created in this process (#905): a session's, a team's and a cold group's, joined or not,
-// for the tests' accounting. And a test's hook, in every build: when nonzero, a session's lane of that index fails to be
-// created, as pthread_create fails when the process may start no more threads. Process-wide, as main.c's units share
-// them.
+// What the process's lanes keep (#905): the threads the compiler has created in it (a session's, a team's and a cold
+// group's, joined or not), for the tests' accounting; and a test's hook, in every build: a session's lane of index
+// `fail_at` fails to be created, as pthread_create fails when the process may start no more threads (UINT32_MAX for
+// none). Process-wide, as main.c's units share it, and in .data rather than .bss, as its initializer isn't zero: the
+// first write to a 2 MB region of the executable's .bss clears a transparent huge page, which a compile that touched
+// nothing else there paid for (2 MB of peak RSS, on the 9700X).
+typedef struct LaneProcess LaneProcess;
+struct LaneProcess
+{
+    uint64_t threads_created;
+    uint32_t fail_at;
+};
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
-extern uint64_t lane_threads_created;
-extern uint32_t lane_session_fail_at;
+extern LaneProcess lane_process;
 #elif defined(BUSTER_UNIT)
-uint64_t lane_threads_created;
-uint32_t lane_session_fail_at;
+LaneProcess lane_process = { .fail_at = UINT32_MAX };
 #else
-static uint64_t lane_threads_created;
-static uint32_t lane_session_fail_at;
+static LaneProcess lane_process = { .fail_at = UINT32_MAX };
 #endif
 
 typedef struct Scratch Scratch;
@@ -1176,15 +1181,38 @@ static bool lane_narrow(uint32_t lanes)
     return inside;
 }
 
-// The narrowed lanes' sync ends the region for them; the others never entered it, and go on to the outer group's next
-// rendezvous, which the narrowed lanes reach after this.
+// lane_sync's arrival without the wait: the last lane to arrive advances the generation, and the others go on at once.
+static void lane_arrive_only(void)
+{
+    const Lane lane = thread_context.lane;
+    if (lane.count > 1)
+    {
+        const uint32_t generation = __atomic_load_n(&lane.group->generation, __ATOMIC_RELAXED) & ~1u;
+        if (__atomic_add_fetch(&lane.group->arrived, 1, __ATOMIC_ACQ_REL) == lane.count)
+        {
+            __atomic_store_n(&lane.group->arrived, 0, __ATOMIC_RELAXED);
+            lane.group->value = lane.group->offered;
+            lane_publish(&lane.group->generation, generation + 2);
+        }
+    }
+}
+
+// The region ends at its group's sync, which only lane 0 waits at: it goes on from the region with the narrowed lanes'
+// writes, while the others arrive and go straight on to the outer group's next rendezvous, asleep, rather than waiting
+// for the region's slowest lane. None of them meets the narrowed group again before lane 0 has left it: the next
+// narrowing at its depth comes after an outer rendezvous that lane 0 reaches only after this. The lanes the narrowing
+// left out never entered the region.
 static void lane_widen(void)
 {
     const uint32_t depth = thread_context.narrow_depth - 1;
     const LaneNarrowing narrowing = thread_context.narrowing[depth];
-    if (narrowing.inside)
+    if (narrowing.inside && thread_context.lane.index == 0)
     {
         lane_sync();
+    }
+    else if (narrowing.inside)
+    {
+        lane_arrive_only();
     }
     thread_context.narrow_depth = depth;
     thread_context.lane = narrowing.outer;
@@ -1447,7 +1475,7 @@ static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* c
             result = pthread_create(&worker->thread, 0, lane_team_thread_main, worker) == 0;
             created += result ? 1 : 0;
         }
-        __atomic_add_fetch(&lane_threads_created, created - 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&lane_process.threads_created, created - 1, __ATOMIC_RELAXED);
         for (uint32_t i = 1; i < created; i += 1)
         {
             lane_wait(&team->workers[i].completed, 0);
@@ -1584,7 +1612,7 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
         };
         created += pthread_create(&threads[i], 0, lane_thread_main, &starts[i]) == 0 ? 1 : 0;
     }
-    __atomic_add_fetch(&lane_threads_created, created - 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&lane_process.threads_created, created - 1, __ATOMIC_RELAXED);
     const bool started = valid && created == count;
     lane_publish(&group.gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
     bool pinned = true;
@@ -1719,14 +1747,14 @@ static uint32_t lane_session_create(LaneSession* session, uint32_t first, uint32
             .session = session,
             .index = i,
         };
-        valid = i != lane_session_fail_at && pthread_create(&session->threads[i], &attributes, lane_session_thread_main, &session->starts[i]) == 0;
+        valid = i != lane_process.fail_at && pthread_create(&session->threads[i], &attributes, lane_session_thread_main, &session->starts[i]) == 0;
         created += valid ? 1 : 0;
     }
     if (attributed)
     {
         pthread_attr_destroy(&attributes);
     }
-    __atomic_add_fetch(&lane_threads_created, created, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&lane_process.threads_created, created, __ATOMIC_RELAXED);
     return created;
 }
 

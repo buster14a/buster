@@ -764,6 +764,11 @@ report, on standard error after the command, a row per stage.
   around it. The 9700X step pins every compile to CPU 2, so its functions take
   one lane. This document's figures were measured before the lanes merged, on
   the calling thread alone, which a pinned compile still is.
+- **The session's start.** `lanes-start` (#905) runs from the options' end to
+  the command's flow's start on lane 0: the session's start, which, the session
+  being lazy, takes lane 1's creation alone, lane 1 creating the other lanes
+  while lane 0 goes on; for a command run on a session already, its flow's
+  dispatch.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked

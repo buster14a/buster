@@ -51,17 +51,18 @@
 //     with lane_team_keep_scratch kept, emptied, and released when the team stops.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
 //     forked child refuses the inherited team without waiting for workers that exist only in its parent.
-//   - Sessions (#905): sessions of 1, 2, 3 and 8 lanes, each lane running the flow once, lane 0 on the calling thread,
-//     with capacity - 1 threads created (lane_threads_created, and the process's threads) and joined after; a session of
-//     one creates none. In the flow: every lane but lane 0 with the asynchronous signals blocked and the synchronous
-//     ones not; a signal sent to the process handled on lane 0; parked
+//   - Sessions (#905): sessions of 1, 2, 3 and 8 lanes, and lazy ones of 1, 3 and 8, each lane running the flow once,
+//     lane 0 on the calling thread, with capacity - 1 threads created (LaneProcess.threads_created, and the process's
+//     threads) and joined after; a session of one creates none. In the flow: every lane but lane 0 with the
+//     asynchronous signals blocked and the synchronous ones not; a signal sent to the process handled on lane 0; parked
 //     broadcasts from each lane; narrowings to 1, 2, 3, every lane and more, nested, each narrowed group syncing,
 //     broadcasting and taking parts, the others untouched; lane 0 serving regions of 1, 3, every lane and more lanes,
 //     each region's lanes running it once, a nested run in a region refused; a lane alone running lane_run on itself;
 //     a run, a team, a cold group and a session of several refused where they would create a thread; and a child forked
-//     from lane 0, which forgets the session and runs as one lane. Then a session whose third lane fails to start
-//     (lane_session_fail_at): the two lanes created joined, the flow on lane 0 alone; and in a child, a session that
-//     leaves its lanes parked at its end (but in sanitizer builds, which join them).
+//     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
+//     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
+//     lane 0 alone; and in a child, a session that leaves its lanes parked at its end (but in sanitizer builds, which
+//     join them).
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -2030,10 +2031,10 @@ static uint64_t lane_test_sessions(void)
             .expected = capacities[i],
             .forks = i == 2,
         };
-        const uint64_t created = lane_threads_created;
+        const uint64_t created = lane_process.threads_created;
         const uint32_t flags = i >= 4 ? BUSTER_LANE_SESSION_LAZY : 0;
         const uint32_t ran = lane_session_run(&session, capacities[i], 0, lane_test_session_main, &test, flags);
-        failures += ran != capacities[i] || lane_threads_created != created + capacities[i] - 1 ? 1 : 0;
+        failures += ran != capacities[i] || lane_process.threads_created != created + capacities[i] - 1 ? 1 : 0;
         for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
         {
             failures += test.calls[lane] != (lane < capacities[i] ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
@@ -2054,11 +2055,11 @@ static uint64_t lane_test_sessions(void)
             .caller = caller,
             .expected = 1,
         };
-        const uint64_t created = lane_threads_created;
-        lane_session_fail_at = failing[i];
+        const uint64_t created = lane_process.threads_created;
+        lane_process.fail_at = failing[i];
         const uint32_t ran = lane_session_run(&session, BUSTER_LANE_TEST_MAX_LANES, 0, lane_test_session_main, &failed, i == 0 ? 0 : BUSTER_LANE_SESSION_LAZY);
-        lane_session_fail_at = 0;
-        failures += ran != 1 || lane_threads_created != created + failing[i] - 1 || failed.calls[0] != 1 || failed.failures[0] != 0 ? 1 : 0;
+        lane_process.fail_at = UINT32_MAX;
+        failures += ran != 1 || lane_process.threads_created != created + failing[i] - 1 || failed.calls[0] != 1 || failed.failures[0] != 0 ? 1 : 0;
         for (uint32_t lane = 1; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
         {
             failures += failed.calls[lane] != 0 ? 1 : 0;
@@ -2088,8 +2089,8 @@ static uint64_t lane_test_sessions(void)
         sigaction(SIGUSR1, &previous_action, 0);
     }
     failures += lane_test_unwatch() ? 0 : 1;
-    printf("sessions: sessions of 1, 2, 3 and %u lanes, one whose lanes didn't start and one parked at its end, %lu wrong\n", BUSTER_LANE_TEST_MAX_LANES,
-           (unsigned long)failures);
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start and one parked at its end, %lu wrong\n",
+           BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
     return failures;
 }
 

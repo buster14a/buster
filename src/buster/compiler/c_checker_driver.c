@@ -2383,21 +2383,20 @@ static void check_driver_flow(void* argument)
     CheckDriverRun* run = argument;
     if (lane_index() == 0)
     {
-        // Several units set their lanes up at once: lane 0 learns first how the session's lanes started. One unit's
-        // lanes are first met at its emission's rounds, which settle then (check_program_emit_round).
-        if (run->input_count > 1)
-        {
-            lane_session_settle();
-        }
         check_clock_mark(run->stage_clock, CHECK_STAGE_LANES_START);
         run->lanes->lanes = run->lanes->lanes < lane_count() ? run->lanes->lanes : lane_count();
     }
     if (run->input_count > 1)
     {
+        // Lane 0 starts serving once the units' tables are built (check_driver_units), the lanes' start having gone on
+        // meanwhile; a command that ends before begins serving here, to end it.
         if (lane_index() == 0)
         {
-            lane_serve_begin();
             run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
+            if (!lane_serving())
+            {
+                lane_serve_begin();
+            }
             lane_serve_end();
         }
         else
@@ -2435,10 +2434,11 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     check_clock_mark(run->stage_clock, CHECK_STAGE_SETUP);
     if (lane_session_current() == NULL)
     {
-        // The session in the command's arena, whose first pages are base pages (a static one's first touch faults in a
-        // huge page of .bss): a terminal command leaves the arena to the process's exit, its lanes parked on the
-        // session, and a reusable one releases it once the lanes have joined.
-        LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(run->arena, LaneSession, 1);
+        // The session in a mapping of its own, in base pages: past the command's arena's first pages, which the options
+        // take some of, or in .bss, its first touch could clear a huge page. A terminal command leaves it to the
+        // process's exit, its lanes parked on it, and a reusable one releases it once the lanes have joined.
+        Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
+        LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
         // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY).
         const uint32_t flags = BUSTER_LANE_SESSION_LAZY | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
         if (session == NULL || lane_session_run(session, capacity, NULL, check_driver_flow, run, flags) == 0)
@@ -2447,6 +2447,10 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
             const Lane group = lane_alone();
             check_driver_flow(run);
             lane_restore(group);
+        }
+        if (run->release)
+        {
+            arena_release(&memory);
         }
     }
     else if (lane_serving())

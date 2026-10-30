@@ -744,6 +744,11 @@ static int foreign_driver_link(ForeignDriverRun* run)
         }
     }
     ends[FOREIGN_DRIVER_STAGE_OPEN] = foreign_driver_now();
+    // The session's lanes, which lane 1 has been starting meanwhile (#905): lane 0 learns how they started, and serves
+    // the stages' regions on them from here.
+    lane_session_settle();
+    lanes = lanes < lane_count() ? lanes : lane_count();
+    lane_serve_begin();
     if (succeeded && !driver.help)
     {
         foreign_run_lanes(&foreign, lanes, 0);
@@ -897,11 +902,16 @@ static void foreign_driver_flow(void* argument)
     ForeignDriverRun* run = argument;
     if (lane_index() == 0)
     {
-        // The link sets its lanes up first: lane 0 learns how the session's lanes, which lane 1 starts, started.
-        run->session_lanes = lane_session_settle();
+        // The lanes asked for, which lane 1 starts while lane 0 opens the first inputs: lane 0 learns how they started,
+        // and starts serving them, before the resolution (foreign_driver_link), or here to end a link that never got
+        // there.
+        run->session_lanes = lane_count();
         run->lanes_end = foreign_driver_now();
-        lane_serve_begin();
         run->result = foreign_driver_link(run);
+        if (!lane_serving())
+        {
+            lane_serve_begin();
+        }
         lane_serve_end();
     }
     else
@@ -937,6 +947,7 @@ static int run_foreign_link(int argc, char** argv)
         run.session_lanes = 1;
         run.lanes_end = foreign_driver_now();
         run.result = foreign_driver_link(&run);
+        lane_serve_end();
     }
     return run.result;
 }

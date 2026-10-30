@@ -1766,7 +1766,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         snprintf(executable_path, sizeof(executable_path), "%s/session_threads_%u", directory, c);
         snprintf(preload, sizeof(preload), "LD_PRELOAD=%s", library);
         snprintf(count_path, sizeof(count_path), "CHECK_LANES_THREADS=%s", counted);
-        snprintf(failing, sizeof(failing), "BUSTER_TEST_LANE_FAIL_AT=%s", command->fail_at != NULL ? command->fail_at : "0");
+        snprintf(failing, sizeof(failing), "BUSTER_TEST_LANE_FAIL_AT=%s", command->fail_at != NULL ? command->fail_at : "");
         uint64_t used = 0;
         for (uint64_t i = 0; i < inherited; i += 1)
         {
@@ -1779,7 +1779,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         }
         environment[used] = preload;
         environment[used + 1] = count_path;
-        environment[used + 2] = failing;
+        environment[used + 2] = command->fail_at != NULL ? failing : NULL;
         environment[used + 3] = NULL;
         char* arguments[12] = { (char*)executable };
         uint32_t count = 1;
@@ -1858,7 +1858,7 @@ static void check_lanes_test_session_result(CheckLanesSession* session, uint32_t
 {
     session->failures += status != session->expected[c] ? 1 : 0;
     session->failures += session->objects[c] != NULL && !check_test_driver_same_files(session->objects[c], session->reference) ? 1 : 0;
-    session->failures += lane_threads_created != session->created ? 1 : 0;
+    session->failures += lane_process.threads_created != session->created ? 1 : 0;
 }
 
 // The commands' rounds, every lane calling each command (a collective call): each lane the same thread throughout, and
@@ -1959,11 +1959,12 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
     const int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
     const bool silenced = saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO;
     static LaneSession lanes;
-    const uint64_t before = lane_threads_created;
+    const uint64_t before = lane_process.threads_created;
     session.created = before + BUSTER_CHECK_LANES_SESSION_LANES - 1;
     const uint32_t ran = referenced && silenced ? lane_session_run(&lanes, BUSTER_CHECK_LANES_SESSION_LANES, NULL, check_lanes_test_session_flow, &session, 0) : 0;
     const uint64_t flow_failures = session.failures;
     session.failures = 0;
+    session.created = before + 2 * (BUSTER_CHECK_LANES_SESSION_LANES - 1);
     const uint32_t served = ran != 0 ? lane_session_run(&lanes, BUSTER_CHECK_LANES_SESSION_LANES, NULL, check_lanes_test_session_served, &session, BUSTER_LANE_SESSION_LAZY) : 0;
     fflush(stderr);
     if (saved >= 0)
@@ -1992,7 +1993,7 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
              (unsigned long long)flow_failures, (unsigned long long)session.failures, (unsigned long long)moved);
     check_lanes_test_expect(tally, ran == BUSTER_CHECK_LANES_SESSION_LANES && session.lanes == BUSTER_CHECK_LANES_SESSION_LANES && flow_failures == 0 && moved == 0,
                             "commands in one process run on one session's lanes, collectively", detail);
-    check_lanes_test_expect(tally, served == BUSTER_CHECK_LANES_SESSION_LANES && session.failures == 0 && lane_threads_created == before + 2 * (BUSTER_CHECK_LANES_SESSION_LANES - 1),
+    check_lanes_test_expect(tally, served == BUSTER_CHECK_LANES_SESSION_LANES && session.failures == 0 && lane_process.threads_created == before + 2 * (BUSTER_CHECK_LANES_SESSION_LANES - 1),
                             "commands in one process run as regions of lane 0's served lanes", detail);
 }
 
