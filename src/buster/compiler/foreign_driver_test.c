@@ -1670,11 +1670,12 @@ static bool foreign_driver_test_large(ForeignTestTally* tally, const char* direc
     return made;
 }
 
-// --time: a link reports every stage (the first inputs' opening and the team's start among them) and the phases of the
-// resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by default, and still writes the
-// program; a link that fails reports no stages, only its diagnostic; one of 8 lanes started on one CPU runs on one lane,
-// the most the command takes (foreign_driver_cpus); and by default, a link of one small object runs on one lane, and
-// its opening reports the objects' bytes that chose it.
+// --time: a link reports every stage (the first inputs' opening and the session's start among them, with the session's
+// lanes) and the phases of the resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by
+// default, and still writes the program; a link that fails reports no stages, only its diagnostic; one of 8 lanes
+// started on one CPU runs on one lane, the most the command takes (foreign_driver_cpus), on a session of one; and by
+// default, a link of one small object runs on one lane of a session of the most its objects may pay for, and its
+// opening reports the objects' bytes that chose it.
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1748,6 +1749,12 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         snprintf(opened, sizeof(opened), " objects %llu bytes\n", sized ? (unsigned long long)object.st_size : 0ull);
         const bool counted = report.pointer != 0 && memmem(report.pointer, report.length, " objects ", strlen(" objects ")) != 0;
         complete = complete && (chosen ? sized && memmem(report.pointer, report.length, opened, strlen(opened)) != 0 : !counted);
+        // The session's lanes (#905): as many as the link may take, the most its objects may pay for by default, though
+        // it runs on fewer.
+        const uint32_t session = way == 1 ? lanes : chosen ? (cpus < BUSTER_FOREIGN_DRIVER_LANES ? cpus : BUSTER_FOREIGN_DRIVER_LANES) : 1;
+        char sessioned[64];
+        snprintf(sessioned, sizeof(sessioned), " session %u of %u\n", session, session);
+        complete = complete && (fails || memmem(report.pointer, report.length, sessioned, strlen(sessioned)) != 0);
         bool none = report.pointer != 0;
         for (uint32_t i = 0; report.pointer != 0 && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {

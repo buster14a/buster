@@ -61,7 +61,8 @@ dynamic and static, and nothing off one lane ([the
 record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)).
 `--time` reports, on standard
 error after the link, each stage's wall time (the arguments, the session's
-start, the interpreter's discovery, the first inputs' opening, with their
+start, with its lanes against those asked for (`session 1 of 8` after a failed
+start), the interpreter's discovery, the first inputs' opening, with their
 objects' bytes when they chose the lanes, the resolution with each of its phases on the
 slowest lane, the conversion, the optional passes, the write with each of the
 writer's phases on lane 0, and the release), as wild's `--time` and mold's

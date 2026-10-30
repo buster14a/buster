@@ -2353,6 +2353,8 @@ struct CheckDriverRun
     Arena* output_arena;
     bool release;
     CheckEmitFlow flow;
+    // The lanes the command asks for (check_driver_run), which --time-stages reports with those its flow ran on.
+    uint32_t capacity;
     int result;
 };
 
@@ -2416,6 +2418,11 @@ static void check_driver_flow(void* argument)
     {
         check_program_emit_follow(&run->flow);
     }
+    // The lanes the flow ran on, whose group lane 0 is a lane of again at its end: one after a failed start.
+    if (lane_index() == 0)
+    {
+        check_clock_lanes(run->stage_clock, run->capacity, lane_count());
+    }
 }
 
 // Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
@@ -2430,6 +2437,7 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     const uint32_t cap = run->lanes->budget != NULL && run->lanes->budget->maximum != 0 ? run->lanes->budget->maximum : UINT32_MAX;
     uint32_t capacity = run->lanes->lanes < cap ? run->lanes->lanes : cap;
     capacity = capacity == 0 || (run->input_count <= 1 && !command->emit_object && !command->link) ? 1 : capacity;
+    run->capacity = capacity;
     // The options are the setup's; the session's start, or the flow's dispatch, is lanes-start's (check_driver_flow).
     check_clock_mark(run->stage_clock, CHECK_STAGE_SETUP);
     if (lane_session_current() == NULL)
@@ -2903,6 +2911,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
 static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
 {
     int result = 1;
+    // A lazy session's lane 0 learns how its lanes started before it meets them: on a failed start it is alone.
+    lane_session_settle();
     const bool collective = lane_session_current() != NULL && lane_count() > 1 && !lane_serving();
     if (collective && lane_index() != 0)
     {

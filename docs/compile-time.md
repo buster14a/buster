@@ -768,7 +768,10 @@ report, on standard error after the command, a row per stage.
   the command's flow's start on lane 0: the session's start, which, the session
   being lazy, takes lane 1's creation alone, lane 1 creating the other lanes
   while lane 0 goes on; for a command run on a session already, its flow's
-  dispatch.
+  dispatch. Two `time-process` lines give the session's lanes: `lanes-asked`,
+  the lanes the command asked for (one per CPU it may run on, or `--lanes N`,
+  at most `--worker-budget N`, and one for a source without code to emit), and
+  `lanes`, those its flow ran on, one after a failed start.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked

@@ -51,9 +51,11 @@
 //   status and diagnostics of --lanes 1; and --lanes', --worker-budget's and --id-order's values it refuses.
 // - The driver's session's threads (#905): a library preloaded into the driver counts its calls of pthread_create,
 //   which its session makes once, before any source is read: none for --lanes 1, --worker-budget=1 and a source's
-//   -fsyntax-only; one per lane past the first of --lanes 3 and, by default, of the CPUs it may run on, for an object,
-//   an executable and two sources' objects, whatever lanes their emissions take; and when its second lane fails to start
-//   (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one lane, writing --lanes 1's object.
+//   -fsyntax-only, and an object compiled on one CPU; one per lane past the first of --lanes 3 and, by default, of the
+//   CPUs it may run on, for an object, an executable and two sources' objects, whatever lanes their emissions take; and
+//   when its second lane fails to start (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one
+//   lane, writing --lanes 1's object. --time-stages reports the lanes asked for and those run on: 3 and 3 for --lanes 3,
+//   and 4 and 1 for that failure.
 // - Commands in one process (#905): a session of 4 lanes whose flow runs, three times, a command that fails, one that
 //   writes an object on 4 lanes, one on 2 by --worker-budget 2, a -fsyntax-only, and -fsyntax-only of two sources by 3
 //   lanes and by 1, every lane calling each (run_check_command's collective call): each lane the same thread
@@ -1677,6 +1679,31 @@ static void check_lanes_test_benchmark_sections(CheckLanesTestTally* tally, cons
     }
 }
 
+// The lanes --time-stages' report in the file at `path` says its command asked for and ran on, each 0 where it has none.
+static void check_lanes_test_report_lanes(const char* path, uint32_t* asked, uint32_t* lanes)
+{
+    *asked = 0;
+    *lanes = 0;
+    FILE* file = fopen(path, "r");
+    char line[256];
+    while (file != NULL && fgets(line, sizeof(line), file) != NULL)
+    {
+        unsigned value = 0;
+        if (sscanf(line, "time-process\tlanes-asked\t%u", &value) == 1)
+        {
+            *asked = value;
+        }
+        else if (sscanf(line, "time-process\tlanes\t%u", &value) == 1)
+        {
+            *lanes = value;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+}
+
 // The driver's session's threads (see the file's comment): `executable`'s calls of pthread_create, counted by a library
 // preloaded into it, for commands on `directory`'s generated programs, each command's object compared with --lanes 1's.
 static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const char* executable, const char* directory)
@@ -1727,7 +1754,8 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     check_lanes_test_expect(tally, !built || referenced, "the driver writes the reference object on one lane", program);
     const uint32_t cpus = check_driver_cpus();
     // The commands: their options, their sources, whether they write an object to compare, the lane of the session that
-    // fails to start (0 for none), and the threads they create.
+    // fails to start (0 for none), whether they may run on one CPU alone, the threads they create, and with --time-stages
+    // the lanes its report must say the session asked for and ran on.
     typedef struct CheckLanesSessionCommand CheckLanesSessionCommand;
     struct CheckLanesSessionCommand
     {
@@ -1736,17 +1764,21 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         bool link;
         bool two;
         const char* fail_at;
+        bool one_cpu;
         uint32_t threads;
+        uint32_t asked;
+        uint32_t ran;
     };
     const CheckLanesSessionCommand commands[] = {
         { .options = { "--lanes", "1", "-c" }, .object = true, .threads = 0 },
         { .options = { "--worker-budget=1", "-c" }, .object = true, .threads = 0 },
         { .options = { "-fsyntax-only" }, .threads = 0 },
-        { .options = { "--lanes", "3", "-c" }, .object = true, .threads = 2 },
+        { .options = { "--lanes", "3", "-c", "--time-stages" }, .object = true, .threads = 2, .asked = 3, .ran = 3 },
         { .options = { "-c" }, .object = true, .threads = cpus - 1 },
+        { .options = { "-c" }, .object = true, .one_cpu = true, .threads = 0 },
         { .options = { "-o" }, .link = true, .threads = cpus - 1 },
         { .options = { "-c" }, .two = true, .threads = cpus - 1 },
-        { .options = { "--lanes", "4", "-c" }, .object = true, .fail_at = "2", .threads = 1 },
+        { .options = { "--lanes", "4", "-c", "--time-stages" }, .object = true, .fail_at = "2", .threads = 1, .asked = 4, .ran = 1 },
     };
     uint64_t inherited = 0;
     for (char** entry = environ; entry != NULL && *entry != NULL; entry += 1)
@@ -1808,8 +1840,19 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         // The two sources' objects are written in the current directory, as clang names them: run them in `directory`.
         char saved[PATH_MAX];
         const bool moved = !command->two || (getcwd(saved, sizeof(saved)) != NULL && chdir(directory) == 0);
-        const int status = moved ? object_test_run_environment(arguments, "/dev/null", errors, environment) : -1;
-        const bool returned = !command->two || (moved && chdir(saved) == 0);
+        // One CPU: this thread pins itself to the first it may run on while it starts the command, which inherits that,
+        // and has its own CPUs back after.
+        uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+        const long affinity_bytes = command->one_cpu ? syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) : 0;
+        uint32_t first = 0;
+        while (affinity_bytes > 0 && first < (uint32_t)affinity_bytes * 8 && ((affinity[first / 64] >> (first % 64)) & 1) == 0)
+        {
+            first += 1;
+        }
+        const bool pinned = affinity_bytes > 0 && first < (uint32_t)affinity_bytes * 8 && lane_pin(first);
+        const int status = moved && (!command->one_cpu || pinned) ? object_test_run_environment(arguments, "/dev/null", errors, environment) : -1;
+        const bool unpinned = !pinned || syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0;
+        const bool returned = unpinned && (!command->two || (moved && chdir(saved) == 0));
         char text[32] = { 0 };
         FILE* report = fopen(counted, "r");
         const bool read = report != NULL && fgets(text, sizeof(text), report) != NULL;
@@ -1830,6 +1873,16 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         check_lanes_test_expect(tally, status == 0 && returned && read && strcmp(text, expected) == 0, "the driver's session creates its lanes once, none for one lane",
                                 detail);
         check_lanes_test_expect(tally, !command->object || check_test_driver_same_files(object, reference), "the driver's object on its session is one lane's",
+                                detail);
+        uint32_t asked = 0;
+        uint32_t ran = 0;
+        if (command->asked != 0)
+        {
+            check_lanes_test_report_lanes(errors, &asked, &ran);
+        }
+        snprintf(detail, sizeof(detail), "command %u: --time-stages reports %u lanes asked for and %u run on, %u and %u expected", c, asked, ran, command->asked,
+                 command->ran);
+        check_lanes_test_expect(tally, asked == command->asked && ran == command->ran, "--time-stages reports the lanes the session asked for and ran on",
                                 detail);
     }
     free(environment);

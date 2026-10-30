@@ -158,7 +158,21 @@ struct CheckClock
     // The write's phases' nanoseconds, from executable_write's result, when it wrote.
     bool wrote;
     uint64_t write_nanoseconds[BUSTER_CHECK_CLOCK_WRITE_PHASES];
+    // The command's lanes (#905): those it asked for, and those its flow ran on, fewer after a failed start (0 for a
+    // command that never reached its flow).
+    uint32_t lanes_asked;
+    uint32_t lanes;
 };
+
+// Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock.
+static void check_clock_lanes(CheckClock* stage_clock, uint32_t asked, uint32_t lanes)
+{
+    if (stage_clock != NULL)
+    {
+        stage_clock->lanes_asked = asked;
+        stage_clock->lanes = lanes;
+    }
+}
 
 // System microseconds and minor faults remain getrusage counters. RSS is the current address space's
 // approximate peak in KiB; the return value says whether it was read, independently of getrusage.
@@ -263,6 +277,11 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
     }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
+    if (stage_clock->lanes_asked != 0)
+    {
+        fprintf(stream, "time-process\tlanes-asked\t%u\n", stage_clock->lanes_asked);
+        fprintf(stream, "time-process\tlanes\t%u\n", stage_clock->lanes);
+    }
     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
     fprintf(stream, "time-process\tstage-system-accuracy\tunqualified\n");

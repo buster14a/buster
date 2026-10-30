@@ -598,13 +598,14 @@ static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slow
     }
 }
 
-// The report: the whole and its lanes, each stage, the first inputs' objects' `bytes`, which with `chosen` chose the
-// lanes, the resolution's phases (`resolve`, the slowest lane's time in each), the conversion's (`convert`,
-// foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first part is the lanes' dispatch
-// and the symbol selection, up to executable_write's own start. `ends` holds each stage's end, `begin` the start; a
-// stage that didn't run ends where the one before did.
-static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends,
-                                  uint64_t write_begin, const ExecutableResult* written)
+// The report: the whole and its lanes, each stage, the session's lanes (`session`, fewer than the `asked` after a failed
+// start, #905), the first inputs' objects' `bytes`, which with `chosen` chose the lanes, the resolution's phases
+// (`resolve`, the slowest lane's time in each), the conversion's (`convert`, foreign_link_build_mode's) and the
+// writer's, from lane 0's timestamps; the writer's first part is the lanes' dispatch and the symbol selection, up to
+// executable_write's own start. `ends` holds each stage's end, `begin` the start; a stage that didn't run ends where the
+// one before did.
+static void foreign_driver_report(uint32_t lanes, uint32_t session, uint32_t asked, bool chosen, uint64_t bytes, const uint64_t* resolve, const uint64_t* convert,
+                                  uint64_t begin, const uint64_t* ends, uint64_t write_begin, const ExecutableResult* written)
 {
     static const char* const stages[FOREIGN_DRIVER_STAGES] = {
         "arguments",
@@ -654,6 +655,10 @@ static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, c
     for (uint32_t stage = 0; stage < FOREIGN_DRIVER_STAGES; stage += 1)
     {
         fprintf(stderr, "  %-13s %9.3f ms", stages[stage], (double)(ends[stage] - previous) / 1e6);
+        if (stage == FOREIGN_DRIVER_STAGE_LANES)
+        {
+            fprintf(stderr, " session %u of %u", session, asked);
+        }
         if (stage == FOREIGN_DRIVER_STAGE_OPEN && chosen)
         {
             fprintf(stderr, " objects %llu bytes", (unsigned long long)bytes);
@@ -890,7 +895,8 @@ static int foreign_driver_link(ForeignDriverRun* run)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        foreign_driver_report(lanes, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
+        // The session's lanes, which lane 0 knows since it began serving them.
+        foreign_driver_report(lanes, lane_session_settle(), run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
     }
     return succeeded ? 0 : 1;
 }
