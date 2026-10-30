@@ -13,6 +13,8 @@ struct CheckDriverFixture
     bool rejected;
     uint32_t warnings;
     bool quiet;
+    const char* message;
+    uint32_t column;
 };
 
 // Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
@@ -4815,6 +4817,13 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "alias on a function definition is rejected at the attribute",
+            .source = "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "function definition cannot also be an alias",
+            .column = 16,
+        },
+        {
             .name = "K&R definition emits its deprecated-non-prototype warning",
             .source = "int f(a)float a;{return (int)a;}\n",
             .warnings = 1,
@@ -5232,6 +5241,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
+            if (fixtures[i].message != NULL)
+            {
+                snprintf(description, sizeof(description), "%s, %s %s%s: diagnostic and attribute column", fixtures[i].name,
+                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "");
+                check_test_expect(&test, ready && checked.column == fixtures[i].column && checked.column == oracle.column &&
+                                  strcmp(checked.message, fixtures[i].message) == 0, description);
+            }
             snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
             check_test_expect(&test, warnings == fixtures[i].warnings, description);
