@@ -4824,6 +4824,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             .column = 16,
         },
         {
+            .name = "a function body after an alias is a redefinition",
+            .source = "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "conflicting declaration",
+            .column = 5,
+        },
+        {
             .name = "K&R definition emits its deprecated-non-prototype warning",
             .source = "int f(a)float a;{return (int)a;}\n",
             .warnings = 1,

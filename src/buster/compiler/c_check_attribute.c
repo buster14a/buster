@@ -1314,6 +1314,18 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
     return valid;
 }
 
+// An alias declaration defines its function even though it has no body. Keep that fact separate from `defined`,
+// whose users also identify bodies (for example, the old-style parameter compatibility check).
+static bool check_input_attribute_alias_definition(const CheckInputAttributes* attributes)
+{
+    bool alias = false;
+    for (uint32_t i = 0; !alias && attributes != 0 && i < attributes->count; i += 1)
+    {
+        alias = attributes->records[i].kind == CHECK_ATTRIBUTE_ALIAS && !attributes->records[i].ignored;
+    }
+    return alias;
+}
+
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
 // declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
 // weak, constructor and destructor, which then make no symbol weak or array entry (#147), and unscoped standard

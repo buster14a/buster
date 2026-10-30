@@ -3972,7 +3972,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->output->explicit_abis[name] = abi_origin;
                 reader->defined[name] = kind == PARSE_KIND_EQUAL || (function && kind == PARSE_KIND_L_BRACE);
                 reader->defined[name] |= !is_typedef && !function && !file && is_static;
-                reader->definition_seen[name] = reader->defined[name];
+                const bool alias_definition = function && !is_typedef && check_input_attribute_alias_definition(attributes);
+                // A block-scope alias changes the linked entity's definition history outside this body. A deferred
+                // lane cannot publish that change in source order, so let the serial reader handle the unit.
+                check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
+                reader->definition_seen[name] = reader->defined[name] || alias_definition;
                 reader->output->tentative[name] = !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL;
                 reader->static_objects[name] = !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0);
                 reader->registers[name] = storage == C_NAME_REGISTER;
@@ -4228,7 +4232,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                                      (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
             }
             if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] || compatible != TYPE_ANSWER_YES ||
-                (reader->defined[token] && reader->definition_seen[previous]) ||
+                (reader->definition_seen[token] && reader->definition_seen[previous]) ||
                 reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
             {
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
