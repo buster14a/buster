@@ -65,7 +65,10 @@ read, and every lane runs the command's flow (`CheckUnitsFlow`): lane 0 runs
 the driver alone, and each wide part (the units' run, the merge of their
 links, its `link_check` and the executable's write) is a round, which lane 0
 announces with its kind and lanes and every lane runs, the first of them its
-operation, a direct call (`check_units_wide`). The lanes keep their threads
+operation by a direct call: lane 0 between `check_units_round_begin` and
+`check_units_round_end`, the others by its kind (`check_units_follow`), so
+that nothing a unit's compile calls leads back to the units' run, as the call
+graph check requires. The lanes keep their threads
 and scratch arenas from one round to the next rather than starting and
 joining threads of their own (#778). The units' lanes are at most the
 session's: one when its lanes couldn't start, and then lane 0 runs every

@@ -1415,7 +1415,9 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     }
     else
     {
-        check_units_round(flow, CHECK_UNITS_ROUND_MERGE, &merge, lanes);
+        check_units_round_begin(flow, CHECK_UNITS_ROUND_MERGE, &merge, lanes);
+        check_units_merge_lane(&merge);
+        check_units_round_end(flow);
         result = merge.valid;
         if (!merge.atoms_added && !merge.duplicated && (!merge.symbols_added || merge.begun))
         {
@@ -1614,44 +1616,45 @@ static uint32_t check_units_flow_lanes(const CheckUnitsFlow* flow)
     return check_units_flow_shared(flow) ? flow->group.count : 1;
 }
 
-// A round's wide part, on every lane of the flow: its first `lanes` lanes run its operation.
-static void check_units_wide(CheckUnitsFlow* flow, CheckUnitsRound round, uint32_t lanes)
-{
-    if (lane_narrow(lanes))
-    {
-        switch (round)
-        {
-            case CHECK_UNITS_ROUND_UNITS: check_units_lane(flow->argument); break;
-            case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(flow->argument); break;
-            case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(flow->argument); break;
-            case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(flow->argument); break;
-            case CHECK_UNITS_ROUND_END: break;
-        }
-    }
-    lane_widen();
-}
-
-static void check_units_round(CheckUnitsFlow* flow, CheckUnitsRound round, void* argument, uint32_t lanes)
+// Lane 0 is always among a round's lanes, a lane alone in a flow without others.
+static void check_units_round_begin(CheckUnitsFlow* flow, CheckUnitsRound round, void* argument, uint32_t lanes)
 {
     assert(flow != NULL);
     flow->argument = argument;
     const bool shared = check_units_flow_shared(flow);
-    const Lane alone = lane_alone();
+    flow->alone = lane_alone();
     if (shared)
     {
         lane_restore(flow->group);
         lane_park_broadcast((uint64_t)round << 32 | lanes, 0);
     }
-    check_units_wide(flow, round, shared ? lanes : 1);
-    lane_restore(alone);
+    lane_narrow(shared ? lanes : 1);
 }
 
-// The flow's other lanes: each round's wide part, until lane 0 ends the flow.
+static void check_units_round_end(CheckUnitsFlow* flow)
+{
+    lane_widen();
+    lane_restore(flow->alone);
+}
+
+// The flow's other lanes: each round's operation on its first lanes, by its kind, until lane 0 ends the flow.
 static void check_units_follow(CheckUnitsFlow* flow)
 {
     for (uint64_t announced = lane_park_broadcast(0, 0); (announced >> 32) != CHECK_UNITS_ROUND_END; announced = lane_park_broadcast(0, 0))
     {
-        check_units_wide(flow, (CheckUnitsRound)(announced >> 32), (uint32_t)announced);
+        const CheckUnitsRound round = (CheckUnitsRound)(announced >> 32);
+        if (lane_narrow((uint32_t)announced))
+        {
+            switch (round)
+            {
+                case CHECK_UNITS_ROUND_UNITS: check_units_lane(flow->argument); break;
+                case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(flow->argument); break;
+                case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(flow->argument); break;
+                case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(flow->argument); break;
+                case CHECK_UNITS_ROUND_END: break;
+            }
+        }
+        lane_widen();
     }
 }
 
@@ -1795,7 +1798,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
-            check_units_round(lanes->units_flow, CHECK_UNITS_ROUND_UNITS, &run, active);
+            check_units_round_begin(lanes->units_flow, CHECK_UNITS_ROUND_UNITS, &run, active);
+            check_units_lane(&run);
+            check_units_round_end(lanes->units_flow);
             check_units_slots_back(lanes->units_flow, &lease);
             // A unit no lane took compiles on lane 0 alone.
             const Lane caller = lane_alone();
