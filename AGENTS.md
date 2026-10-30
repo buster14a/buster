@@ -305,7 +305,10 @@ designs and the compilers already built this way.
   scalar/vector table builders. `test-x86-target` checks the policy and Clang
   predefines; `benchmark-x86-target` measures table construction.
   `docs/x86-target.md` records the API, current catalogue coverage and the
-  selector/corpus acceptance still pending for #180.
+  selector/corpus acceptance still pending for #180. Its "A function's target
+  attribute" has #772's per-function features and code generation's check of
+  them, which `-c` and the direct path make after selection as clang does
+  (`c_check_target_feature.c`, #775; `test-checker-driver` against clang `-c`).
 
 - `src/buster/compiler/assembler.c` is the callable GNU assembly frontend, with
   AVX-512 and scalar paths and shared form matching in `x86_match.c`, whose
@@ -1354,9 +1357,20 @@ preprocessor's predefines give as clang's do for the same options
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
-After both hosted variants pass on the same triggering revision, Benchpress
+On pushes to main and the daily and dispatched runs (not on pull requests, which
+they would hold up for over an hour), each host architecture also runs the
+complete inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`. ASan combines UBSan, bounds,
+leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
+builds default to `-O3`, frames and line information, with fatal symbolized detector
+proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
+coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
+its byte-input callback. Hosted frontend, ELF and crash/replay campaigns gate
+the same runs. Additional full ASan/UBSan suites run at `-O1`;
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
+See `docs/ci.md` for usage and the precise coverage boundaries.
+After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
-benchmarks, reusing one build and the existing shared lock. All three builds run
+benchmarks, reusing one build and the existing shared lock. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. The existing required check name is retained by a hosted

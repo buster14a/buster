@@ -2365,12 +2365,17 @@ static void foreign_test_unstarted(ForeignTestTally* tally, char** arguments, ui
         const pid_t child = parsed ? fork() : -1;
         if (child == 0)
         {
+#if BUSTER_SANITIZER_RESOURCES
+            lane_test_resources.no_threads = true;
+            const bool limited = true;
+#else
             const struct rlimit limit = {
                 .rlim_cur = 0,
                 .rlim_max = 0,
             };
-            const uint32_t cpus[2] = { 0, 1 };
             const bool limited = setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
+            const uint32_t cpus[2] = { 0, 1 };
             Foreign foreign;
             const ForeignFailure pinned = foreign_run(&foreign, &command, FOREIGN_PATH_VECTOR, 2, cpus);
             foreign_release(&foreign);

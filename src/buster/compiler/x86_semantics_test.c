@@ -2972,7 +2972,8 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
         uint64_t* opmask_vector_reads = malloc(count * sizeof(uint64_t));
         uint64_t* opmask_vector_writes = malloc(count * sizeof(uint64_t));
         uint16_t* scalar_opmasks = malloc(count * sizeof(uint16_t));
-        uint16_t* vector_opmasks = malloc(count * sizeof(uint16_t));
+        // Zeroed: MSan doesn't model the vector path's down-converting masked store (vpmovqw) as writing it.
+        uint16_t* vector_opmasks = calloc(count, sizeof(uint16_t));
         if (x86_semantics_expect(&tally, opmask_scalar_reads && opmask_scalar_writes && opmask_vector_reads && opmask_vector_writes && scalar_opmasks && vector_opmasks,
                                  "the opmask columns"))
         {

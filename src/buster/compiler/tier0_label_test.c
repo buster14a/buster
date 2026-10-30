@@ -86,7 +86,8 @@ struct Tier0TestLabelShared
 
 // Runs the function's code (`length` bytes) in a child, which must exit with status 0: the code mapped executable at a
 // page of its own, the table its labels' addresses there (`offsets` of their records), and f called from C on each input.
-static bool tier0_test_label_native(const uint8_t* code, uint32_t length, const uint32_t* offsets, const uint32_t* records, const uint64_t* inputs,
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) bool tier0_test_label_native(const uint8_t* code, uint32_t length, const uint32_t* offsets, const uint32_t* records, const uint64_t* inputs,
                                     Tier0TestLabelShared* shared)
 {
     const pid_t child = fork();

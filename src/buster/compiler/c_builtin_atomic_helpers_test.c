@@ -153,7 +153,8 @@ static bool cbuiltin_atomic_test_wait(CBuiltinAtomicTestExchange* exchange, cons
     return result;
 }
 
-static void* cbuiltin_atomic_test_sender(void* opaque)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void* cbuiltin_atomic_test_sender(void* opaque)
 {
     CBuiltinAtomicTestExchange* exchange = opaque;
     bool running = true;
@@ -170,7 +171,8 @@ static void* cbuiltin_atomic_test_sender(void* opaque)
     return NULL;
 }
 
-static void cbuiltin_atomic_test_exchange(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicTestNative* native)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_atomic_test_exchange(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicTestNative* native)
 {
     for (uint32_t path = 0; path < 2; path += 1)
     {
@@ -248,7 +250,8 @@ static void cbuiltin_atomic_test_refusals(CBuiltinAtomicHelperTest* test)
 }
 
 static bool cbuiltin_atomic_test_caller(CBuiltinAtomicHelperTest* test, Arena* arena, const CBuiltinAtomicHelper* helper, CBuiltinAtomicTestProgram programs[2], uint32_t item);
-static void cbuiltin_atomic_test_values(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicTestNative* native);
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_atomic_test_values(CBuiltinAtomicHelperTest* test, const CBuiltinAtomicTestNative* native);
 
 static int run_builtin_atomic_helper_tests(int argc, char** argv)
 {

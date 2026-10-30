@@ -1588,6 +1588,9 @@ static uint64_t profile_ab_run(Arena* arena, const ProfileAb* ab)
                         n += 1;
                     }
                     argv[n] = 0;
+                    // The child leaves no copy of buffered output to write again at its exit (a sanitizer's _exit flushes).
+                    fflush(stdout);
+                    fflush(stderr);
                     const pid_t child = fork();
                     if (child == 0)
                     {

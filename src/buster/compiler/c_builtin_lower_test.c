@@ -283,7 +283,8 @@ static __attribute__((noinline)) uint32_t cbuiltin_lower_test_bit_overflow(CBuil
 #undef BUSTER_CBUILTIN_LOWER_TEST_BIT_WIDTH
 #undef BUSTER_CBUILTIN_LOWER_TEST_BITS
 
-static void cbuiltin_lower_test_case(CBuiltinLowerTestTally* tally, Arena* arena, CBuiltinLowerCall call, uint64_t* state)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CBuiltinLowerTestTally* tally, Arena* arena, CBuiltinLowerCall call, uint64_t* state)
 {
     tally->a_type = call.a_type;
     tally->b_type = call.b_type;
@@ -542,7 +543,8 @@ static unsigned __int128 cbuiltin_lower_test_wide_input(uint32_t index, uint32_t
 
 // One overflow builtin with a 128-bit operand or destination, as a native (const void* a, const void* b, void* out):
 // each operand loaded from its pointer into its slot (a 128-bit one's an object of 16 bytes), then the recipe.
-static void cbuiltin_lower_test_wide_case(CBuiltinLowerTestTally* tally, Arena* arena, CBuiltinLowerCall call, uint64_t* state)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_wide_case(CBuiltinLowerTestTally* tally, Arena* arena, CBuiltinLowerCall call, uint64_t* state)
 {
     tally->a_type = call.a_type;
     tally->b_type = call.b_type;

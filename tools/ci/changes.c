@@ -2296,6 +2296,8 @@ static void changes_test_split(ChangesTest* test)
 }
 
 // Reuse on the persistent host is safe only behind independent correctness on both hosted variants of this revision.
+// Pull requests run the hosted plain builds alone; pushes to main and the periodic/manual runs add the sanitizer rows
+// and the fuzz campaigns.
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow)
 {
@@ -2326,8 +2328,8 @@ static bool changes_oracle_policy(Text workflow)
         hosted_check |= job == 1 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
         hosted_variants |= job == 1 && text_equal_c(line, "        host_arch: [x86-64, native]");
         hosted_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
-        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test]");
-        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' }}");
+        native_needs |= job == 2 && text_equal_c(line, "    needs: [changes, test, fuzz]");
+        native_success |= job == 2 && text_equal_c(line, "    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.test.result == 'success' && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped')) }}");
         native_modes |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}");
         native_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
     }
@@ -2345,8 +2347,13 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
         { "      BUSTER_ORACLE_CACHE: check", "      BUSTER_ORACLE_CACHE: use" },
         { "        host_arch: [x86-64, native]", "        host_arch: [native]" },
         { "        host_arch: [x86-64, native]", "        host_arch: [x86-64]" },
-        { "    needs: [changes, test]", "    needs: changes" },
+        { "    needs: [changes, test, fuzz]", "    needs: changes" },
+        { "    needs: [changes, test, fuzz]", "    needs: [changes, test]" },
         { "needs.test.result == 'success'", "needs.test.result != 'failure'" },
+        { " && (needs.fuzz.result == 'success' || (github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'))", "" },
+        { "needs.fuzz.result == 'success'", "needs.fuzz.result != 'failure'" },
+        // Pull requests skip the fuzz campaigns; nothing else may.
+        { "github.event_name == 'pull_request' && needs.fuzz.result == 'skipped'", "needs.fuzz.result == 'skipped'" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",
           "      BUSTER_ORACLE_CACHE: ${{ github.event_name == 'schedule' && 'check' || 'use' }}" },
         { "      BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}",

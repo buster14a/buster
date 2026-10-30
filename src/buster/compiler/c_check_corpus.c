@@ -137,8 +137,17 @@ struct CheckCorpusOracle
 // every first error, including an included header's, and treats process/I/O failures separately from rejection.
 // One invocation owns one translation unit. Included files may themselves be corpus inputs, #line may rename a
 // location, and fatal include errors can survive -ferror-limit=1; none can misattribute acceptance to another file.
+// What check_corpus_clang_phase runs clang for: -fsyntax-only, -E, or -c, whose code generation reports errors of its
+// own (#775's checks of target features). -E's text and -c's object go to /dev/null.
+typedef enum CheckCorpusClangMode
+{
+    CHECK_CORPUS_CLANG_SYNTAX,
+    CHECK_CORPUS_CLANG_PREPROCESS,
+    CHECK_CORPUS_CLANG_COMPILE,
+} CheckCorpusClangMode;
+
 static bool check_corpus_clang_phase(const char* executable, const char* const* arguments, uint32_t argument_count,
-                                     const char* path, bool preprocess, CheckCorpusOracle* result)
+                                     const char* path, CheckCorpusClangMode mode, CheckCorpusOracle* result)
 {
     *result = (CheckCorpusOracle){ 0 };
     char** argv = calloc((size_t)argument_count + 12, sizeof(char*));
@@ -155,13 +164,13 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
             argv[used++] = (char*)arguments[argument];
             result->suppress_warnings |= strcmp(arguments[argument], "-w") == 0;
         }
-        argv[used++] = preprocess ? "-E" : "-fsyntax-only";
+        argv[used++] = mode == CHECK_CORPUS_CLANG_PREPROCESS ? "-E" : mode == CHECK_CORPUS_CLANG_COMPILE ? "-c" : "-fsyntax-only";
         argv[used++] = "-fno-caret-diagnostics";
         argv[used++] = "-fno-color-diagnostics";
         argv[used++] = "-ferror-limit=1";
-        if (preprocess)
+        if (mode != CHECK_CORPUS_CLANG_SYNTAX)
         {
-            // Only its diagnostics are read: the text goes to /dev/null, as it did through standard output.
+            // Only its diagnostics are read: the text or the object goes to /dev/null, as -E's did through standard output.
             argv[used++] = "-o";
             argv[used++] = "/dev/null";
         }
@@ -230,7 +239,14 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
 static bool check_corpus_clang_file(const char* executable, const char* const* arguments, uint32_t argument_count,
                                     const char* path, CheckCorpusOracle* result)
 {
-    return check_corpus_clang_phase(executable, arguments, argument_count, path, false, result);
+    return check_corpus_clang_phase(executable, arguments, argument_count, path, CHECK_CORPUS_CLANG_SYNTAX, result);
+}
+
+// clang -c's first error, its code generation's among them (#775).
+static __attribute__((unused)) bool check_corpus_clang_compile(const char* executable, const char* const* arguments, uint32_t argument_count, const char* path,
+                                                               CheckCorpusOracle* result)
+{
+    return check_corpus_clang_phase(executable, arguments, argument_count, path, CHECK_CORPUS_CLANG_COMPILE, result);
 }
 
 static bool check_corpus_clang(const char* executable, const char* const* arguments, uint32_t argument_count,
@@ -2423,7 +2439,7 @@ static bool check_corpus_files(CheckCorpusTally* tally, char** files, uint32_t c
             CheckCorpusOracle preprocessing = { 0 };
             if (rejections && outcomes[i].rejected)
             {
-                valid = check_corpus_clang_phase(clang, arguments, argument_count, file, true, &preprocessing);
+                valid = check_corpus_clang_phase(clang, arguments, argument_count, file, CHECK_CORPUS_CLANG_PREPROCESS, &preprocessing);
             }
             const bool excluded = rejections ? !outcomes[i].rejected || preprocessing.rejected : selection != 0 && outcomes[i].rejected;
             if (valid && rejections)
@@ -2630,7 +2646,7 @@ static bool check_corpus_oracle_controls(const char* directory, const char* clan
     CheckCorpusOracle preprocessing[BUSTER_ARRAY_LENGTH(sources)];
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
     {
-        valid = check_corpus_clang_phase(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths[i], true, preprocessing + i);
+        valid = check_corpus_clang_phase(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths[i], CHECK_CORPUS_CLANG_PREPROCESS, preprocessing + i);
     }
     valid = valid && !preprocessing[0].rejected && !preprocessing[2].rejected && !preprocessing[3].rejected && !preprocessing[5].rejected &&
             preprocessing[1].rejected && preprocessing[4].rejected && preprocessing[1].line == 2 && preprocessing[4].line == 2 &&

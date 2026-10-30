@@ -2479,7 +2479,8 @@ static void foreign_exchange(Foreign* foreign, uint32_t index, ForeignLane* lane
     }
     else
     {
-        if (written.end == partitions + 1)
+        // The lane whose range holds the last bound writes it; lanes with empty ranges past the end don't.
+        if (written.begin < written.end && written.end == partitions + 1)
         {
             round->partition_begin[partitions] = offset;
         }
