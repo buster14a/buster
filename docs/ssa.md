@@ -364,8 +364,10 @@ fuel, which ends the function at zero.
 ### Results
 
 Every function of the corpora passes both promotions' checks, and every program
-gives its expected output in all three forms. Locally (a Zen 4 laptop, Clang
-23.1.4), with the 9700X job's options for `sqlite3.c` and musl:
+gives its expected output in all three forms. On the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/6a910d75bee362782f2edc77ab9066b48fd92b6c/docs/measurements/ssa-source-134-2026-10-30)), c-testsuite's subset, `sqlite3.c`, musl and 48 generated programs
+gave these counts again. Locally (a Zen 4 laptop, Clang 23.1.4), with the 9700X
+job's options for `sqlite3.c` and musl:
 
 | Input | Functions | Lowered instructions | Promoted | Phis (vector / scalar) | Programs run |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -384,7 +386,44 @@ the generated programs 519,202,382 and 536,015,938: their phis, at loop headers
 and labels reached by many gotos, cost more steps than their loads and stores
 did.
 
+Each check was tried on a build with a deliberate defect, which the command
+must reject (16 generated programs, and c-testsuite's subset without 8 queens):
+phi operands written in reverse order by the adapter (`ssa_ir_fill`), which the
+IR's dominance checks refused in 94 of the 96 generated functions and 46 of
+c-testsuite's; a second write to a local in one block ignored by the scalar
+constructor, whose later reads in the block then see the first write, which
+dominates them, refused by `ssa_verify` ("read is not the current local value")
+in 39 and 35 functions, and, with the verifier disabled as well, caught by the
+runs, whose scalar form's output or status differed from the memory form's in
+all 16 programs and in 27 of c-testsuite's; and an unsigned `>>` lowered as an
+arithmetic shift (`ir_lower.c`), on which the three forms agree but 4 of the 16
+programs print other than clang's build and 1 of c-testsuite's than its
+`.expected`.
+
 ## Benchmark
+
+### `sqlite3.c`'s functions
+
+#134's measurement: `benchmark-ir-source` on the frozen `sqlite3.c`, with the 9700X
+job's options, pinned to CPU 2 of the 9700X under the lock, against main
+`caef4ea2` in six rounds that alternate which runs first ([the record](https://github.com/buster14a/buster-performance/tree/6a910d75bee362782f2edc77ab9066b48fd92b6c/docs/measurements/ssa-source-134-2026-10-30)).
+These are medians of the rounds' 21-pass medians, over the 2,602 functions'
+396,928 typed entries and 598,425 lowered IR instructions:
+
+| Path | Cycles per IR instruction | ns per IR instruction | ns per typed entry | Instructions per typed entry | Phis |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `promote` (`ssa_ir_promote`) | 519.50 | 93.74 | 141.32 | 2,167.97 | 6,097 |
+| `promote-scalar` | 518.50 | 93.55 | 141.04 | 2,236.80 | 6,097 |
+
+A promotion is all of `ssa_ir_promote`: the input's verification, CFG and
+classification, the shared dominance analysis, construction and cleanup, the
+IR's rebuild and both IR verifiers on the output. The two paths make the same
+phis. Against main, `promote` took +0.16% and `promote-scalar` −0.32% (each within
+its rounds' spread), with 0.003% more instructions, the promotion's tests of its
+verifier argument. After 200 ms of scalar work before each pass, `promote` took
+141.16 ns per entry against main's 141.17.
+
+### Synthetic CFGs
 
 ```sh
 ./build/compiler benchmark-ssa
