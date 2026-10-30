@@ -77,7 +77,10 @@ the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
 
 An implicit library declaration warns by default even in C89. The ordinary
 implicit-declaration warning switches, promotion/demotion and source pragmas
-apply. `-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
+apply. An earlier explicit linked function declaration of an eligible library
+name suppresses its later first-use warning after that block closes; this
+borrows the prior declaration's diagnostic fact, not its closed-block type.
+`-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
 for plain library names, but do not disable explicit `__builtin_` spellings.
 `-fbuiltin` reverses the global disabling option; freestanding mode separately
 disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized

@@ -81,6 +81,16 @@ static void check_test_driver_implicit_library(CheckTest* test, const char* clan
         { { "int f(void){return abs(-1);}typedef int abs;", "-std=gnu89", "-ffreestanding", NULL }, true },
         { { "int f(void){typedef int abs;abs n=2;return n;}int g(void){return abs(-1);}", "-std=c89", NULL, NULL }, true },
         { { "int f(void){enum E{abs=2};return abs;}int g(void){return abs(-1);}", "-std=gnu89", NULL, NULL }, true },
+        // A prior block-scope explicit library declaration suppresses the later first-library warning, but no
+        // ordinary/disabled-library warning or an earlier use's warning. Keep the original typedef conflict above.
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){return abs(-2);}", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){return abs(-2);}", "-std=gnu89", "-Werror=implicit-function-declaration", NULL }, true },
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){return abs(-2);}", "-std=c89", "-fno-builtin", NULL }, true },
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){return abs(-2);}", "-std=gnu89", "-fno-builtin", "-Werror=implicit-function-declaration" }, false },
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){return abs(-2);}", "-std=gnu89", "-ffreestanding", "-Werror=implicit-function-declaration" }, false },
+        { { "int f(void){extern int ordinary(int);return ordinary(-1);}int g(void){return ordinary(-2);}", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){extern int ordinary(int);return ordinary(-1);}int g(void){return ordinary(-2);}", "-std=gnu89", "-Werror=implicit-function-declaration", NULL }, false },
+        { { "int f(void){return abs(-1);}int g(void){extern int abs(int);return abs(-2);}", "-std=gnu89", "-Werror=implicit-function-declaration", NULL }, false },
     };
     char source[512];
     char objects[2][512];

@@ -84,7 +84,14 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
             const TypeId type = library ? decoded.types.function_type : ordinary ? check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0)) : 0;
             CheckInput* input = reader->output;
             const uint32_t linked = reader->linked_declarations[name];
-            const bool diagnosed = library && linked != 0 && (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
+            // An explicit declaration of a library function has already caused clang to create its translation-unit
+            // builtin, without the first-use warning. A later use after that block closes still gets the catalogue
+            // prototype, not the closed block's type; only the warning decision borrows this earlier linked identity.
+            const bool declared_library = library && linked != 0 && linked - 1 < token &&
+                reader->declaration_kinds[linked - 1] == C_BINDING_FUNCTION && reader->linkage[linked - 1] == 2 &&
+                (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT) == 0;
+            const bool diagnosed = declared_library ||
+                (library && linked != 0 && (input->function_flags[linked - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0);
             if (!diagnosed && type != 0 && input->implicit_function_count == reader->implicit_function_capacity)
             {
                 const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
