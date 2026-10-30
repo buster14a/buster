@@ -417,8 +417,9 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
     // the incomplete type's answer of a tag completed after the function (0, and libatomic's query), and the complete
     // type's of a block-scope tag completed later in the same body (1), whose _Static_assert reads it at the call (0); and
     // the completed type's in a static or inline function, which clang emits at the unit's end (1); and a function's
-    // pointee, complete and aligned to 4 bytes. Through the selection, as -c compiles it (check_test_program_includes),
-    // which makes CheckProgram.body_eager.
+    // pointee, complete and aligned to 4 bytes; and the same body's tag through an _Atomic pointer's lvalue and a
+    // qualified one's, whose value conversion gives the pointer the query reads (1, in both kinds of function). Through
+    // the selection, as -c compiles it (check_test_program_includes), which makes CheckProgram.body_eager.
     check_test_program_includes = true;
     check_test_program_source(test,
         "struct Late;int external_query(struct Late*p){return __atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);}"
@@ -429,8 +430,11 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
         "int same_body(void*v){struct S;struct S*p=v;_Static_assert(!__atomic_always_lock_free(8,p),\"incomplete at the call\");"
         "int r=__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);struct S{long x;};return r;}"
         "static int same_static(void*v){struct S;struct S*p=v;int r=__atomic_always_lock_free(8,p);struct S{long x;};return r;}"
+        "int atomic_body(void*v){struct S;_Atomic(struct S*)p=v;int r=__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);struct S{long x;};return r;}"
+        "static int atomic_static(void*v){struct S;_Atomic(struct S*)p=v;int r=__atomic_always_lock_free(8,p);struct S{long x;};return r;}"
+        "int qualified_body(void*v){struct S;struct S*const volatile p=v;int r=__atomic_always_lock_free(8,p)*2+__atomic_is_lock_free(8,p);struct S{long x;};return r;}"
         "int tested(int n){struct Late s={n};return external_query(&s)+static_query(&s)*8+inline_query(&s)*64+early_query(&s)*128+function_query(0)*256"
-        "+same_body(&s)*1024+same_static(&s)*4096;}",
+        "+same_body(&s)*1024+same_static(&s)*4096+atomic_body(&s)*8192+atomic_static(&s)*32768+qualified_body(&s)*65536;}",
         "lock-free-queries-by-emission", clang);
     check_test_program_includes = false;
 }

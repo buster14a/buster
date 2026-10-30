@@ -403,6 +403,8 @@ struct CheckBuiltinAtomicEffect
     // A lock-free query whose answer in code is its function's emission's (CheckBuiltinAtomicResult.late_completion).
     bool late_completion;
     int8_t answers[2];
+    uint64_t query_size;
+    TypeId query_pointer;
 };
 
 typedef struct CheckStream CheckStream;
@@ -1890,6 +1892,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .compiler_barrier = checked.compiler_barrier,
             .late_completion = checked.late_completion,
             .answers = { checked.answers[0], checked.answers[1] },
+            .query_size = checked.query_size,
+            .query_pointer = checked.query_pointer,
         };
     }
     else if (action->op == CHECK_OP_BUILTIN_VECTOR)

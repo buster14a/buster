@@ -508,18 +508,18 @@ static void check_lower_atomic_query(CheckLowerWriter* writer, uint32_t node)
     int32_t answer = late && deferred ? effect->answers[1] : -1;
     if (late && !deferred)
     {
-        // The size, a constant (a late query's answers differ, which only a sized one's can), and the pointer before its
-        // conversion, as check_builtin_atomic_query reads them.
+        // The size and the pointer's type that check_builtin_atomic_query read, after their value conversion (an _Atomic
+        // pointer's lvalue is its pointer's value: #932's review), and no constant: a late query's answers differ by its
+        // pointee's completeness alone, as a constant address answers alike at either cut.
         const CBuiltinId id = (CBuiltinId)graph->members[node];
-        const uint32_t first = graph->argument_offsets[node];
+        const CheckValue pointer = { .type = effect->query_pointer, .category = CHECK_RVALUE };
         const CheckBuiltinAtomicAction cut = {
             .id = id,
             .tag_completions = graph->tag_completions,
             .tag_completion_count = graph->tag_completion_count,
             .source_position = program->parser->tree.parents[writer->body->opening],
         };
-        answer = check_builtin_atomic_lock_free(program->types, &cut, id, (uint64_t)stream->values[graph->argument_nodes[first]].integer,
-                                                stream->values + graph->argument_nodes[first + 1], false);
+        answer = check_builtin_atomic_lock_free(program->types, &cut, id, effect->query_size, &pointer, false);
     }
     if (answer >= 0)
     {

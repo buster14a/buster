@@ -687,9 +687,12 @@ code whose runs equal clang -O0's on both paths.
   block-scope tag completed later in the same body is complete there), and by
   the complete type in a deferred function's: the checker folds a constant
   context's call by the type at the call, and leaves a call in code to the
-  lowering, which takes the answer of its function's emission
-  (`CheckBuiltinAtomicResult.late_completion`, `CheckProgram.body_eager`, which
-  the selection makes for such a unit; #932's reviews). The C11 query follows the same width now,
+  lowering, which takes the answer of its function's emission, from the size and
+  the pointer's type that the query read after their value conversion (an
+  `_Atomic` pointer's lvalue answers by its pointer's pointee)
+  (`CheckBuiltinAtomicResult.late_completion`, `query_size` and `query_pointer`,
+  and `CheckProgram.body_eager`, which the selection makes for such a unit;
+  #932's reviews). The C11 query follows the same width now,
   and the declaration-time evaluator checks every family
   (`check_builtin_atomic_family`), so the queries fold in enumerators and bounds.
 - **GNU's generic forms**, `__atomic_load`, `__atomic_store`, `__atomic_exchange`

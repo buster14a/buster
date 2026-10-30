@@ -95,11 +95,16 @@ struct CheckBuiltinAtomicResult
     bool compiler_barrier;
     // A GNU lock-free query outside a constant context whose answer depends on when clang emits its function (#932's
     // review): its pointee's tag, incomplete at the call, is complete at the unit's end. Clang folds the call as it emits
-    // it, where the unit defines an eager function and at the unit's end a deferred one, so the checker folds none of it,
-    // and the lowering takes `answers[0]` (the call's) in an eager function and `answers[1]` (the unit end's) in a
-    // deferred one (CheckProgram.body_eager): 1 or 0, or -1 for libatomic's runtime query.
+    // it, once it has read an eager function's whole definition and at the unit's end for a deferred one, so the checker
+    // folds none of it: `answers[0]` is the call's answer and `answers[1]` the unit end's, which the lowering takes in a
+    // deferred function (CheckProgram.body_eager), 1 or 0, or -1 for libatomic's runtime query. An eager function's it
+    // answers at the function's closing brace from `query_size` and `query_pointer`, the size and the pointer's type
+    // that check_builtin_atomic_lock_free read: after their value conversion, so an _Atomic pointer's lvalue is its
+    // pointer's value, and before the pointer's conversion to const volatile void *.
     bool late_completion;
     int8_t answers[2];
+    uint64_t query_size;
+    TypeId query_pointer;
 };
 
 static bool check_builtin_atomic_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinAtomicAction* input)
@@ -491,6 +496,8 @@ static void check_builtin_atomic_query(TypeTable* table, const CheckBuiltinAtomi
         output->late_completion = answer != at_end && !input->constant_evaluated;
         output->answers[0] = (int8_t)answer;
         output->answers[1] = (int8_t)at_end;
+        output->query_size = output->late_completion ? (uint64_t)values[0].integer : 0;
+        output->query_pointer = output->late_completion ? pointer.type : 0;
         if (answer >= 0 && !output->late_completion)
         {
             output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
