@@ -5595,8 +5595,14 @@ static uint32_t abi_test_va_disagreement(const AbiTestCross* cross, uint32_t n, 
             expected.stack_offset = (uint32_t)overflow;
             overflow += plan.stack_bytes;
         }
+        // A STACK location with HIGH is the value's high eightbyte alone in an 8-byte slot (clang's count gave it a
+        // general register that LLVM hasn't, and its low eightbyte is padding), where va_arg reads the whole value from
+        // the overflow area, its high eightbyte 8 bytes past the slot: a disagreement even at the slot's offset, as seed
+        // 11's clang run at 32 bytes found (`struct { unsigned _BitInt(16) : 2; struct S* p[0]; unsigned _BitInt(15) x;
+        // }` after an UNCOUNTED _Atomic __int128).
+        const bool high_alone = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
         const bool same = location.kind == expected.kind && location.registers[0] == expected.registers[0] && location.registers[1] == expected.registers[1] &&
-                          (expected.kind != BUSTER_ABI_LOCATION_STACK || location.stack_offset == expected.stack_offset);
+                          (expected.kind != BUSTER_ABI_LOCATION_STACK || location.stack_offset == expected.stack_offset) && !high_alone;
         result = same ? result : a;
     }
     return result;

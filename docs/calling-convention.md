@@ -857,7 +857,12 @@ passes as values too, are refused: see "Where clang's LLVM types decide"):
   argument the call placed by LLVM's registers otherwise (`SPLIT`,
   `UNCOUNTED`, `LOW_GENERAL`, a `PAIR` on the stack, or after a `DEMOTED`
   result), the two can disagree; a scalar, which both place by LLVM's
-  registers, still agrees.
+  registers, still agrees. So can such an argument itself: a value whose low
+  eightbyte is padding, to which clang's count gives a general register that
+  LLVM hasn't, has its high eightbyte alone in an 8-byte slot (`HIGH`), which
+  `va_arg`, reading the whole value from the overflow area, finds 8 bytes past
+  the slot even when the slot is where it reads (the cross-check's seed 11 at
+  32 bytes found one after an uncounted `_Atomic __int128`).
 - **A `WIDE` union of a 16-byte member and a long array** (SSE, SSEUP, since
   the array adds NO_CLASS): as an unnamed argument clang classifies it so,
   counts a vector register, and its call puts it on the stack while its
