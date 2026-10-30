@@ -2291,7 +2291,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     }
                     // The musttail returns' errors (#147, c_check_musttail.c), as the driver reports them after the expressions'.
                     CheckMusttails musttails = { 0 };
-                    const bool tails = check_musttail_run(&musttails, &input[p], &parsers[p], &streams[p], &types[p].table, &output_storage[p]);
+                    const bool tails = check_musttail_run(&musttails, &input[p], &parsers[p], &streams[p], &types[p].table, &output_storage[p], &scratch[p]);
                     check_test_expect(test, tails, "source musttail fixture exhausted resources");
                     rejected[p] |= musttails.count != 0;
                     for (uint32_t m = 0; m < musttails.count; m += 1)

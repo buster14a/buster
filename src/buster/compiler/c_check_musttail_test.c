@@ -71,6 +71,27 @@ static __attribute__((noinline)) void check_test_musttail_sources(CheckTest* tes
         { .name = "musttail: another calling convention", .source = "__attribute__((ms_abi)) int f(int);\nint g(int x)\n{\n__attribute__((musttail)) return f(x);\n}\n",
           .rejected = true },
         { .name = "musttail: a [[noreturn]] callee", .source = "[[noreturn]] int f(int);\nint g(int x)\n{\n__attribute__((musttail)) return f(x);\n}\n", .rejected = true },
+        // #936's review: a standard noreturn counts where an accepted declaration before the call has it (clang's
+        // inheritance), not where clang drops it after the definition, and not where it is declared after the call.
+        { .name = "musttail: an earlier declaration's [[noreturn]]", .source = "[[noreturn]] int f(int);\nint f(int);\nint g(int x)\n{\n"
+                                                                             "__attribute__((musttail)) return f(x);\n}\n", .rejected = true },
+        { .name = "musttail: a [[noreturn]] clang drops after the definition", .source = "int f(int x) { return x; }\n[[noreturn]] int f(int);\nint g(int x)\n{\n"
+                                                                                       "__attribute__((musttail)) return f(x);\n}\n" },
+        { .name = "musttail: a [[noreturn]] clang drops after the definition, in C23", .source = "int f(int x) { return x; }\n[[noreturn]] int f(int);\nint g(int x)\n{\n"
+                                                                                                "__attribute__((musttail)) return f(x);\n}\n", .standard = 2023 },
+        { .name = "musttail: a [[noreturn]] declared after the call", .source = "int f(int);\nint g(int x)\n{\n__attribute__((musttail)) return f(x);\n}\n"
+                                                                               "[[noreturn]] int f(int);\n" },
+        // #936's review: pointers' qualifiers beneath arrays of the same bound, or of none, are similar types too
+        // (UnwrapSimilarArrayTypes), and arrays of another bound or another element beneath them aren't.
+        { .name = "musttail: pointers' qualifiers beneath arrays of the same bound", .source = "int f(const int *(*p)[3]);\nint g(int *(*p)[3])\n{\n"
+                                                                                                "__attribute__((musttail)) return f((const int *(*)[3])p);\n}\n" },
+        { .name = "musttail: pointers' qualifiers beneath arrays of no bound", .source = "int f(const int *(*p)[]);\nint g(int *(*p)[])\n{\n"
+                                                                                          "__attribute__((musttail)) return f((const int *(*)[])p);\n}\n" },
+        { .name = "musttail: arrays of another bound", .source = "int f(const int *(*p)[4]);\nint g(int *(*p)[3])\n{\n"
+                                                                  "__attribute__((musttail)) return f((const int *(*)[4])p);\n}\n", .rejected = true },
+        { .name = "musttail: another element beneath arrays of the same bound", .source = "int f(const long *(*p)[3]);\nint g(int *(*p)[3])\n{\n"
+                                                                                           "__attribute__((musttail)) return f((const long *(*)[3])p);\n}\n",
+          .rejected = true },
         { .name = "musttail: in a cleanup's scope", .source = "void c(int *);\nint f(int);\nint g(int x)\n{\nint y __attribute__((cleanup(c))) = x;\n"
                                                            "__attribute__((musttail)) return f(x);\n}\n", .rejected = true },
         { .name = "musttail: in a nested cleanup's scope", .source = "void c(int *);\nint f(int);\nint g(int x)\n{\n{\nint y __attribute__((cleanup(c))) = x;\n"
@@ -238,9 +259,64 @@ static __attribute__((noinline)) void check_test_musttail_programs(CheckTest* te
     }
 }
 
+// The errors' count past its limit (#936's review: a scope's error for each active cleanup at each return can pass a
+// uint32_t's): two returns in three cleanups' scopes, six errors, checked by both paths with a limit of 5, which must fail
+// for want of room with neither arena changed, then of 6, which must give all six.
+static __attribute__((noinline)) void check_test_musttail_limit(CheckTest* test)
+{
+    static const char source[] = "void c(int *);\nint f(int);\nint g(int x)\n{\nint a __attribute__((cleanup(c))) = x;\nint b __attribute__((cleanup(c))) = x;\n"
+                                 "int d __attribute__((cleanup(c))) = x;\nif (x)\n__attribute__((musttail)) return f(x);\n__attribute__((musttail)) return f(x + 1);\n}\n";
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                        pp_run_source(&pp, "musttail-limit", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "musttail limit: source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 24);
+        Arena output = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        const bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                           parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                           check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                           check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0;
+        check_test_expect(test, ready, "musttail limit: the source is checked");
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        CheckMusttails short_of = { 0 };
+        const bool refused = ready && !check_musttail_run_limited(&short_of, &input, &parser, &stream, &types.table, &output, &scratch, 5);
+        check_test_expect(test, refused && short_of.resource && short_of.count == 0 && short_of.diagnostics == NULL && output.length == output_mark &&
+                                    scratch.length == scratch_mark,
+                          "musttail limit: six errors past a limit of 5 fail for want of room, with neither arena changed");
+        CheckMusttails enough = { 0 };
+        const bool taken = ready && check_musttail_run_limited(&enough, &input, &parser, &stream, &types.table, &output, &scratch, 6);
+        bool scopes = taken && enough.count == 6;
+        for (uint32_t i = 0; scopes && i < enough.count; i += 1)
+        {
+            scopes = enough.diagnostics[i].error == CHECK_MUSTTAIL_SCOPE;
+        }
+        check_test_expect(test, scopes && scratch.length == scratch_mark, "musttail limit: a limit of 6 gives the six scopes' errors");
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static __attribute__((noinline)) void check_test_musttails(CheckTest* test, const char* clang)
 {
     check_test_musttail_sources(test, clang);
+    check_test_musttail_limit(test);
     check_test_musttail_programs(test, clang);
 }
 

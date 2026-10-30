@@ -3615,12 +3615,16 @@ order, the first rule each breaks in the order of clang 23's `Sema::checkMustTai
 2. both the function and the callee have prototypes;
 3. both have the same calling convention;
 4. neither is variadic;
-5. the callee isn't declared `[[noreturn]]`;
-6. both have the same signature, as similar types (`hasSimilarType`: the same canonical type once each pointer level's
-   qualifiers are gone).
+5. the callee isn't declared `[[noreturn]]`: by an accepted unscoped standard spelling on a declaration of its entity
+   before the call, whose attribute clang's later declarations inherit (`check_musttail_noreturns`), not one clang
+   drops after the definition (`ignored`, `check_input_attribute_late`), GNU's or the `_Noreturn` keyword;
+6. both have the same signature, as similar types (`hasSimilarType`: the same canonical type once each level's
+   qualifiers are gone, an array's elements' too, past arrays of the same constant bound or of none and pointers'
+   pointees, `UnwrapSimilarTypes`).
 
 A return that keeps them can't leave a cleanup variable's scope: an error for each such variable, the innermost first,
-which clang reports as its function ends. The driver spells clang's messages (`check_driver_musttail_message`), each
+which clang reports as its function ends. Errors past what their count holds (a uint32_t's, which each active cleanup
+at each return can pass) are a resource failure (`check_musttail_collect`'s limit), checked with a limit of 5. The driver spells clang's messages (`check_driver_musttail_message`), each
 scope's error at its place even where one return leaves several: the reports' walk keeps every one of them
 (`CheckDriverDiagnostic.repeated`) rather than a token's first alone. A call of a builtin's, which the checker
 computes with no call, is refused as unsupported.

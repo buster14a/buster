@@ -59,23 +59,45 @@ struct CheckMusttails
     bool resource;
 };
 
-// The most pointer levels the similar types' comparison unwraps, past which it compares what is left as it is.
+// The most pointer and array levels the similar types' comparison unwraps, past which it compares what is left as it is.
 #define BUSTER_CHECK_MUSTTAIL_LEVELS 64
 
-// Two types as clang's hasSimilarType has them in C: each pointer level's qualifiers (and an aligned typedef's
-// alignment) removed, then the same canonical type (type_same_canonical, which looks through the aligned typedefs inside).
+// Whether two unqualified types are arrays clang's UnwrapSimilarArrayTypes unwraps in C: of the same constant bound, or
+// both of none (a variable one never).
+static bool check_musttail_same_bound(const TypeTable* types, TypeId a, TypeId b)
+{
+    const uint8_t left = type_kind(types, a);
+    const uint8_t right = type_kind(types, b);
+    return (left == BUSTER_TYPE_KIND_ARRAY && right == BUSTER_TYPE_KIND_ARRAY && types->types.extent[type_index(a)] == types->types.extent[type_index(b)]) ||
+           (left == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY && right == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY);
+}
+
+// Two types as clang's hasSimilarType has them in C: each level's qualifiers (and an aligned typedef's alignment)
+// removed, an array's from its elements too (getUnqualifiedArrayType), then the same canonical type (type_same_canonical,
+// which looks through the aligned typedefs inside), or else, past arrays of the same bound, two pointers' pointees
+// compared so again (UnwrapSimilarTypes); any other pair isn't similar.
 static bool check_musttail_similar(const TypeTable* types, TypeId left, TypeId right, bool* resource)
 {
-    TypeId a = type_unqualified(type_strip_aligned(types, left));
-    TypeId b = type_unqualified(type_strip_aligned(types, right));
-    for (uint32_t level = 0; level < BUSTER_CHECK_MUSTTAIL_LEVELS && a != b && type_kind(types, a) == BUSTER_TYPE_KIND_POINTER &&
-                             type_kind(types, b) == BUSTER_TYPE_KIND_POINTER;
-         level += 1)
+    TypeId a = left;
+    TypeId b = right;
+    TypeAnswer answer = TYPE_ANSWER_NO;
+    bool going = true;
+    for (uint32_t level = 0; going && level < BUSTER_CHECK_MUSTTAIL_LEVELS; level += 1)
     {
-        a = type_unqualified(type_strip_aligned(types, type_element(types, a)));
-        b = type_unqualified(type_strip_aligned(types, type_element(types, b)));
+        a = type_unqualified(type_strip_aligned(types, a));
+        b = type_unqualified(type_strip_aligned(types, b));
+        for (uint32_t depth = 0; depth < BUSTER_CHECK_MUSTTAIL_LEVELS && check_musttail_same_bound(types, a, b); depth += 1)
+        {
+            a = type_unqualified(type_strip_aligned(types, type_element(types, a)));
+            b = type_unqualified(type_strip_aligned(types, type_element(types, b)));
+        }
+        answer = a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b);
+        going = answer == TYPE_ANSWER_NO && type_kind(types, a) == BUSTER_TYPE_KIND_POINTER && type_kind(types, b) == BUSTER_TYPE_KIND_POINTER;
+        a = going ? type_element(types, a) : a;
+        b = going ? type_element(types, b) : b;
     }
-    const TypeAnswer answer = a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b);
+    // Past the levels, what is left as it is.
+    answer = going ? (a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b)) : answer;
     *resource |= answer == TYPE_ANSWER_FULL;
     return answer == TYPE_ANSWER_YES;
 }
@@ -114,25 +136,54 @@ static uint32_t check_musttail_callee_name(const CheckInput* input, uint32_t nod
     return name;
 }
 
-// Whether a callee's declaration (a name's, `name` its use) has a standard noreturn attribute: [[noreturn]] or
-// [[_Noreturn]], unscoped, the one clang's rule names (CXX11NoReturnAttr), and not GNU's or the _Noreturn keyword.
-static bool check_musttail_noreturn(const CheckInput* input, uint32_t name)
+// Whether a declaration's attribute is the standard noreturn clang's rule names (CXX11NoReturnAttr): [[noreturn]] or
+// [[_Noreturn]], unscoped, not GNU's or the _Noreturn keyword, and accepted, not one clang drops after the entity's
+// definition (`ignored`, check_input_attribute_late).
+static bool check_musttail_standard_noreturn(const CheckInputAttribute* attribute)
+{
+    return attribute->kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword && attribute->first == attribute->name_token &&
+           !attribute->ignored;
+}
+
+// Per object, the first declaration of its entity with an accepted standard noreturn (check_musttail_standard_noreturn),
+// or BUSTER_CHECK_NONE: clang's declaration that a call names inherits the attribute from every earlier one
+// (mergeDeclAttributes), so a callee has it where such a declaration precedes the call. One pass over the declarations'
+// attributes, in a unit with musttail returns alone; null without room.
+static uint32_t* check_musttail_noreturns(const CheckInput* input, Arena* scratch)
+{
+    const uint32_t count = input->token_count;
+    uint32_t* first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    for (uint32_t i = 0; first != NULL && i <= count; i += 1)
+    {
+        first[i] = BUSTER_CHECK_NONE;
+    }
+    for (uint32_t d = 0; first != NULL && d < count; d += 1)
+    {
+        const CheckInputAttributes* attributes = input->attributes[d];
+        const uint32_t object = attributes != NULL ? input->objects[d] : 0;
+        bool noreturn = false;
+        for (uint32_t i = 0; object != 0 && object <= count && i < attributes->count; i += 1)
+        {
+            noreturn |= check_musttail_standard_noreturn(attributes->records + i);
+        }
+        first[object] = noreturn && first[object] == BUSTER_CHECK_NONE ? d : first[object];
+    }
+    return first;
+}
+
+// Whether a callee's entity (a name's, `name` its use) has an accepted standard noreturn declared before the call
+// (`noreturns`, check_musttail_noreturns).
+static bool check_musttail_noreturn(const CheckInput* input, const uint32_t* noreturns, uint32_t name)
 {
     const uint32_t declaration = name != BUSTER_CHECK_NONE && input->graph.count != 0 ? input->declarations[name] : BUSTER_CHECK_NONE;
-    const CheckInputAttributes* attributes = declaration != BUSTER_CHECK_NONE ? input->attributes[declaration] : NULL;
-    bool noreturn = false;
-    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-    {
-        const CheckInputAttribute* attribute = attributes->records + i;
-        noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword && attribute->first == attribute->name_token;
-    }
-    return noreturn;
+    const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
+    return object != 0 && object <= input->token_count && noreturns[object] < name;
 }
 
 // The first of the six rules that the musttail return `musttail` breaks (the file's comment), or the count for none, with
 // the callee's name for the messages that name it.
-static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const CheckInputMusttail* musttail,
-                                    uint32_t* callee_name, bool* resource)
+static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* noreturns,
+                                    const CheckInputMusttail* musttail, uint32_t* callee_name, bool* resource)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t returned = input->token_nodes[musttail->statement];
@@ -176,7 +227,7 @@ static uint32_t check_musttail_rule(const CheckInput* input, const CheckStream* 
         {
             rule = CHECK_MUSTTAIL_VARIADIC;
         }
-        else if (check_musttail_noreturn(input, *callee_name))
+        else if (check_musttail_noreturn(input, noreturns, *callee_name))
         {
             rule = CHECK_MUSTTAIL_NORETURN;
         }
@@ -207,16 +258,18 @@ static uint32_t check_musttail_terminator(const Parser* parser, uint32_t stateme
 }
 
 // The musttail returns' errors (the file's comment), or with `diagnostics` null their count alone: in source order, each
-// return's rules' first, or its scopes'.
-static uint32_t check_musttail_collect(const CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types,
-                                       CheckMusttailDiagnostic* diagnostics, bool* resource)
+// return's rules' first, or its scopes'. A count past `limit` (UINT32_MAX, what the count holds, but in tests: a scope's
+// error for each active cleanup at each return can pass it, #936's review) stops the count, a resource failure
+// (`resource`).
+static uint64_t check_musttail_collect(const CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types,
+                                       const uint32_t* noreturns, uint64_t limit, CheckMusttailDiagnostic* diagnostics, bool* resource)
 {
-    uint32_t count = 0;
-    for (uint32_t m = 0; m < input->musttail_count; m += 1)
+    uint64_t count = 0;
+    for (uint32_t m = 0; m < input->musttail_count && count <= limit; m += 1)
     {
         const CheckInputMusttail* musttail = input->musttails + m;
         uint32_t callee = BUSTER_CHECK_NONE;
-        const uint32_t rule = check_musttail_rule(input, stream, types, musttail, &callee, resource);
+        const uint32_t rule = check_musttail_rule(input, stream, types, noreturns, musttail, &callee, resource);
         const uint32_t end = check_musttail_terminator(parser, musttail->statement);
         if (rule != CHECK_MUSTTAIL_SCOPE)
         {
@@ -238,7 +291,7 @@ static uint32_t check_musttail_collect(const CheckInput* input, const Parser* pa
             // The cleanup variables whose scopes hold the return, the innermost (the latest declared) first, as clang reports
             // them once its function ends.
             const uint32_t closing = parser->tree.parents[musttail->body];
-            for (uint32_t c = input->cleanup_count; c > 0; c -= 1)
+            for (uint32_t c = input->cleanup_count; c > 0 && count <= limit; c -= 1)
             {
                 const CheckInputCleanup* cleanup = input->cleanups + c - 1;
                 if (cleanup->scope >= musttail->body && cleanup->declaration < musttail->statement && musttail->statement < cleanup->end)
@@ -259,23 +312,35 @@ static uint32_t check_musttail_collect(const CheckInput* input, const Parser* pa
             }
         }
     }
+    *resource |= count > limit;
     return count;
 }
 
 // The musttail returns' errors (check_musttail_collect), into `output`. A stream with errors of its own, whose expressions
-// clang wouldn't check further, is checked no further. False only where the output or a type comparison runs out of room
-// (`resource`), with none kept.
-static bool check_musttail_run(CheckMusttails* result, const CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types,
-                               Arena* output)
+// clang wouldn't check further, is checked no further. False only where an arena, the errors' count or a type comparison
+// runs out of room (`resource`), with none kept. The callees' noreturn attributes take `scratch` while it runs. At most
+// `limit` errors (check_musttail_collect).
+static bool check_musttail_run_limited(CheckMusttails* result, const CheckInput* input, const Parser* parser, const CheckStream* stream,
+                                       const TypeTable* types, Arena* output, Arena* scratch, uint64_t limit)
 {
     *result = (CheckMusttails){ 0 };
     const bool checked = input->musttail_count != 0 && stream->report_count == 0;
-    const uint32_t count = checked ? check_musttail_collect(input, parser, stream, types, NULL, &result->resource) : 0;
+    const uint64_t mark = scratch->length;
+    const uint32_t* noreturns = checked ? check_musttail_noreturns(input, scratch) : NULL;
+    result->resource = checked && noreturns == NULL;
+    const uint64_t count = checked && !result->resource ? check_musttail_collect(input, parser, stream, types, noreturns, limit, NULL, &result->resource) : 0;
     result->diagnostics = count != 0 && !result->resource ? BUSTER_ARENA_PUSH_ARRAY(output, CheckMusttailDiagnostic, count) : NULL;
     result->resource |= count != 0 && result->diagnostics == NULL;
     if (!result->resource && count != 0)
     {
-        result->count = check_musttail_collect(input, parser, stream, types, result->diagnostics, &result->resource);
+        result->count = (uint32_t)check_musttail_collect(input, parser, stream, types, noreturns, limit, result->diagnostics, &result->resource);
     }
+    arena_pop_to(scratch, mark);
     return !result->resource;
+}
+
+static bool check_musttail_run(CheckMusttails* result, const CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types,
+                               Arena* output, Arena* scratch)
+{
+    return check_musttail_run_limited(result, input, parser, stream, types, output, scratch, UINT32_MAX);
 }
