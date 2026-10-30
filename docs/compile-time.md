@@ -741,6 +741,21 @@ report, on standard error after the command, a row per stage.
   minor faults and growth of the peak RSS. The per-function passes (lowering,
   Tier 0, branch sizing, encoding, `-g`'s rows, unwind frames) take TSC laps
   alone, and the next mark charges their resource use to its stage.
+- **System-time qualification.** The stage `system-ms` values are raw
+  `getrusage(RUSAGE_SELF).ru_stime` deltas between resource marks, summed into
+  the named row; the counter includes all process threads. They are
+  **unqualified** estimates, not precise exclusive
+  stage kernel costs: the resource boundaries may differ from the TSC laps,
+  and kernel accounting can attribute CPU time across short phase boundaries.
+  The October 29 repeated SQLite capture had stable parse elapsed time but
+  widely varying attributed system time ([issue #870](https://github.com/buster14a/buster/issues/870)).
+  Do not rank stages by these deltas or subtract them from elapsed time to
+  infer stage user time. The report retains the raw numbers and identifies their
+  source, boundaries and unqualified accuracy in `time-process` rows. A failed
+  `getrusage` read currently substitutes zeros and can distort a later delta,
+  so a zero is not proof of no system work; availability detection and
+  independent validation remain open.
+  Elapsed timings and minor fault counts are separate measurements.
 - **Lanes.** The driver compiles the functions on lanes (#151), by default as
   many as their tokens pay for, up to one per CPU it may run on. On one lane, the
   calling thread takes the per-function laps above. On several, a thread's laps
