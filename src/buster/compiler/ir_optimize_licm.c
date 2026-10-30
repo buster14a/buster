@@ -142,10 +142,10 @@ static void ir_licm_worklist(IrLicmWork* work)
     }
 }
 
-static bool ir_licm_sweep(IrLicmWork* work)
+static uint32_t ir_licm_sweep(IrLicmWork* work)
 {
     const IrFunction* f = work->ir.function;
-    bool changed = false;
+    uint32_t progress = 0;
     for (uint64_t first = 0; first < f->instruction_count; first += 16)
     {
         const uint32_t count = f->instruction_count - first < 16 ? f->instruction_count - first : 16;
@@ -172,10 +172,43 @@ static bool ir_licm_sweep(IrLicmWork* work)
         }
         _mm512_mask_storeu_epi32(work->available + first, ready, _mm512_set1_epi32(1));
         work->statistics.visits += count;
-        changed = changed || ready != 0;
+        progress += (uint32_t)__builtin_popcount((uint32_t)ready);
     }
     work->statistics.sweeps += 1;
-    return changed;
+    return progress;
+}
+
+// Readiness only changes from unavailable to available. Preserve the sweep's discoveries when switching to
+// the exact worklist; both reach the same least fixed point, before the separate motion-order pass.
+// Continue whole-function sweeps only while at least one value per 16 visited instructions becomes available.
+// This bounds productive sweeps by the vector width, rather than paying the whole sweep limit for a thin chain.
+static void ir_licm_complete(IrLicmWork* work, IrLicmOptions options)
+{
+    const uint32_t count = work->ir.function->instruction_count;
+    // AVX-512 dword gather indices are signed. Larger value spaces use the exact worklist path.
+    if (options.scalar || count > INT32_MAX)
+    {
+        work->statistics.fallback = work->statistics.fallback || !options.scalar;
+        ir_licm_worklist(work);
+    }
+    else
+    {
+        bool changed = true;
+        bool productive = true;
+        uint32_t sweeps = 0;
+        while (changed && productive && sweeps < options.sweep_limit)
+        {
+            const uint32_t progress = ir_licm_sweep(work);
+            changed = progress != 0;
+            productive = (uint64_t)progress * 16 >= count;
+            sweeps += 1;
+        }
+        if (changed)
+        {
+            work->statistics.fallback = true;
+            ir_licm_worklist(work);
+        }
+    }
 }
 
 static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions options)
@@ -210,27 +243,7 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                 work->candidate[i] = inside && work->safe[i] != 0;
                 work->available[i] = !inside && dominators_dominates(&work->loops, work->destination[i], preheader);
             }
-            // AVX-512 dword gather indices are signed. Larger value spaces use the exact worklist path.
-            if (options.scalar || f->instruction_count > INT32_MAX)
-            {
-                work->statistics.fallback = work->statistics.fallback || !options.scalar;
-                ir_licm_worklist(work);
-            }
-            else
-            {
-                bool changed = true;
-                uint32_t sweeps = 0;
-                while (changed && sweeps < options.sweep_limit)
-                {
-                    changed = ir_licm_sweep(work);
-                    sweeps += 1;
-                }
-                if (changed)
-                {
-                    work->statistics.fallback = true;
-                    ir_licm_worklist(work);
-                }
-            }
+            ir_licm_complete(work, options);
             for (uint32_t i = 0; i < f->instruction_count; i += 1)
             {
                 if (work->candidate[i] != 0 && work->available[i] != 0)

@@ -4,8 +4,175 @@
 #ifndef BUSTER_C_CHECK_CONTROL_INPUT_TEST_INCLUDED
 #define BUSTER_C_CHECK_CONTROL_INPUT_TEST_INCLUDED
 
+// Count only possible insertions, including diagnostic-only address rows, at every byte and prefix boundary.
+static void check_test_label_capacity(CheckTest* test)
+{
+    const long page_size = sysconf(_SC_PAGESIZE);
+    const uint64_t page = page_size > 0 ? (uint64_t)page_size : 0;
+    uint8_t* mappings[2] = { MAP_FAILED, MAP_FAILED };
+    bool ready = page >= 193;
+    for (uint32_t column = 0; ready && column < 2; column += 1)
+    {
+        mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "label capacity columns have protected tails");
+    for (uint32_t count = 0; ready && count <= 193; count += 1)
+    {
+        uint8_t* kinds = mappings[0] + page - count;
+        uint8_t* roles = mappings[1] + page - count;
+        for (uint32_t shape = 0; shape < 4; shape += 1)
+        {
+            uint64_t definitions = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t selected = shape == 0 ? 3 : shape == 1 ? 0 : shape == 2 ? 1 : token % 4;
+                roles[token] = selected == 0 ? PARSE_ROLE_LABEL : selected == 3 ? PARSE_ROLE_LOGICAL_AND : PARSE_ROLE_PREFIX;
+                kinds[token] = selected == 0 ? PARSE_KIND_COLON : selected == 2 ? PARSE_KIND_NUMBER : PARSE_KIND_AMPAMP;
+                definitions += selected == 0;
+            }
+            uint64_t entries = definitions;
+            for (uint32_t prefix = 0; prefix <= count; prefix += 1)
+            {
+                if (prefix != 0 && roles[prefix - 1] == PARSE_ROLE_PREFIX && kinds[prefix - 1] == PARSE_KIND_AMPAMP)
+                {
+                    entries += 1;
+                }
+                uint64_t expected = 1;
+                while (expected <= entries * 2)
+                {
+                    expected *= 2;
+                }
+                Parser parser = { 0 };
+                parser.tokens.count = count;
+                // A full-unit count must not read the kinds column at all.
+                parser.tokens.kinds = prefix != 0 ? kinds : NULL;
+                parser.tree.roles = roles;
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    parser.options.scalar = path == 0;
+                    check_test_expect(test, check_input_label_capacity(&parser, prefix) == expected,
+                                      "label table capacity matches independent insertion counts at guarded tails and prefix cuts");
+                }
+            }
+        }
+    }
+    for (uint32_t column = 0; column < 2; column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+}
+
+// With no definitions the full-unit table needs one empty slot, but a prefix must have room for synthetic
+// &&name entries. Sixteen distinct colliding names and four repeats exercise insertion, probing and canonical reuse.
+static void check_test_label_prefix_capacity(CheckTest* test)
+{
+    enum
+    {
+        count = 128,
+        addresses = 20,
+        distinct = 16,
+    };
+    uint8_t kinds[count];
+    uint8_t roles[count];
+    uint32_t parents[count];
+    uint32_t names[count] = { 0 };
+    uint32_t first[count];
+    uint32_t asm_ids[count] = { 0 };
+    uint32_t regions[count] = { 0 };
+    CheckInputAttributes* attributes[count] = { 0 };
+    memset(kinds, PARSE_KIND_IDENTIFIER, sizeof(kinds));
+    memset(roles, PARSE_ROLE_OPERAND, sizeof(roles));
+    memset(parents, 0xff, sizeof(parents));
+    memset(first, 0xff, sizeof(first));
+    roles[4] = PARSE_ROLE_OPEN_BODY;
+    roles[count - 1] = PARSE_ROLE_CLOSE_BODY;
+    parents[4] = count - 1;
+    for (uint32_t i = 0; i < addresses; i += 1)
+    {
+        const uint32_t token = 8 + 4 * i;
+        kinds[token] = PARSE_KIND_AMPAMP;
+        roles[token] = PARSE_ROLE_PREFIX;
+        first[token] = token + 1;
+        names[token + 1] = 1 + 64 * (i % distinct);
+    }
+    Parser parser = { 0 };
+    parser.tokens.count = count;
+    parser.tokens.kinds = kinds;
+    parser.tokens.names = names;
+    parser.tree.roles = roles;
+    parser.tree.parents = parents;
+    for (uint32_t prefix = 0; prefix < 2; prefix += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            parser.options.scalar = path == 0;
+            uint32_t bodies[count];
+            uint32_t targets[count];
+            CheckInputReport reports[32] = { 0 };
+            memset(bodies, 0xff, sizeof(bodies));
+            memset(targets, 0xff, sizeof(targets));
+            CheckInput input =
+            {
+                .reports = reports,
+                .report_capacity = BUSTER_ARRAY_LENGTH(reports),
+                .declaration_bodies = bodies,
+                .label_targets = targets,
+                .asm_ids = asm_ids,
+                .expression_regions = regions,
+                .attributes = attributes,
+            };
+            Arena scratch = arena_reserve(8192);
+            const uint64_t capacity = scratch.capacity;
+            // The old token-sized table cannot fit; the precise insertion bound can.
+            scratch.capacity = prefix != 0 ? 64 * sizeof(uint32_t) : sizeof(uint32_t);
+            CheckInputReader reader =
+            {
+                .output = &input,
+                .parser = &parser,
+                .scratch = &scratch,
+                .first_child = first,
+                .fragment_end = count,
+            };
+            check_test_expect(test, scratch.base != NULL, "label prefix fixture has scratch space");
+            if (scratch.base != NULL)
+            {
+                if (prefix != 0)
+                {
+                    check_input_controls_prefix(&reader, 96);
+                }
+                else
+                {
+                    check_input_controls(&reader);
+                }
+                check_test_expect(test, !input.resource && scratch.length == 0 && reader.fragment_end == count,
+                                  "label capacity fits the insertion bound and restores scratch and fragment limits");
+                check_test_expect(test, input.report_count == (prefix != 0 ? 0 : addresses) && input.label_address_count == (prefix != 0 ? addresses : 0),
+                                  "prefix reserves synthetic labels while full completion diagnoses missing definitions");
+                for (uint32_t i = 0; i < addresses; i += 1)
+                {
+                    const uint32_t token = 8 + 4 * i;
+                    const uint32_t expected = prefix != 0 ? 8 + 4 * (i % distinct) : BUSTER_CHECK_NONE;
+                    check_test_expect(test, targets[token] == expected, "colliding label references retain their first canonical target");
+                    if (prefix == 0)
+                    {
+                        check_test_expect(test, reports[i].token == token + 1 && reports[i].message == CHECK_INPUT_LABEL_UNDECLARED,
+                                          "missing labels retain source-ordered diagnostics with a one-slot empty table");
+                    }
+                }
+            }
+            scratch.capacity = capacity;
+            arena_release(&scratch);
+        }
+    }
+}
+
 static void check_test_control_masks(CheckTest* test)
 {
+    check_test_label_capacity(test);
     static const struct
     {
         uint8_t kind;
@@ -111,6 +278,7 @@ static void check_test_control_masks(CheckTest* test)
 
 static void check_test_control_walks(CheckTest* test)
 {
+    check_test_label_prefix_capacity(test);
     enum { count = 200 };
     uint8_t kinds[count];
     uint8_t roles[count];
