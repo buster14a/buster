@@ -47,6 +47,9 @@ static uint32_t builtin_intrinsic_filter_candidates(const BuiltinIntrinsicName* 
         _mm256_storeu_si256((__m256i*)hashes, hash);
     }
     uint32_t result = 0;
+    // Clang 23 otherwise turns this bounded irregular probe into a wide gather on znver5. Keep
+    // the probes as scalar loads; only the regular eight-key mixing above is a SIMD kernel.
+#pragma clang loop vectorize(disable) interleave(disable)
     for (uint32_t lane = 0; lane < count; lane += 1)
     {
         if ((valid & (1u << lane)) != 0)
