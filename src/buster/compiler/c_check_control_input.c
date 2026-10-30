@@ -397,6 +397,50 @@ static uint32_t check_input_control_next(const Parser* parser, CheckInputControl
     return token;
 }
 
+// Only definitions enter the full-unit table. Diagnostic prefixes can also insert an unresolved &&name
+// in an unfinished function, so reserve for those address sites before prefix_count as well. Count a safe
+// superset (including deferred/invalid/duplicate sites), keeping the table below half full without token-sized
+// clearing. The normal path reads roles only; both columns are bounded, unpadded byte arrays.
+static uint64_t check_input_label_capacity(const Parser* parser, uint32_t prefix_count)
+{
+    const uint32_t count = parser->tokens.count;
+    uint64_t entries = 0;
+    if (BUSTER_SCALAR_PATH(parser->options.scalar))
+    {
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            entries += parser->tree.roles[token] == PARSE_ROLE_LABEL || (token < prefix_count && check_input_label_address(parser, token));
+        }
+    }
+    else
+    {
+        for (uint64_t first = 0; first < count; first += BUSTER_CHECK_CONTROL_TOKENS)
+        {
+            const uint32_t remaining = count - first;
+            const uint32_t length = remaining < BUSTER_CHECK_CONTROL_TOKENS ? remaining : BUSTER_CHECK_CONTROL_TOKENS;
+            const uint64_t valid = length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+            const __m512i roles = _mm512_maskz_loadu_epi8(valid, parser->tree.roles + first);
+            uint64_t selected = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_LABEL));
+            if (first < prefix_count)
+            {
+                const uint32_t prefix_remaining = prefix_count - first;
+                const uint32_t prefix_length = prefix_remaining < length ? prefix_remaining : length;
+                const uint64_t prefix = prefix_length == BUSTER_CHECK_CONTROL_TOKENS ? UINT64_MAX : (UINT64_C(1) << prefix_length) - 1;
+                const __m512i kinds = _mm512_maskz_loadu_epi8(prefix, parser->tokens.kinds + first);
+                selected |= prefix & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX)) &
+                            _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_AMPAMP));
+            }
+            entries += (uint64_t)__builtin_popcountll(selected & valid);
+        }
+    }
+    uint64_t capacity = 1;
+    while (capacity < entries * 2 + 1)
+    {
+        capacity *= 2;
+    }
+    return capacity;
+}
+
 // before == NONE is the unchanged full-unit path. The diagnostic prefix collects all function-scoped label names
 // for forward references, but reports only sites before its completion and defers unfinished-function obligations.
 static __attribute__((always_inline)) void check_input_controls_mode(CheckInputReader* reader, uint32_t before)
@@ -407,11 +451,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
     const bool prefix = before != BUSTER_CHECK_NONE;
     const uint32_t limit = prefix && before < count ? before : count;
     const uint64_t mark = reader->scratch->length;
-    uint64_t capacity = 1;
-    while (capacity < (uint64_t)count * 2 + 1)
-    {
-        capacity *= 2;
-    }
+    const uint64_t capacity = check_input_label_capacity(parser, prefix ? limit : 0);
     uint32_t* labels = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     reader->output->resource |= labels == 0;
     CheckLocalLabels locals = { 0 };

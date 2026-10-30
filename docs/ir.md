@@ -678,6 +678,8 @@ scalar constructor (`BUSTER_SSA_IR_VECTOR_CELLS`, docs/ssa.md): on the 9700X
 scalar work), under its twin's 151.1, with 2,208 instructions per entry against
 2,535 and 13.4 throttled dispatch slots per instruction against 31.5 ([the
 record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29)).
+#134's later measurement of both promotions, with each path's phis, is in [the SSA
+guide](ssa.md)'s "Benchmark".
 
 Against main (`9bb5060e`), in the same record: `-c` of `sqlite3.c` runs the same
 instructions but 0.0004% and writes the same object. The checker's unit compiled

@@ -4,8 +4,9 @@
 // #131's measurement on real C (benchmark-ir-source): the IR's bytes per source token of the functions the driver's -c
 // compiles of a set of files, with the largest function's share (#15: sqlite3.c's sqlite3VdbeExec, 5.0% of its -O0
 // code), and the time per typed entry of lowering them (ir_lower_typed and its scalar twin), of verifying the result
-// (ir_verify and ir_verify_scalar) and of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar). Include
-// after ir_source_test.c and tier0_benchmark_measure.c, whose clock, counters and medians it takes.
+// (ir_verify and ir_verify_scalar) and of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
+// promotion's phis (#134). Include after ir_source_test.c and tier0_benchmark_measure.c, whose clock, counters and
+// medians it takes.
 //
 //   build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [--functions] [preprocessor options] file...
 //
@@ -53,6 +54,8 @@ struct IrSourceCorpus
     uint64_t bytes;
     uint64_t promoted_instructions;
     uint64_t promoted_bytes;
+    // Each promotion's phis (#134): the vector path's (ssa_ir_promote), then its twin's.
+    uint64_t phis[2];
     // The lowered IR's bytes of its side tables, without the alignment gaps (ir_source_payload).
     uint64_t tables;
     // Functions a path refused or the paths lowered apart, and files that failed or were left out.
@@ -109,7 +112,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
                                   Arena* output, Arena* scratch)
 {
     IrSourceFile file;
-    ir_source_prepare(&file, name, options, option_count, lowered, table);
+    ir_source_prepare(&file, name, options, option_count, lowered, table, false);
     bool joined = file.status == IR_SOURCE_PREPARED && corpus->count + file.count <= corpus->capacity;
     uint64_t bytes = 0;
     uint64_t instructions = 0;
@@ -132,8 +135,11 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         arena_pop_to(output, mark);
         const IrCheck promotion = lowers ? ssa_ir_promote(vector, output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         const uint64_t promoted_bytes = promoted.arena_bytes;
+        uint32_t trivial = 0;
+        const uint32_t phis = promotion.error == IR_OK ? ssa_ir_phis(&promoted, &trivial) : 0;
         arena_pop_to(output, mark);
         const IrCheck promotion_twin = lowers ? ssa_ir_promote_scalar(vector, output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const uint32_t twin_phis = promotion_twin.error == IR_OK ? ssa_ir_phis(&promoted_twin, &trivial) : 0;
         joined = promotion.error == IR_OK && promotion_twin.error == IR_OK;
         if (joined)
         {
@@ -145,6 +151,8 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
             corpus->tables += ir_source_tables(vector);
             corpus->promoted_instructions += promoted.instruction_count;
             corpus->promoted_bytes += promoted_bytes;
+            corpus->phis[0] += phis;
+            corpus->phis[1] += twin_phis;
             bytes += vector->arena_bytes;
             instructions += vector->instruction_count;
         }
@@ -185,6 +193,8 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
            (double)columns / tokens, (double)corpus->tables / tokens, (double)gaps / tokens);
     printf("benchmark-ir-source: promoted IR: %" PRIu64 " instructions (%.3f per token), %" PRIu64 " bytes: %.2f per token\n", corpus->promoted_instructions,
            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
+    printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction), %" PRIu64 " by promote-scalar (%.4f)\n", corpus->phis[0],
+           (double)corpus->phis[0] / (double)corpus->instructions, corpus->phis[1], (double)corpus->phis[1] / (double)corpus->instructions);
     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
     uint32_t largest[BUSTER_IR_SOURCE_LARGEST];
     uint32_t kept = 0;

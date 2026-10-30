@@ -71,6 +71,21 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
+# #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
+# native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
+# status and record checked.
+./build/compiler test-ssa-source --self-test
+== Promote c-testsuite's programs to SSA and run them in the IR's three forms [3 CPUs]
+# #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
+# ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
+# in its three forms at once (all locals in memory, and each path's SSA), which must agree with each other and with
+# the program's expected output.
+./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+== Promote and run random C programs of structured and unstructured control flow [3 CPUs]
+# #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
+# continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
+./build/compiler test-ssa-source --generate 48 --clang clang
 == Test the parser's snippets against clang
 # The snippets, each also checked against clang, the generated inputs and the driver's checks.
 ./build/compiler test-parser --clang
@@ -84,9 +99,9 @@ unset CPATH C_INCLUDE_PATH
 ./build/compiler test-checker --seed 133
 == Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
 # #129: each source the checker accepts is written as -c writes it, and must define what clang -O0 -c's object
-# does, but for the three documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
+# does, but for the four documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
 # feature it names. Its acceptance against clang -fsyntax-only is compared too, as for any corpus. These eight
-# directories' 348 files that the backend lowers, with every explained difference of musl's (math's), must all
+# directories' 354 files that the backend lowers, with every explained difference of musl's (math's), must all
 # be compared: a backend that came to refuse them would otherwise pass by comparing none.
 unset CPATH C_INCLUDE_PATH
 export SOURCE_DATE_EPOCH=1792454400
@@ -95,6 +110,16 @@ musl="$corpus/libc/musl"
 ./build/compiler test-checker-corpus --clang clang --symbols-minimum 354 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
+== Compare main.c's checking and its functions and objects with clang's
+# #129: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this run's host,
+# sanitizer and fuzzing (the unit docs/c-lowering.md measures): checked by both paths, which must agree, and
+# accepted as clang -fsyntax-only accepts it, and its -c object must define what clang -O0 -c's does, but for the
+# documented reasons. The one file must be compared.
+unset CPATH C_INCLUDE_PATH
+mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+test "${#flags[@]}" -gt 0
+./build/compiler test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" src/buster/compiler/main.c
 == Test the C lexer as C++
 ./build/compiler test-lexer --cplusplus
 ./build/compiler test-lexer --raw-strings
@@ -152,6 +177,22 @@ for unit in "${sources[@]}"; do
     ./build/compiler -fsyntax-only "${flags[@]}" "$unit"
 done
 rm "$flags_file" "$sources_file"
+== Compile main.c by -c, its referenced definitions and all of them, by both paths
+# #129 and #619: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this
+# run's host, sanitizer and fuzzing (the unit docs/c-lowering.md measures), by -c, which lowers what its roots
+# reach, and by --lower-all, which lowers every definition but C's inline-only ones, the header intrinsics of
+# features znver5 lacks among them; each with --verify's checks of every function's records. The scalar path's
+# --lower-all object must be the vector path's, byte for byte.
+unset CPATH C_INCLUDE_PATH
+mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
+  BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+test "${#flags[@]}" -gt 0
+objects=$(mktemp -d)
+./build/compiler --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" src/buster/compiler/main.c
+./build/compiler --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" src/buster/compiler/main.c
+./build/compiler --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
+cmp "$objects/all.o" "$objects/all-scalar.o"
+rm -r "$objects"
 == Test the object writer
 # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
 # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
@@ -294,6 +335,17 @@ musl="$corpus/libc/musl"
 ./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 ./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 ./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
+# #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
+# function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+./build/compiler test-ssa-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-ssa-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Check the frozen SQLite source against Clang
