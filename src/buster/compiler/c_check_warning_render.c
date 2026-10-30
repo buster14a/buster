@@ -136,6 +136,12 @@ static const char* check_driver_warning_message(const Preprocessor* pp, const Ty
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
+            result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_BUILTIN_HEADER:
+            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of its header", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_UNDEFINED_INTERNAL:
             result = check_warning_text(scratch, "function '%.*s' has internal linkage but is not defined", (int)name.length, name.pointer);
             break;

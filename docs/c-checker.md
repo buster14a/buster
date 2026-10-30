@@ -56,7 +56,42 @@ with its identifier and `-Wimplicit-function-declaration`, as Clang does;
 `-Wno-error=implicit-function-declaration` demotes it, while
 `-Wno-implicit-function-declaration` suppresses it. Source diagnostic pragmas
 apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
-Parenthesized identifiers and non-call uses do not acquire an implicit type.
+Parenthesized identifiers and non-call uses of ordinary names do not acquire an implicit type.
+
+Eligible library names are different (#804): their first undeclared use takes
+the library prototype from the frozen Clang builtin catalogue, then uses the
+ordinary C binding, argument-checking, ABI and external-symbol paths. The
+catalogue's library attribute and language eligibility, not a list of example
+names, control admission. GNU-only library names stay ordinary undeclared
+functions in strict modes. A source declaration or local shadow always wins.
+The lazy library declaration remains visible at file scope after its first
+use's block closes. The reader retains its source token separately from the
+lexical binding events and reactivates it only when a later use or declaration
+needs it. A closed block's explicit prototype does not become the visible file
+prototype; local objects, typedefs and enumerators can still shadow the library.
+Later compatible declarations share the entity; an incompatible library
+prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
+conflicts and malformed calls remain errors. Header-dependent descriptors such
+as `FILE *` do not become invented types: a direct pre-C23 call falls back to
+the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
+
+An implicit library declaration warns by default even in C89. The ordinary
+implicit-declaration warning switches, promotion/demotion and source pragmas
+apply. An earlier explicit linked function declaration of an eligible library
+name suppresses its later first-use warning after that block closes; this
+borrows the prior declaration's diagnostic fact, not its closed-block type.
+`-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
+for plain library names, but do not disable explicit `__builtin_` spellings.
+`-fbuiltin` reverses the global disabling option; freestanding mode separately
+disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized
+library declaration can still be formed in C23 when its diagnostic is
+suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
+
+`test-checker-driver --executable PATH` compares the original #804 fixtures
+against external Clang through syntax-only checking, object publication and
+native execution, including scalar/default path agreement and pointer-sized
+results with builtin options enabled and disabled. This is correctness
+coverage, not a Zen 5 performance qualification.
 
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot

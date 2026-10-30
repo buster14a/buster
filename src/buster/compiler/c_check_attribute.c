@@ -758,7 +758,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool named = token == last && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] != 0;
         const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
         const uint32_t name = named ? parser->tokens.names[token] : 0;
-        const uint32_t handle = named ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+        const uint32_t handle = named ? check_input_library_binding(reader, name, token) : 0;
         valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
         reader->output->resource |= named && !valid;
         error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
