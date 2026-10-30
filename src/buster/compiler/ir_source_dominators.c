@@ -57,6 +57,11 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
     const uint64_t scratch_mark = scratch->length;
     *check = (IrSourceDominatorCheck){
         .reason = "CFG construction failed",
+        .status = {
+            DOMINATOR_INVALID,
+            DOMINATOR_INVALID,
+            DOMINATOR_INVALID,
+        },
     };
     IrCfg cfg = { 0 };
     check->cfg_error = ir_build_cfg(function, output, scratch, &cfg);
@@ -116,5 +121,69 @@ static bool ir_source_dominator_check(const IrFunction* function, Arena* output,
     }
     arena_pop_to(scratch, scratch_mark);
     arena_pop_to(output, output_mark);
+    return valid;
+}
+
+// Exercise this handoff, not just its solvers: exact serialization, rejected CFGs, both arena exhaustion paths,
+// actual stream failure and restoration of caller-owned prefixes. ir_test_simple is an original one-block IR.
+static bool ir_source_dominator_tests(Arena* memory, Arena* output, Arena* scratch)
+{
+    const uint64_t memory_mark = memory->length;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    IrFunction function = { 0 };
+    bool valid = ir_test_simple(memory, &function);
+    char* text = 0;
+    size_t length = 0;
+    FILE* stream = valid ? open_memstream(&text, &length) : 0;
+    valid = valid && stream != 0;
+    IrSourceDominatorCheck check;
+    if (valid)
+    {
+        valid = ir_source_dominator_check(&function, output, scratch, stream, "a b\n", (const uint8_t*)"f", 1, 0, &check) && check.checks != 0;
+        valid = valid && output->length == output_mark && scratch->length == scratch_mark;
+    }
+    if (stream != 0)
+    {
+        const int closed = fclose(stream);
+        static const char expected[] = "cfg 0 1 0 0\nfile 6120620a\nname 66\nend\n";
+        valid = valid && closed == 0 && length == sizeof(expected) - 1 && memcmp(text, expected, sizeof(expected) - 1) == 0;
+    }
+    free(text);
+    if (valid)
+    {
+        Arena full_output = *output;
+        full_output.capacity = full_output.length;
+        valid = !ir_source_dominator_check(&function, &full_output, scratch, 0, "", 0, 0, 0, &check) && check.cfg_error == IR_ERROR_MEMORY;
+        valid = valid && full_output.length == output_mark && scratch->length == scratch_mark;
+        Arena full_scratch = *scratch;
+        full_scratch.capacity = full_scratch.length;
+        valid = !ir_source_dominator_check(&function, output, &full_scratch, 0, "", 0, 0, 0, &check) && valid;
+        valid = valid && output->length == output_mark && full_scratch.length == scratch_mark;
+        // A branch to an absent block must fail before the analyzer or exporter touches its columns.
+        const uint32_t old_target = function.a[2];
+        function.op[2] = IR_BR;
+        function.a[2] = function.block_count;
+        valid = !ir_source_dominator_check(&function, output, scratch, 0, "", 0, 0, 0, &check) && check.cfg_error != IR_OK && valid;
+        valid = valid && output->length == output_mark && scratch->length == scratch_mark;
+        function.op[2] = IR_RET;
+        function.a[2] = old_target;
+    }
+    FILE* full = valid ? fopen("/dev/full", "w") : 0;
+    if (full != 0)
+    {
+        const bool unbuffered = setvbuf(full, 0, _IONBF, 0) == 0;
+        const bool rejected = unbuffered && !ir_source_dominator_check(&function, output, scratch, full, "file", (const uint8_t*)"f", 1, 0, &check);
+        valid = valid && rejected && ferror(full) != 0 && output->length == output_mark && scratch->length == scratch_mark;
+        fclose(full);
+    }
+    else
+    {
+        valid = false;
+    }
+    arena_pop_to(scratch, scratch_mark);
+    arena_pop_to(output, output_mark);
+    arena_pop_to(memory, memory_mark);
+    printf("ir-source: dominator handoff controls %s\n", valid ? "passed" : "FAILED");
     return valid;
 }
