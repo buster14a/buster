@@ -64,7 +64,7 @@
 // misaligned, one running past the end, one shorter than its column, the index's bits past 31, the names run past the
 // data, a region starting past the end, more crt objects' records than the table has, the members' names before the
 // crt objects' end, and the directory's end before its last region's.
-#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 12
+#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 15
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
@@ -1225,11 +1225,18 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
             // The members' names placed before the run's first part ends: Runtime.member_names would point before the data.
             header->counts.member_names_run = header->counts.object_name_bytes - 1;
             break;
-        default:
+        case 11:
             // Ending before the directory's last region does, which its hash would then leave out.
             header->directory_bytes -= BUSTER_SNAPSHOT_ALIGNMENT;
             header->regions[BUSTER_SNAPSHOT_PIECE_REGIONS].offset -= BUSTER_SNAPSHOT_ALIGNMENT;
             break;
+        default:
+        {
+            // Even a matching hash cannot make a noncanonical bool safe to read.
+            const uint32_t offsets[] = { offsetof(RuntimeProbe, directory), offsetof(RuntimeProbe, found), offsetof(RuntimeProbe, deferred) };
+            ((uint8_t*)&header->compiler)[offsets[change - 12]] = 91;
+            break;
+        }
         }
         snapshot_hash(edited, header->directory_bytes, header->hash);
         const bool copied = snapshot_test_pwrite(file, edited, sizeof(SnapshotHeader), 0);

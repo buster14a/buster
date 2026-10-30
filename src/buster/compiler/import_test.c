@@ -2695,7 +2695,7 @@ static bool import_test_page_edges(const ImportTestInput* inputs, uint32_t count
                 {
                     import_test_describe(input->name, "with byte", position, values[v]);
                     memcpy(end - input->size, input->bytes, input->size);
-                    end[position - input->size] = values[v];
+                    (end - input->size)[position] = values[v];
                     import_test_expect(&tally, import_test_edge(end, input->size, arena), input->name, position);
                     changes += 1;
                 }
@@ -3652,6 +3652,8 @@ static void import_test_cross_check_library(ImportTestTally* tally, const Import
         char index[16];
         char name[1024];
         binding[0] = 0;
+        visibility[0] = 0;
+        index[0] = 0;
         name[0] = 0;
         const int fields = sscanf(line, " %u: %31s %31s %15s %15s %15s %15s %1023s", &number, value, size_text, type, binding, visibility, index, name);
         char* at = fields == 8 ? strchr(name, '@') : 0;

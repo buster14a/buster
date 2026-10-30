@@ -121,8 +121,13 @@ static int check_units_test_run(const char* directory, char* const* arguments, c
         };
         const int out = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 &&
-            (!unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0))
+#if BUSTER_SANITIZER_RESOURCES
+        // The detectors start threads of their own: their builds inject the lanes' start failure instead.
+        const bool limited = !unstarted || setenv("BUSTER_TEST_NO_LANE_THREADS", "1", 1) == 0;
+#else
+        const bool limited = !unstarted || setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
+        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && chdir(directory) == 0 && setrlimit(RLIMIT_CORE, &limit) == 0 && limited)
         {
             alarm(BUSTER_CHECK_UNITS_TEST_SECONDS);
             execvp(arguments[0], arguments);
@@ -1207,7 +1212,7 @@ static __attribute__((noinline)) CheckUnitsTestProbe check_units_test_probe(char
 // its own under `directory`. The command and observations run once through the probe in this process first, so that
 // what only a process's first run makes (the encoder's tables, the stack's and the heap's growth) is the children's
 // already. The parent baseline is frozen only after that same-frame warmup and restoration of the parent's state.
-static void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
+static __attribute__((unused)) void check_units_test_limits(CheckUnitsTestTally* tally, const char* directory)
 {
     static const char header[] = "int limits_square(int value);\n";
     static const char caller[] = "#include \"square.h\"\nint main(void)\n{\n    return limits_square(3) == 9 ? 0 : 1;\n}\n";
@@ -1755,7 +1760,13 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
         check_units_test_shared(&tally, executable, directory);
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer maps shadow for each mapping a run makes and keeps it, so a run neither returns the address space
+        // to its base nor fails at a limit of its own reservations. The other detectors' builds and plain ones check them.
+        printf("  reservations: not failed in turn under ThreadSanitizer, whose shadow grows the address space\n");
+#else
         check_units_test_limits(&tally, directory);
+#endif
         check_units_test_jobserver(&tally, executable, directory);
         check_units_test_unstarted(&tally, executable, directory);
     }

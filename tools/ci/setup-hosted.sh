@@ -28,7 +28,7 @@ tar -I 'zstd -d --long=30' --extract --file "$RUNNER_TEMP/llvm.tar.zst" \
     --directory "$llvm" --strip-components=1 --no-same-owner --wildcards \
     "$archive/bin/clang" "$archive/bin/clang-23" "$archive/bin/clang++" \
     "$archive/bin/lld" "$archive/bin/ld.lld" "$archive/bin/llvm-config" \
-    "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" \
+    "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" "$archive/bin/llvm-symbolizer" \
     "$archive/include/*" "$archive/lib/clang/23/*" \
     "$archive/lib/libLLVM*.a" "$archive/lib/libPolly*.a" "$archive/lib/libclang-cpp.so*"
 rm "$RUNNER_TEMP/llvm.tar.zst"
@@ -41,6 +41,9 @@ printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89af
     "$llvm/LICENSE.TXT" | sha256sum --check
 test "$("$llvm/bin/clang" -dumpversion)" = "$version"
 test "$("$llvm/bin/llvm-config" --version)" = "$version"
+# The release keeps its runtimes in the per-target directory alone, where
+# build.sh looks for the fuzzer first.
+test -f "$("$llvm/bin/clang" -print-runtime-dir)/libclang_rt.fuzzer_no_main.a"
 test -f /usr/lib/x86_64-linux-gnu/libzstd.a
 toolbin="$RUNNER_TEMP/buster-test-tools"
 mkdir -p "$toolbin"

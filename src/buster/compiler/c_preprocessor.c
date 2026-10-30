@@ -92,6 +92,8 @@
 #include <sys/wait.h>
 #include "host_isa.h"
 #include "c_builtin_catalog.c"
+#include "c_builtin_fortify.c"
+#include "c_builtin_source_intrinsics.c"
 #include "buster/compiler/x86_target.c"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
@@ -268,6 +270,9 @@ struct PPOptions
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
     bool no_standard_includes;
+    // In-memory consumers can refuse every external include/embed lookup,
+    // including absolute paths and __has_include/__has_embed queries.
+    bool no_external_files;
     // -nobuiltininc: no compiler headers (clang's resource directory, or buster's) among the standard directories.
     bool no_builtin_includes;
     // --buster-headers: buster's own headers (src/buster/include, found from the executable) in place of clang's
@@ -4411,7 +4416,11 @@ static PPCandidate pp_include_candidate(const Preprocessor* pp, const uint8_t* n
 {
     PPCandidate result = PP_CANDIDATE_END;
     *directory = BUSTER_PP_NONE;
-    if (length != 0 && name[0] == '/')
+    if (pp->options.no_external_files)
+    {
+        result = PP_CANDIDATE_END;
+    }
+    else if (length != 0 && name[0] == '/')
     {
         // An absolute path: its record, if a file is there (a record is kept for a missing one too).
         if (index == 0)
@@ -9569,6 +9578,11 @@ BUSTER_INLINE bool pp_template_spelled(const uint8_t* bytes, uint32_t length)
 static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PPTemplate* template, const PPArgument* records, uint32_t given,
                                   const PPFileData* file, uint32_t file_base, PPOperators* operators)
 {
+#if __has_feature(memory_sanitizer)
+    // pp_template_write's permutes pick their lanes from whole vectors of these columns, of which MSan's model reads
+    // every lane: those no token fills are zero there.
+    memset(operators, 0, sizeof(*operators));
+#endif
     bool result = file == 0 || template->strings == 0;
     uint32_t size = 0;
     uint32_t joined = 0;
@@ -15911,7 +15925,7 @@ static bool pp_find_embed(Preprocessor* pp, const PPContext* context, const uint
     *path_length = 0;
     *size = 0;
     *regular = false;
-    for (uint32_t c = absolute || !angled ? 0 : 2; !found && c < count; c += 1)
+    for (uint32_t c = absolute || !angled ? 0 : 2; !pp->options.no_external_files && !found && c < count; c += 1)
     {
         int written;
         if (absolute)
@@ -16676,17 +16690,61 @@ static const PPFeature pp_features_constexpr_builtin[] = {
     { "__builtin_ssub_overflow", 1 }, { "__builtin_sub_overflow", 1 }, { "__builtin_uadd_overflow", 1 }, { "__builtin_umul_overflow", 1 },
 };
 
-// What buster implements, which the feature queries answer outside the oracle's mode (#154: until everything clang
-// supports is, they say exactly what is). The preprocessor's __is_target_* are implemented here. C builtins use the
-// shared catalog's source/constant-expression acceptance, independently of recognition and standalone actions.
-// The implemented attribute tables cover only behavior the checker and lowering honor. Other attributes, features
-// and extensions remain unadvertised. __has_warning and __has_declspec_attribute answer as clang does in both modes.
-// Sorted for binary search.
+// Implemented source capabilities, independent of the frozen Clang oracle. Attribute acceptance alone is not
+// implementation: diagnostic-only attributes and unpublished linkage obligations remain zero. These
+// entries have declaration/type, control, symbol or executable lowering consumers. C23 date codes describe the
+// standardized attribute, not the language mode (the spelling is also accepted as an extension in earlier modes).
+// Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
+// Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
 static const PPFeature pp_implemented_attribute[] = {
+    { "aligned", 1 },
+    { "cleanup", 1 },
+    { "constructor", 1 },
+    { "destructor", 1 },
+    { "ext_vector_type", 1 },
+    { "fallthrough", 1 },
+    { "gnu_inline", 1 },
+    { "mode", 1 },
+    { "naked", 1 },
+    { "overloadable", 1 },
     { "packed", 1 },
+    { "section", 1 },
+    { "target", 1 },
+    { "transparent_union", 1 },
+    { "used", 1 },
+    { "vector_size", 1 },
+    { "visibility", 1 },
+    { "weak", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
+    { "clang::ext_vector_type", 1 },
+    { "clang::overloadable", 1 },
+    { "fallthrough", 201910 },
+    { "gnu::aligned", 1 },
+    { "gnu::cleanup", 1 },
+    { "gnu::constructor", 1 },
+    { "gnu::destructor", 1 },
+    { "gnu::fallthrough", 1 },
+    { "gnu::gnu_inline", 1 },
+    { "gnu::mode", 1 },
+    { "gnu::naked", 1 },
     { "gnu::packed", 1 },
+    { "gnu::section", 1 },
+    { "gnu::target", 1 },
+    { "gnu::transparent_union", 1 },
+    { "gnu::used", 1 },
+    { "gnu::vector_size", 1 },
+    { "gnu::visibility", 1 },
+    { "gnu::weak", 1 },
+};
+static const PPFeature pp_implemented_feature[] = {
+    { "c_alignas", 1, 2011 },
+    { "c_alignof", 1, 2011 },
+    { "c_atomic", 1, 2011 },
+    { "c_fixed_enum", 1, 2023 },
+    { "c_generic_selections", 1, 2011 },
+    { "c_static_assert", 1, 2011 },
+    { "c_thread_local", 1, 2011 },
 };
 static const PPFeature pp_implemented_builtin[] = {
     { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
@@ -16774,20 +16832,22 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
                            : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard) |
-                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE);
+                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) | cbuiltin_source_intrinsic(name, length) |
+                                 cbuiltin_fortify_source(name, length);
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)
                            : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
             break;
         case PP_BUILTIN_HAS_FEATURE:
-            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer : 0;
+            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer
+                           : pp_feature_lookup(pp_implemented_feature, BUSTER_ARRAY_LENGTH(pp_implemented_feature), name, length, standard);
             break;
         case PP_BUILTIN_HAS_EXTENSION:
             // An extension is anything that is a feature, or in the extension table.
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) |
                                  pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard) | sanitizer
-                           : 0;
+                           : pp_feature_lookup(pp_implemented_feature, BUSTER_ARRAY_LENGTH(pp_implemented_feature), name, length, UINT32_MAX);
             break;
         case PP_BUILTIN_HAS_C_ATTRIBUTE:
             result = clang ? pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard)

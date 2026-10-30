@@ -9,6 +9,7 @@
 #define BUSTER_C_BUILTIN_FORTIFY_INCLUDED
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 
 typedef enum CBuiltinFortifyId
@@ -74,6 +75,14 @@ static __attribute__((unused)) CBuiltinFortifyId cbuiltin_fortify_id(const char*
         }
     }
     return result;
+}
+
+// Source availability uses the checker's exact admission, not generic Clang metadata recognition. Reject overlong
+// query slices before the dispatch reads its prefix; the longest admitted name bounds every comparison below.
+static __attribute__((unused)) bool cbuiltin_fortify_source(const uint8_t* name, uint32_t bytes)
+{
+    const bool bounded = name != NULL && bytes <= sizeof("__builtin___vsnprintf_chk") - 1;
+    return bounded && cbuiltin_fortify_id((const char*)name, bytes) != CBUILTIN_FORTIFY_COUNT;
 }
 
 #endif

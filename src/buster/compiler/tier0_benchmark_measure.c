@@ -219,7 +219,7 @@ static Tier0BenchmarkAdd tier0_benchmark_add(Tier0BenchmarkCorpus* corpus, const
         const Tier0Code scalar = tier0_compile_scalar(function, code_arena);
         const Tier0Code vector = tier0_compile(&requesting, code_arena);
         const bool same = scalar.error == vector.error && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
-                          memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0;
+                          (scalar.count == 0 || memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0);
         const bool memory = scalar.error == TIER0_ERROR_MEMORY || vector.error == TIER0_ERROR_MEMORY;
         result = memory ? TIER0_BENCHMARK_MEMORY : !same ? TIER0_BENCHMARK_DISAGREE : vector.error != TIER0_OK ? TIER0_BENCHMARK_REFUSED : TIER0_BENCHMARK_ADDED;
         X86Instruction* sized = result == TIER0_BENCHMARK_ADDED ? BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, (uint64_t)vector.count + 1) : 0;

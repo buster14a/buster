@@ -1774,13 +1774,18 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
         const pid_t child = prepared ? fork() : -1;
         if (child == 0)
         {
+#if BUSTER_SANITIZER_RESOURCES
+            const bool limited = setenv("BUSTER_TEST_NO_LANE_THREADS", "1", 1) == 0;
+#else
             const struct rlimit limit = {
                 .rlim_cur = 0,
                 .rlim_max = 0,
             };
+            const bool limited = setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
             const int out = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && setrlimit(RLIMIT_NPROC, &limit) == 0)
+            if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && limited)
             {
                 alarm(BUSTER_OBJECT_TEST_RUN_SECONDS);
                 execv(arguments[0], arguments);
@@ -1944,7 +1949,13 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         }
         const String8 text = foreign_test_read(arena, counted);
         char expected[32];
-        snprintf(expected, sizeof(expected), "%u\n", lanes - 1);
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
+        const uint32_t detector = lanes > 1 ? 1 : 0;
+#else
+        const uint32_t detector = 0;
+#endif
+        snprintf(expected, sizeof(expected), "%u\n", lanes - 1 + detector);
         const bool started = text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0;
         char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
         snprintf(detail, sizeof(detail), "%s: %.*s thread(s) for %u lane(s)", executable, text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",
