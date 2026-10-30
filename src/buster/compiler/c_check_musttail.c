@@ -59,9 +59,6 @@ struct CheckMusttails
     bool resource;
 };
 
-// The most pointer and array levels the similar types' comparison unwraps, past which it compares what is left as it is.
-#define BUSTER_CHECK_MUSTTAIL_LEVELS 64
-
 // Whether two unqualified types are arrays clang's UnwrapSimilarArrayTypes unwraps in C: of the same constant bound, or
 // both of none (a variable one never).
 static bool check_musttail_same_bound(const TypeTable* types, TypeId a, TypeId b)
@@ -73,31 +70,24 @@ static bool check_musttail_same_bound(const TypeTable* types, TypeId a, TypeId b
 }
 
 // Two types as clang's hasSimilarType has them in C: each level's qualifiers (and an aligned typedef's alignment)
-// removed, an array's from its elements too (getUnqualifiedArrayType), then the same canonical type (type_same_canonical,
-// which looks through the aligned typedefs inside), or else, past arrays of the same bound, two pointers' pointees
-// compared so again (UnwrapSimilarTypes); any other pair isn't similar.
+// removed, an array's from its elements too (getUnqualifiedArrayType), stepping into two pointers' pointees and the
+// elements of arrays of the same bound while the two differ (UnwrapSimilarTypes), then the same canonical type
+// (type_same_canonical, which looks through the aligned typedefs inside). Comparing what is left once alone is clang's
+// comparison at each level: two types the same at a level have the same parts beneath it. Each step goes into a type
+// of its own, so the steps are no more than the table's types, whatever the depth (#936's review: 64 pointer levels).
 static bool check_musttail_similar(const TypeTable* types, TypeId left, TypeId right, bool* resource)
 {
-    TypeId a = left;
-    TypeId b = right;
-    TypeAnswer answer = TYPE_ANSWER_NO;
-    bool going = true;
-    for (uint32_t level = 0; going && level < BUSTER_CHECK_MUSTTAIL_LEVELS; level += 1)
+    TypeId a = type_unqualified(type_strip_aligned(types, left));
+    TypeId b = type_unqualified(type_strip_aligned(types, right));
+    for (uint32_t step = 0; step < types->types.count && a != b &&
+                            (check_musttail_same_bound(types, a, b) ||
+                             (type_kind(types, a) == BUSTER_TYPE_KIND_POINTER && type_kind(types, b) == BUSTER_TYPE_KIND_POINTER));
+         step += 1)
     {
-        a = type_unqualified(type_strip_aligned(types, a));
-        b = type_unqualified(type_strip_aligned(types, b));
-        for (uint32_t depth = 0; depth < BUSTER_CHECK_MUSTTAIL_LEVELS && check_musttail_same_bound(types, a, b); depth += 1)
-        {
-            a = type_unqualified(type_strip_aligned(types, type_element(types, a)));
-            b = type_unqualified(type_strip_aligned(types, type_element(types, b)));
-        }
-        answer = a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b);
-        going = answer == TYPE_ANSWER_NO && type_kind(types, a) == BUSTER_TYPE_KIND_POINTER && type_kind(types, b) == BUSTER_TYPE_KIND_POINTER;
-        a = going ? type_element(types, a) : a;
-        b = going ? type_element(types, b) : b;
+        a = type_unqualified(type_strip_aligned(types, type_element(types, a)));
+        b = type_unqualified(type_strip_aligned(types, type_element(types, b)));
     }
-    // Past the levels, what is left as it is.
-    answer = going ? (a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b)) : answer;
+    const TypeAnswer answer = a == b ? TYPE_ANSWER_YES : type_same_canonical(types, a, b);
     *resource |= answer == TYPE_ANSWER_FULL;
     return answer == TYPE_ANSWER_YES;
 }

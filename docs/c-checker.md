@@ -3620,7 +3620,7 @@ order, the first rule each breaks in the order of clang 23's `Sema::checkMustTai
    drops after the definition (`ignored`, `check_input_attribute_late`), GNU's or the `_Noreturn` keyword;
 6. both have the same signature, as similar types (`hasSimilarType`: the same canonical type once each level's
    qualifiers are gone, an array's elements' too, past arrays of the same constant bound or of none and pointers'
-   pointees, `UnwrapSimilarTypes`).
+   pointees, `UnwrapSimilarTypes`), at any depth: the steps go into types of their own, no more than the table has.
 
 A return that keeps them can't leave a cleanup variable's scope: an error for each such variable, the innermost first,
 which clang reports as its function ends. Errors past what their count holds (a uint32_t's, which each active cleanup

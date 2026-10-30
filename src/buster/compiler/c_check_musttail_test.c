@@ -92,6 +92,16 @@ static __attribute__((noinline)) void check_test_musttail_sources(CheckTest* tes
         { .name = "musttail: another element beneath arrays of the same bound", .source = "int f(const long *(*p)[3]);\nint g(int *(*p)[3])\n{\n"
                                                                                            "__attribute__((musttail)) return f((const long *(*)[3])p);\n}\n",
           .rejected = true },
+        // #936's second review: pointers' qualifiers at any depth, 63, 64 and 65 levels, and another leaf at 64.
+        { .name = "musttail: a leaf's qualifiers beneath 63 pointers", .source = "#define P8 ********\n#define P63 ******* P8 P8 P8 P8 P8 P8 P8\n"
+                                                                              "int f(const int P63 p);\nint g(int P63 p)\n{\n__attribute__((musttail)) return f((const int P63)p);\n}\n" },
+        { .name = "musttail: a leaf's qualifiers beneath 64 pointers", .source = "#define P8 ********\n#define P64 P8 P8 P8 P8 P8 P8 P8 P8\n"
+                                                                              "int f(const int P64 p);\nint g(int P64 p)\n{\n__attribute__((musttail)) return f((const int P64)p);\n}\n" },
+        { .name = "musttail: a leaf's qualifiers beneath 65 pointers", .source = "#define P8 ********\n#define P65 * P8 P8 P8 P8 P8 P8 P8 P8\n"
+                                                                              "int f(const int P65 p);\nint g(int P65 p)\n{\n__attribute__((musttail)) return f((const int P65)p);\n}\n" },
+        { .name = "musttail: another leaf beneath 64 pointers", .source = "#define P8 ********\n#define P64 P8 P8 P8 P8 P8 P8 P8 P8\n"
+                                                                       "int f(const long P64 p);\nint g(int P64 p)\n{\n__attribute__((musttail)) return f((const long P64)p);\n}\n",
+          .rejected = true },
         { .name = "musttail: in a cleanup's scope", .source = "void c(int *);\nint f(int);\nint g(int x)\n{\nint y __attribute__((cleanup(c))) = x;\n"
                                                            "__attribute__((musttail)) return f(x);\n}\n", .rejected = true },
         { .name = "musttail: in a nested cleanup's scope", .source = "void c(int *);\nint f(int);\nint g(int x)\n{\n{\nint y __attribute__((cleanup(c))) = x;\n"
