@@ -1476,7 +1476,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         else if (valid && kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT &&
                  (!input->syntax[index] || role == PARSE_ROLE_SPECIFIER))
         {
-            const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
             if (builtin != CBUILTIN_NONE)
@@ -3236,7 +3236,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                  (parser->tokens.kinds[token - 1] != PARSE_KIND_STRUCT && parser->tokens.kinds[token - 1] != PARSE_KIND_ENUM)))
         {
             const uint32_t name = parser->tokens.names[token];
-            const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+            const uint32_t handle = input->cached ? 0 : check_input_library_binding(reader, name, token);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
             const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;

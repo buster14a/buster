@@ -45,7 +45,7 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
 {
     const Parser* parser = reader->parser;
     const uint32_t name = parser->tokens.names[token];
-    const bool missing = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
+    const bool missing = check_input_library_binding(reader, name, token) == 0;
     const bool explicit_builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
     if (missing && !explicit_builtin)
     {
@@ -132,6 +132,10 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
                 reader->linkage[token] = 2;
                 input->declaration_bodies[token] = reader->function_body;
                 check_input_bind(reader, token, token);
+                if (library && reader->library_declarations != NULL)
+                {
+                    reader->library_declarations[name] = token + 1;
+                }
             }
         }
     }

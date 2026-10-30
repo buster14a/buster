@@ -730,6 +730,9 @@ struct CheckInputReader
     uint32_t* member_seen;
     uint32_t* linked_declarations;
     TypeId* linked_types;
+    // The first lazy file-scope library declaration of each name (token + 1), independent of lexical restores.
+    // Lanes share this source-order column read-only; a declaration after the name's source point is not visible.
+    uint32_t* library_declarations;
     TypeId* tag_types;
     uint32_t* tag_ends;
     unsigned __int128* enum_values;
@@ -813,6 +816,22 @@ struct CheckInputReader
     bool lane;
     bool lane_unsupported;
 };
+
+// A lazy library declaration belongs to the translation unit, although its ordinary binding event was made at a
+// block's first use. Rebuild that event only when a later semantic use or declaration needs it after a restore.
+// Existing local bindings win, and the original library declaration, rather than a closed block's later prototype,
+// supplies the visible type. The normal event stream still owns uses, scopes and scalar/vector replay.
+static uint32_t check_input_library_binding(CheckInputReader* reader, uint32_t name, uint32_t point)
+{
+    uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+    const uint32_t library = reader->library_declarations != NULL ? reader->library_declarations[name] : 0;
+    if (handle == 0 && library != 0 && library - 1 <= point)
+    {
+        handle = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, C_BINDING_FUNCTION, library - 1, point, 0);
+        reader->output->resource |= handle == 0;
+    }
+    return handle;
+}
 
 // Before a write into the token columns of the arena of rare columns at `entry`: where more than one lane writes them
 // in huge pages (CheckInputReader.rare_claims), the first lane to write a 2 MB region claims it (0: unclaimed, 1: being
@@ -4173,7 +4192,7 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
 static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const uint32_t name = reader->parser->tokens.names[token];
-    const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+    const uint32_t old = check_input_library_binding(reader, name, point);
     const CBindingKind kind = (CBindingKind)reader->declaration_kinds[token];
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
@@ -6713,6 +6732,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= reader.linked_declarations != 0;
     reader.linked_types = valid ? arena_push_array(scratch, pp->table->count, sizeof(TypeId), 64) : 0;
     valid &= reader.linked_types != 0;
+    reader.library_declarations = valid ? arena_push_array(scratch, pp->table->count, sizeof(uint32_t), 64) : 0;
+    valid &= reader.library_declarations != 0;
     reader.tag_completions = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint32_t), 4) : 0;
     valid &= reader.tag_completions != 0;
     reader.enum_fixed = valid ? arena_push_array(scratch, types->tags.capacity, sizeof(uint8_t), 4) : 0;
@@ -6778,6 +6799,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.member_seen, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.linked_types, 0, (uint64_t)pp->table->count * sizeof(TypeId));
+        memset(reader.library_declarations, 0, (uint64_t)pp->table->count * sizeof(uint32_t));
         memset(reader.tag_completions, 0xff, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);

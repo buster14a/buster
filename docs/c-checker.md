@@ -64,6 +64,11 @@ ordinary C binding, argument-checking, ABI and external-symbol paths. The
 catalogue's library attribute and language eligibility, not a list of example
 names, control admission. GNU-only library names stay ordinary undeclared
 functions in strict modes. A source declaration or local shadow always wins.
+The lazy library declaration remains visible at file scope after its first
+use's block closes. The reader retains its source token separately from the
+lexical binding events and reactivates it only when a later use or declaration
+needs it. A closed block's explicit prototype does not become the visible file
+prototype; local objects, typedefs and enumerators can still shadow the library.
 Later compatible declarations share the entity; an incompatible library
 prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
 conflicts and malformed calls remain errors. Header-dependent descriptors such

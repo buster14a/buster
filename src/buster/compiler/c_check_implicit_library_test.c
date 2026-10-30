@@ -4,13 +4,14 @@
 
 static void check_test_driver_implicit_library(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const struct
+    typedef struct CheckImplicitLibraryCase
     {
         const char* source;
         const char* standard;
         const char* first;
         const char* second;
-    } cases[] =
+    } CheckImplicitLibraryCase;
+    static const CheckImplicitLibraryCase cases[] =
     {
         { "int f(void){return printf(\"hi\\n\");}", "-std=c89", NULL, NULL },
         { "int f(void){return strlen(\"abc\")-3;}", "-std=c89", NULL, NULL },
@@ -59,30 +60,60 @@ static void check_test_driver_implicit_library(CheckTest* test, const char* clan
         { "#pragma clang diagnostic error \"-Wimplicit-function-declaration\"\nint f(void){return abs(-1);}", "-std=c89", NULL, NULL },
         { "#include <stdio.h>\nint f(void){char b[4];return snprintf(b,4,\"x\")-1;}", "-ansi", NULL, NULL },
     };
+    static const struct
+    {
+        CheckImplicitLibraryCase input;
+        bool success;
+    } scope_cases[] =
+    {
+        { { "int f(void){return abs(-1);}typedef int abs;", "-std=c89", NULL, NULL }, false },
+        { { "int f(void){return abs(-1);}typedef int abs;", "-std=gnu89", NULL, NULL }, false },
+        { { "int f(void){return abs(-1);}enum E{abs=1};", "-std=c89", NULL, NULL }, false },
+        { { "int f(void){return abs(-1);}enum E{abs=1};", "-std=gnu89", NULL, NULL }, false },
+        { { "int f(void){{abs(-1);}return 0;}typedef int abs;", "-std=c89", NULL, NULL }, false },
+        { { "int f(void){extern int abs(int);return abs(-1);}int g(void){abs(-2);{extern int abs(int);}return 0;}typedef int abs;", "-std=gnu89", NULL, NULL }, false },
+        { { "int f(void){return abs(-1);}int g(int abs);typedef int abs;", "-std=c89", NULL, NULL }, false },
+        { { "int f(void){return abs(-1);}int g(void){typedef int abs;abs n=2;return n;}", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){return abs(-1);}int g(void){{enum E{abs=2};}return abs(-2);}", "-std=gnu89", NULL, NULL }, true },
+        { { "int f(void){abs(-1);{int abs=2;abs++;}return abs(-2);}", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){return abs(-1);}int (*p)(int)=abs;", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){return abs(-1);}typedef int abs;", "-std=c89", "-fno-builtin", NULL }, true },
+        { { "int f(void){return abs(-1);}typedef int abs;", "-std=gnu89", "-ffreestanding", NULL }, true },
+        { { "int f(void){typedef int abs;abs n=2;return n;}int g(void){return abs(-1);}", "-std=c89", NULL, NULL }, true },
+        { { "int f(void){enum E{abs=2};return abs;}int g(void){return abs(-1);}", "-std=gnu89", NULL, NULL }, true },
+    };
     char source[512];
     char objects[2][512];
     snprintf(source, sizeof(source), "%s/implicit-library.c", directory);
     snprintf(objects[0], sizeof(objects[0]), "%s/implicit-library-scalar.o", directory);
     snprintf(objects[1], sizeof(objects[1]), "%s/implicit-library-vector.o", directory);
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases) + BUSTER_ARRAY_LENGTH(scope_cases); c += 1)
     {
-        const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));
+        const bool scope = c >= BUSTER_ARRAY_LENGTH(cases);
+        const uint32_t scope_case = scope ? c - BUSTER_ARRAY_LENGTH(cases) : 0;
+        const CheckImplicitLibraryCase* input = scope ? &scope_cases[scope_case].input : &cases[c];
+        const bool written = parse_test_write(source, input->source, strlen(input->source));
         check_test_expect(test, written, "implicit library fixture is written");
         for (uint32_t mode = 0; written && mode < 2; mode += 1)
         {
             char* expected = NULL;
-            char* arguments[16] = { (char*)clang, (char*)cases[c].standard, "-fno-caret-diagnostics",
+            char* arguments[16] = { (char*)clang, (char*)input->standard, "-fno-caret-diagnostics",
                                    mode == 0 ? "-fsyntax-only" : "-c", source, "-o", objects[0] };
             uint32_t count = 7;
-            if (cases[c].first != NULL)
+            if (input->first != NULL)
             {
-                arguments[count++] = (char*)cases[c].first;
+                arguments[count++] = (char*)input->first;
             }
-            if (cases[c].second != NULL)
+            if (input->second != NULL)
             {
-                arguments[count++] = (char*)cases[c].second;
+                arguments[count++] = (char*)input->second;
             }
             const int oracle = check_test_driver_spawn(arguments, &expected);
+            if (scope)
+            {
+                check_test_expect(test, oracle >= 0 && (oracle == 0) == scope_cases[scope_case].success,
+                                  "implicit library scope control has its expected Clang acceptance");
+            }
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 arguments[0] = (char*)executable;
