@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+name: Whole issue source preparation
+on:
+  push:
+    branches: [chatgpt/whole-issues-source-20261030]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: caef4ea2cd1f47311842b2c1a4f87e55f14c29ea
+          persist-credentials: false
+      - name: Archive the exact implementation base, including provenance
+        run: git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whole-issues-source-caef4ea2
+          path: source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
