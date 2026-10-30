@@ -108,7 +108,8 @@ static void cbuiltin_terminal_test_guards(CBuiltinTerminalTestTally* tally)
     }
 }
 
-static void cbuiltin_terminal_test_native(CBuiltinTerminalTestTally* tally, const CBuiltinTerminalHelper* helper, uint32_t item)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_terminal_test_native(CBuiltinTerminalTestTally* tally, const CBuiltinTerminalHelper* helper, uint32_t item)
 {
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(helper->code.count);
     uint8_t* mapping = mmap(0, BUSTER_CBUILTIN_TERMINAL_TEST_PAGE * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

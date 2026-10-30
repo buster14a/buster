@@ -576,8 +576,8 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
             };
             cursor += arities[kind];
         }
-        uint8_t input_copy[MAXIMUM * sizeof(CheckBuiltinAtomicAction)];
-        uint8_t argument_copy[3 * MAXIMUM * sizeof(CheckValue)];
+        CheckBuiltinAtomicAction input_copy[MAXIMUM];
+        CheckValue argument_copy[3 * MAXIMUM];
         memcpy(input_copy, actions, count * sizeof(*actions));
         memcpy(argument_copy, arguments, total_arguments * sizeof(*arguments));
         CheckBuiltinAtomicResult expected[MAXIMUM];
@@ -599,8 +599,21 @@ static void check_builtin_atomic_test_pages(CheckBuiltinAtomicTest* test, TypeTa
                 check_builtin_atomic_test_expect(test, check_builtin_atomic_test_equal(expected + i, results + i), "legal atomic batch partition changed semantic output");
             }
         }
-        check_builtin_atomic_test_expect(test, memcmp(input_copy, actions, count * sizeof(*actions)) == 0 &&
-                                        memcmp(argument_copy, arguments, total_arguments * sizeof(*arguments)) == 0, "atomic actions never mutate borrowed inputs");
+        // By field: the actions' and the values' padding is no part of them.
+        bool unchanged = true;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const CheckBuiltinAtomicAction* x = input_copy + i;
+            const CheckBuiltinAtomicAction* y = actions + i;
+            unchanged &= x->id == y->id && x->arguments == y->arguments && x->argument_count == y->argument_count && x->node == y->node &&
+                x->tag_completions == y->tag_completions && x->tag_completion_count == y->tag_completion_count && x->source_position == y->source_position &&
+                x->extensions == y->extensions && x->minimum_alignment == y->minimum_alignment && x->alignment_known == y->alignment_known;
+        }
+        for (uint32_t i = 0; i < total_arguments; i += 1)
+        {
+            unchanged &= check_test_value_equal(argument_copy + i, arguments + i);
+        }
+        check_builtin_atomic_test_expect(test, unchanged, "atomic actions never mutate borrowed inputs");
         for (uint32_t i = 1; i <= 16; i += 1)
         {
             check_builtin_atomic_test_expect(test, *((uint8_t*)actions - i) == 0xa5 && *((uint8_t*)results - i) == 0xa5 && *((uint8_t*)arguments - i) == 0xa5,

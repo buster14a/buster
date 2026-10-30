@@ -1682,10 +1682,26 @@ static uint64_t lane_test_team_keep(uint32_t threads_before)
     return failures;
 }
 
+#if __has_feature(thread_sanitizer)
+static void* lane_test_nothing(void* argument)
+{
+    return argument;
+}
+#endif
+
 static uint64_t lane_test_teams(void)
 {
     lane_test_watch(BUSTER_ARRAY_LENGTH(lane_test_check_names), BUSTER_LANE_TEST_MAX_LANES, false);
     alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+#if __has_feature(thread_sanitizer)
+    // ThreadSanitizer starts a thread of its own with the process's first other thread, which the counts below would
+    // take for a lane's: one started and joined first leaves the detector's running before them.
+    pthread_t first;
+    if (pthread_create(&first, 0, lane_test_nothing, 0) == 0)
+    {
+        pthread_join(first, 0);
+    }
+#endif
     const uint32_t threads_before = lane_test_thread_count();
     const Lane previous = thread_context.lane;
     Scratch retained = scratch_begin(0);

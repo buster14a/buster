@@ -5,6 +5,15 @@
 // worklist exists only for an out-of-range immediate. Each control/node enters it once, with no recursion, token
 // reparsing or dependence on target features. Unknown conditions retain both edges. Scratch has exactly one byte
 // and one u64 slot per control/node; no padding is read. Failure publishes no partially resolved events.
+// Code generation's check of target features walks the same way (#775, c_check_target_feature.c): with `calls`, the
+// walk also appends each call it reaches to that arena, a uint64_t each of its node in the low half and the walk's `tag`
+// in the high, `call_count` of them, in a run nothing else pushes into while it walks; `call_room` turns false if one had
+// no room. Each item pushed carries `tag` in its high half too, for the check's loop to set it from (the statement whose
+// control reached an expression); this walk's is 0, so that its items are the bare indices. With `cleanup_tags` too, it
+// marks each variable whose cleanup's call it reaches (CHECK_CONTROL_CLEANUP) at any exit from its scope: the entry of
+// its record (by its index in CheckInput.cleanups) takes the walk's tag where it was 0 (the check's tags are all 1 or
+// more), and `cleanup_count` counts them. A statement expression's END marks its block's own, which follow the END and
+// which it runs once its value is computed (check_lower_region).
 
 typedef struct CheckX86DiagnosticWalk CheckX86DiagnosticWalk;
 struct CheckX86DiagnosticWalk
@@ -14,6 +23,12 @@ struct CheckX86DiagnosticWalk
     uint8_t* seen;
     uint64_t* stack;
     uint64_t depth;
+    Arena* calls;
+    uint32_t call_count;
+    bool call_room;
+    uint32_t tag;
+    uint32_t* cleanup_tags;
+    uint32_t cleanup_count;
 };
 
 static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t index, bool control)
@@ -24,7 +39,7 @@ static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t ind
     if (valid && walk->seen[item] == 0)
     {
         walk->seen[item] = 1;
-        walk->stack[walk->depth++] = item;
+        walk->stack[walk->depth++] = item | (uint64_t)walk->tag << 32;
     }
 }
 
@@ -71,12 +86,30 @@ static void check_x86_diagnostic_initializer(CheckX86DiagnosticWalk* walk, const
     }
 }
 
+// Marks the variable whose cleanup's call is the body's control `index`, if it is a CLEANUP control (the walk's
+// cleanup_tags).
+static void check_x86_diagnostic_cleanup(CheckX86DiagnosticWalk* walk, uint32_t index)
+{
+    const CheckProgram* program = walk->program;
+    const CheckControl* entry = index < walk->body->count ? program->controls + walk->body->first + index : NULL;
+    const uint32_t record = entry != NULL && entry->kind == CHECK_CONTROL_CLEANUP ? entry->target : BUSTER_CHECK_NONE;
+    if (record < program->input->cleanup_count && walk->cleanup_tags[record] == 0)
+    {
+        walk->cleanup_tags[record] = walk->tag;
+        walk->cleanup_count += 1;
+    }
+}
+
 static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t index)
 {
     const CheckProgram* program = walk->program;
     const CheckInput* input = program->input;
     const CheckControl* entry = program->controls + walk->body->first + index;
     check_x86_diagnostic_push(walk, entry->node, false);
+    if (entry->kind == CHECK_CONTROL_CLEANUP && walk->cleanup_tags != NULL)
+    {
+        check_x86_diagnostic_cleanup(walk, index);
+    }
     if (entry->kind == CHECK_CONTROL_INITIALIZE)
     {
         const CheckInitializer* plan = program->initializers->plans + entry->target;
@@ -129,6 +162,11 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t 
         if (region != 0 && region <= program->region_count)
         {
             check_x86_diagnostic_push(walk, program->regions[region - 1].result, false);
+            const uint32_t cleanups = walk->cleanup_tags != NULL ? program->regions[region - 1].cleanups : 0;
+            for (uint32_t c = 0; c < cleanups && c < walk->body->count - index - 1; c += 1)
+            {
+                check_x86_diagnostic_cleanup(walk, index + 1 + c);
+            }
         }
     }
     if (falls)
@@ -170,6 +208,16 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     }
     else if (op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
     {
+        if (op == CHECK_OP_CALL && walk->calls != NULL)
+        {
+            uint64_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint64_t, 1) : NULL;
+            walk->call_room = call != NULL;
+            if (call != NULL)
+            {
+                *call = (uint64_t)walk->tag << 32 | node;
+                walk->call_count += 1;
+            }
+        }
         uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
         bool truth = false;
         if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&

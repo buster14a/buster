@@ -176,8 +176,14 @@ static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, const 
     }
     if (valid)
     {
-        qsort(result->items, result->count, sizeof(LoweringSymbol), lowering_symbols_order);
-        qsort(result->strings, result->string_count, sizeof(String8), lowering_symbols_string_order);
+        if (result->count > 1)
+        {
+            qsort(result->items, result->count, sizeof(LoweringSymbol), lowering_symbols_order);
+        }
+        if (result->string_count > 1)
+        {
+            qsort(result->strings, result->string_count, sizeof(String8), lowering_symbols_string_order);
+        }
         uint32_t unique = 0;
         for (uint32_t i = 0; i < result->string_count; i += 1)
         {
@@ -395,8 +401,14 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     if (valid)
     {
-        qsort(result->labels, result->label_count, sizeof(String8), lowering_symbols_string_order);
-        qsort(result->bases, result->base_count, sizeof(String8), lowering_symbols_string_order);
+        if (result->label_count > 1)
+        {
+            qsort(result->labels, result->label_count, sizeof(String8), lowering_symbols_string_order);
+        }
+        if (result->base_count > 1)
+        {
+            qsort(result->bases, result->base_count, sizeof(String8), lowering_symbols_string_order);
+        }
     }
     else
     {

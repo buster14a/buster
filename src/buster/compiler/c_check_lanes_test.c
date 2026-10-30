@@ -327,7 +327,7 @@ struct CheckLanesTestEmission
 
 // The address space the process has mapped (/proc/self/statm's first field, the kernel's total that RLIMIT_AS bounds),
 // or 0 if it can't be read.
-static uint64_t check_lanes_test_mapped(void)
+static __attribute__((unused)) uint64_t check_lanes_test_mapped(void)
 {
     char text[128] = { 0 };
     const int file = open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
@@ -354,6 +354,13 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
     CheckDebug dwarf = { 0 };
     const CheckProgram* program = &unit->selected.program;
     const bool ready = output.base != 0 && bytes.base != 0 && scratch.base != 0;
+#if BUSTER_SANITIZER_RESOURCES
+    const bool before_limited = lane_test_resources.arena_limited;
+    const uint64_t before_room = lane_test_resources.arena_limit;
+    lane_test_resources.arena_limited = room != UINT64_MAX;
+    lane_test_resources.arena_limit = room;
+    result.limited = room != UINT64_MAX;
+#else
     struct rlimit before = { 0 };
     const bool got = ready && room != UINT64_MAX && getrlimit(RLIMIT_AS, &before) == 0;
     const uint64_t mapped = got ? check_lanes_test_mapped() : 0;
@@ -362,6 +369,7 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
         .rlim_max = before.rlim_max,
     };
     result.limited = mapped != 0 && setrlimit(RLIMIT_AS, &limit) == 0;
+#endif
     const uint64_t scratch_capacity = scratch.capacity;
     scratch.capacity = scratch_room < scratch_capacity ? scratch_room : scratch_capacity;
     const bool emitted = ready && (room == UINT64_MAX || result.limited) &&
@@ -369,7 +377,12 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
                                                                    NULL, rows ? &row_set : NULL, unwind, true, lanes) :
                                           check_program_emit(&code, program, parser, identifiers, unit->selected.data.capacity, scalar, &output, &bytes, &scratch, NULL,
                                                              rows ? &row_set : NULL, unwind, true));
+#if BUSTER_SANITIZER_RESOURCES
+    lane_test_resources.arena_limited = before_limited;
+    lane_test_resources.arena_limit = before_room;
+#else
     result.limited = result.limited && setrlimit(RLIMIT_AS, &before) == 0;
+#endif
     scratch.capacity = scratch_capacity;
     result.columns_capacity = lanes != NULL ? lanes->arenas[0].scratch.capacity : 0;
     result.columns_length = lanes != NULL ? lanes->arenas[0].scratch.length : 0;
@@ -960,13 +973,20 @@ static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* d
             static InternTable identifiers;
             static Preprocessor pp;
             static Parser parser;
+#if !BUSTER_SANITIZER_RESOURCES
             const struct rlimit limit = {
                 .rlim_cur = 0,
                 .rlim_max = 0,
             };
+#endif
             alarm(BUSTER_OBJECT_TEST_RUN_SECONDS);
             CheckLanesTestTally own = { .random = 1 };
+#if BUSTER_SANITIZER_RESOURCES
+            lane_test_resources.no_threads = true;
+            check_lanes_test_expect(&own, lane_test_resources.no_threads, "inject the child's lane-start failure", 0);
+#else
             check_lanes_test_expect(&own, setrlimit(RLIMIT_NPROC, &limit) == 0, "limit the child to the processes it has", 0);
+#endif
             uint32_t compared = 0;
             char path[PATH_MAX];
             char detail[256];
@@ -1313,13 +1333,18 @@ static int check_lanes_test_run_unstarted(char* const* arguments, const char* er
     const pid_t child = fork();
     if (child == 0)
     {
+#if BUSTER_SANITIZER_RESOURCES
+        const bool limited = setenv("BUSTER_TEST_NO_LANE_THREADS", "1", 1) == 0;
+#else
         const struct rlimit limit = {
             .rlim_cur = 0,
             .rlim_max = 0,
         };
+        const bool limited = setrlimit(RLIMIT_NPROC, &limit) == 0;
+#endif
         const int out = open("/dev/null", O_WRONLY);
         const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && setrlimit(RLIMIT_NPROC, &limit) == 0)
+        if (out >= 0 && err >= 0 && dup2(out, 1) == 1 && dup2(err, 2) == 2 && limited)
         {
             alarm(BUSTER_OBJECT_TEST_RUN_SECONDS);
             execv(arguments[0], arguments);

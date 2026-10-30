@@ -1717,6 +1717,26 @@ static void check_test_program_x86_refusals(CheckTest* test)
     }
 }
 
+// #806: answers must agree with the checker's source scope and actual native lowering.
+static void check_test_program_intrinsic_features(CheckTest* test)
+{
+    uint32_t advertised = 0;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_infos + i;
+        const bool special = strcmp(info->name, "__builtin_assume") == 0 || strcmp(info->name, "__builtin_unpredictable") == 0;
+        const bool implemented = special || check_x86_lower_rule(info->name, info->name_length) != NULL ||
+                                 cbuiltin_x86_helper_kind(info->name, info->name_length) != CBUILTIN_X86_HELPER_NONE;
+        const bool expected = builtin_intrinsic_own_main_prototype_in_scope(info->name, info->name_length) && implemented;
+        const bool actual = cbuiltin_source_intrinsic((const uint8_t*)info->name, info->name_length);
+        char description[192];
+        snprintf(description, sizeof(description), "intrinsic query agrees with source scope and native lowering: %s", info->name);
+        check_test_expect(test, actual == expected, description);
+        advertised += actual;
+    }
+    check_test_expect(test, advertised > 100, "native intrinsic capabilities are not an empty or helper-only list");
+}
+
 // Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
 // (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
@@ -1724,6 +1744,7 @@ static void check_test_program_x86_refusals(CheckTest* test)
 // a MASK_UNARY's or MASK_MERGE's both with its mask an operand and with a constant mask of every lane's bit, unmasked.
 static void check_test_program_x86_rows(CheckTest* test)
 {
+    check_test_program_intrinsic_features(test);
     static const uint64_t immediates[] = { 0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 31, 63, 0x1b, 0x80, 0xff };
     static const uint64_t rounds[] = { 4, 8, 9, 10, 11, 12, 15 };
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };

@@ -731,7 +731,8 @@ static bool tier0_test_int128_native(const uint8_t* code, uint32_t length, Tier0
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-static void tier0_test_int128_run_body(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_body(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef void (*Body)(const void*, const void*, void*);
     Body body = 0;
@@ -1230,7 +1231,8 @@ static int64_t tier0_test_int128_long(uint32_t k, uint32_t which)
     return longs[(k + 5 * which) % 8];
 }
 
-static void tier0_test_int128_run_muladd(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_muladd(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef __int128 (*F)(__int128, unsigned __int128, int64_t);
     F f = 0;
@@ -1241,7 +1243,8 @@ static void tier0_test_int128_run_muladd(const void* code, Tier0TestInt128Shared
     }
 }
 
-static void tier0_test_int128_run_stacked(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_stacked(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef unsigned __int128 (*F)(int64_t, int64_t, int64_t, int64_t, int64_t, unsigned __int128);
     F f = 0;
@@ -1253,7 +1256,8 @@ static void tier0_test_int128_run_stacked(const void* code, Tier0TestInt128Share
     }
 }
 
-static void tier0_test_int128_run_caller(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_caller(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef __int128 (*F)(__int128);
     F f = 0;
@@ -1424,7 +1428,8 @@ static void tier0_test_int128_functions(Tier0TestTally* tally, const Tier0TestIn
 // ---------------------------------------------------------------------------------------------------------------------
 // The memory classes' slots
 
-static void tier0_test_int128_run_slots(const void* code, Tier0TestInt128Shared* shared)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void tier0_test_int128_run_slots(const void* code, Tier0TestInt128Shared* shared)
 {
     typedef void (*F)(void*);
     F f = 0;

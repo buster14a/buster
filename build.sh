@@ -21,6 +21,13 @@
 # print-compile-flags and print-sources print expanded compile arguments and source paths as NUL-delimited argv,
 # without building. Consumers read arrays rather than reevaluating shell text from this script.
 set -e
+# Fuzzing is opt-in. Its entry source defines buster_fuzz_test_input and is
+# included where the compiler's normal entry point has access to its modules.
+case "${BUSTER_FUZZ_AVAILABLE:-0}" in
+    0) [ -z "${BUSTER_FUZZ_ENTRY:-}" ] || { echo 'build.sh: BUSTER_FUZZ_ENTRY requires BUSTER_FUZZ_AVAILABLE=1' >&2; exit 1; } ;;
+    1) BUSTER_SANITIZER=${BUSTER_SANITIZER:-address} ;;
+    *) echo 'build.sh: BUSTER_FUZZ_AVAILABLE must be 0 or 1' >&2; exit 1 ;;
+esac
 sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_checker.c src/buster/compiler/main_unit_check_builtins.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c src/buster/compiler/tier1_select_benchmark.c src/buster/compiler/tier1_model_measure.c)
 flags=(-march="${BUSTER_HOST_ARCH:-native}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror)
 # The target-query defaults follow the Clang driver used to build this compiler.
@@ -45,6 +52,44 @@ case "${BUSTER_DEBUG_INFO-1}" in
     0) debug=() ;;
     *) echo "build.sh: BUSTER_DEBUG_INFO must be 0 or 1" >&2; exit 1 ;;
 esac
+# Sanitizer builds keep the production semantics (-fwrapv, unsigned char and
+# aliasing) and instrument every unit and the final link with the same flags.
+# TSan requires PIE; use it for all diagnostic builds. Keep the ordinary fixed
+# address executable and its benchmark layout unchanged.
+sanitizer_flags=()
+link_mode=(-no-pie)
+case "${BUSTER_SANITIZER:-none}" in
+    none) ;;
+    address) sanitizer_flags=(-fsanitize=address,undefined,bounds -fsanitize-address-use-after-scope -fsanitize-address-use-after-return=always) ;;
+    undefined) sanitizer_flags=(-fsanitize=undefined,bounds) ;;
+    thread) sanitizer_flags=(-fsanitize=thread) ;;
+    memory) sanitizer_flags=(-fsanitize=memory -fsanitize-memory-track-origins=2) ;;
+    *) echo 'build.sh: BUSTER_SANITIZER must be none, address, undefined, thread or memory' >&2; exit 1 ;;
+esac
+if [ "${BUSTER_SANITIZER:-none}" != none ]; then
+    [ -z "${BUSTER_HOST_RUNTIME:-}" ] || { echo 'build.sh: sanitizers require the host runtime, not BUSTER_HOST_RUNTIME' >&2; exit 1; }
+    sanitizer_flags+=(-fno-sanitize-recover=all -fno-sanitize-trap=all -fno-omit-frame-pointer -fno-optimize-sibling-calls -fPIE)
+    flags+=("${sanitizer_flags[@]}")
+    case "${BUSTER_SANITIZER_OPTIMIZATION:-3}" in
+        1|2|3) optimization="-O${BUSTER_SANITIZER_OPTIMIZATION:-3}" ;;
+        *) echo 'build.sh: BUSTER_SANITIZER_OPTIMIZATION must be 1, 2 or 3' >&2; exit 1 ;;
+    esac
+    debug=(-gline-tables-only)
+    link_mode=(-pie)
+fi
+fuzz_libraries=()
+if [ "${BUSTER_FUZZ_AVAILABLE:-0}" = 1 ]; then
+    [ "${BUSTER_SANITIZER:-none}" != thread ] || { echo 'build.sh: libFuzzer cannot be combined with ThreadSanitizer' >&2; exit 1; }
+    fuzz_entry=$(realpath "${BUSTER_FUZZ_ENTRY:-src/buster/compiler/fuzz.c}")
+    [[ -f "$fuzz_entry" && "$fuzz_entry" != *[\"\\]* && "$fuzz_entry" != *$'\n'* ]] || { echo 'build.sh: BUSTER_FUZZ_ENTRY must name a C file without quotes, backslashes or newlines' >&2; exit 1; }
+    # Clang's per-target runtime directory holds it (the official releases' only layout); older layouts name the
+    # architecture in the file.
+    fuzz_runtime="$(clang -print-runtime-dir)/libclang_rt.fuzzer_no_main.a"
+    [[ -f "$fuzz_runtime" ]] || fuzz_runtime=$(clang -print-file-name=libclang_rt.fuzzer_no_main-x86_64.a)
+    [[ "$fuzz_runtime" = /* && -f "$fuzz_runtime" ]] || { echo 'build.sh: Clang libFuzzer no-main runtime is missing' >&2; exit 1; }
+    flags+=(-fsanitize=fuzzer-no-link -DBUSTER_FUZZ_AVAILABLE=1 "-DBUSTER_FUZZ_ENTRY=\"$fuzz_entry\"")
+    fuzz_libraries=("$fuzz_runtime" -lstdc++ -pthread)
+fi
 # The order the compiles start in, each source's file name once, the longest first by their times on the 9700X (#270):
 # the build runs at most one compile per core (cores, below), so a long one that started late would make it wait for
 # it. A new source goes where its time puts it.
@@ -98,7 +143,9 @@ cores()
 }
 capture()
 {
-    clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" "$1" -o "$2"
+    # This is the source call graph. Sanitizer/coverage-generated globals and
+    # runtime calls are not compiler state or source recursion.
+    clang -S -emit-llvm "$optimization" -Xclang -disable-llvm-passes "${flags[@]}" -fno-sanitize=all "$1" -o "$2"
 }
 # The temporary directories, removed on exit, and the processes each_source runs, which an interrupt stops too.
 temporary=()
@@ -186,10 +233,10 @@ link_program()
         [ "${BUSTER_HOST_ARCH:-native}" = x86-64 ] || { echo 'build.sh: BUSTER_HOST_RUNTIME requires BUSTER_HOST_ARCH=x86-64' >&2; return 1; }
         local library="$BUSTER_HOST_RUNTIME/usr/lib/x86_64-linux-gnu"
         local support="$BUSTER_HOST_RUNTIME/usr/lib/gcc/x86_64-linux-gnu/15/libgcc.a"
-        clang -no-pie -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
+        clang "${link_mode[@]}" -nostdlib "${linker_flags[@]}" "$library/crt1.o" "$library/crti.o" "$@" \
             "$library/libm.so.6" "$library/libc.so.6" "$support" "$library/crtn.o" -o "$output"
     else
-        clang -no-pie "${linker_flags[@]}" "$@" -lm -ldl -o "$output"
+        clang "${link_mode[@]}" "${sanitizer_flags[@]}" "${linker_flags[@]}" "$@" "${fuzz_libraries[@]}" -lm -ldl -o "$output"
     fi
 }
 
@@ -267,6 +314,10 @@ select_linker()
 defines=()
 if [ "$1" = print-compile-flags ]; then
     printf '%s\0' "${debug[@]}" "${flags[@]}" "$optimization" "${defines[@]}"
+elif [ "$1" = print-sanitizer-flags ]; then
+    if [ "${#sanitizer_flags[@]}" -ne 0 ]; then
+        printf '%s\0' "$optimization" "${debug[@]}" "${sanitizer_flags[@]}" "${link_mode[@]}"
+    fi
 elif [ "$1" = print-sources ]; then
     printf '%s\0' "${sources[@]}"
 elif [ "$1" = check-call-graph ]; then
