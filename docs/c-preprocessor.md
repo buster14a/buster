@@ -1301,7 +1301,18 @@ decisions in #154 and on #117's configuration):
   with the checker's frozen source scope; the full Clang recognition catalog
   is not an implementation list. The fourteen fortified libc builtins reuse
   the checker's separate exact-name admission table and ordinary native call
-  path (#803); none has a source constant-expression capability.
+  path (#803); none has a source constant-expression capability. An
+  implemented builtin answers 1 only where clang 23 makes it one, as clang's
+  `__has_builtin` decides (#148): the language modes of its row in clang's
+  table (`__builtin_c23_va_start` in C23 alone; a GNU mode's, Microsoft's and
+  the other languages' rows; `pp_builtin_language`) and its required target
+  features, the row's expression of clang's feature names evaluated against
+  the unit's features as clang resolves them from `-march` and the `-m` flags
+  (`pp_builtin_features`, with `c_builtin_intrinsic_features.c`'s evaluator).
+  So `__builtin_ia32_aadd32` answers 0 at `-march=znver5`, which lacks
+  RAO-INT, as clang's does. `test-preprocessor --clang` compares every one of
+  clang's 3,775 builtin names with `clang -E`'s answer in eleven target and
+  language configurations, and the gates' facts with clang's table.
 - **In the oracle's mode, clang's** (`--clang-features`, #125). That is
   `__has_builtin`, `__has_constexpr_builtin`, `__has_attribute`,
   `__has_c_attribute`, `__has_feature` and `__has_extension`.

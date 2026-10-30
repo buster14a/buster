@@ -94,6 +94,7 @@
 #include "c_builtin_catalog.c"
 #include "c_builtin_fortify.c"
 #include "c_builtin_source_intrinsics.c"
+#include "c_builtin_intrinsic_features.c"
 #include "buster/compiler/x86_target.c"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
@@ -16818,6 +16819,63 @@ static bool pp_target_gnu(const uint8_t* name, uint32_t length)
     return result;
 }
 
+// Whether clang 23 makes a name a builtin of the unit by its row's language modes (`languages`, the token of clang's
+// table: Builtin::Context's builtinIsSupported): ALL_LANGUAGES in every C mode, ALL_GNU_LANGUAGES in GNU's, C23_LANG
+// from C23 on; never the modes buster has no option for (Microsoft's extensions, C2y, coroutines, Objective-C, C++,
+// OpenCL, HLSL, CUDA).
+static bool pp_builtin_language(const PPOptions* options, const char* languages)
+{
+    const bool result = strcmp(languages, "ALL_LANGUAGES") == 0 || (strcmp(languages, "ALL_GNU_LANGUAGES") == 0 && options->language.gnu) ||
+                        (strcmp(languages, "C23_LANG") == 0 && options->language.standard >= 2023);
+    return result;
+}
+
+// Whether a builtin's required target features hold in the unit, which clang's __has_builtin answers by
+// (Builtin::evaluateRequiredTargetFeatures): `features`, an expression of clang's feature names (',' and, '|' or),
+// against the target's features as clang resolves them from -march and the -m flags (predefines_resolve), each of
+// c_predefines.c's names available or not, as clang's feature map has them. An empty expression requires nothing.
+// Only an x86 builtin's has features, and headers query none, so the table is made for each query rather than kept.
+static bool pp_builtin_features(const PPOptions* options, const char* features)
+{
+    bool result = features[0] == 0;
+    if (!result)
+    {
+        PredefinesFeatures resolved;
+        int32_t cpu;
+        // The options resolved when they were parsed (pp_parse_options' predefines_target), so they do again.
+        predefines_resolve(&options->predefines, &resolved, &cpu);
+        CBuiltinIntrinsicFeature table[BUSTER_ARRAY_LENGTH(predefines_features)];
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_features); i += 1)
+        {
+            table[i] = (CBuiltinIntrinsicFeature){
+                .name = predefines_features[i].name,
+                .name_length = (uint32_t)strlen(predefines_features[i].name),
+                .available = predefines_has(resolved, i),
+            };
+        }
+        CBuiltinIntrinsicFeatureFrame frames[8];
+        result = c_builtin_intrinsic_features_evaluate(features, (uint32_t)strlen(features), table, BUSTER_ARRAY_LENGTH(table), frames,
+                                                       BUSTER_ARRAY_LENGTH(frames)) == CBUILTIN_INTRINSIC_FEATURE_AVAILABLE;
+    }
+    return result;
+}
+
+// buster's __has_builtin of a name (#806, #148): 1 for a builtin it implements, its source checking and Tier 0 lowering
+// shipped (the catalog's source capability, the x86 intrinsics' rows and leaves, the fortified builtins and its own
+// queries), that clang makes a builtin of the unit by its language modes and whose required target features hold
+// there, as clang answers (pp_builtin_language, pp_builtin_features).
+static uint32_t pp_implemented_builtin_query(const PPOptions* options, const uint8_t* name, uint32_t length)
+{
+    const CBuiltinSourceScope* scope = cbuiltin_source_scope(name, length);
+    const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) && pp_builtin_language(options, cbuiltin_languages(name, length));
+    const bool intrinsic =
+        cbuiltin_source_intrinsic(name, length) && pp_builtin_language(options, scope->languages) && pp_builtin_features(options, scope->features);
+    const uint32_t result =
+        pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, options->language.standard) | catalog |
+        intrinsic | cbuiltin_fortify_source(name, length);
+    return result;
+}
+
 // A feature query's answer for `name`: clang's (`options->clang_features`, the oracle's mode) or what buster implements.
 // The sanitizer features follow the sanitizers the options leave on (c_predefines.c's predefines_sanitizer_feature). The
 // target queries answer for the target triple in both modes, as clang's read a name: case aside, and the operating
@@ -16839,13 +16897,12 @@ static uint32_t pp_feature(const PPOptions* options, PPBuiltin builtin, const ui
             break;
         case PP_BUILTIN_HAS_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
-                           : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard) |
-                                 cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) | cbuiltin_source_intrinsic(name, length) |
-                                 cbuiltin_fortify_source(name, length);
+                           : pp_implemented_builtin_query(options, name, length);
             break;
         case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
             result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard)
-                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR);
+                           : cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) &&
+                                 pp_builtin_language(options, cbuiltin_languages(name, length));
             break;
         case PP_BUILTIN_HAS_FEATURE:
             result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) | sanitizer

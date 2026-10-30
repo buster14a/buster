@@ -4812,9 +4812,34 @@ teams release them, so that each operation pays for its scratch as a command
 does. Dispatch/completion synchronization is separate from the barriers inside
 an operation.
 
-`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link`, the
-output modes of `benchmark-executable` and `link-foreign` own teams:
-`link-foreign`'s resolution, conversion and write share one (#501). Each
+**The session owns the threads** of the compiler's commands (#905): the C
+driver's and `link-foreign`'s. A session (`lane_session_run`) is the process's
+lanes, created once, after the command's options and before it reads any input,
+the calling thread lane 0, as many as the command may take, none for one; every
+lane runs the command's flow, lane 0 its serial parts while the others sleep at
+once on the futex (`lane_park`), and each wide part on the lanes it pays for and
+the worker budget gives (`lane_narrow`), which meet at the narrowed group's sync.
+Under a session nothing creates a thread: `lane_run` runs a region of lane 0's
+on the lanes that serve it (`lane_serve`, for a flow that is still serial code
+with `lane_run` calls), or a lane's operation alone, and a team, a cold group of
+several or a second session is refused. Its lanes start with the asynchronous
+signals blocked, so a signal sent to the process reaches lane 0. A lazy session
+(`BUSTER_LANE_SESSION_LAZY`, the compiler's commands') takes the threads'
+creation off lane 0's path: lane 0 creates lane 1 alone and runs the flow, and
+lane 1 creates the others and opens the gate they wait at, or closes it if one
+can't start; lane 0 learns which (`lane_session_settle`) before it first meets
+them. A session whose
+lanes can't start runs the flow on lane 0 alone and never tries again; a
+terminal command's lanes stay parked when its flow ends, for the process's exit
+to end them (a sanitizer build joins them), and a test's are joined. The
+RAD Debugger's GUI keeps its asynchronous lanes for the process's life the same
+way, but always starts at least one thread, and its main thread isn't one of
+them; radbin, like a session, runs its whole program on its lanes, but on
+threads it starts, its main thread waiting.
+
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
+output modes of `benchmark-executable` own teams; `link-foreign` owned one, for
+its resolution, conversion and write (#501), until its session. Each
 handler starts and stops its team in the translation unit that runs the
 operations: the
 benchmarks' units have thread-local contexts of their own, beside the one

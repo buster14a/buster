@@ -345,7 +345,9 @@ static InterpreterStatus ir_interpreter_anchors(const IrInterpreterIncoming* inc
     return status;
 }
 
-static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, Arena* arena)
+// `checked` marks the program's functions verified so far in this execution: a function's IR doesn't change while it
+// runs, so each is verified once, at its first frame, rather than at every call (#134 runs C programs' recursions).
+static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, uint8_t* checked, Arena* arena)
 {
     const IrFunction* function = program->functions[function_index].function;
     const uint64_t mark = arena->length;
@@ -353,7 +355,8 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
     {
-        verified = ir_verify_complete(function, arena, false);
+        verified = checked[function_index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena, false);
+        checked[function_index] = verified.error == IR_OK;
     }
     if (verified.error == IR_ERROR_MEMORY)
     {
@@ -493,14 +496,21 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
     const uint32_t result_size = records != 0 ? records->result_size : 0;
     const bool hidden = own != 0 && target->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool registers = own != 0 && target->result_size != 0;
-    const uint32_t named = call.parameter_count;
+    // A variadic call that takes all its arguments as named (IrCall.parameter_count) is the IR lowered from a typed stream,
+    // which doesn't keep which are (#134 runs C programs' IR): its named arguments are its callee's parameters, its first.
+    // The rest are unnamed, which a variadic definition's frame reads, and a callee without one (a variadic function that
+    // never calls va_start, or a function C calls without a prototype, which passes its arguments as a variadic call
+    // does) ignores.
+    const bool all_named = call.parameter_count == call.argument_count;
+    const uint32_t named = call.variadic && all_named && target->parameter_count >= (uint32_t)hidden ? target->parameter_count - hidden : call.parameter_count;
     // The call's argument area's alignment, rsp's at the call: the records' (or 16 for a call without them, whose stack
     // arguments are scalars), or the callee's incoming frame's where that says more. A stack argument lies there at a
     // multiple of its alignment, which a copy of it must keep.
     const uint8_t call_alignment = records != 0 ? records->call.stack_alignment_log2 : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
     const uint8_t larger = call_alignment > target->incoming.stack_alignment_log2 ? call_alignment : target->incoming.stack_alignment_log2;
     const uint8_t alignment_log2 = larger > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? larger : (uint8_t)BUSTER_ABI_STACK_ALIGNMENT_LOG2;
-    bool valid = call.variadic == target->variadic && target->parameter_count == named + hidden && !(hidden && registers) && alignment_log2 <= BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2;
+    bool valid = (call.variadic || !target->variadic) && named <= call.argument_count && (call.variadic || named == call.argument_count) &&
+                 target->parameter_count == named + hidden && !(hidden && registers) && alignment_log2 <= BUSTER_IR_INTERPRETER_MAX_STACK_ALIGNMENT_LOG2;
     valid = valid && (hidden || registers ? call.result_type == IR_VOID && (result_size != 0 || !hidden) && (result_size == 0 || records->call.result.kind == target->result_abi.kind) &&
                                                 (!registers || target->result_type == IR_PTR)
                                           : result_size == 0 && call.result_type == target->result_type);
@@ -860,6 +870,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     const InterpreterOptions* options = requested_options == 0 ? &defaults : requested_options;
     const uint64_t mark = arena->length;
     IrInterpreterFrame* frames = 0;
+    uint8_t* checked = 0;
     InterpreterRuntime runtime = {
         .memory_capacity = options->max_memories,
         .check_memory = options->check_memory,
@@ -872,7 +883,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     {
         frames = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterFrame, options->max_frames);
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterMemory, options->max_memories);
-        result.status = options->max_frames == 0 || options->max_frames == UINT32_MAX ? INTERPRETER_FRAME_LIMIT : frames == 0 || runtime.memories == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
+        checked = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)program->function_count + 1);
+        result.status = options->max_frames == 0 || options->max_frames == UINT32_MAX ? INTERPRETER_FRAME_LIMIT : frames == 0 || runtime.memories == 0 || checked == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
+        if (checked != 0)
+        {
+            memset(checked, 0, (uint64_t)program->function_count + 1);
+        }
     }
     for (uint32_t b = 0; result.status == INTERPRETER_OK && b < program->binding_count; b += 1)
     {
@@ -896,7 +912,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             // An entry has no call whose records would place its aggregates (#131).
             const IrFunction* function = program->functions[first].function;
             result.status = function != 0 && function->parameter_passed != 0 ? INTERPRETER_INVALID
-                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, arena);
+                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, checked, arena);
             if (result.status == INTERPRETER_OK)
             {
                 depth = 1;
@@ -1115,7 +1131,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         };
                         if (target != 0)
                         {
-                            target_check = ir_verify_complete(target, arena, false);
+                            target_check = checked[callee] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(target, arena, false);
+                            checked[callee] = target_check.error == IR_OK;
                         }
                         if (target_check.error == IR_ERROR_MEMORY)
                         {
@@ -1136,7 +1153,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         if (result.status == INTERPRETER_OK)
                         {
                             result.status = ir_interpreter_frame(&frames[depth], program, callee, parameters, target->parameter_count, target->variadic ? &incoming : 0, i, depth + 1, options,
-                                                                 active_values, active_locals, &runtime, arena);
+                                                                 active_values, active_locals, &runtime, checked, arena);
                             if (result.status == INTERPRETER_OK)
                             {
                                 // The new frame owns its copied arguments and the staging storage preceding them.
@@ -1151,6 +1168,22 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     }
                     else if (result.status == INTERPRETER_OK && native != 0)
                     {
+                        // The typed stream's pointers are I64s, and so are those of the IR lowered from it (#134 runs C
+                        // programs' IR): a flagged native's pointer operands and result are taken as pointers, as the
+                        // typed front takes its U64s (interpreter.c), so that its bookkeeping applies.
+                        const uint32_t flags = native->flags;
+                        const bool pointer_result = flags == BUSTER_INTERPRETER_NATIVE_ALLOCATE || flags == BUSTER_INTERPRETER_NATIVE_CALLOC ||
+                                                    flags == BUSTER_INTERPRETER_NATIVE_REALLOCATE || flags == BUSTER_INTERPRETER_NATIVE_COPY || flags == BUSTER_INTERPRETER_NATIVE_SET;
+                        const bool pointer_first = flags == BUSTER_INTERPRETER_NATIVE_FREE || flags == BUSTER_INTERPRETER_NATIVE_REALLOCATE ||
+                                                   flags == BUSTER_INTERPRETER_NATIVE_COPY || flags == BUSTER_INTERPRETER_NATIVE_SET;
+                        if (call.argument_count != 0 && pointer_first && types[0] == IR_I64)
+                        {
+                            types[0] = IR_PTR;
+                        }
+                        if (call.argument_count > 1 && flags == BUSTER_INTERPRETER_NATIVE_COPY && types[1] == IR_I64)
+                        {
+                            types[1] = IR_PTR;
+                        }
                         const InterpreterNativeRequest request = {
                             .binding = native,
                             .types = types,
@@ -1158,7 +1191,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             .arguments = passed,
                             .argument_count = call.argument_count,
                             .named_count = call.parameter_count,
-                            .result_type = call.result_type,
+                            .result_type = pointer_result && call.result_type == IR_I64 ? IR_PTR : call.result_type,
                             .variadic = call.variadic,
                             .runtime = &runtime,
                             .abi = records != 0 ? &records->call : 0,

@@ -237,6 +237,23 @@ struct CheckEmitBoard
     CheckEmitShare shares[BUSTER_LANE_MAX_COUNT];
 };
 
+// A unit's emission in its command's flow (#905, the C driver's): lane 0 runs the unit's stages alone, and each of its
+// emissions that pays for more than one lane is a round, which lane 0 announces at the flow's rendezvous with the
+// emission's lanes (check_program_emit_round). Every lane of the flow runs the round's wide part
+// (check_program_emit_wide), the first `lanes` of them the bodies' parts (check_program_emit_lane), and lane 0 goes on
+// alone. The others follow the rounds (check_program_emit_follow) until lane 0 announces the flow's end
+// (check_program_emit_flow_end).
+typedef struct CheckEmitFlow CheckEmitFlow;
+struct CheckEmitFlow
+{
+    // The flow's group, which lane 0 leaves to run alone (check_program_emit_flow_begin).
+    Lane group;
+    // The emission of the round lane 0 announced last. Only the round's lanes read it, before they arrive at the round's
+    // end, which lane 0 waits for before it writes another (lane_widen); the lanes a round leaves out read nothing but
+    // the announcement, and may still be on their way to the next one when lane 0 writes.
+    struct CheckEmitRun* run;
+};
+
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
 // functions' bytes (`bytes`).
@@ -280,6 +297,9 @@ struct CheckProgramLanes
     CheckEmitBoard* board;
     uint32_t board_lane;
     uint32_t board_pause_microseconds;
+    // In a command's flow (#905), its rounds' rendezvous: the emission's lanes are rounds of the flow's lanes rather
+    // than a lane_run of its own. Null elsewhere.
+    CheckEmitFlow* flow;
     // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
     // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
     // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
@@ -703,6 +723,60 @@ static void check_program_emit_lane(void* argument)
     if (index == 0)
     {
         run->part_count = (uint32_t)parts;
+    }
+}
+
+// Lane 0 of a command's flow: runs the unit's stages alone from here (CheckEmitFlow).
+static void check_program_emit_flow_begin(CheckEmitFlow* flow)
+{
+    flow->group = lane_alone();
+}
+
+// Lane 0: the flow's end, at which the other lanes' check_program_emit_follow returns: none if the session's lanes didn't
+// start (lane_session_settle).
+static void check_program_emit_flow_end(CheckEmitFlow* flow)
+{
+    if (lane_session_settle() > 1)
+    {
+        lane_restore(flow->group);
+        lane_park_broadcast(0, 0);
+    }
+}
+
+// A round's wide part, on every lane of the flow: its first `lanes` lanes take the bodies' parts.
+static void check_program_emit_wide(CheckEmitFlow* flow, uint32_t lanes)
+{
+    if (lane_narrow(lanes))
+    {
+        check_program_emit_lane(flow->run);
+    }
+    lane_widen();
+}
+
+// Lane 0, alone in the flow: a round of the emission `run` on `lanes` of the flow's lanes (at least 1), after which it
+// goes on alone. Its first round learns how the session's lanes started (lane_session_settle): false if they didn't, for
+// the bodies to go on one lane.
+static bool check_program_emit_round(CheckEmitFlow* flow, CheckEmitRun* run, uint32_t lanes)
+{
+    const bool started = lane_session_settle() > 1;
+    if (started)
+    {
+        const Lane alone = lane_alone();
+        lane_restore(flow->group);
+        flow->run = run;
+        lane_park_broadcast(lanes, 0);
+        check_program_emit_wide(flow, lanes);
+        lane_restore(alone);
+    }
+    return started;
+}
+
+// The flow's other lanes: each round's wide part, on the lanes its announcement gives, until lane 0 ends the flow (0).
+static void check_program_emit_follow(CheckEmitFlow* flow)
+{
+    for (uint64_t lanes = lane_park_broadcast(0, 0); lanes != 0; lanes = lane_park_broadcast(0, 0))
+    {
+        check_program_emit_wide(flow, (uint32_t)lanes);
     }
 }
 
@@ -1318,6 +1392,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (board != NULL)
             {
                 check_program_emit_shared(&run, board, lanes->board_lane, active, lanes->board_pause_microseconds);
+            }
+            else if (lanes->flow != NULL)
+            {
+                // The flow's lanes (#905), which a lazy session's lane 1 has been starting meanwhile: a round of them, or
+                // if they didn't start, the bodies again on one lane.
+                again = check_program_emit_round(lanes->flow, &run, active) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
             }
             else
             {

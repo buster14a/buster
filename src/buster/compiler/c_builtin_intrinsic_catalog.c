@@ -134,7 +134,7 @@ static __attribute__((unused)) bool builtin_intrinsic_own_main_x86_in_scope(cons
 // The own-main workload inventory and its tests remain unchanged.
 static __attribute__((unused)) bool builtin_intrinsic_immediate_in_scope(const char* name, uint32_t length)
 {
-#define BUSTER_CBUILTIN_IMMEDIATE_NAME(n) { n, sizeof(n) - 1 },
+#define BUSTER_CBUILTIN_IMMEDIATE_NAME(n, f) { n, sizeof(n) - 1 },
     static const BuiltinIntrinsicName names[] = {
 #include "c_builtin_immediate_scope.inc"
     };
