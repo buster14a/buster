@@ -743,11 +743,13 @@ static void asm_test_targets(AsmTest* test)
     {
         const bool avx2 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX2)) != 0 : architecture >= X86_ARCH_V3;
         const bool avx512 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0 : architecture >= X86_ARCH_V4;
+        const uint64_t mask_features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
+        const bool masks = architecture == X86_ARCH_NATIVE ? (native.features & mask_features) == mask_features : architecture >= X86_ARCH_V4;
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvmovdqa32 zmm0,[rax]\nvpsubd zmm0,zmm1,zmm2\n"), avx512, architecture);
-        asm_test_pair(test, (String8){.pointer = (char*)asm_test_kmov, .length = sizeof(asm_test_kmov) - 1}, avx512, architecture);
+        asm_test_pair(test, (String8){.pointer = (char*)asm_test_kmov, .length = sizeof(asm_test_kmov) - 1}, masks, architecture);
         for (uint32_t i = 0; i < test->index->begin[BUSTER_X86_MATCH_BUCKETS]; i += 1)
         {
             asm_test_check(test, x86_target_form_allowed(test->index->allowed, test->index->forms[i]), "all indexed records eligible", 0);
