@@ -720,7 +720,16 @@ Mutations of the tables, each built and run once, are caught. Among them:
     AVX-512VNNI's;
   - SHA512's vsha512msg1, vsha512msg2 and vsha512rnds2 and SM3's vsm3msg1 and
     vsm3msg2, which modify their first operand, and AVX10.2's EVEX forms of
-    SM4's vsm4key4 and vsm4rnds4 of 64 bytes.
+    SM4's vsm4key4 and vsm4rnds4 of 64 bytes;
+  - AVX10.2's saturating conversions with truncation (vcvttps2dqs to
+    vcvttpd2uqqs), as the AVX-512 ones they saturate; its bf16 operations
+    (vscalefbf16, vgetexpbf16, vrcpbf16, vrsqrtbf16, vmaxbf16 and vminbf16),
+    without MXCSR or exceptions, as vcvtneps2bf16's, and vcomisbf16, as
+    vcomiss; its conversions to and from 8-bit floats (vcvtph2bf8 to
+    vcvt2ph2hf8s and vcvthf82ph), without MXCSR or exceptions; and vcvt2ps2phx
+    and vdpphps, which read MXCSR;
+  - MOVRS's vector loads (vmovrsb to vmovrsq), as vmovdqu8's, and AVX512-BMM's
+    vbmacor16x16x16 and vbmacxor16x16x16, which modify their accumulator.
 
 The other VEX and EVEX forms are uncovered, and so are mulx (whose rdx the rows
 can't name, as Tier 0's rows refuse it), v4fmaddps (a register block), APX's
@@ -733,8 +742,9 @@ AVX512-FP16's forms, an extension the table doesn't classify, nor the VEX forms
 of AVX-IFMA and AVX-NE-CONVERT (vpmadd52luq's and vcvtneps2bf16's), features it
 has no bit for. Their rows follow their EVEX and single-precision twins' by
 rule, unexecuted. AVX512VP2INTERSECT's and AVX-VNNI's run on the 9700X alone.
-XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's run on no host
-the tests have (Zen 5 has none of them), nor does the table classify them:
+XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and
+AVX512-BMM's run on no host the tests have (Zen 5 has none of them), nor does
+the table classify them:
 `test-x86-intrinsics` compares the compiler's code of their intrinsics with
 clang's instead (`x86_intrinsics_test.c`).
 

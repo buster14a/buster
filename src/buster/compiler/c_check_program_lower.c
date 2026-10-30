@@ -7256,11 +7256,21 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
             constants &= a == BUSTER_CHECK_X86_NO_IMMEDIATE;
         }
     }
+    // A MASK_UNARY's or MASK_MERGE's mask, its last argument before a rounding control, where it is a constant.
+    uint64_t mask = 0;
+    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) &&
+        count > (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u))
+    {
+        const uint32_t a = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        CheckValue value = stream->values[graph->argument_nodes[first + a]];
+        check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
+        mask = value.constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)value.integer : 0;
+    }
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
-                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
+                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
     if (reduce)
