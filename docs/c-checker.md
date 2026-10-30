@@ -2001,6 +2001,14 @@ What the lowering covers past scalars (#145's programs):
     masked intrinsics use the existing masked byte selection. The opcode and
     result/effect traces are compared with clang by `test-x86-intrinsics`;
     no runtime result is claimed on a host without AVX512-BMM.
+  - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
+    counts, masking the original counts modulo eight. Their two halves are
+    shifted separately and combined with VPOR; splitting the complementary
+    shift into one and seven minus the count discards that half for a zero
+    count. Repeated-byte constants are extra row operands. Distinct halves,
+    signed inputs and `_mm_rot_epi8`'s identical halves are checked against
+    clang; native execution requires XOP. Other widths and targets lacking
+    XOP retain named refusals.
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a

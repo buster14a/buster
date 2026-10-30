@@ -7580,7 +7580,7 @@ static uint32_t check_lower_brain_negations(const CheckProgram* program, uint32_
 // - a conversion's vector, or where it converts a shuffle's first elements in place (the intrinsics' conversions of a
 //   vector's low elements: a shuffle of fewer than 16 bytes that Tier 0 has no class for), that shuffle's first vector,
 //   its second one having no effects;
-// - an elementwise function's operands;
+// - an elementwise function's operands, then any constant splats its row takes;
 // - a reduction's vector, through its rows, the last one's element converted to the call's type.
 //
 // __builtin_nondeterministic_value gives zeros, without evaluating its operand.
@@ -7732,12 +7732,21 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const uint32_t negated = vectors && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && check_vector_lower_brain(types, result) ?
                                      check_lower_brain_negations(program, first, result) :
                                      0;
-        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows) :
+        uint8_t splats[BUSTER_CHECK_VECTOR_ELEMENTWISE_SPLATS] = { 0 };
+        uint32_t splat_count = 0;
+        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, splats, &splat_count) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                            "elementwise builtins of scalars";
         if (reason == NULL)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
+            for (uint32_t s = splat_count; s-- > 0;)
+            {
+                uint64_t words[8] = { 0 };
+                const uint32_t byte_count = check_lower_vector_of(writer, result);
+                memset(words, splats[s], byte_count);
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, words, byte_count));
+            }
             for (uint32_t a = arguments; a-- > 0;)
             {
                 // A negated operand's negation is the row's form's: its operand in its place.
