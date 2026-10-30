@@ -1548,15 +1548,20 @@ static bool asm_alias(String8* name)
     return found;
 }
 
+// An AT&T mnemonic whose suffix gives its operands' widths: the catalogue's mnemonic, and the source's and the
+// destination's widths.
+typedef struct AsmAttExtension AsmAttExtension;
+struct AsmAttExtension
+{
+    const char* name;
+    const char* canonical;
+    uint8_t source;
+    uint8_t destination;
+};
+
 static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_width)
 {
-    static const struct
-    {
-        const char* name;
-        const char* canonical;
-        uint8_t source;
-        uint8_t destination;
-    } aliases[] =
+    static const AsmAttExtension moves[] =
     {
         {"movzbw", "movzx", 1, 2},
         {"movzbl", "movzx", 1, 4},
@@ -1569,6 +1574,9 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         {"movswl", "movsx", 2, 4},
         {"movswq", "movsx", 2, 8},
         {"movslq", "movsxd", 4, 8},
+    };
+    static const AsmAttExtension x87[] =
+    {
         // The x87's memory widths: s a float's, l a double's and t the 10 bytes of an extended value.
         {"flds", "fld", 4, 4},
         {"fldl", "fld", 8, 8},
@@ -1592,15 +1600,21 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         {"fisttpll", "fisttp", 8, 8},
         {"fisttpq", "fisttp", 8, 8},
     };
+    // A move's extension starts with m and an x87 mnemonic with f, and each scans its own rows alone: every AT&T
+    // instruction comes here, and one scan of all the rows cost each of them about 55 ns on the 9700X once the x87's
+    // integers had theirs (#147).
+    const char letter = name->length != 0 ? name->pointer[0] : 0;
+    const AsmAttExtension* rows = letter == 'f' ? x87 : moves;
+    const uint32_t count = letter == 'f' ? BUSTER_ARRAY_LENGTH(x87) : letter == 'm' ? BUSTER_ARRAY_LENGTH(moves) : 0;
     bool found = false;
-    for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
+    for (uint32_t i = 0; !found && i < count; i += 1)
     {
-        found = x86_match_name(*name, aliases[i].name);
+        found = x86_match_name(*name, rows[i].name);
         if (found)
         {
-            *name = (String8){.pointer = (char*)aliases[i].canonical, .length = strlen(aliases[i].canonical)};
-            *width = aliases[i].destination;
-            *source_width = aliases[i].source;
+            *name = (String8){.pointer = (char*)rows[i].canonical, .length = strlen(rows[i].canonical)};
+            *width = rows[i].destination;
+            *source_width = rows[i].source;
         }
     }
     return found;
