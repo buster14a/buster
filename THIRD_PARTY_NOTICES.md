@@ -17,6 +17,15 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`c_builtin_intrinsic_filter.c`, `c_builtin_intrinsic_filter_hash.h`,
+`c_builtin_intrinsic_filter_test.c` and `tools/generate_builtin_intrinsic_filter.c`
+(#893) are original project code under the default terms. The generated
+`generated/clang_builtin_intrinsic_filter_23_1_1.inc` is a projection of the
+existing reviewed Clang metadata's LLVM name facts and retains its
+Apache-2.0 WITH LLVM-exception terms and provenance. No external implementation
+is imported. Exact initial input and reproduction are recorded in
+`docs/builtin-intrinsic-filter.md`; the underlying LLVM notices remain applicable.
+
 The fortified libc builtin adapter and lowering in `c_builtin_fortify.c`,
 `c_check_program_fortify.c`, their integration changes and original fixtures in
 `c_check_fortify_driver_test.c` (#803) use the project default terms. The existing

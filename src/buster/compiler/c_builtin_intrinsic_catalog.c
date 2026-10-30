@@ -64,6 +64,8 @@ struct BuiltinIntrinsicName
     uint32_t length;
 };
 
+#include "c_builtin_intrinsic_filter.c"
+
 static int builtin_intrinsic_compare(const BuiltinIntrinsicName* name, const BuiltinIntrinsicInfo* info)
 {
     const uint32_t common = name->length < info->name_length ? name->length : info->name_length;
@@ -181,10 +183,11 @@ static __attribute__((unused)) void builtin_intrinsic_lookup_batch(const Builtin
         {
             const uint32_t lanes = count - base < 8 ? count - base : 8;
             int32_t upper_lanes[8] = { 0 };
+            const uint32_t candidates = builtin_intrinsic_filter_candidates(inputs + base, lanes, false);
             for (uint32_t lane = 0; lane < lanes; lane += 1)
             {
                 outputs[base + lane] = 0;
-                upper_lanes[lane] = inputs[base + lane].name != 0 && inputs[base + lane].length != 0 ? BUSTER_BUILTIN_INTRINSIC_COUNT : 0;
+                upper_lanes[lane] = (candidates & (1u << lane)) != 0 ? BUSTER_BUILTIN_INTRINSIC_COUNT : 0;
             }
             __m256i lower = _mm256_setzero_si256();
             __m256i upper = _mm256_loadu_si256((const __m256i*)upper_lanes);

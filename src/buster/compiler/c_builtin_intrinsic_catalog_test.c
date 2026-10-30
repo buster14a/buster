@@ -37,8 +37,11 @@ static void builtin_intrinsic_catalog_test_expect(BuiltinIntrinsicCatalogTest* t
     }
 }
 
+#include "c_builtin_intrinsic_filter_test.c"
+
 static void builtin_intrinsic_catalog_test_inventory(BuiltinIntrinsicCatalogTest* test)
 {
+    builtin_intrinsic_catalog_test_filter(test);
     builtin_intrinsic_catalog_test_expect(test, BUSTER_BUILTIN_INTRINSIC_COUNT == 3775, "exact installed Clang 23.1.1 generic/x86/x86-64 inventory count");
     builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_at(BUSTER_BUILTIN_INTRINSIC_COUNT) == NULL &&
         builtin_intrinsic_at(UINT32_MAX) == NULL, "out-of-range inventory indices miss");
