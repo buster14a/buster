@@ -411,6 +411,12 @@ static bool x86_match_supported(const X86FormDescription* form)
         }
         allowed |= strcmp(name, "vzeroupper") == 0;
     }
+    else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'k')
+    {
+        // Mask moves use VEX without a leading v. The ordinary operand templates already distinguish their mask,
+        // general-register and memory forms; the target table supplies each width's AVX-512 requirement.
+        allowed = strcmp(name, "kmovb") == 0 || strcmp(name, "kmovw") == 0 || strcmp(name, "kmovd") == 0 || strcmp(name, "kmovq") == 0;
+    }
     else if (form->family == BUSTER_X86_FAMILY_EVEX && form->vector_length == 2 && name[0] == 'v')
     {
         // 512-bit floating arithmetic/moves and dword integer arithmetic are AVX-512F. No implicit VL/BW/DQ.
