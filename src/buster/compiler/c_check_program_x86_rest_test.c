@@ -278,6 +278,58 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             "K8(k8,4)K8(0,8)K8(0xff,12)K16(k16,8)K16(0,4)K16(0xffff,12)\n"
             "return (int)h;}",
         },
+        {
+            // The compares of floats at every predicate and past them, where clang's code takes the immediate's low 5 bits
+            // (or a scalar one's whole byte, which the instruction takes so): into vectors, into masks under masks of
+            // none, some and all (the 64-byte ones with a rounding control that clang's code ignores, the scalar ones with
+            // the exceptions' suppression and without), and into ints (vcomiss, vcomisd), of zeros of each sign, equal
+            // values, infinities and NaNs.
+            "x86-rest-float-compares",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "#define P8(F,o,...) F(o+0,__VA_ARGS__)F(o+1,__VA_ARGS__)F(o+2,__VA_ARGS__)F(o+3,__VA_ARGS__)F(o+4,__VA_ARGS__)F(o+5,__VA_ARGS__)F(o+6,"
+            "__VA_ARGS__)F(o+7,__VA_ARGS__)\n"
+            "#define P32(F,...) P8(F,0,__VA_ARGS__)P8(F,8,__VA_ARGS__)P8(F,16,__VA_ARGS__)P8(F,24,__VA_ARGS__)F(32,__VA_ARGS__)F(0x3b,__VA_ARGS__)F(-1,"
+            "__VA_ARGS__)\n"
+            "#define VA(p,N,A,B) __builtin_ia32_##N(A,B,p),\n"
+            "#define MA(p,N,A,B,K) __builtin_ia32_##N(A,B,p,K),\n"
+            "#define MS(p,N,A,B,K,S) __builtin_ia32_##N(A,B,p,K,S),\n"
+            "#define V(N,T,A,B) {T r[]={P32(VA,N,A,B)};FOLD(r);}\n"
+            "#define M(N,A,B,K) {unsigned short r[]={P32(MA,N,A,B,K)};FOLD(r);}\n"
+            "#define MR(N,A,B,K,S) {unsigned short r[]={P32(MS,N,A,B,K,S)};FOLD(r);}\n"
+            "#define C(N,A,B,S) {int r[]={P32(MA,N,A,B,S)};FOLD(r);}\n"
+            "static const float fs[8]={1.5f,-0.0f,0.0f,__builtin_nanf(\"\"),__builtin_inff(),-2.5f,1.5f,-__builtin_inff()};\n"
+            "static const double ds[8]={1.5,-0.0,0.0,__builtin_nan(\"\"),__builtin_inf(),-2.5,1.5,-__builtin_inf()};\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf a4,b4;v8sf a8,b8;v16sf a16,b16;v2df p2,q2;v4df p4,q4;v8df p8,q8;\n"
+            "for(int i=0;i<16;i++){float f=fs[(i+n)&7],g=fs[(i*3+n*5+1)&7];double d=ds[(i+n*3)&7],e=ds[(i*5+n+2)&7];if(i<4){a4[i]=f;b4[i]=g;}if(i<2)"
+            "{p2[i]=d;q2[i]=e;}\n"
+            "if(i<8){a8[i]=g;b8[i]=f;p8[i]=d;q8[i]=e;}if(i<4){p4[i]=e;q4[i]=d;}a16[i]=f;b16[i]=g;}\n"
+            "unsigned long long m=mask(n);unsigned char k8=(unsigned char)m;unsigned short k16=(unsigned short)(m>>8);\n"
+            "V(cmpps,v4sf,a4,b4)V(cmppd,v2df,p2,q2)V(cmpps256,v8sf,a8,b8)V(cmppd256,v4df,p4,q4)V(cmpss,v4sf,a4,b4)V(cmpsd,v2df,p2,q2)\n"
+            "M(cmpps128_mask,a4,b4,k8)M(cmpps128_mask,a4,b4,0xff)M(cmpps128_mask,a4,b4,0)M(cmppd128_mask,p2,q2,k8)M(cmppd128_mask,p2,q2,0xff)\n"
+            "M(cmpps256_mask,a8,b8,k8)M(cmpps256_mask,a8,b8,0xff)M(cmppd256_mask,p4,q4,k8)\n"
+            "MR(cmpps512_mask,a16,b16,k16,4)MR(cmpps512_mask,a16,b16,0xffff,8)MR(cmppd512_mask,p8,q8,k8,8)MR(cmppd512_mask,p8,q8,0xff,4)\n"
+            "MR(cmpss_mask,a4,b4,k8,4)MR(cmpss_mask,a4,b4,0xff,8)MR(cmpsd_mask,p2,q2,k8,12)MR(cmpsd_mask,p2,q2,1,4)\n"
+            "C(vcomiss,a4,b4,4)C(vcomiss,a4,b4,8)C(vcomisd,p2,q2,4)C(vcomisd,p2,q2,8)C(vcomisd,q2,p2,4)\n"
+            "return (int)h;}",
+        },
+        {
+            // AVX512-FP16's compares of halves into masks, at predicates that swap their operands, that clang's code makes
+            // constants and past them, and the scalar one's with the exceptions' suppression: compiled and linked against
+            // clang's build of the same, as no host of the tests runs them; test-x86-intrinsics compares their code.
+            "x86-rest-half-compares",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "typedef _Float16 v8hf __attribute__((vector_size(16)));typedef _Float16 v16hf __attribute__((vector_size(32)));"
+            "typedef _Float16 v32hf __attribute__((vector_size(64)));\n"
+            "__attribute__((target(\"avx512fp16,avx512vl\"))) static unsigned compares(v8hf a,v8hf b,v16hf c,v16hf d,v32hf e,v32hf f,unsigned k)"
+            "{return __builtin_ia32_cmpph128_mask(a,b,0x00,(unsigned char)k)+__builtin_ia32_cmpph128_mask(a,b,0x1e,(unsigned char)k)"
+            "+__builtin_ia32_cmpph256_mask(c,d,0x09,(unsigned short)k)+__builtin_ia32_cmpph256_mask(c,d,0x14,0xffff)"
+            "+__builtin_ia32_cmpph512_mask(e,f,0x0d,k,8)+__builtin_ia32_cmpph512_mask(e,f,0x1f,k,4)+__builtin_ia32_cmpph512_mask(e,f,0x0b,k,4)"
+            "+__builtin_ia32_cmpsh_mask(a,b,0x3b,(unsigned char)k,8)+__builtin_ia32_cmpsh_mask(a,b,-1,(unsigned char)k,4);}\n"
+            "int tested(int n){unsigned h=2166136261u;v8hf a,b;v16hf c,d;v32hf e,f;fill(&a,16,n);fill(&b,16,n+1);fill(&c,32,n+2);fill(&d,32,n+3);"
+            "fill(&e,64,n+4);fill(&f,64,n+5);unsigned r=compares(a,b,c,d,e,f,(unsigned)mask(n));FOLD(r);return (int)h;}",
+            0,
+            true,
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

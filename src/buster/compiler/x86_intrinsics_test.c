@@ -64,7 +64,8 @@ struct X86IntrinsicCase
 // AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), SHA512's, SM3's and SM4's; then AVX10.2's
 // saturating conversions, bf16 operations and compares, conversions to and from 8-bit floats and of two vectors of
 // floats to halves, dot products of halves and sums of absolute differences of 64 bytes' blocks (#148: the probe's
-// function of _mm512_mpsadbw_epu8, a macro of a constant immediate), MOVRS's vector loads and AVX512-BMM's products of
+// function of _mm512_mpsadbw_epu8, a macro of a constant immediate, and AVX512-FP16's compares, by predicates whose
+// operands clang's code swaps and with the exceptions' suppression), MOVRS's vector loads and AVX512-BMM's products of
 // bit matrices; then the system instructions of extensions no host of the tests has, or whose effects are on the
 // machine's state (a transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE,
 // SERIALIZE, UINTR's, PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's,
@@ -464,6 +465,10 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_Y(_mm256_dpph_ps)
     BUSTER_X86_INTRINSIC_X(_mm_dpph_ps)
     BUSTER_X86_INTRINSIC_Z(buster_intrinsic_mpsadbw512)
+    BUSTER_X86_INTRINSIC_B(buster_intrinsic_cmp_ph128)
+    BUSTER_X86_INTRINSIC_H(buster_intrinsic_mask_cmp_ph256)
+    BUSTER_X86_INTRINSIC_I(buster_intrinsic_cmp_round_ph512)
+    BUSTER_X86_INTRINSIC_B(buster_intrinsic_mask_cmp_round_sh)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi16)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi32)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi64)
@@ -583,7 +588,8 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 
 // The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, byte
 // funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves, and a macro's intrinsic of an immediate
-// (AVX10.2's sums of absolute differences of 64 bytes' blocks), whose address a case takes through a function.
+// (AVX10.2's sums of absolute differences of 64 bytes' blocks, AVX512-FP16's compares), whose address a case takes
+// through a function.
 static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_sub_ab(__m128i a, __m128i b) { return _mm_sub_epi32(a, b); }\n"
                                                     "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n"
                                                     "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshl_bytes(__m128i a,__m128i b,__m128i c)"
@@ -591,7 +597,15 @@ static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_su
                                                     "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshr_bytes(__m128i a,__m128i b,__m128i c)"
                                                     "{return (__m128i)__builtin_elementwise_fshr((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
                                                     "__attribute__((target(\"avx10.2\"))) __m512i buster_intrinsic_mpsadbw512(__m512i a,__m512i b)"
-                                                    "{return _mm512_mpsadbw_epu8(a,b,0x2d);}\n";
+                                                    "{return _mm512_mpsadbw_epu8(a,b,0x2d);}\n"
+                                                    "__attribute__((target(\"avx512fp16,avx512vl\"))) __mmask8 buster_intrinsic_cmp_ph128(__m128h a,__m128h b)"
+                                                    "{return _mm_cmp_ph_mask(a,b,_CMP_GT_OQ);}\n"
+                                                    "__attribute__((target(\"avx512fp16,avx512vl\"))) __mmask16 buster_intrinsic_mask_cmp_ph256(__mmask16 k,__m256h a,"
+                                                    "__m256h b){return _mm256_mask_cmp_ph_mask(k,a,b,_CMP_NGE_UQ);}\n"
+                                                    "__attribute__((target(\"avx512fp16\"))) __mmask32 buster_intrinsic_cmp_round_ph512(__m512h a,__m512h b)"
+                                                    "{return _mm512_cmp_round_ph_mask(a,b,_CMP_NEQ_US,_MM_FROUND_NO_EXC);}\n"
+                                                    "__attribute__((target(\"avx512fp16\"))) __mmask8 buster_intrinsic_mask_cmp_round_sh(__mmask8 k,__m128h a,__m128h b)"
+                                                    "{return _mm_mask_cmp_round_sh_mask(k,a,b,_CMP_GE_OS,_MM_FROUND_NO_EXC);}\n";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The objects

@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 427 audited SemaX86 constraint facts for 405
+`c_check_builtin_x86.c` adds 450 audited SemaX86 constraint facts for 422
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 87
-rounding sets, 83 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 251 direct ranges.
+rounding sets, 90 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -847,7 +847,21 @@ the existing families or of new ones:
   `fixupimmsd_maskz`, the ternary family's, merged into a or zeroed). The
   64-byte and scalar ones take the exceptions' suppression their last argument
   asks for; a scalar one's immediate follows its mask (but getmant's), which
-  the lowering finds past it.
+  the lowering finds past it;
+- the compares of floats by a predicate: into vectors (`cmpps`, `cmppd`,
+  `cmpss`, `cmpsd`, `cmpps256`, `cmppd256`, VEX's VCMPPS to VCMPSD), into masks
+  under masks (`cmpps128_mask` to `cmpsd_mask`, and AVX512-FP16's
+  `cmpph128_mask` to `cmpsh_mask`) and into ints (`vcomiss` and `vcomisd`, as
+  `vcomish`: VCMPSS's and VCMPSD's opmask bit). A packed one's predicate is
+  clang's code's: CGBuiltin's fcmp of the immediate's low 4 bits ignores the
+  predicate's signaling, and LLVM selects that fcmp with the operands swapped
+  for a greater-than (ULT as NLE, ULE as NLT, OGE as LE, OGT as LT), so the
+  lowering does the same (`check_x86_lower_float_predicate`; FALSE and TRUE,
+  which clang's code makes constants, are the instruction's predicates of
+  them), and clang's code ignores a 64-byte one's rounding control. A scalar
+  one's predicate is the immediate's whole byte, as clang's code passes it
+  (`vcomiss`'s and `vcomisd`'s its low 5 bits, as `vcomish`'s, all the
+  instruction reads), with the exceptions' suppression it asks for.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

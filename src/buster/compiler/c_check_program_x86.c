@@ -13,7 +13,8 @@
 
 typedef enum CheckX86LowerFamily
 {
-    // (vector a, vector b, int predicate, mask m): VPCMP's or VPCMPU's opmask of a and b under m.
+    // (vector a, vector b, int predicate, mask m[, int rounding]): VPCMP's or VPCMPU's opmask of a and b under m, or the
+    // form's (a float compare's, VCMPPS's: its predicate by `fixed`, CheckX86LowerPredicate).
     CHECK_X86_LOWER_COMPARE,
     // (mask m, vector w, vector a): w's elements where m's bits are set, a's elsewhere.
     CHECK_X86_LOWER_SELECT,
@@ -60,8 +61,9 @@ typedef enum CheckX86LowerFamily
     // (vector a, int index, vector w, mask m): the form's lane of a at the index, an immediate, merged into w under m
     // (VEXTRACTI32X4, VEXTRACTI64X4), of `other` bytes.
     CHECK_X86_LOWER_EXTRACT_LANE,
-    // (vector a, vector b, int immediate): the form's dest, a, b, imm (VALIGN, VSHUFI, VINSERTI, VGF2P8AFFINEQB), b of
-    // `other` bytes where it isn't a's.
+    // (vector a, vector b, int immediate): the form's dest, a, b, imm (VALIGN, VSHUFI, VINSERTI, VGF2P8AFFINEQB, and a
+    // float compare's into a vector, VCMPPS's, its predicate by `fixed`, CheckX86LowerPredicate), b of `other` bytes
+    // where it isn't a's.
     CHECK_X86_LOWER_BINARY_IMMEDIATE,
     // (vector a, int immediate): the form's dest, a, imm: with `swap`, the destination in vvvv (VPROLD, VPSLLDQ).
     CHECK_X86_LOWER_UNARY_IMMEDIATE,
@@ -129,8 +131,8 @@ typedef enum CheckX86LowerFamily
     // register) and of b's found in a (k3), stored at p and at q.
     CHECK_X86_LOWER_INTERSECT,
     // (vector a, vector b, int predicate[, int rounding]): the form's compare of a's and b's first elements by the
-    // predicate (its imm8's low 5 bits) into k1, whose bit 0 is the int (VCMPSH's: clang's vcomi intrinsics are an
-    // FSETCCM, not COMISH's flags).
+    // predicate (its imm8's low 5 bits) into k1, whose bit 0 is the int (VCMPSH's, VCMPSS's and VCMPSD's: clang's vcomi
+    // intrinsics are an FSETCCM, not COMISH's flags).
     CHECK_X86_LOWER_SCALAR_COMPARE,
     // (vector a, vector b, int predicate): XOP's VPCOM of a and b by the predicate, the immediate's low 3 bits (less,
     // less or equal, greater, greater or equal, equal, not equal, false, true), as clang's code for AVX-512 has it: VPCMP's
@@ -223,6 +225,15 @@ typedef enum CheckX86LowerMerge
     CHECK_X86_MERGE_W_HALF,
 } CheckX86LowerMerge;
 
+// A float compare's predicate, by its rule's `fixed` (BINARY_IMMEDIATE's and COMPARE's of a form): the immediate's whole
+// byte, as clang's code passes a scalar one's; or clang's code's of a packed one, the fcmp of the immediate's low 4 bits,
+// whose signaling it ignores, as LLVM selects it (check_x86_lower_float_predicate).
+typedef enum CheckX86LowerPredicate
+{
+    CHECK_X86_PREDICATE_BYTE,
+    CHECK_X86_PREDICATE_FCMP,
+} CheckX86LowerPredicate;
+
 // REDUCE's operations.
 typedef enum CheckX86LowerReduction
 {
@@ -269,7 +280,9 @@ struct CheckX86LowerRule
     // The form its rounding control picks (CheckX86LowerRounding), and that control's kind.
     uint16_t round_form;
     uint8_t rounding;
-    // BINARY's immediate where its form has one and the builtin none: the SSE compares' predicates.
+    // BINARY's immediate where its form has one and the builtin none: the SSE compares' predicates; and the other
+    // families' variant where they have one (MASK_MERGE's CheckX86LowerMerge, TERNARY's CheckX86LowerInto, a float
+    // compare's CheckX86LowerPredicate, FLAGS' condition).
     uint8_t fixed;
     // Its extensions (X86Target.extensions' bits: AVX512-FP16's), which the target must have too.
     uint32_t extensions;
@@ -398,6 +411,18 @@ static bool check_x86_lower_family_masks(uint8_t family)
     default: break;
     }
     return result;
+}
+
+// A packed float compare's predicate as clang's code has it (CHECK_X86_PREDICATE_FCMP): CGBuiltin's fcmp of the immediate's
+// low 4 bits, whose signaling it ignores, as LLVM selects that fcmp (translateX86FSETCC): the instruction's predicate, and
+// with *swap its operands the other way round, a greater-than's as a less-than's (ULT as NLE, ULE as NLT, OGE as LE, OGT
+// as LT). FALSE and TRUE, which clang's code makes constants, are the instruction's own (0x0b and 0x0f), which give them.
+static uint32_t check_x86_lower_float_predicate(uint64_t immediate, bool* swap)
+{
+    static const uint8_t predicates[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x06, 0x05, 0x0b, 0x0c, 0x02, 0x01, 0x0f };
+    const uint32_t index = (uint32_t)(immediate & 15);
+    *swap = index == 0x09 || index == 0x0a || index == 0x0d || index == 0x0e;
+    return predicates[index];
 }
 
 // A record of a rule with a rounding control at that control's value, `round` (CheckX86LowerRounding): its form, or the
@@ -571,11 +596,20 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         if (rule->family == CHECK_X86_LOWER_COMPARE)
         {
             const uint32_t size = rule->element == 1 ? 0 : rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
-            // The predicate is the immediate's low 3 bits, as the instruction reads them.
+            // The predicate is the immediate's low 3 bits, as the instruction reads them; a float compare's (a rule with a
+            // form: VCMPPS's) clang's code's (CheckX86LowerPredicate), with the operands swapped where that says, and the
+            // exceptions' suppression its rounding control asks for, where the rule takes it.
+            const bool floating = rule->form != X86_FORM_NONE;
+            bool swap = false;
+            const uint64_t predicate = !floating                                ? immediate & 7 :
+                                       rule->fixed == CHECK_X86_PREDICATE_FCMP ? check_x86_lower_float_predicate(immediate, &swap) :
+                                                                                 immediate & 0xff;
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 2, 0, BUSTER_TIER0_ROLE_INTEGER(2));
-            row->records[1] = check_x86_lower_record(check_x86_lower_compare_form(rule->is_signed, size, width), 1, v0, v1);
-            row->records[1].immediate = (int64_t)(immediate & 7);
+            row->records[1] = check_x86_lower_record(floating ? rule->form : check_x86_lower_compare_form(rule->is_signed, size, width), 1, swap ? v1 : v0,
+                                                     swap ? v0 : v1);
+            row->records[1].immediate = (int64_t)predicate;
             row->records[1].decorations = 2;
+            check_x86_lower_round(rule, round, &row->records[1]);
             row->records[2] = check_x86_lower_record(check_x86_lower_mask_out(lanes), BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, 1);
             row->record_count = 3;
             row->operand_count = 3;
@@ -891,10 +925,14 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE)
         {
-            // An insertion's lane index is its immediate's low bits (VINSERTI's), the others' the whole byte.
+            // An insertion's lane index is its immediate's low bits (VINSERTI's), a packed float compare's predicate clang's
+            // code's (`fixed` CHECK_X86_PREDICATE_FCMP, its operands swapped where that says), the others' the whole byte.
             const uint64_t lanes_in = rule->other != 0 ? (uint64_t)rule->bytes / rule->other : 256;
-            row->records[0] = check_x86_lower_record(rule->form, v0, v0, v1);
-            row->records[0].immediate = (int32_t)(immediate & (lanes_in - 1));
+            const bool fcmp = rule->fixed == CHECK_X86_PREDICATE_FCMP;
+            bool swap = false;
+            const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, &swap) : immediate & (lanes_in - 1);
+            row->records[0] = check_x86_lower_record(rule->form, v0, swap ? v1 : v0, swap ? v0 : v1);
+            row->records[0].immediate = (int32_t)value;
             row->record_count = 1;
             row->operand_count = 2;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;

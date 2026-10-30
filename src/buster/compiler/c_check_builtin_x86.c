@@ -26,8 +26,8 @@
 // SUPPRESSED retains the audited fact without a diagnostic. No event is a hard action error. Missing CFG information
 // must remain DEFERRED or later emit conservatively; it must not silently suppress the warning.
 //
-// The immutable 427 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
-// implementation was copied. They cover 405 exact names: 87 RC sets, 83 SAE sets, 6 scale sets and 251 deferred ranges
+// The immutable 450 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
+// implementation was copied. They cover 422 exact names: 87 RC sets, 90 SAE sets, 6 scale sets and 267 deferred ranges
 // (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope, #619 ucmpd128_mask's range,
 // #148 the 8 ranges of the SSE shuffles, shifts, extracts and inserts that stb_image, dr_libs and minimp3 call,
 // #799 five additional 128/256-bit shuffle, blend and align names, and #148 the rest of clang's x86 builtins it
@@ -163,9 +163,28 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_cmpd128_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 642 },
     { "__builtin_ia32_cmpd256_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 646 },
     { "__builtin_ia32_cmpd512_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 650 },
+    { "__builtin_ia32_cmppd", 20, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 726 },
+    { "__builtin_ia32_cmppd128_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 731 },
+    { "__builtin_ia32_cmppd256", 23, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 729 },
+    { "__builtin_ia32_cmppd256_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 733 },
+    { "__builtin_ia32_cmppd512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 97 },
+    { "__builtin_ia32_cmppd512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 735 },
+    { "__builtin_ia32_cmpps", 20, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 724 },
+    { "__builtin_ia32_cmpps128_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 730 },
+    { "__builtin_ia32_cmpps256", 23, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 728 },
+    { "__builtin_ia32_cmpps256_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 732 },
+    { "__builtin_ia32_cmpps512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 98 },
+    { "__builtin_ia32_cmpps512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 734 },
     { "__builtin_ia32_cmpq128_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 643 },
     { "__builtin_ia32_cmpq256_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 647 },
     { "__builtin_ia32_cmpq512_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 651 },
+    { "__builtin_ia32_cmpsd", 20, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 727 },
+    { "__builtin_ia32_cmpsd_mask", 25, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 99 },
+    { "__builtin_ia32_cmpsd_mask", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 736 },
+    { "__builtin_ia32_cmpsh_mask", 25, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 101 },
+    { "__builtin_ia32_cmpss", 20, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 725 },
+    { "__builtin_ia32_cmpss_mask", 25, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 100 },
+    { "__builtin_ia32_cmpss_mask", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 737 },
     { "__builtin_ia32_cmpw128_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 641 },
     { "__builtin_ia32_cmpw256_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 645 },
     { "__builtin_ia32_cmpw512_mask", 27, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 649 },
@@ -416,7 +435,11 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_ucmpw128_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 653 },
     { "__builtin_ia32_ucmpw256_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 657 },
     { "__builtin_ia32_ucmpw512_mask", 28, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 661 },
+    { "__builtin_ia32_vcomisd", 22, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 3, 0, 0, 0x1110, 87 },
+    { "__builtin_ia32_vcomisd", 22, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 849 },
     { "__builtin_ia32_vcomish", 22, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 3, 0, 0, 0x1110, 89 },
+    { "__builtin_ia32_vcomiss", 22, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 3, 0, 0, 0x1110, 88 },
+    { "__builtin_ia32_vcomiss", 22, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 850 },
     { "__builtin_ia32_vcvt2ps2phx512_mask", 34, CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 0x0f10, 306 },
     { "__builtin_ia32_vcvtdq2ph512_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 0x0f10, 214 },
     { "__builtin_ia32_vcvtpd2ph512_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RC, 3, 0, 0, 0x0f10, 199 },
@@ -576,7 +599,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_vpshrdw512", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 879 },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 427, "the audited x86 rule manifest has 427 rows");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 450, "the audited x86 rule manifest has 450 rows");
 
 static int check_builtin_x86_compare(const char* name, uint32_t bytes, const CheckBuiltinX86Rule* rule)
 {
