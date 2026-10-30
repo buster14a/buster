@@ -48,9 +48,9 @@ static bool check_lower_half_excess(const CheckLowerWriter* writer, CheckHalf fo
 
 // Whether the function's body has FENV_ACCESS anywhere, a pragma's in a block of it or one before it: clang then emits
 // every floating operation of the function as a constrained intrinsic, outside the pragma's block too, which its -O0 code
-// folds none of (a conversion of a constant, a unary chain's round trip). Its tokens are read where a fold asks, once a
-// body (CheckLowerWriter.half_strict_body): only a half-precision fold does, in a unit with a floating pragma, so that
-// the scan stays scalar.
+// folds none of (a conversion of a constant, a unary chain's round trip). Packed x86 compares share this constrained
+// decision. Its tokens are read only when one of these operations asks, once a body (CheckLowerWriter.half_strict_body),
+// in a unit with a floating pragma, so that the scan stays scalar.
 static bool check_lower_half_strict(CheckLowerWriter* writer)
 {
     const CheckProgram* program = writer->program;

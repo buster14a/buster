@@ -5271,6 +5271,7 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_vectors(&test, clang);
             check_test_program_x86(&test, clang);
+            check_test_program_x86_rest(&test, clang);
             check_test_program_vector_builtins(&test, clang);
             check_test_program_fp16(&test, clang);
             check_test_program_bf16(&test, clang);

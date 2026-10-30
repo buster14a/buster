@@ -558,7 +558,7 @@ struct CheckLowerWriter
     // (check_lower_half_entry): check_lower_half_temporary's.
     uint32_t half_locals[3];
     // Whether the body whose opening token is `half_strict_body` - 1 has FENV_ACCESS anywhere (check_lower_half_strict):
-    // the first half-precision fold in a body asks, and the body's later folds read the answer.
+    // the first half-precision fold or packed floating comparison asks, and the body's later uses read the answer.
     uint32_t half_strict_body;
     bool half_strict;
     bool x87;
@@ -7347,21 +7347,27 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
             constants &= a == BUSTER_CHECK_X86_NO_IMMEDIATE;
         }
     }
-    // A MASK_UNARY's or MASK_MERGE's mask, its last argument before a rounding control, where it is a constant.
+    // A MASK_UNARY's or MASK_MERGE's mask, its last argument but a rounding control and an immediate (which follows the
+    // mask of the scalar range, reduce and rndscale builtins), where it is a constant.
     uint64_t mask = 0;
-    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) &&
-        count > (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u))
+    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) && count >= 3)
     {
-        const uint32_t a = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t last = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t a = last == skipped ? last - 1 : last;
         CheckValue value = stream->values[graph->argument_nodes[first + a]];
         check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
         mask = value.constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)value.integer : 0;
     }
+    // Clang constrains the whole function when any block has FENV_ACCESS. Share the existing once-per-body scan
+    // used by half-precision lowering, and ask only for packed float-compare rows, leaving other builtins unchanged.
+    const bool packed = rule != NULL && rule->fixed == CHECK_X86_PREDICATE_FCMP &&
+                        (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
+    const bool strict = packed && check_lower_half_strict(writer);
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
-                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, &row);
+                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, strict, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
     if (reduce)
