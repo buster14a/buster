@@ -722,10 +722,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds the 217 audited SemaX86 constraint facts for the
-215 affected names in the frozen 1,492-name own-main target-builtin scope: 87
+`c_check_builtin_x86.c` adds 222 audited SemaX86 constraint facts for 220
+affected names in the frozen 1,492-name own-main target-builtin scope and five
+additional names: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 63 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 68 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -739,6 +740,11 @@ ranges: `pshufd`, `pshufhw`, `pshuflw` and `shufps` (0 to 255),
 `psrldqi128_byteshift` and `palignr128` (0 to 255), `vec_ext_v8hi` and
 `vec_set_v8hi` (0 to 7). Their target features (SSE2, and SSSE3 for
 `palignr128`) are no more checked than any x86 builtin's.
+The separately attested #799 scope adds `shufpd` (immediate 0 to 3), and
+`pblendw128`, `pshufd256`, `permdi256` and `palignr256` (0 to 255). Their
+lowering uses VEX forms and requires AVX or AVX2; the existing vector backend
+also requires AVX-512F and AVX-512VL. The attestation does not change the frozen
+own-main inventory or admit other catalogue entries.
 `builtin_intrinsic_own_main_prototype_in_scope` also admits
 the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,

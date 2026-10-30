@@ -130,6 +130,24 @@ static __attribute__((unused)) bool builtin_intrinsic_own_main_x86_in_scope(cons
     return result;
 }
 
+// These exact extra x86 names have separately audited prototype, immediate, feature and lowering contracts.
+// The own-main workload inventory and its tests remain unchanged.
+static __attribute__((unused)) bool builtin_intrinsic_immediate_in_scope(const char* name, uint32_t length)
+{
+#define BUSTER_CBUILTIN_IMMEDIATE_NAME(n) { n, sizeof(n) - 1 },
+    static const BuiltinIntrinsicName names[] = {
+#include "c_builtin_immediate_scope.inc"
+    };
+#undef BUSTER_CBUILTIN_IMMEDIATE_NAME
+    bool result = false;
+    const bool candidate = name != NULL && (length == 21 || length == 24 || length == 25) && memcmp(name, "__builtin_ia32_", 15) == 0;
+    for (uint32_t i = 0; candidate && !result && i < sizeof(names) / sizeof(names[0]); i += 1)
+    {
+        result = length == names[i].length && memcmp(name, names[i].name, length) == 0;
+    }
+    return result;
+}
+
 // The frozen scope's generic table builtins that no dedicated checker module owns (no CBuiltinId) and whose clang Sema
 // checking is their prototype alone: llvmorg-23.1.1's SemaChecking.cpp has no case for the rotates or
 // __builtin_unpredictable, and __builtin_assume's (BuiltinAssume, line 6624) only warns of an argument's side effects.
@@ -148,12 +166,12 @@ static const char* const builtin_intrinsic_prototype_names[] =
     "__builtin_unpredictable",
 };
 
-// Whether a call of the frozen scope's name is checked by its prototype (and an x86 one also by its SemaX86 rules): an
-// x86 record, or a generic one of builtin_intrinsic_prototype_names.
+// Whether a name is checked by its prototype (and an x86 one also by its SemaX86 rules): an x86 record of the frozen
+// scope or its separately attested additions, or a generic one of builtin_intrinsic_prototype_names.
 static __attribute__((unused)) bool builtin_intrinsic_own_main_prototype_in_scope(const char* name, uint32_t length)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_lookup(name, length);
-    bool result = builtin_intrinsic_own_main_x86_in_scope(name, length);
+    bool result = builtin_intrinsic_own_main_x86_in_scope(name, length) || builtin_intrinsic_immediate_in_scope(name, length);
     const bool generic = info != 0 && strcmp(info->shard, "generic") == 0 && strcmp(info->record_kind, "table-record") == 0;
     for (uint32_t i = 0; generic && !result && i < sizeof(builtin_intrinsic_prototype_names) / sizeof(builtin_intrinsic_prototype_names[0]); i += 1)
     {
