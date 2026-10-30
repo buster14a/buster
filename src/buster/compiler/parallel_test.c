@@ -1053,7 +1053,7 @@ static void parallel_test_command_line(ParallelTest* test)
     report = parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output));
     // The default jobs are the cores of the CPUs this process may use, which the report then prints.
     char expected[BUSTER_PARALLEL_TEST_TEXT_BYTES];
-    const unsigned long long cpus = (unsigned long long)parallel_core_count();
+    const unsigned long long cpus = (unsigned long long)lane_core_count();
     snprintf(expected, sizeof(expected),
              "parallel: 1 commands, at most %llu CPUs at once\n"
              "::group::fails: failed (exit status 2) in * s, * s of CPU\n"
@@ -1224,68 +1224,26 @@ static void parallel_test_command_line(ParallelTest* test)
     unlink(errors);
 }
 
-// --jobs' default against /proc/cpuinfo's cores: the distinct physical and core ids of the CPUs this process may use.
+// --jobs' default (lane_core_count) against /proc/cpuinfo's cores: the distinct physical and core ids of the CPUs this
+// process may use (lane_test_cpuinfo), each of which it must list.
 static void parallel_test_cores(ParallelTest* test)
 {
-    uint64_t mask[BUSTER_PARALLEL_CPUS / 64] = { 0 };
-    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
-    const String8 text = parallel_test_read(&test->arena, "/proc/cpuinfo");
-    // Each allowed processor's physical id and core id, as one number each, and how many processors had both.
-    uint64_t* pairs = BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint64_t, BUSTER_PARALLEL_CPUS);
-    uint64_t pair_count = 0;
-    uint64_t processors = 0;
-    int64_t processor = -1;
-    int64_t package = -1;
-    uint64_t position = 0;
-    while (text.pointer != 0 && pairs != 0 && position < text.length)
-    {
-        const uint64_t start = position;
-        while (position < text.length && text.pointer[position] != '\n')
-        {
-            position += 1;
-        }
-        const String8 line = { .pointer = text.pointer + start, .length = position - start };
-        position += 1;
-        uint64_t colon = 0;
-        while (colon < line.length && line.pointer[colon] != ':')
-        {
-            colon += 1;
-        }
-        int64_t value = -1;
-        for (uint64_t i = colon + 1; i < line.length; i += 1)
-        {
-            const char c = line.pointer[i];
-            value = c >= '0' && c <= '9' ? (value < 0 ? 0 : value) * 10 + (c - '0') : value;
-        }
-        const bool processor_line = line.length >= 9 && memcmp(line.pointer, "processor", 9) == 0;
-        const bool package_line = line.length >= 11 && memcmp(line.pointer, "physical id", 11) == 0;
-        const bool core_line = line.length >= 7 && memcmp(line.pointer, "core id", 7) == 0;
-        processor = processor_line ? value : processor;
-        package = processor_line ? -1 : package_line ? value : package;
-        const bool allowed = processor >= 0 && processor < BUSTER_PARALLEL_CPUS && ((mask[processor / 64] >> (processor % 64)) & 1) != 0;
-        if (core_line && allowed && package >= 0 && value >= 0 && pair_count < BUSTER_PARALLEL_CPUS)
-        {
-            const uint64_t pair = (uint64_t)package << 32 | (uint64_t)value;
-            bool seen = false;
-            for (uint64_t i = 0; i < pair_count; i += 1)
-            {
-                seen = seen || pairs[i] == pair;
-            }
-            pairs[pair_count] = pair;
-            pair_count += !seen;
-            processors += 1;
-        }
-    }
+    uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint64_t* ids = BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint64_t, BUSTER_LANE_CPU_MASK_WORDS * 64);
+    const bool known = ids != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
+    const uint32_t processors = known ? lane_test_cpuinfo(ids) : 0;
+    uint32_t unlisted = 0;
+    const uint32_t pairs = known ? lane_test_cpuinfo_cores(ids, mask, &unlisted) : 0;
     uint64_t allowed_count = 0;
-    for (uint64_t i = 0; i < BUSTER_PARALLEL_CPUS / 64; i += 1)
+    for (uint64_t i = 0; i < BUSTER_LANE_CPU_MASK_WORDS; i += 1)
     {
         allowed_count += (uint64_t)__builtin_popcountll(mask[i]);
     }
-    const uint64_t cores = parallel_core_count();
+    const uint64_t cores = lane_core_count();
     char report[256];
-    const int length = snprintf(report, sizeof(report), "%llu cores, /proc/cpuinfo's %llu of %llu CPUs (%llu processors with ids)\n", (unsigned long long)cores,
-                                (unsigned long long)pair_count, (unsigned long long)allowed_count, (unsigned long long)processors);
-    parallel_test_check(test, "the cores", known && processors == allowed_count && cores == pair_count && cores <= allowed_count, (String8){ .pointer = report, .length = (uint64_t)length },
+    const int length = snprintf(report, sizeof(report), "%llu cores, /proc/cpuinfo's %u of %llu CPUs (%u processors with ids, %u unlisted)\n",
+                                (unsigned long long)cores, pairs, (unsigned long long)allowed_count, processors, unlisted);
+    parallel_test_check(test, "the cores", known && unlisted == 0 && cores == pairs && cores <= allowed_count, (String8){ .pointer = report, .length = (uint64_t)length },
                         0);
     test->arena.length = 0;
 }

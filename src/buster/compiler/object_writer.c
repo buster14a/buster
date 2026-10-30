@@ -29,7 +29,8 @@
 // address through its section's symbol would reach the resolver), and not into a string pool with a PC-relative kind or
 // an addend, since linkers split pools by string and the section's symbol would then name the wrong string. The fields
 // are already zero: link_add_code_fixups zeroes code's, and data's are zero, as GNU as writes them. An object that
-// defines an IFUNC is ELFOSABI_GNU, as GNU as and LLVM mark it, and others ELFOSABI_SYSV.
+// defines an IFUNC, or has a section whose descriptor's flags have SHF_GNU_RETAIN (#147's retain attribute), is
+// ELFOSABI_GNU, as GNU as and LLVM mark it (LLVM's markGnuAbi), and others ELFOSABI_SYSV.
 //
 // An absolute symbol (BUSTER_LINK_SOURCE_ABSOLUTE) is in no unit, so no object could define it as the link does:
 // object_prepare refuses a link with one, rather than writing objects that leave it undefined. The direct path's
@@ -195,7 +196,8 @@ struct ObjectUnits
     // names given to its local symbols without one among them.
     uint32_t* symbol_name_bytes;
     uint64_t* unit_name_bytes;
-    // Each unit's object's EI_OSABI: ELFOSABI_GNU if it defines an IFUNC, otherwise ELFOSABI_SYSV.
+    // Each unit's object's EI_OSABI: ELFOSABI_GNU if it defines an IFUNC, otherwise ELFOSABI_SYSV (and ELFOSABI_GNU
+    // where a section's descriptor has SHF_GNU_RETAIN, which object_build finds: ObjectBuilder.retained).
     uint8_t* unit_abi;
     // A TEXT atom's name, for its own section with function sections: its first named symbol at offset 0's, or 0.
     NameId* atom_name;
@@ -695,9 +697,11 @@ struct ObjectBuilder
     // The unit's atoms in the object's order, which the sections' ranges index: its slice of ObjectUnits.atoms, or with
     // ObjectOptions.atom_sections that slice grouped by section (object_group_atoms).
     const AtomId* atoms;
-    // The sections of atoms, in the object's order.
+    // The sections of atoms, in the object's order, and whether a descriptor of one has SHF_GNU_RETAIN, which makes the
+    // object ELFOSABI_GNU.
     ObjectSection* sections;
     uint32_t section_count;
+    bool retained;
     uint64_t fixup_count;
     // What the unit's fixups refer to: the lane's ObjectSymbols, this object's stamp there, and the undefined symbols in
     // the order the fixups first refer to them.
@@ -890,6 +894,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
             const uint32_t group_end = described ? firsts[g + 1] : end;
             const ObjectAtomSection* explicit = described ? descriptors[g] : 0;
             const bool apart = explicit == 0 && builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT;
+            builder->retained |= explicit != 0 && (explicit->flags & SHF_GNU_RETAIN) != 0;
             for (uint32_t first = group_begin; result && first < group_end; first = apart ? first + 1 : group_end)
             {
                 ObjectSection* section = &builder->sections[builder->section_count];
@@ -1857,7 +1862,7 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
             ELFCLASS64,
             ELFDATA2LSB,
             EV_CURRENT,
-            builder->units->unit_abi[builder->unit],
+            builder->retained ? ELFOSABI_GNU : builder->units->unit_abi[builder->unit],
         },
         .e_type = ET_REL,
         .e_machine = EM_X86_64,

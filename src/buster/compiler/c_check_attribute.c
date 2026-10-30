@@ -758,7 +758,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         const bool named = token == last && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] != 0;
         const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
         const uint32_t name = named ? parser->tokens.names[token] : 0;
-        const uint32_t handle = named ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+        const uint32_t handle = named ? check_input_library_binding(reader, name, token) : 0;
         valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
         reader->output->resource |= named && !valid;
         error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
@@ -900,7 +900,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
-            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
+            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_WEAKREF;
             const bool late_kind = check_input_attribute_late_kind(&attribute);
             reader->late_attributes |= late_kind;
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
@@ -1322,43 +1322,90 @@ static TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttr
     return attributes == 0 || attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? result : 0;
 }
 
-// clang's no_builtin is permitted on a function's definition alone: on another function's declaration it is an error at
-// its name, and on anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as
-// written, as an argument that names no library function is, which clang warns about and ignores: no code here makes a
-// call of a library function that the source doesn't. Whether the declaration's attributes are valid.
-static bool check_input_attribute_definition(CheckInputReader* reader, CheckInputAttributes* attributes, bool function, bool definition)
+// The declaration whose attributes check_input_attribute_definition checks: its name's token; whether it is a function's
+// (not a typedef's), a typedef's, and at file scope; whether it defines a function (a body) or a variable (an
+// initializer, or at file scope a tentative definition with external linkage); and whether a variable has external
+// linkage.
+typedef struct CheckInputAttributeSubject CheckInputAttributeSubject;
+struct CheckInputAttributeSubject
+{
+    uint32_t name;
+    bool function;
+    bool is_typedef;
+    bool file;
+    bool function_definition;
+    bool variable_definition;
+    bool external;
+};
+
+// One pass over a declaration's attributes, for those whose place on a definition matters. clang's no_builtin is
+// permitted on a function's definition alone: on another function's declaration it is an error at its name, and on
+// anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as written, as an
+// argument that names no library function is, which clang warns about and ignores: no code here makes a call of a
+// library function that the source doesn't.
+// GNU's alias, ifunc and weakref attributes (#147), as clang's Sema takes them, in their order: an alias (or a weakref's
+// target, which clang makes one) on a definition is an error at the attribute, "definition 'f' cannot also be an alias";
+// and an alias, ifunc or weakref target after another that makes the declaration a definition (hasDefiningAttr), on a
+// function, or on a variable with external linkage, is too (handleAliasAttr, handleIFuncAttr, checkAttributesAfterMerging).
+// An ifunc anywhere but on a function is ignored (clang warns, which isn't modeled). A weakref on a typedef is an error;
+// in a block it is too, and dropped; and one without a target is the next error, at the list's first attribute, after
+// which clang drops it (ProcessDeclAttributeList). Whether the declaration's attributes are valid.
+static bool check_input_attribute_definition(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttributeSubject subject)
 {
     bool valid = true;
+    bool defining = subject.function ? subject.function_definition : subject.variable_definition;
+    bool weakref = false;
+    bool targeted = false;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
+        const CheckInputAttributeKind kind = attribute->ignored ? CHECK_ATTRIBUTE_UNKNOWN : attribute->kind;
+        attribute->ignored |= kind == CHECK_ATTRIBUTE_IFUNC && !subject.function;
+        const bool aliasing = kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_IFUNC && subject.function) ||
+                              (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0 && !subject.is_typedef && subject.file);
         if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
         {
-            attribute->ignored |= !function;
-            valid = !function || definition;
+            attribute->ignored |= !subject.function;
+            valid = !subject.function || subject.function_definition;
             if (!valid)
             {
                 check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
             }
         }
-        else if (attribute->kind == CHECK_ATTRIBUTE_ALIAS && !attribute->ignored && function && definition)
+        else if (kind == CHECK_ATTRIBUTE_WEAKREF && (subject.is_typedef || !subject.file))
         {
-            // Clang points at the alias attribute when a function has both a body and an alias target.
-            check_input_report(reader, attribute->name_token, CHECK_INPUT_ALIAS_DEFINITION);
+            check_input_report_subject(reader, attribute->name_token, subject.is_typedef ? CHECK_INPUT_WEAKREF_SUBJECT : CHECK_INPUT_WEAKREF_CONTEXT, subject.name);
             valid = false;
         }
+        else if (aliasing && !subject.is_typedef && defining && (subject.function || subject.external || subject.variable_definition))
+        {
+            check_input_report_subject(reader, attribute->name_token, kind == CHECK_ATTRIBUTE_IFUNC ? CHECK_INPUT_IFUNC_DEFINITION : CHECK_INPUT_ALIAS_DEFINITION,
+                                       subject.name);
+            valid = false;
+        }
+        defining |= aliasing;
+        weakref |= kind == CHECK_ATTRIBUTE_WEAKREF;
+        targeted |= kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0);
+    }
+    if (valid && weakref && !targeted)
+    {
+        check_input_report_subject(reader, attributes->records[0].name_token, CHECK_INPUT_WEAKREF_ALIAS, subject.name);
+        valid = false;
     }
     return valid;
 }
 
-// An alias declaration defines its function even though it has no body. Keep that fact separate from `defined`,
-// whose users also identify bodies (for example, the old-style parameter compatibility check).
+// An alias, ifunc or weakref declaration defines its entity even though it has no body or initializer (clang's
+// hasDefiningAttr). Keep that fact separate from `defined`, whose users also identify bodies (for example, the old-style
+// parameter compatibility check).
 static bool check_input_attribute_alias_definition(const CheckInputAttributes* attributes)
 {
     bool alias = false;
     for (uint32_t i = 0; !alias && attributes != 0 && i < attributes->count; i += 1)
     {
-        alias = attributes->records[i].kind == CHECK_ATTRIBUTE_ALIAS && !attributes->records[i].ignored;
+        const CheckInputAttribute* attribute = attributes->records + i;
+        alias = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC ||
+                                        (attribute->kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0));
     }
     return alias;
 }

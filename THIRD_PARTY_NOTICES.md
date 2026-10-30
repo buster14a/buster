@@ -17,6 +17,15 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+`c_builtin_intrinsic_filter.c`, `c_builtin_intrinsic_filter_hash.h`,
+`c_builtin_intrinsic_filter_test.c` and `tools/generate_builtin_intrinsic_filter.c`
+(#893) are original project code under the default terms. The generated
+`generated/clang_builtin_intrinsic_filter_23_1_1.inc` is a projection of the
+existing reviewed Clang metadata's LLVM name facts and retains its
+Apache-2.0 WITH LLVM-exception terms and provenance. No external implementation
+is imported. Exact initial input and reproduction are recorded in
+`docs/builtin-intrinsic-filter.md`; the underlying LLVM notices remain applicable.
+
 The AMX value transport, per-unit instruction leaves and original oracle fixtures
 in `c_builtin_amx_helpers.c`, `c_builtin_amx_leaves.inc`,
 `c_check_program_amx_test.c` and their lowering/target integration (#126, #136,
@@ -521,3 +530,13 @@ and helper records without importing implementation. The intrinsic query also
 instantiates the already-reviewed
 `generated/clang_builtin_own_main_23_1_1.inc` name inventory; that file's LLVM
 provenance and license remain unchanged. No new upstream data was imported.
+
+### Implicit library declarations (#804)
+
+The original `c_check_implicit_input.c`, `c_check_implicit_library_test.c` and
+related declaration, option and diagnostic changes use the existing frozen
+Clang 23.1.1 builtin catalogue; its provenance and licensing are unchanged.
+Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
+and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
+`CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
+as behavior references. No LLVM implementation or test fixtures were copied.

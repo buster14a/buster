@@ -56,7 +56,42 @@ with its identifier and `-Wimplicit-function-declaration`, as Clang does;
 `-Wno-error=implicit-function-declaration` demotes it, while
 `-Wno-implicit-function-declaration` suppresses it. Source diagnostic pragmas
 apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
-Parenthesized identifiers and non-call uses do not acquire an implicit type.
+Parenthesized identifiers and non-call uses of ordinary names do not acquire an implicit type.
+
+Eligible library names are different (#804): their first undeclared use takes
+the library prototype from the frozen Clang builtin catalogue, then uses the
+ordinary C binding, argument-checking, ABI and external-symbol paths. The
+catalogue's library attribute and language eligibility, not a list of example
+names, control admission. GNU-only library names stay ordinary undeclared
+functions in strict modes. A source declaration or local shadow always wins.
+The lazy library declaration remains visible at file scope after its first
+use's block closes. The reader retains its source token separately from the
+lexical binding events and reactivates it only when a later use or declaration
+needs it. A closed block's explicit prototype does not become the visible file
+prototype; local objects, typedefs and enumerators can still shadow the library.
+Later compatible declarations share the entity; an incompatible library
+prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
+conflicts and malformed calls remain errors. Header-dependent descriptors such
+as `FILE *` do not become invented types: a direct pre-C23 call falls back to
+the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
+
+An implicit library declaration warns by default even in C89. The ordinary
+implicit-declaration warning switches, promotion/demotion and source pragmas
+apply. An earlier explicit linked function declaration of an eligible library
+name suppresses its later first-use warning after that block closes; this
+borrows the prior declaration's diagnostic fact, not its closed-block type.
+`-fno-builtin` and exact `-fno-builtin-NAME` options disable this treatment
+for plain library names, but do not disable explicit `__builtin_` spellings.
+`-fbuiltin` reverses the global disabling option; freestanding mode separately
+disables library builtins, matching the pinned Clang 23.1.4 oracle. A recognized
+library declaration can still be formed in C23 when its diagnostic is
+suppressed; an unknown C23 name cannot acquire the removed `int ()` fallback.
+
+`test-checker-driver --executable PATH` compares the original #804 fixtures
+against external Clang through syntax-only checking, object publication and
+native execution, including scalar/default path agreement and pointer-sized
+results with builtin options enabled and disabled. This is correctness
+coverage, not a Zen 5 performance qualification.
 
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
@@ -2515,6 +2550,112 @@ What the lowering covers past scalars (#145's programs):
   and with another object's strong definitions, and the direct path's
   executables, must print what clang's build prints, its constructors' order
   before `main` and its destructors' after it.
+- **GNU's `alias`, `ifunc` and `weakref` attributes** (#147,
+  `c_check_program_alias.c`). `check_program`'s pass over the static
+  declarations finds the file-scope ones with one (clang's code generation
+  ignores a block-scope alias), and `check_program_aliases` makes an entry per
+  object (`CheckProgram.aliases`), from its first such declaration: a weakref,
+  whose target is its argument or an alias attribute's beside it, else an
+  ifunc, else an alias. An entry's name is resolved to the unit's object whose
+  symbol it names: an object's asm label (from any of its declarations), or
+  else its identifier, of a file-scope declaration with linkage that isn't a
+  weakref's (a weakref's own name is no symbol); a block-scope static's made
+  name is none, as clang finds none. An overloadable function's name is the
+  one its symbol gets: its mangled name (`check_mangle_name`, `_Z1fi`) where
+  no asm label replaces it, never its identifier. The names are grouped by their bytes'
+  hashes and found by their identifiers' ids in two scans of the static
+  declarations, 64 tokens at a time, which a unit without these attributes
+  never makes. The chains of aliases are followed by pointer jumping (at most
+  33 rounds) to clang's aliasee, the first object on the way that isn't an
+  alias (`GlobalAlias::getAliaseeObject`), which must be defined: a body, a
+  variable's definition or tentative definition, or an ifunc; an ifunc's must
+  be a function returning a pointer. An alias's symbol is at its aliasee's
+  definition, or an aliased ifunc's resolver's, with that definition's size
+  (as LLVM's ELF writer gives `alias = base` the base's section, value and
+  size), its own name, binding (weak with `weak`) and visibility, and its
+  definition's type, IFUNC where an ifunc is on the way; an ifunc's is an
+  `STT_GNU_IFUNC` at its resolver, global whatever its declaration says, as
+  clang gives every ifunc external linkage. Both are definitions of the unit
+  (`check_program_object_access`: reached directly), which the emission names
+  and flags with the other symbols and defines once the static data's atoms
+  exist (`check_program_define_aliases`, at the end of
+  `check_program_sections`, which every caller that publishes the static data
+  runs); until then their symbols are marked as the program's without an
+  atom, which lets the static data refer to a local one (`check_data_emit`'s
+  local targets). Every alias and ifunc is emitted, as clang emits each, so the
+  selection roots its definition (`BUSTER_C_LOWERING_ALIAS_TARGET`), unless
+  that is an inline-only function, which isn't emitted: clang's error
+  (`BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED`). A weakref's references are its
+  target's: the selection's edges reach the target's definition, and its
+  numbering (`check_program_alias_number`) gives a referenced weakref its
+  target's symbol, whose undefined symbol is weak where nothing but weakrefs
+  refers to it (`BUSTER_CHECK_PROGRAM_ALIAS_WEAK`, clang's
+  `GetWeakRefReference`), whatever linkage its declarations give it, and then
+  reached through the GOT; or, where no object has the name, a symbol of its own
+  named after it, weak and reached through the GOT, which the name's later
+  weakrefs share. Code generation's errors, at `-c` and when it links but not
+  at `-fsyntax-only` (`check_driver_aliases`, after the selection, in the
+  order clang emits the aliases): "alias must point to a defined variable or
+  function" and "ifunc must point to a defined function" with clang's notes
+  (that the name must be the mangled one, and the name clang gives each
+  emitted, referenced or defined declaration of that identifier, an
+  overloadable function's mangled one: `check_driver_overload_name`), "alias (or
+  ifunc) definition is part of a cycle", "cannot alias a variable with a
+  function" and "cannot alias a function with a variable" with the aliasee's
+  definition noted, and "ifunc resolver function must return a pointer".
+  But an alias or ifunc that names itself stops clang's code generation at
+  its declaration, which reports its cycle at once, emits no later one and
+  checks no alias: the first such one's error is then the unit's only one.
+  `test-ir-source` and `test-ssa-source` define the aliases' symbols too
+  (`ir_source_prepare`), and a run in the shared IR's interpreter reaches an
+  alias's function through its symbol as through the function's own
+  (`ssa_source_child`); an ifunc, whose resolver the interpreter doesn't call,
+  leaves a program to run out.
+  Sema's, at `-fsyntax-only` too (`check_input_attribute_definition`): a
+  definition (a body, an initializer, an external tentative definition, or an
+  earlier alias or ifunc of the declaration) that is also an alias or ifunc,
+  "definition 'f' cannot also be an alias"; and a weakref with external
+  linkage, in a block, without a target or on a typedef. A static variable's
+  alias or weakref is no tentative definition, and an alias, ifunc or weakref
+  target defines its entity for later redeclarations, functions' and
+  variables'. Refused by name: an alias whose thread-local storage isn't its
+  definition's, and an alias variable that the unit also defines tentatively
+  (before it clang's error "alias definition of 'w' after tentative
+  definition", which the reader doesn't make; after it clang takes the
+  declaration as the alias's). Not modeled: clang's warnings at them (an alias
+  of a weak alias, a section on an alias, different types, an ifunc on a
+  variable, which is ignored), and the redefinition's own message (the
+  generic "conflicting declaration"). `__has_attribute` and
+  `__has_c_attribute` answer 1 for them. `test-checker` runs programs of
+  aliases of static functions and objects (thread-local ones too) and chains of
+  them, with static data that refers to local ones, ifuncs and weakrefs
+  against clang -O0's build (`c_check_program_alias_test.c`), and the
+  selection's fixtures of their roots (`c_check_program_select_test.c`);
+  `test-checker-driver` (`c_check_alias_driver_test.c`) compiles a fixture of
+  every shape by clang and both paths: each symbol's type, binding,
+  visibility and definedness clang's, each alias and ifunc at its
+  definition's section, value and size, both paths' objects the same bytes,
+  run by `cc`'s links alone and with strong definitions of a weak alias's and
+  of the weakrefs' names, and the direct path's executables (the dynamic
+  PIE's own IFUNCs through its stubs), as clang's build runs; and compares
+  every error and note of the errors above with clang's, at `-c` and at
+  `-fsyntax-only`, an alias and an ifunc of themselves among them.
+- **GNU's `retain` attribute** (#147). A definition with one before it (the
+  reader drops one after it) that the unit emits keeps its section: its named
+  section's (a section attribute's), or a section of its own, its class's
+  section's name and its symbol's (`.data.kept`, `.text.f`, `.bss.z`,
+  `.tbss.t`, `.data.function.local`, as LLVM names a retained global's unique
+  section), with `SHF_GNU_RETAIN` (`check_program_sections`, from the
+  emission's `CheckProgramCode.retained_symbols`), which makes `-c`'s object
+  `ELFOSABI_GNU`, as clang's is. Retain alone emits nothing: clang 23 emits
+  no unreferenced static with it, so the selection doesn't take it as a root
+  (`used` is one). `__has_attribute(retain)` and
+  `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
+  each retained definition's section (name, type, flags and alignment) and
+  the object's OS/ABI with clang's object's, and runs the programs, linked
+  from `-c`'s objects and by the direct path. `common` stays refused by name:
+  its symbols are `SHN_COMMON`'s, which neither the link representation nor
+  the object writer has.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one

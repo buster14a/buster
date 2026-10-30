@@ -12,6 +12,8 @@ static uint32_t check_test_implicit_count(const char* text, const char* part)
     return count;
 }
 
+#include "c_check_implicit_library_test.c"
+
 static void check_test_driver_implicit_system(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -264,4 +266,5 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
     }
     unlink(path);
     check_test_driver_implicit_system(test, clang, executable, directory);
+    check_test_driver_implicit_library(test, clang, executable, directory);
 }
