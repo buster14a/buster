@@ -508,6 +508,22 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "return (int)(c*10000)+(int)(s*10000)*3+(int)(x_yl2x(n*n+1.5L,n+0.5L)*1000)*5+(int)(x_scale(1.5L,n%7)*64)*7+(int)(x_one()*11)+(int)(x_pi()*1e6)+"
         "(int)(x_sqrtf(n*n+2.f)*1000)*13+(int)(x_sqrt(n+5.0)*1e6)%100000+(int)(x_keep(n*0.5L)*4)*17+(int)(x_copy(n*0.75L)*4)*19;}",
         "asm-x87-shapes", clang);
+    // A float's and a double's signaling NaNs through `+t` in templates of no instructions: their helper passes them
+    // through the x87's stack as clang's code does, whose fld quiets them and raises the invalid operation (masked). The
+    // results' bits and the status word's flag after fnclex, and a long double's value, must be clang's build's.
+    check_test_program_source(test,
+        "static float through_float(float v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static double through_double(double v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static long double through_long_double(long double v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static unsigned short status_word(void){unsigned short word;__asm__ volatile(\"fnstsw %0\" : \"=m\"(word));return word;}"
+        "static void clear_exceptions(void){__asm__ volatile(\"fnclex\");}"
+        "int tested(int n){unsigned bits=0x7f800001u|((unsigned)n&0xffu)<<8;float f;__builtin_memcpy(&f,&bits,4);"
+        "clear_exceptions();float g=through_float(f);unsigned short after_float=status_word();unsigned out;__builtin_memcpy(&out,&g,4);"
+        "unsigned long long wide=0x7ff0000000000001ull|((unsigned long long)n&0xffu)<<20;double d;__builtin_memcpy(&d,&wide,8);"
+        "clear_exceptions();double e=through_double(d);unsigned short after_double=status_word();unsigned long long wide_out;__builtin_memcpy(&wide_out,&e,8);"
+        "long double x=n*0.5L;clear_exceptions();long double y=through_long_double(x);unsigned short after_long_double=status_word();"
+        "return (int)(out>>8)+(int)(wide_out>>40)*3+(after_float&1)*5+(after_double&1)*7+(after_long_double&1)*11+(int)(y*4)*13;}",
+        "asm-x87-empty-signaling", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");

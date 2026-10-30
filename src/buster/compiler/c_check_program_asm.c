@@ -4,7 +4,8 @@
 // C's inline assembly (#147), as the lowering compiles it: each asm statement whose template assembles to instructions
 // is a per-unit helper, a leaf function of its own records that the statement's code calls through Tier 0's ordinary
 // CALL, as the atomic and floating-environment helpers are (c_check_program_helpers.c); a template of no instructions,
-// the compiler barriers', is no code at all. Tier 0 doesn't see the asm: its registers stay out of Tier 0's depths and
+// the compiler barriers', is no code at all, but one with x87 operands, whose helper passes their values through the
+// x87's stack as clang's code does. Tier 0 doesn't see the asm: its registers stay out of Tier 0's depths and
 // homes, the call saves the values live across it, and the helper has an unwind entry of its own.
 //
 // check_program_asm_plan plans every statement of the selected bodies before they are lowered, beside the builtin
@@ -121,7 +122,8 @@ struct CheckAsmName
 };
 
 // A statement's plan: its operands' places (output_count + input_count of them), its block's bytes (0 for none), its
-// helper's index in CheckProgramHelpers.items (BUSTER_CHECK_NONE for a template of no instructions, which has none),
+// helper's index in CheckProgramHelpers.items (BUSTER_CHECK_NONE for a template of no instructions without x87 operands,
+// which has none),
 // and for a statement the lowering refuses, why (CheckProgramLowered.reason), reported where the statement is lowered.
 // A helper's references refer to names: `names` has each one's spelling, in their order, and check_program_asm_names
 // makes each reference's target its index in CheckProgramAsms.names, which the emission makes its symbol's. `labels`
@@ -1279,15 +1281,23 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // code (Tier 0's) doesn't mark.
         reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
     }
-    // The held operands (BUSTER_CHECK_ASM_HELD): refused by a template of instructions, which would read or write their
-    // registers, and in one of none an output's object or an input's value, which the lowering evaluates alone.
+    // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
+    // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
+    bool x87 = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
+    }
+    const bool helped = code.count != 0 || x87;
+    // The held operands (BUSTER_CHECK_ASM_HELD): refused by a statement with a helper, which would read or write their
+    // registers, and in one without an output's object or an input's value, which the lowering evaluates alone.
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         CheckAsmPlace* place = places + k;
-        reason = place->kind == BUSTER_CHECK_ASM_HELD && code.count != 0 ? "inline assembly operands of this type in their constraint's registers" : NULL;
+        reason = place->kind == BUSTER_CHECK_ASM_HELD && helped ? "inline assembly operands of this type in their constraint's registers" : NULL;
         place->kind = place->kind != BUSTER_CHECK_ASM_HELD ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
     }
-    if (valid && reason == NULL && code.count != 0)
+    if (valid && reason == NULL && helped)
     {
         // The callee-saved registers the statement touches: its clobbers', its operands' and the stores'.
         uint32_t first = 0;

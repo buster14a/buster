@@ -20,7 +20,11 @@ unwind entry.
 
 A template that assembles to no instructions makes no helper and no call. These
 are the compiler barriers, `asm volatile("" : : "r"(x) : "memory")`, and comments
-with operands substituted into them. Their operands are evaluated in the same
+with operands substituted into them. But one with x87 operands has a helper,
+whose loads and stores pass their values through the x87's stack as clang's
+code does: `asm volatile("" : "+t"(x))` of a `float` holding a signaling NaN
+quiets it (fld raises the invalid operation, masked, and loads the quiet NaN),
+as clang's build does. Their operands are evaluated in the same
 order as a helper's. A matching input's value is stored into its output as the
 register would hold it: an integer narrower than its output is zero-extended
 from its own width, as GCC and clang place it (`"=r"(long) : "0"(-1)` is
@@ -482,10 +486,12 @@ has the commands, the logs and the default path's numbers against main.
   - the x87's operands: the shapes of musl's long double functions, in
     functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
     and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
-    from that word, `fistpll`'s popping store, and `X` operands), and each shape
-    of the stack's rules (fsincos's two outputs, fyl2x's popped st(1), fscale's
-    kept one, outputs pushed by the template, a `float`'s and a `double`'s
-    operands, templates of no instructions).
+    from that word, `fistpll`'s popping store, and `X` operands); each shape of
+    the stack's rules (fsincos's two outputs, fyl2x's popped st(1), fscale's kept
+    one, outputs pushed by the template, a `float`'s and a `double`'s operands,
+    templates of no instructions); and a `float`'s and a `double`'s signaling
+    NaNs through `+t` in templates of no instructions, the results' bits and the
+    status word's invalid-operation flag as clang's build gives them.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one
