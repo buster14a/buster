@@ -1740,7 +1740,8 @@ static void check_test_program_intrinsic_features(CheckTest* test)
 // Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
 // (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
-// (check_lower_x86_operand_class); a rule with a rounding control at each value clang takes for it, and one past them.
+// (check_lower_x86_operand_class); a rule with a rounding control at each value clang takes for it, and one past them; and
+// a MASK_UNARY's or MASK_MERGE's both with its mask an operand and with a constant mask of every lane's bit, unmasked.
 static void check_test_program_x86_rows(CheckTest* test)
 {
     check_test_program_intrinsic_features(test);
@@ -1754,12 +1755,15 @@ static void check_test_program_x86_rows(CheckTest* test)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
     {
         const CheckX86LowerRule* rule = check_x86_lower_rules + i;
-        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(immediates) * BUSTER_ARRAY_LENGTH(rounds); k += 1)
+        const bool masks = rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(immediates) * BUSTER_ARRAY_LENGTH(rounds) * 2; k += 1)
         {
             const uint64_t immediate = immediates[k % BUSTER_ARRAY_LENGTH(immediates)];
-            const uint64_t round = rounds[k / BUSTER_ARRAY_LENGTH(immediates)];
+            const uint64_t round = rounds[k / BUSTER_ARRAY_LENGTH(immediates) % BUSTER_ARRAY_LENGTH(rounds)];
+            const uint64_t mask = k >= BUSTER_ARRAY_LENGTH(immediates) * BUSTER_ARRAY_LENGTH(rounds) ? UINT64_MAX : 0;
             Tier0Operation row;
-            if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && check_x86_lower_row_of(&every, rule, immediate, round, &row) == NULL)
+            if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && (mask == 0 || masks) &&
+                check_x86_lower_row_of(&every, rule, immediate, round, mask, &row) == NULL)
             {
                 for (uint32_t j = 0; j < row.operand_count; j += 1)
                 {
@@ -1779,8 +1783,8 @@ static void check_test_program_x86_rows(CheckTest* test)
                     invalid += 1;
                     if (invalid <= 8)
                     {
-                        printf("  x86 rows: %s at immediate %llu and rounding %llu isn't a row Tier 0 takes\n", rule->name, (unsigned long long)immediate,
-                               (unsigned long long)round);
+                        printf("  x86 rows: %s at immediate %llu, rounding %llu and mask %llx isn't a row Tier 0 takes\n", rule->name,
+                               (unsigned long long)immediate, (unsigned long long)round, (unsigned long long)mask);
                     }
                 }
             }

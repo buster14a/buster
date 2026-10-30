@@ -107,6 +107,9 @@ The admitted families are:
 - the corresponding VEX forms and `vzeroupper`; 512-bit AVX-512F packed float
   arithmetic/moves, `vpaddd/vpsubd/vpxord/vmovdqa32/vmovdqu32`, with destination
   masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts;
+- VEX `kmovb/kmovw/kmovd/kmovq` between mask registers, memory and general
+  registers, including `k0`, subject to each form's target features. Byte and
+  word moves use 32-bit general registers; qword moves use 64-bit ones;
 - the processor-state instructions C's inline assembly uses (#147): `cpuid`,
   `xgetbv`, `xchg`, `bswap`, the x87's `fnstcw/fldcw/fnstsw/fnclex`,
   `stmxcsr/ldmxcsr`, and SSE2's `pcmpeqd` in its legacy forms. An `xchg` takes
@@ -114,6 +117,11 @@ The admitted families are:
   grammar has no accumulator role, so `fnstsw` takes memory, not `%ax`, and an
   `xchg` of the accumulator with another register takes the two-byte form,
   where GNU as takes the one-byte one;
+- operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc`, and `rdtscp`
+  (#798). The assembler requires a target with RDTSCP for `rdtscp`; inline
+  templates admit it independently of the target, so their author is responsible
+  for selecting instructions supported by the CPU and declaring register outputs;
+- the spin-wait spellings `rep nop` and `rep; nop`, each encoded as `pause`;
 - what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
   between an XMM register and a general one or memory, the x87's `fld` and
   `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and

@@ -72,8 +72,9 @@ command is already are taken and change nothing: `--build-id`,
 and `-z now`, `-z relro`, `-z noexecstack` and `-z text` (the writer never
 writes a relocation in read-only memory). `-dynamic-linker` is
 `--dynamic-linker`. Any other `-m` or `-z` keyword is refused, naming it. So
-a driver's command line, as `gcc -###` prints it for GNU ld, links as it is:
-`-pie` for a PIE, `-static`, `-static -pie` and `-shared` for the others.
+a driver's command line for supported inputs can be passed directly: `-pie`
+for a PIE, `-static`, `-static -pie` and `-shared` for the others. GCC's
+LTO plugin options and plugin-dependent inputs are not supported.
 
 ## Input order and output boundary
 
@@ -83,8 +84,10 @@ controls. The static kinds (a static executable and a static PIE) start
 library search with archives only; a PIE and a shared library start with the
 resolver's ordinary DSO preference. Explicit ordered `-Bstatic`/`-Bdynamic`
 override that initial choice. An explicit `-static` also stays in the input
-stream, preserving its existing search effect. Static output that selects a
-needed DSO reports the incompatible input.
+stream, preserving its existing search effect. `--push-state` saves the
+as-needed, library-search and whole-archive settings; `--pop-state` restores
+them, and pairs can nest. A pop with no saved state is refused. Static output
+that selects a needed DSO reports the incompatible input.
 
 Every kind accepts explicit C runtime startup objects, the program objects,
 libraries and closing CRT objects in the caller's chosen order: `crt1.o`,

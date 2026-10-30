@@ -43,6 +43,22 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
 {
     static const char* const programs[][2] = {
         {
+            "vector-byte-product-reductions",
+            "typedef unsigned char u4 __attribute__((vector_size(4)));typedef unsigned char u8 __attribute__((vector_size(8)));"
+            "int tested(int n){unsigned h=2166136261u;u4 a4;u8 a8;v16qu a16;v32qu a32;v64qu a64;"
+            "fill(&a4,4,n);fill(&a8,8,n+1);fill(&a16,16,n+2);fill(&a32,32,n+3);fill(&a64,64,n+4);"
+            "for(int round=0;round<3;round++){"
+            "for(int i=0;i<64;i++){unsigned char v=(unsigned char)(n+i*2+1);if(round==0)v|=1;if(round==1&&i==17)v=0;"
+            "a64[i]=v;if(i<32)a32[i]=v;if(i<16)a16[i]=v;if(i<8)a8[i]=v;if(i<4)a4[i]=v;}"
+            "unsigned char r4=__builtin_reduce_mul(a4),r8=__builtin_reduce_mul(a8),r16=__builtin_reduce_mul(a16),"
+            "r32=__builtin_reduce_mul(a32),r64=__builtin_reduce_mul(a64);"
+            "unsigned p=1;for(int i=0;i<64;i++){p=(p*a64[i])&255u;if(i==3&&r4!=p)return 101;if(i==7&&r8!=p)return 102;"
+            "if(i==15&&r16!=p)return 103;if(i==31&&r32!=p)return 104;}if(r64!=p)return 105;"
+            "signed char s16=__builtin_reduce_mul((v16qs)a16),s32=__builtin_reduce_mul((v32qs)a32),s64=__builtin_reduce_mul((v64qs)a64);"
+            "if((unsigned char)s16!=r16||(unsigned char)s32!=r32||(unsigned char)s64!=r64)return 106;"
+            "FOLD(r4);FOLD(r8);FOLD(r16);FOLD(r32);FOLD(r64);}return (int)h;}",
+        },
+        {
             "vector-shuffles",
             "int tested(int n){unsigned h=2166136261u;v16qs a1,b1;v32hs a2,b2;v16ss a4,b4;v8ds a8,b8;v4ss x4,y4;v2ds x2;v4sf f4,g4;v4df e4,e5;"
             "fill(&a1,16,n);fill(&b1,16,n+1);fill(&a2,64,n+2);fill(&b2,64,n+3);fill(&a4,64,n+4);fill(&b4,64,n+5);fill(&a8,64,n+6);fill(&b8,64,n+7);"
@@ -393,24 +409,42 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         "int tested(int n){unsigned h=2166136261u;int w=n;long a=n*3L,b=n*5L,c=n*7L,d=n*11L,e=n*13L,f=n*17L;"
         "__builtin_ia32_monitorx(&w,0,0);__builtin_ia32_mwaitx(2,0,(unsigned)n*1000u);long r[]={a,b,c,d,e,f};FOLD(r);FOLD(w);"
         "return (int)h;}";
+    // xbegin's leaf, run where the host has RTM (CPUID 7's EBX bit 11): a transaction that commits (xend), within 100
+    // tries, and one that a store through a null pointer aborts (RTM suppresses the fault), whose status isn't -1.
+    static const char rtm[] =
+        "__attribute__((target(\"rtm\"))) int tested(int n){unsigned h=2166136261u;int committed=0,aborted=0;"
+        "for(int i=0;i<100&&!committed;i++){if(__builtin_ia32_xbegin()==~0u){committed=1;__builtin_ia32_xend();}}"
+        "for(int i=0;i<100&&!aborted;i++){if(__builtin_ia32_xbegin()==~0u){*(volatile int*)0=n;__builtin_ia32_xend();}else aborted=1;}"
+        "FOLD(committed);FOLD(aborted);FOLD(n);return (int)h;}";
     const bool has_mwaitx = (x86_target_native().features & BUSTER_X86_FEATURE(MWAITX)) != 0;
-    for (uint32_t i = 0; i <= BUSTER_ARRAY_LENGTH(programs); i += 1)
+    uint32_t leaf7[4] = { 0 };
+    if (__get_cpuid_max(0, 0) >= 7)
     {
-        const char* program = i < BUSTER_ARRAY_LENGTH(programs) ? programs[i][1] : mwaitx;
+        __cpuid_count(7, 0, leaf7[0], leaf7[1], leaf7[2], leaf7[3]);
+    }
+    const bool has_rtm = (leaf7[1] >> 11 & 1) != 0;
+    const uint32_t count = BUSTER_ARRAY_LENGTH(programs);
+    for (uint32_t i = 0; i < count + 2; i += 1)
+    {
+        const char* program = i < count ? programs[i][1] : i == count ? mwaitx : rtm;
         const size_t length = strlen(check_test_vector_builtin_types) + strlen(program) + 1;
         char* source = malloc(length);
         check_test_expect(test, source != 0, "vector builtin program source");
         if (source != 0)
         {
             snprintf(source, length, "%s%s", check_test_vector_builtin_types, program);
-            check_test_program_source_native_limits(test, source, i < BUSTER_ARRAY_LENGTH(programs) ? programs[i][0] : "x86-mwaitx", clang, false, -1, 0,
-                                                    target, i < BUSTER_ARRAY_LENGTH(programs) ? run_native : run_native && has_mwaitx);
+            check_test_program_source_native_limits(test, source, i < count ? programs[i][0] : i == count ? "x86-mwaitx" : "x86-rtm", clang, false, -1, 0, target,
+                                                    i < count ? run_native : i == count ? run_native && has_mwaitx : run_native && has_rtm);
             free(source);
         }
     }
     if (run_native && !has_mwaitx)
     {
         printf("  x86-mwaitx: native execution skipped (the host hasn't MWAITX); the program compiles and links\n");
+    }
+    if (run_native && !has_rtm)
+    {
+        printf("  x86-rtm: native execution skipped (the host hasn't RTM); the program compiles and links\n");
     }
 }
 
@@ -439,6 +473,19 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "x86-64", "unsigned long tested(int n){return __builtin_ia32_xgetbv((unsigned)n);}", "xgetbv without XSAVE", 0 },
         { "x86-64", "int x;int tested(int n){__builtin_ia32_monitorx(&x,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0, 1 },
         { "x86-64", "int tested(int n){__builtin_ia32_mwaitx(0,0,0);return n;}", "monitorx or mwaitx without MWAITX", 0 },
+        // The leaves of the extensions' instructions, without them: RTM's, WAITPKG's and Key Locker's, and its wide
+        // forms' with KL but not WIDEKL.
+        { "x86-64", "int tested(int n){return __builtin_ia32_xbegin()+n;}", "x86 builtins whose instructions the target hasn't", 0 },
+        { "x86-64", "int tested(int n){return __builtin_ia32_umwait(0u,0u,(unsigned)n);}", "x86 builtins whose instructions the target hasn't", 0 },
+        { "x86-64", "int tested(int n){return __builtin_ia32_tpause(0u,0u,(unsigned)n);}", "x86 builtins whose instructions the target hasn't", 0 },
+        { "x86-64", "int tested(int n){v2ds o,i={n};char h[48]={0};return __builtin_ia32_aesenc128kl_u8(&o,i,h);}",
+          "x86 builtins whose instructions the target hasn't", 2 },
+        { "x86-64", "__attribute__((target(\"kl\"))) int tested(int n){v2ds o[8],i[8]={{n}};char h[48]={0};return __builtin_ia32_aesencwide128kl_u8(o,i,h);}",
+          "x86 builtins whose instructions the target hasn't", 2 },
+        { "x86-64", "unsigned tested(int n){v2ds k={n};char h[48];return __builtin_ia32_encodekey128_u32((unsigned)n,k,h);}",
+          "x86 builtins whose instructions the target hasn't", 1 },
+        { "x86-64", "int tested(int n){v2ds a={n},b={n},c={n};__builtin_ia32_loadiwkey(a,b,c,(unsigned)n);return n;}",
+          "x86 builtins whose instructions the target hasn't", 3 },
         { "znver5", "int calls;int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),"
           "(v2qs){(calls++,7),8},0,1,2,3,0,1,2,3,0,1,2,3,0,1,2,3);return calls+c[n&15];}",
           "narrow vector shuffle operands with nonconstant values or side effects", 2, 1 },
@@ -458,7 +505,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "void tested(v8bf* p,v4ss* q){*q=__builtin_convertvector(__builtin_shufflevector(*p,*p,0,1,2,3),v4ss);}",
           "vector conversions to bf16 elements, or of bf16 ones to types other than float", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of half-precision elements without AVX512-FP16", 0 },
-        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements", 0 },
+        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements without AVX10.2", 0 },
         { "znver5", "void tested(v4sfu* p){v4sf v={1};__builtin_nontemporal_store(v,p);}", "nontemporal vector builtins at underaligned addresses", 1 },
         { "znver5", "void tested(int* p,int v){__builtin_nontemporal_store(v,p);}", "nontemporal builtins of scalars", 0 },
         { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
@@ -470,10 +517,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector leading zero counts of 8- and 16-bit elements", 2 },
         { "znver5", "int tested(int n){v4ss a={n},b={1};v4ss c=__builtin_elementwise_sub_sat(a,b);return c[0];}",
           "saturating vector arithmetic of 32- and 64-bit elements", 3 },
-        { "znver5", "int tested(int n){v16qs a={(signed char)n};signed char c=__builtin_reduce_mul(a);return c;}", "vector multiplication of 8-bit elements", 2 },
         { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
           "elementwise vector builtins of floating elements", 3 },
         { "znver5", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal", 2 },
+        { "znver5", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}",
+          "vector bit reversal of bytes without AVX512-BMM", 2 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements", 3 },
@@ -519,6 +567,24 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
                                            "eligible-mwaitx", true, true, 0, 0, NULL, &zen);
         check_test_program_boundary_target(test, "unsigned long tested(int n){__builtin_ia32_pause();return __rdtsc()+__builtin_ia32_tzcnt_u64((unsigned long)n);}",
                                            "baseline-leaves", true, true, 0, 0, NULL, &baseline);
+        // The extensions' leaves, in functions whose target attribute has the extensions: Key Locker's on Zen 5, whose
+        // AVX-512F and VL its vectors take (the attribute's target is the command line's, check_test_program_march, and
+        // its features).
+        check_test_program_boundary_target(test, "__attribute__((target(\"rtm\"))) int tested(int n){return __builtin_ia32_xbegin()+n;}", "eligible-xbegin", true, true, 0, 0,
+                                           NULL, &baseline);
+        check_test_program_boundary_target(test,
+                                           "__attribute__((target(\"waitpkg\"))) int tested(int n){return __builtin_ia32_umwait(0u,0u,(unsigned)n)+"
+                                           "__builtin_ia32_tpause(1u,(unsigned)n,0u);}",
+                                           "eligible-waits", true, true, 0, 0, NULL, &baseline);
+        const char* march = check_test_program_march;
+        check_test_program_march = "-march=znver5";
+        check_test_program_boundary_target(test,
+                                           "typedef long long v2ds __attribute__((vector_size(16)));__attribute__((target(\"kl,widekl\"))) int tested(int n){"
+                                           "v2ds o[8],i[8]={{n}},k={n};char h[64]={0};int r=__builtin_ia32_aesenc128kl_u8(o,k,h)+__builtin_ia32_aesdec256kl_u8(o,k,h)+"
+                                           "__builtin_ia32_aesencwide128kl_u8(o,i,h)+__builtin_ia32_aesdecwide256kl_u8(o,i,h);__builtin_ia32_loadiwkey(k,k,k,0u);"
+                                           "return r+(int)__builtin_ia32_encodekey128_u32(0u,k,h)+(int)__builtin_ia32_encodekey256_u32(0u,k,k,h);}",
+                                           "eligible-key-locker", true, true, 0, 4, NULL, &zen);
+        check_test_program_march = march;
     }
     // The conversions of 64-bit integers take AVX-512DQ, which an AVX-512F and VL target may lack.
     X86Target without_dq = { 0 };

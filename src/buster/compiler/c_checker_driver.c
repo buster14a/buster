@@ -79,6 +79,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function parameter has incompatible type"; break;
         case CHECK_INPUT_CLEANUP_ARGUMENTS: result = "'cleanup' attribute takes one argument"; break;
         case CHECK_INPUT_WEAK_LINKAGE: result = "weak declaration cannot have internal linkage"; break;
+        case CHECK_INPUT_ALIAS_DEFINITION: result = "function definition cannot also be an alias"; break;
         case CHECK_INPUT_LABEL_UNDECLARED: result = "use of undeclared label"; break;
         case CHECK_INPUT_LABEL_REDEFINITION: result = "redefinition of label"; break;
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;

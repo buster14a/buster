@@ -19,6 +19,16 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
+The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
+`-Werror` does not guarantee the warnings or build failures Clang gives for the
+same source: some warnings are not produced, and some produced warnings are not
+promoted by `-Werror`. For example, an unused local, an address of a local
+returned from a function, or a mismatched `printf` format can pass with
+`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
+matter. The individual supported diagnostics and their boundaries are described
+in this guide; the remaining warning work is tracked in
+[#823](https://github.com/buster14a/buster/issues/823).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
@@ -1581,7 +1591,10 @@ What the lowering covers past scalars (#145's programs):
   not their arithmetic, which rounds at run time. An integer constant converted
   to one rounds once, as clang folds it, where a conversion at run time rounds
   through float (a `__bf16`'s twice; a conditional's value converts so, as
-  clang's does); but in a function with `FENV_ACCESS` none folds, as none of
+  clang's does), and so does a float or double constant that the checker leaves
+  to the lowering (a vector initializer's element: `_mm_setzero_ph`'s zeros,
+  which libgcc's `__truncdfhf2` converted at run time before); but in a function
+  with `FENV_ACCESS` none folds, as none of
   clang's constrained conversions does, and a float rounds to a `__bf16` by
   libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
   unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
@@ -1650,7 +1663,21 @@ What the lowering covers past scalars (#145's programs):
   conversions do (VCVTPH2PS and VCVTPS2PH after the flip); a chain, an operand
   of those operators that is one of them or a unary plus, is refused by name
   (`check_lower_vector_half_chain`). A unit whose target has the extension
-  computes chains in half precision, as clang does. An element is read and written at
+  computes chains in half precision, as clang does. bf16 elements' (`__bf16`'s)
+  arithmetic is clang's too (`check_vector_lower_brain_rows`): where the unit's
+  target has AVX10.2, AVX10.2's instructions (VADDBF16 to VDIVBF16, which round
+  to nearest even, flush subnormals and report nothing) and a negation's sign
+  flip; where it hasn't, clang's excess precision computes `+ - * /` and
+  negation in float, as its -O0 code does: each operand widened (VPMOVZXWD, then
+  VPSLLD by 16), the floats' operation and AVX512-BF16's VCVTNEPS2BF16 rounding
+  back (to nearest even, subnormals flushed), which the function's target must
+  have. A vector of 64 bytes, whose floats take two registers an operand, past
+  a row's 8 records, sets its operands into frame temporaries, whose halves two
+  rows read through their addresses, as clang's code reads its operands' halves
+  from their slots, and a third joins the halves (VINSERTF64X4); one of 4 bytes
+  divides its two elements under a mask of them. Their chains are refused as
+  half precision's, and so are their compares; a `__bf16` scalar splats by its
+  bits. An element is read and written at
   its place in the vector's bytes, an rvalue's after it is set into a temporary
   (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
   same bytes changes no bits, and so does one between a GNU C vector of 4 or 8
@@ -1744,11 +1771,15 @@ What the lowering covers past scalars (#145's programs):
   - operations into w under a mask, of one vector (MASK_UNARY: every
     conversion's pair of widths, VGETEXP, VRCP14 and VRSQRT14) and of two
     (MASK_MERGE: VSCALEF, and the scalar ones, whose other elements are a's);
+    a constant mask of every lane's bit is the form unmasked, with no opmask to
+    load, as clang's code has the headers' intrinsics without a mask, which
+    pass -1;
   - compares and tests into an int, from the flags (FLAGS and KTEST): the SSE
     compares (`comieq` and the others, of each kind, the parity giving
     unordered operands' equal and not equal), PTEST, VTEST, KORTEST and KTEST,
-    then CMOVcc's of the condition into the result, which MOV's 0 and 1 leave
-    the flags for;
+    then SETcc of the condition into a scratch register's byte and its zero
+    extension into the result, as clang's code has it (`comieq`'s SETNP, SETE
+    and AND, `comineq`'s SETP, SETNE and OR);
   - KNOT and the other widths' opmask operations;
   - the general registers' and memory's instructions (SYSTEM): CRC32, BEXTR,
     the FS and GS bases, RDPID, the shadow stack's, the cache lines', FXSAVE,
@@ -1801,6 +1832,41 @@ What the lowering covers past scalars (#145's programs):
     SM4 key expansion and rounds of 64 bytes (BINARY's), each extension's
     (`X86Extension`'s SHA512, SM3 and SM4), compared with clang's code by
     `test-x86-intrinsics` as well;
+  - AVX10.2's saturating conversions with truncation of floats and doubles to
+    doublewords and quadwords, signed and not (`vcvttps2dqs` to
+    `vcvttpd2uqqs`, MASK_UNARY's, those of 64 bytes with the exceptions'
+    suppression where their last argument asks for it);
+  - AVX10.2's bf16 operations: the scale (MASK_MERGE's), the exponent and the
+    approximations (MASK_UNARY's), the maximum and the minimum (BINARY's), and
+    the compares of the first elements into an int (`vcomisbf16eq` to
+    `vcomisbf16neq`, FLAGS', as COMISS's);
+  - AVX10.2's conversions to and from 8-bit floats: of halves to bf8 and hf8,
+    saturating or not, from one vector (`vcvtph2bf8` to `vcvtph2hf8s`,
+    MASK_UNARY's), with a vector of biases (`vcvtbiasph2bf8` to
+    `vcvtbiasph2hf8s`, MASK_MERGE's, whose results of 32 and 64 bytes' halves
+    are half their bytes, `CHECK_X86_MERGE_W_HALF`) and from two vectors
+    (`vcvt2ph2bf8` to `vcvt2ph2hf8s`, BINARY's), and of hf8 to halves
+    (`vcvthf8_2ph`); its conversion of two vectors of floats to halves
+    (`vcvt2ps2phx`, MASK_MERGE's, with a rounding control at 64 bytes); and its
+    dot products of pairs of halves into floats (`vdpphps`, TERNARY's);
+  - MOVRS's vector loads (`vmovrsb` to `vmovrsq`, AVX10.2's, VECTOR_MEMORY's
+    LOAD) and AVX512-BMM's products of 16-by-16 bit matrices into their
+    accumulator, by OR and by XOR (`bmacor16x16x16`, `bmacxor16x16x16`,
+    TERNARY's), each extension's (`X86Extension`'s MOVRS and AVX512BMM). No host
+    of the tests runs any of these AVX10.2, MOVRS or AVX512-BMM instructions,
+    and `test-x86-intrinsics` compares them all with clang's code;
+  - the extensions' system instructions (SYSTEM, each of its extension:
+    `X86Extension`'s RAOINT to USERMSR): RAO-INT's atomic operations of memory
+    (`aadd32` to `axor64`), CLDEMOTE, SERIALIZE, UINTR's (`clui`, `stui`,
+    `testui`'s CF and `senduipi`), PTWRITE, WAITPKG's UMONITOR, LWP's control
+    block (`llwpcb`, `slwpcb`), MOVRS's integer loads (a byte's and a word's
+    through a scratch register's low bytes, zero-extended) and its prefetch,
+    RTM's XEND and XTEST's ZF, TSXLDTRK's, AMX-TILE's configuration
+    (`ldtilecfg`, `sttilecfg`, `tilerelease`), ENQCMD's ZF and USER_MSR's
+    register forms; a flag is SETcc's int, as FLAGS' is. No host of the tests
+    has their extensions, or their effects are on the machine's state (a
+    transaction's, the user interrupts', the tiles' configuration, MSRs), and
+    `test-x86-intrinsics` compares them all with clang's code;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -1843,10 +1909,24 @@ What the lowering covers past scalars (#145's programs):
   VZEROUPPER. `sha256rnds2`, whose round keys are xmm0's, is a leaf of
   vectors: its arguments and result are its builtin's 16-byte vectors, which
   its calls pass and return as a function's (frame objects, in xmm0 to xmm2
-  and xmm0). Each leaf requires its instructions' features of the output
-  target (XGETBV XSAVE's, MONITORX and MWAITX MWAITX's, the others theirs);
-  the baseline target still takes PAUSE, RDTSC, the BSF- and BSR-based counts
-  and the rotates.
+  and xmm0). Key Locker's leaves take both (`CBuiltinX86HelperInfo.vectors`):
+  `aesenc128kl` to `aesdec256kl` their data block in xmm0 between the output's
+  and the handle's pointers, `encodekey128` and `encodekey256` their keys, and
+  `loadiwkey` its three keys and its control; the wide forms take pointers
+  alone. The eight that encrypt or decrypt store the result where ZF is 0 (the
+  handle was valid) and zeros where it is 1, as Intel's manual, clang's own
+  `keylockerintrin.h` and GCC's code have it, through a `jne` over the zeroing,
+  the leaf's branch (`CBuiltinX86HelperInfo.branch`), which branch sizing
+  sizes; clang's code (23, and LLVM's main today) stores them the other way
+  round. `umwait` and `tpause` put their deadline's halves in edx:eax and
+  return CF; `xbegin` sets eax to -1, then begins the transaction with its
+  fallback the leaf's `ret` (its displacement 0), so that it returns -1 where
+  the transaction runs and its abort status where it aborts. Each leaf
+  requires its instructions' features of the output target (XGETBV XSAVE's,
+  MONITORX and MWAITX MWAITX's, the others theirs) and its extensions
+  (`X86Target.extensions`: Key Locker's KL, and WIDEKL for the wide forms,
+  WAITPKG and RTM); the baseline target still takes PAUSE, RDTSC, the BSF- and
+  BSR-based counts and the rotates.
   `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
   nothing: its operand isn't evaluated, as clang's isn't. clang's header
   builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
@@ -1861,8 +1941,15 @@ What the lowering covers past scalars (#145's programs):
   the headers' `target("avx512fp16")`, and one in a unit whose target has the
   extension (x86-64-v4's, against clang's for sapphirerapids), of modest values
   where the forms clang chooses could choose among NaNs and random bits
-  elsewhere; they run where the host has AVX512-FP16 too (not on Zen 5).
-  `test-checker --program-vectors` runs them and the vector programs alone.
+  elsewhere; they run where the host has AVX512-FP16 too (not on Zen 5). The
+  bf16 vector programs (`c_check_program_bf16_test.c`) are a znver5 unit's
+  arithmetic of random bits at every width, which runs where the host has
+  AVX512-BF16 (Zen 5 among them); AVX10.2's square roots and multiply-adds, in
+  a function with `target("avx10.2")`, and the arithmetic in a unit whose
+  target has AVX10.2 (x86-64-v4's and the extension, against clang's for
+  diamondrapids), which compile and link, no host of the tests having AVX10.2;
+  and their refusals by name. `test-checker --program-vectors` runs them and
+  the vector programs alone.
 - **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
   `__builtin_convertvector`, the `__builtin_elementwise_*` functions,
   `__builtin_reduce_*` of integer elements and `__builtin_nontemporal_load` and
@@ -1910,7 +1997,12 @@ What the lowering covers past scalars (#145's programs):
     floats and doubles (VSQRTPS and VFMADD213PS and theirs at the current
     rounding, as llvm.sqrt and llvm.fma are), of vectors and of scalars, whose
     operands are floating values (`check_vector_scalar_row`, with AVX-512F),
-    and of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH);
+    of half-precision elements with AVX512-FP16 (VSQRTPH, VFMADD213PH), and of
+    bf16 elements with AVX10.2 (VSQRTBF16, and the fused multiply-add's 213
+    form, its operands in clang's registers, with a negated operand's negation
+    folded into it as clang's instruction selection folds it: VFMSUB213BF16,
+    VFNMADD213BF16 or VFNMSUB213BF16, `check_lower_brain_negations`), where the
+    negation alone would round through float;
   - a nontemporal store is VMOVNTPS, VMOVNTPD or VMOVNTDQ of the vector by its
     elements and a nontemporal load VMOVNTDQA, at an address the pointer's
     element type aligns to the vector's bytes, as clang's code needs them; of a
@@ -1919,7 +2011,14 @@ What the lowering covers past scalars (#145's programs):
   - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
     and VPSRLW) and applies its operation at each step, then moves the element
     into a general register, in two rows where that is more than a row's 8
-    records.
+    records. Byte product reductions first zero-extend to 16-bit elements and
+    use VPMULLW, keeping the final low byte. A 64-byte input widens its two
+    halves separately and multiplies them before the halvings. Row boundaries
+    always keep each shuffle and its multiplication together;
+  - byte bit reversal uses AVX512-BMM's VBITREVB at 16, 32 or 64 bytes. Its
+    masked intrinsics use the existing masked byte selection. The opcode and
+    result/effect traces are compared with clang by `test-x86-intrinsics`;
+    no runtime result is claimed on a host without AVX512-BMM.
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
@@ -1931,10 +2030,12 @@ What the lowering covers past scalars (#145's programs):
   memory. The other floating elementwise functions and conversions (between
   8-bit integers and half-precision elements, between 8- and 16-bit integers and
   bf16 elements, to bf16 elements, and between half-precision elements and other
-  types than floats without AVX512-FP16), the bf16 elements' elementwise
-  functions and the half-precision ones' without AVX512-FP16, floating
+  types than floats without AVX512-FP16), the bf16 elements' other elementwise
+  functions and their square roots and multiply-adds without AVX10.2, the
+  half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
-  bit reversal, 8-bit multiplication, the funnel shifts of 8-bit elements, the
+  bit reversal of elements wider than a byte, byte bit reversal without
+  AVX512-BMM, the funnel shifts of 8-bit elements, the
   leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
   at underaligned addresses, bit casts of other types, and the rows whose
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
@@ -2671,12 +2772,17 @@ with Clang, and covers guarded classifier/interval tails and allocation failure.
 ### Intrinsics no host runs (`test-x86-intrinsics`)
 
 ```sh
-./build/compiler test-x86-intrinsics [--clang PATH] [--march CPU] [--executable PATH] [--cases FILE] [--print NAME] [--keep]
+./build/compiler test-x86-intrinsics [--clang PATH] [--march CPU] [--option FLAG]... [--executable PATH] [--cases FILE] [--print NAME] [--keep]
 ```
 
 The executable programs check a builtin's lowering by running it, which XOP's,
-AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's instructions can't be:
-no host of the tests has them (Zen 5 has none of them).
+AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and AVX512-BMM's
+instructions can't be: no host of the tests has them (Zen 5 has none of them);
+nor can the extensions' system instructions, whose extensions no host has or
+whose effects are the machine's (a transaction's, the user interrupts', the
+tiles' configuration, MSRs), or the leaves of Key Locker's, WAITPKG's and RTM's
+instructions (`c_builtin_x86_helpers.c`), whose extensions the 9700X and the
+hosted runners haven't.
 `test-x86-intrinsics` (`x86_intrinsics_test.c`, #136) compares the compiler's
 code of their intrinsics with clang -O0's instead, as the values each
 instruction computes:
@@ -2684,46 +2790,106 @@ instruction computes:
 - A source includes `<x86intrin.h>` and `<immintrin.h>` and takes each case's
   address, so that each compiler compiles the case's `always_inline` definition
   out of line, as `--lower-all` of `main.c` lowers the headers' definitions:
-  clang with `-O0 -march=znver5 -c` (`--march` names another CPU), this
-  executable (or `--executable`'s) by both paths, whose objects must be the
-  same bytes.
+  clang with `-O0 -march=znver5 -c` (`--march` names another CPU, and each
+  `--option` adds a flag to every compile), this executable (or
+  `--executable`'s) by both paths, whose objects must be the same bytes.
 - Each case's function in each object is decoded (`x86_64_disassembler.c`)
   and followed from its entry. Every general register's, vector register's,
   opmask's and stack byte's value is an expression of the arguments' bytes:
   the argument registers (`g0` to `g5`, `v0` to `v7`) and stack slots (`s0`
   on) at the entry, constants (the object's data, which relocations name), and
   a node for each instruction that isn't a move, of its form (VEX's and EVEX's
-  encodings of one instruction are one), its immediate and its operands'
-  values, a masked one's a select of its mask, its value and what it keeps.
+  encodings of one instruction are one, a ModRM.rm operand of a register or
+  memory compared as its register's: VEX's shifts by an immediate take a
+  register alone, and EVEX's either), its immediate and its operands'
+  values, a masked one's a select of its mask, its value and what it keeps,
+  over lanes of the destination's elements (a conversion's no more than its
+  source's: `vcvtph2bf8`'s eight bytes of an XMM register's halves).
   What an instruction reads and writes is its form's effects in
   `x86_semantics.c`; a form without them fails the case and is listed. Moves,
   pushes, pops and stack slots carry values, and the trace follows jumps in a
   function and calls of the object's other functions (the compiler's code calls
-  the definitions clang inlines).
+  the definitions clang inlines). An implicit general register is read whole,
+  but UMWAIT's, TPAUSE's and LOADIWKEY's EDX:EAX and EAX, which are 32-bit
+  halves; Key Locker's XMM registers that no role names (`x86_implicit_vectors`)
+  are operands after the explicit ones, and each one written is the node's part
+  for it, `node.x<i>`.
+- At a conditional jump or `xbegin` the trace follows both paths (up to 8),
+  each with its conditions: a jump's is a condition code's boolean of the flags
+  it tests, `set<cc>(flags)` of the even code of its pair (`e` for `e` and
+  `ne`), holding or not where the jump is taken; a jump on `e` or `ne` after a
+  test of a condition's boolean with 1 or itself, or its compare with 0
+  (clang's `sete`, then `test $1`), is the boolean's own condition; and
+  `xbegin`'s is its node, holding on the path to its fallback, where EAX is the
+  abort status, `status(xbegin#...)`. A trace of several paths is each path's
+  conditions' line (`path ...`, its conditions in their texts' order, `=1`
+  where one holds and `=0` where it doesn't) and its result and stores, the
+  paths in those lines' order. A vector register's zero idiom (`pxor`) leaves
+  the flags, which a general register's (`xor eax, eax`) defines.
 - A case's result (its return register's bytes of the intrinsic's type) and
-  its stores through pointers must be the same expressions in both objects.
+  its stores through pointers must be the same expressions in both objects, and
+  so must its effects, in order among the stores: each instruction that writes
+  no register or memory, and no flag or is a system instruction (a fence,
+  SERIALIZE, LOADIWKEY, and UMWAIT, TESTUI and ENQCMD, whose flags its result
+  may read), as its node, and each prefetch's and cache line's hint as its form
+  and its address. A memory
+  operand the form's table gives no size reads or writes its effects' width
+  (`ldtilecfg`'s, `sttilecfg`'s and `enqcmd`'s 64 bytes).
 - Controls: intrinsics that the executable programs run already, unmasked,
   merged and zeroed (`_mm_add_epi32`, `_mm256_dpbusd_avx_epi32` and their masked
   forms), and two XOP compares, whose code is AVX-512's, must agree too, and so
   must AVX10.2's masked store of bf16's first element (`_mm_mask_store_sbh`),
   a result stored through a pointer; and one intrinsic called with its two
   operands in each order must give different expressions in each object.
-- The cases, 145 of them: the intrinsics of XOP's own instructions (VFRCZ's
+- The cases, 466 of them: the intrinsics of XOP's own instructions (VFRCZ's
   fractions, the horizontal sums and differences, the multiply-accumulates,
   VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads,
   AVX10.2's intrinsics of AVX-VNNI-INT8's and AVX-VNNI-INT16's dot products,
-  masked, merged and zeroed, at each width, and SHA512's, SM3's and SM4's.
+  masked, merged and zeroed, at each width, SHA512's, SM3's and SM4's; and
+  AVX10.2's saturating conversions, bf16 operations and compares, conversions
+  to and from 8-bit floats and of two vectors of floats to halves, and dot
+  products of halves, MOVRS's vector loads and AVX512-BMM's products of bit
+  matrices, each unmasked, merged and zeroed where the headers have them; and
+  the system instructions of RAO-INT, CLDEMOTE, SERIALIZE, UINTR, PTWRITE,
+  WAITPKG's UMONITOR, LWP, MOVRS (its integer loads and prefetch), RTM's XEND
+  and XTEST, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR; and the
+  leaves' intrinsics, Key Locker's 11, WAITPKG's UMWAIT and TPAUSE and RTM's
+  XBEGIN; and AVX10.2's bf16 arithmetic, square roots and fused multiply-adds
+  at each width, with four of their masked forms, which in znver5's unit clang
+  computes in float (its excess precision: each operand widened, the floats'
+  operation, VCVTNEPS2BF16's rounding back), a negated operand of a
+  multiply-add folded into its form.
+- A second run, `--march diamondrapids --option -mno-apxf --cases
+  tests/x86-intrinsics/avx10.2-units.txt` (`tools/ci/correctness.tests`),
+  compares 16 of the bf16 cases and a control in a unit whose target has
+  AVX10.2, whose arithmetic is AVX10.2's own (VADDBF16 and the rest).
+  `-mno-apxf` keeps clang's prologues free of APX's REX2 prefixes, which the
+  disassembler doesn't decode.
+- Inverted cases: clang's code of Key Locker's eight that encrypt and decrypt
+  stores the result where ZF is 1 and zeros where it is 0, the other way from
+  Intel's manual, clang's own `keylockerintrin.h` (`ZF := 1`, `MEM[__odata] :=
+  0` for a handle that isn't valid) and GCC's code, which the compiler's leaves
+  follow; their cases compare clang's paths with each condition negated
+  (`X86IntrinsicCase.inverted`). Compared as they are (`--cases`, which has no
+  such flag), they differ, and the cases without a branch agree.
 
 The comparison is of the instructions' data flow, not of their meaning: code
 that computes the same values with other instructions differs, and a case would
 then need another check. Rules broken on purpose, a shift's source and counts
 swapped, a saturating multiply-accumulate for a wrapping one, an unsigned
 horizontal sum for a signed one and a packed fraction for a scalar one, each
-make their own case differ and no other.
+make their own case differ and no other; and so do leaves broken on purpose: the
+one-block Key Locker leaves' branch on `je`, the wide ones' first two blocks
+stored the other way round, `encodekey128`'s type from esi, `encodekey256`'s
+last part from xmm2, `loadiwkey`'s keys swapped, the waits' halves swapped and
+`xbegin`'s -1 for 0, which made exactly their 14 cases differ; and bf16's
+widening shifted by 15 rather than 16, and `fmsub`'s form `fmadd`'s, which made
+exactly their 18 cases differ (the operators', the `fmsub`s' and the masked
+forms that call them).
 
 `--cases FILE` takes other cases, a line each: `X`, `Y` or `Z` for a vector
-result of 16, 32 or 64 bytes, `I` or `L` for an integer of 4 or 8, `V` for
-none, then the intrinsic's name. `--print NAME` prints each object's trace of a
+result of 16, 32 or 64 bytes, `B`, `H`, `I` or `L` for an integer of 1, 2, 4 or
+8, `V` for none, then the intrinsic's name. `--print NAME` prints each object's trace of a
 case, every record it followed with the value it made. The files are removed
 unless `--keep` or a failure.
 

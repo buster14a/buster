@@ -365,7 +365,7 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
         {
             "vector-bf16-arithmetic",
             "typedef __bf16 v8bf __attribute__((vector_size(16)));void tested(v8bf*p,v8bf*q){*p=*p+*q;}",
-            "vector operations on elements of this type",
+            "vector arithmetic of bf16 elements without AVX512-BF16",
             0,
         },
         {

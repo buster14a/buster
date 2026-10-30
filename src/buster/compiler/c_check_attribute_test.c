@@ -1402,6 +1402,14 @@ static __attribute__((noinline)) void check_test_attribute_sources(CheckTest* te
         { "weak declarators after one's definition", "int x = 1;\n__attribute__((weak)) int x, y;\n", false, false },
         { "constructor after the definition ignored", "void f(void) {}\nvoid f(void) __attribute__((constructor));\n", false, false },
         { "constructor priorities", "void __attribute__((constructor(101), destructor(65536))) f(void) {}\n", false, false },
+        { "alias function definition rejected", "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void) { return 1; }\n", true, false },
+        { "alias function declaration accepted", "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void);\n", false, false },
+        { "alias followed by a body rejected", "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n", true, false },
+        { "alias followed by a declaration and a body rejected", "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void);\nint h(void) { return 1; }\n", true, false },
+        { "alias followed by a declaration accepted", "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void);\n", false, false },
+        { "repeated alias definition rejected", "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) __attribute__((alias(\"g\")));\n", true, false },
+        { "body followed by alias rejected", "int g(void) { return 0; }\nint h(void) { return 1; }\nint h(void) __attribute__((alias(\"g\")));\n", true, false },
+        { "block alias followed by body rejected", "int g(void) { return 0; }\nvoid f(void) { int h(void) __attribute__((alias(\"g\"))); }\nint h(void) { return 1; }\n", true, false },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
     char directory[] = "/tmp/buster-checker-attribute-source-XXXXXX";

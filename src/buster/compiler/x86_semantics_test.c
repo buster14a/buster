@@ -694,6 +694,12 @@ static const X86SemanticsFixture x86_semantics_fixtures[] = {
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 4)
     BUSTER_X86_FIXTURE(UCOMISD_X_XM64, FCOMPARE, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
                        BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 8, 0)
+    BUSTER_X86_FIXTURE(COMISS_X_XM32, FCOMPARE_SIGNALING, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
+                       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION, 4, 0)
+    // Intel AVX10.2 361050-004US, section 7.3.2: BF16 compares neither consult MXCSR nor raise FP exceptions.
+    // This static fixture runs even where the host cannot execute the instruction.
+    BUSTER_X86_FIXTURE(VCOMISBF16_X_XM16, FCOMPARE_SIGNALING, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0,
+                       0, 2, 0)
     BUSTER_X86_FIXTURE(XORPS_X_XM128, VECTOR_XOR, BUSTER_X86_RW | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, BUSTER_X86_MEMORY_EFFECT_ALIGNED,
                        BUSTER_X86_EFFECT_ZERO_IDIOM | BUSTER_X86_EFFECT_KEEP_UPPER, 16, 16)
     BUSTER_X86_FIXTURE(MOVUPS_X_XM, VECTOR_MOVE, BUSTER_X86_W | BUSTER_X86_V, BUSTER_X86_R | BUSTER_X86_V, 0, 0, 0, 0, 0, 0, BUSTER_X86_EFFECT_KEEP_UPPER, 16, 16)
@@ -990,6 +996,24 @@ static bool x86_semantics_check_resolved(void)
             .reads = BUSTER_X86_RESOURCE_VECTOR(4) | BUSTER_X86_RESOURCE_VECTOR(5) | BUSTER_X86_RESOURCE_MXCSR,
             .writes = BUSTER_X86_RESOURCE_VECTOR(4),
             .what = "addsd xmm4, xmm5",
+        },
+        {
+            .record = { .form = X86_FORM_COMISS_X_XM32, .reg = 4, .rm = 5 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(4) | BUSTER_X86_RESOURCE_VECTOR(5) | BUSTER_X86_RESOURCE_MXCSR,
+            .writes = status,
+            .what = "comiss xmm4, xmm5: retains the ordinary comparison's MXCSR dependency",
+        },
+        {
+            .record = { .form = X86_FORM_VCOMISBF16_X_XM16, .reg = 4, .rm = 5 },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(4) | BUSTER_X86_RESOURCE_VECTOR(5),
+            .writes = status,
+            .what = "vcomisbf16 xmm4, xmm5: no MXCSR dependency",
+        },
+        {
+            .record = { .form = X86_FORM_VCOMISBF16_X_XM16, .reg = 4, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },
+            .reads = BUSTER_X86_RESOURCE_VECTOR(4) | BUSTER_X86_RESOURCE_GPR(7) | memory,
+            .writes = status,
+            .what = "vcomisbf16 xmm4, [rdi]: retains the address and memory read",
         },
         {
             .record = { .form = X86_FORM_LOCK_XADD_M64_R64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE },

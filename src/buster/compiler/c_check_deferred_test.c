@@ -159,6 +159,8 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
     { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
     { "block-scope-prototype-adds-parameters", "int h();\nint f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "block-scope-alias-changes-definition-history", "int h(void);\nint f(void) { int h(void) __attribute__((alias(\"g\"))); return 0; }\n"
+      "int g(void) { return 0; }\n", false },
     // A naked prototype's later declarations inherit the attribute: a block's declaration that inherits it merges, and
     // one that adds it, which the later definition inherits in source order, is source order's.
     { "block-scope-declaration-inherits-naked", "__attribute__((naked)) void n(void);\nint f(void) { void n(void); n(); return 0; }\n"

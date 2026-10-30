@@ -13,6 +13,8 @@ struct CheckDriverFixture
     bool rejected;
     uint32_t warnings;
     bool quiet;
+    const char* message;
+    uint32_t column;
 };
 
 // Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
@@ -2759,6 +2761,10 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
+                                           "\ntime-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n",
+                                           "\ntime-process\tstage-system-boundary\tresource-marks\n",
+                                           "\ntime-process\tstage-system-accuracy\tunqualified\n",
+                                           "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
@@ -2923,12 +2929,14 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
-    const int measured_status = made ? check_test_driver_spawn(measured, &text) : -1;
+    const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
+    const bool qualified = text != NULL && strstr(text, "stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks") != NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
+    check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
@@ -4858,6 +4866,20 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "alias on a function definition is rejected at the attribute",
+            .source = "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "function definition cannot also be an alias",
+            .column = 16,
+        },
+        {
+            .name = "a function body after an alias is a redefinition",
+            .source = "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "conflicting declaration",
+            .column = 5,
+        },
+        {
             .name = "K&R definition emits its deprecated-non-prototype warning",
             .source = "int f(a)float a;{return (int)a;}\n",
             .warnings = 1,
@@ -5316,6 +5338,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
+            if (fixtures[i].message != NULL)
+            {
+                snprintf(description, sizeof(description), "%s, %s %s%s: diagnostic and attribute column", fixtures[i].name,
+                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "");
+                check_test_expect(&test, ready && checked.column == fixtures[i].column && checked.column == oracle.column &&
+                                  strcmp(checked.message, fixtures[i].message) == 0, description);
+            }
             snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
             check_test_expect(&test, warnings == fixtures[i].warnings, description);

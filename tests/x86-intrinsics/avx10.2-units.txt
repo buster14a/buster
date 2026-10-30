@@ -1,0 +1,17 @@
+X _mm_add_pbh
+X _mm_sub_pbh
+X _mm_mul_pbh
+X _mm_div_pbh
+Y _mm256_add_pbh
+Y _mm256_sub_pbh
+Y _mm256_mul_pbh
+Y _mm256_div_pbh
+Z _mm512_add_pbh
+Z _mm512_sub_pbh
+Z _mm512_mul_pbh
+Z _mm512_div_pbh
+Z _mm512_mask_add_pbh
+Y _mm256_maskz_div_pbh
+X _mm_fmadd_pbh
+Z _mm512_fnmsub_pbh
+X _mm_add_epi32
