@@ -1335,9 +1335,10 @@ static void check_units_merge_lane(void* argument)
 
 // The units' merge on `lanes` lanes of the units' flow (see the comment before CheckUnitsMerge), a round of `flow`'s
 // (#905): check_units_merge's link and results, from shared state in `scratch` that lane 0 reserves before the round.
-// Without its memory, the merge is check_units_merge's, on lane 0 alone.
+// Without its memory, return the round's lease before check_units_merge runs on lane 0 alone. The caller's final
+// return remains idempotent, and a failed early return stays in flow->slots_lost.
 static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
-                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow)
+                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow, WorkerBudgetLease* lease)
 {
     const uint64_t mark = scratch->length;
     uint64_t symbols = 0;
@@ -1411,6 +1412,7 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     {
         // Without its memory, the twin, from the link as it was.
         arena_pop_to(scratch, mark);
+        check_units_slots_back(flow, lease);
         result = check_units_merge(link, units, count, binding, debug, output, bytes, scratch);
     }
     else

@@ -1571,7 +1571,7 @@ typedef struct CheckUnitsUnit CheckUnitsUnit;
 static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
                               Arena* bytes, Arena* scratch);
 static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
-                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow);
+                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow, WorkerBudgetLease* lease);
 static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t count, const Link* link, NameId name);
 
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
@@ -1644,7 +1644,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar) ?
                                          check_units_slots(lanes->budget, lanes->lanes, &merge_lease) : 1;
         const bool emitted = !valid || (merge_lanes > 1   ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
-                                                                                    scratch, merge_lanes, lanes->units_flow) :
+                                                                                    scratch, merge_lanes, lanes->units_flow, &merge_lease) :
                                         units != NULL     ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
                                                             check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
                                                                                      &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));

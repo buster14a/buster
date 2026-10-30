@@ -59,6 +59,11 @@ units' run, and the executable's merge, `link_check` and write, which want as
 many lanes as the units' run took. A unit no lane took compiles on the calling
 thread alone: the same outputs.
 
+If the parallel merge cannot reserve its scratch workspace, it pops that
+workspace and returns the merge's worker-budget lease before calling the serial
+twin. The caller's final return remains idempotent; an early return failure is
+sticky in both the budget and the flow and still fails the command.
+
 The command's lanes are its session's (#905, `lane_session_run`, as
 `link-foreign`'s), created once after its options and before any source is
 read, and every lane runs the command's flow (`CheckUnitsFlow`, a `LaneFlow`
@@ -600,6 +605,14 @@ driver as a process, in a directory of its own:
   `can't reserve the lane's memory`), its file cache's after its intern table
   and the cache's first arrays were reserved, which the lane releases with the
   rest.
+- **The merge-fallback lease:** a small shared scratch arena forces the actual
+  parallel reservation to fail; the serial twin then performs its duplicate-name
+  check. A test broker observes scratch on the real release control/reply
+  protocol while the caller waits for acknowledgement, before serial writes.
+  Moving release after the serial call or leaving it to final cleanup fails this
+  observation. A refused acknowledgement also checks sticky failure through the
+  caller's idempotent final cleanup. The control does not change production
+  dispatch or add a callback.
 - **The jobserver:** four units by `--lanes 4` under a GNU make jobserver of
   three tokens, linked into an executable of more than a megabyte whose path
   is a FIFO, which the test reads: while the writer writes, the jobserver
