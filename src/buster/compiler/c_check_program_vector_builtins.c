@@ -622,8 +622,13 @@ static const char* check_vector_builtin_feature_reason(CBuiltinId builtin, uint6
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading zero
 // counts (clzg's second operand the elements a zero element takes) and funnel shifts; of half-precision elements (with
 // AVX512-FP16), floats and doubles, the square roots and the fused multiply-adds at the current rounding, as llvm.sqrt's
-// and llvm.fma's are (VSQRTPH/PS/PD of a, VFMADD213PH/PS/PD of a, b and c: a = b * a + c).
-static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, Tier0Operation* row)
+// and llvm.fma's are (VSQRTPH/PS/PD of a, VFMADD213PH/PS/PD of a, b and c: a = b * a + c); of bf16 elements (with
+// AVX10.2), VSQRTBF16 of a, and the fused multiply-add of b, a and c (b = a * b + c, as clang's code has b in ModRM.reg
+// and a in VEX.vvvv), moved to VECTOR(0), whose operands `negated` has the bit of (the lowering takes their negations'
+// operands: check_lower_brain_negations) negate the product (a's or b's alone) or the sum (c's) as the form does, as
+// clang's instruction selection folds the negations: VFMADD213BF16, VFMSUB213BF16, VFNMADD213BF16 or VFNMSUB213BF16.
+static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
+                                                Tier0Operation* row)
 {
     const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
@@ -654,6 +659,25 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
         reason = shape.element == 2 && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0 ?
                      "elementwise vector builtins of half-precision elements without AVX512-FP16" :
                      NULL;
+    }
+    else if (shape.bfloat && (builtin == CBUILTIN_ELEMENTWISE_SQRT || builtin == CBUILTIN_ELEMENTWISE_FMA))
+    {
+        static const CheckVectorForms products[4] = { BUSTER_CHECK_VECTOR_PACKED(VFMADD213BF16), BUSTER_CHECK_VECTOR_PACKED(VFMSUB213BF16),
+                                                      BUSTER_CHECK_VECTOR_PACKED(VFNMADD213BF16), BUSTER_CHECK_VECTOR_PACKED(VFNMSUB213BF16) };
+        // 1 for a negated sum, 2 for a negated product.
+        const uint32_t sign = (negated >> 2 & 1) | ((negated ^ negated >> 1) & 1) << 1;
+        if (builtin == CBUILTIN_ELEMENTWISE_SQRT)
+        {
+            row->records[0] = check_vector_lower_record(BUSTER_CHECK_VECTOR_UNARY_PACKED(VSQRTBF16).forms[width], v0, 0, v0);
+            row->record_count = 1;
+        }
+        else
+        {
+            row->records[0] = check_vector_lower_record(products[sign].forms[width], v1, v0, v2);
+            row->records[1] = check_x86_lower_move_result(shape.bytes, v1);
+            row->record_count = 2;
+        }
+        reason = (target->extensions & BUSTER_X86_EXTENSION(AVX10_2)) == 0 ? "elementwise vector builtins of bf16 elements without AVX10.2" : NULL;
     }
     else if (shape.bfloat)
     {

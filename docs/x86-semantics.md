@@ -694,8 +694,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,
     vshufi32x4, vshufi64x2, the broadcasts
     (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
-    register too), the inserts and extracts (vinserti32x4, vinserti64x4, f32x4,
-    f64x4, i32x4, i64x4, vpinsr and vpextr in b, w, d, q), the packs (vpacksswb,
+    register too), the inserts and extracts (vinserti32x4, vinserti64x4,
+    vinsertf64x4, vextract in f32x4, f64x4, i32x4 and i64x4, vpinsr and vpextr
+    in b, w, d, q), the packs (vpacksswb,
     vpackssdw, vpackuswb, vpackusdw), the narrowing moves (vpmov, vpmovs and
     vpmovus from d and q to b, w and d, and from w to b) and the widening ones
     (vpmovzx and vpmovsx from b, w and d), and the compresses
@@ -730,8 +731,11 @@ Mutations of the tables, each built and run once, are caught. Among them:
     SM4's vsm4key4 and vsm4rnds4 of 64 bytes;
   - AVX10.2's saturating conversions with truncation (vcvttps2dqs to
     vcvttpd2uqqs), as the AVX-512 ones they saturate; its bf16 operations
-    (vscalefbf16, vgetexpbf16, vrcpbf16, vrsqrtbf16, vmaxbf16 and vminbf16),
-    without MXCSR or exceptions, as vcvtneps2bf16's, and vcomisbf16, as
+    (vscalefbf16, vgetexpbf16, vrcpbf16, vrsqrtbf16, vmaxbf16 and vminbf16)
+    and arithmetic (vaddbf16 to vdivbf16, vsqrtbf16, and the fused
+    multiply-adds' 213 forms, vfmadd213bf16 to vfnmsub213bf16, which the
+    lowering's rows take), without MXCSR or exceptions, as vcvtneps2bf16's, and
+    vcomisbf16, as
     vcomiss; its conversions to and from 8-bit floats (vcvtph2bf8 to
     vcvt2ph2hf8s and vcvthf82ph), without MXCSR or exceptions; and vcvt2ps2phx
     and vdpphps, which read MXCSR;
