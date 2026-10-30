@@ -1849,6 +1849,20 @@ What the lowering covers past scalars (#145's programs):
     has their extensions, or their effects are on the machine's state (a
     transaction's, the user interrupts', the tiles' configuration, MSRs), and
     `test-x86-intrinsics` compares them all with clang's code;
+  - AMX internal tile-value builtins: zero, ordinary/streaming/read-shared loads,
+    stores, INT8/BF16/FP16/complex/FP8 products and the six AMX-AVX512 row
+    conversions. Their 1024-byte `int` vectors use memory objects for copies,
+    arguments, hidden results and element access. Active rows are packed using
+    their column-byte count as the stride; inactive result-object bytes are
+    initialized to zero. Per-unit leaves configure palette 1 with every reserved
+    byte zero, execute the real AMX instruction and release tile state. Each
+    operation requires its target extension, and row operations also require
+    AVX10.2. Ordinary arithmetic on tile-sized vectors remains unsupported.
+    `test-checker --program-amx` compares decoded Clang instruction chains with
+    the leaves at minimum, interior and full tile shapes, including wrong-width
+    and swapped-source negative controls. It separately executes value/ABI
+    tests on eligible ordinary x86-64 hosts; the instruction trace does not
+    establish native AMX execution;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
