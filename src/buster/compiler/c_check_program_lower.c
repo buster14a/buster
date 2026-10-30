@@ -7741,6 +7741,16 @@ static bool check_lower_libm_builtin(CBuiltinId builtin)
     return (builtin >= CBUILTIN_ELEMENTWISE_ACOS && builtin <= CBUILTIN_ELEMENTWISE_TANH) || (builtin >= CBUILTIN_ELEMENTWISE_ATAN2 && builtin <= CBUILTIN_ELEMENTWISE_POW);
 }
 
+// Whether node `node`, a call of `builtin`, is __builtin_elementwise_round under FENV_ACCESS (#934's review): clang
+// computes it by the constrained round, the C library's round for each element, since the rows' expansion
+// (check_vector_floating_row's) adds the half below 0.5 in MXCSR's rounding mode, which a caller may have changed (0.5f
+// rounds to 0 under FE_DOWNWARD), and raises inexact; ceil, floor, trunc and roundeven fix their rounding in their
+// instructions, and rint and nearbyint take MXCSR's, as their functions do.
+static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBuiltinId builtin)
+{
+    return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+}
+
 // Pushes the instructions of an address `offset` bytes into frame object `object`, which run in the reverse of their
 // pushes: LOCAL_ADDRESS, then the offset's PTR_ADD.
 static void check_lower_element_address(CheckLowerWriter* writer, uint32_t object, uint32_t offset)
@@ -8209,7 +8219,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             writer->vectors = true;
         }
     }
-    else if (check_lower_libm_builtin(builtin))
+    else if (check_lower_libm_builtin(builtin) || check_lower_strict_round(graph, node, builtin))
     {
         check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
     }
@@ -10528,6 +10538,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     uint32_t builtin_count = 0;
     uint32_t atomic_capacity = 0;
     uint32_t integer_builtin_count = 0;
+    // A libm builtin of a vector (check_lower_vector_calls) calls the C library's function once an element, past what the
+    // per-node bounds below give a node (#934's review): its lanes' calls and their arguments, and each call's entries, its
+    // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 13 with two
+    // arguments).
+    uint64_t lane_calls = 0;
+    uint64_t lane_arguments = 0;
     for (uint32_t node = 0; node < nodes; node += 1)
     {
         integer_builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
@@ -10541,6 +10557,15 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
                            (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
                            (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
+        const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
+        const CBuiltinId member = (CBuiltinId)input->graph.members[node];
+        if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
+            (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
+        {
+            const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
+            lane_calls += lanes;
+            lane_arguments += lanes * input->graph.argument_counts[node];
+        }
     }
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
@@ -10562,7 +10587,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                                                                                                                 (CheckLowerLimbRoom){ 0 };
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
-                                limb_room.entries + 32;
+                                limb_room.entries + lane_calls * 13 + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
@@ -10639,9 +10664,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
     // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
     // the helpers'.
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls + 1;
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
+                                    lane_calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
-                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + 1 : 0;
+                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
     lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;

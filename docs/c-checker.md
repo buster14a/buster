@@ -2111,7 +2111,11 @@ What the lowering covers past scalars (#145's programs):
     AVX-512F): the roundings VRNDSCALE (floor 9, ceil 10, trunc 11, rint 4,
     nearbyint 12, roundeven 8; a scalar's of a register holding it alone,
     zeros past it, VRNDSCALESS being no form `x86_semantics.c` covers);
-    round's x + copysign(0.5's predecessor, x), truncated; canonicalize's x *
+    round's x + copysign(0.5's predecessor, x), truncated, but under
+    `FENV_ACCESS`, where clang computes the constrained round, the C library's
+    round as the functions below are called (`check_lower_strict_round`, #934's
+    review: the addition rounds by MXCSR's mode, which takes 0.5 to 0 under
+    `FE_DOWNWARD`, and raises inexact); canonicalize's x *
     1.0; copysign's VPTERNLOGD by the magnitude mask; maxnum and minnum's VMAXP
     or VMINP of y and x and y where x is a NaN; maximum and minimum's of x and
     y with VPTERNLOGD's sign fix and x where x is a NaN; maximumnum and
@@ -2126,7 +2130,9 @@ What the lowering covers past scalars (#145's programs):
     element at a time, in element order, through frame objects of the vectors
     (`check_lower_vector_calls`): clang -O0's code makes a vector's calls in its
     scheduler's order, which the code around them changes, so errno after them
-    is unspecified. A long double's roundings (floorl ... roundl), maxnum and
+    is unspecified. The lowering's tables have room for a vector's calls, an
+    element each, beside a node's own (`check_lower_prepare`'s lane calls:
+    64 nested sines of a 64-byte float vector make 1,024). A long double's roundings (floorl ... roundl), maxnum and
     minnum (fmaxl, fminl) and ldexp by an int's exponent (ldexpl) are calls
     too;
   - the floating reductions are clang's trees: maximum and minimum halve the

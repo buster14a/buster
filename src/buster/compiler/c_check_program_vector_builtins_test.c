@@ -642,6 +642,60 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             free(source);
         }
     }
+    // #934's review: a libm builtin of a wide vector calls the C library's function once an element, which the lowering's
+    // tables have room for whatever the unit's other code: 64 nested __builtin_elementwise_sin of a 64-byte float vector,
+    // 1,024 calls, and 64 of __builtin_elementwise_pow's two operands, a unit of its own.
+    char nested[8192];
+    int at = snprintf(nested, sizeof(nested), "%s" BUSTER_CHECK_TEST_FLOATING_TYPES "v16sf nested(v16sf x){return ", check_test_vector_builtin_types);
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, "__builtin_elementwise_sin(");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ? snprintf(nested + at, sizeof(nested) - (size_t)at, "x") : 0;
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, ")");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ? snprintf(nested + at, sizeof(nested) - (size_t)at, ";}v16sf powers(v16sf x){v16sf y=x;") : 0;
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, "y=__builtin_elementwise_pow(y,x);");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ?
+              snprintf(nested + at, sizeof(nested) - (size_t)at,
+                       "return y;}int tested(int n){unsigned h=2166136261u;v16sf v;for(int i=0;i<16;i++)v[i]=(float)(n+i)*0.125f;"
+                       "v16sf s=nested(v);FOLD(s);v16sf w;for(int i=0;i<16;i++)w[i]=1.0f+(float)((n+i)&3)*0.001f;v16sf p=powers(w);FOLD(p);return (int)h;}") :
+              0;
+    check_test_expect(test, at > 0 && (size_t)at < sizeof(nested), "the nested libm calls' source fits");
+    if (at > 0 && (size_t)at < sizeof(nested))
+    {
+        check_test_program_source_native_limits(test, nested, "vector-nested-libm-calls", clang, false, -1, 0, target, run_native);
+    }
+    // #934's review: __builtin_elementwise_round under FENV_ACCESS is the C library's round, an element at a time, as
+    // clang's constrained round is, right in each of MXCSR's rounding modes, which the caller sets: the rows' expansion
+    // adds the half below 0.5 in MXCSR's mode, so 0.5 rounds to 0 under FE_DOWNWARD. Each mode's results and its
+    // exception flags, cleared before the calls, by each width of a float and of a double.
+    static const char strict_round[] = BUSTER_CHECK_TEST_FLOATING_TYPES
+        "#pragma STDC FENV_ACCESS ON\n"
+        "static float round_f(float x){return __builtin_elementwise_round(x);}static double round_d(double x){return __builtin_elementwise_round(x);}"
+        "static v4sf round_v4(v4sf x){return __builtin_elementwise_round(x);}static v16sf round_v16(v16sf x){return __builtin_elementwise_round(x);}"
+        "static v8df round_w(v8df x){return __builtin_elementwise_round(x);}"
+        "int tested(int n){unsigned h=2166136261u;unsigned saved;__asm__ volatile(\"stmxcsr %0\" : \"=m\"(saved));"
+        "for(unsigned mode=0;mode<4;mode++){unsigned m=(saved&~0x603fu)|(mode<<13);__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(m));"
+        "float f=round_f(0.5f+(float)(n&1));FOLD(f);double d=round_d(-2.5+(double)(n&3));FOLD(d);"
+        "v4sf q;v16sf v;v8df w;for(int i=0;i<4;i++)q[i]=(float)i+0.5f;for(int i=0;i<16;i++)v[i]=(float)(i-8)*0.5f+(float)(n&1)*0.25f;"
+        "for(int i=0;i<8;i++)w[i]=(double)(i-4)*0.5+(double)(n&3)*0.125;"
+        "v4sf rq=round_v4(q);FOLD(rq);v16sf rv=round_v16(v);FOLD(rv);v8df rw=round_w(w);FOLD(rw);"
+        "unsigned after;__asm__ volatile(\"stmxcsr %0\" : \"=m\"(after));after&=0x3fu;FOLD(after);}"
+        "__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(saved));return (int)h;}";
+    char* strict = malloc(strlen(check_test_vector_builtin_types) + sizeof(strict_round));
+    check_test_expect(test, strict != 0, "the strict round program's source");
+    if (strict != 0)
+    {
+        snprintf(strict, strlen(check_test_vector_builtin_types) + sizeof(strict_round), "%s%s", check_test_vector_builtin_types, strict_round);
+        check_test_program_source_native_limits(test, strict, "vector-strict-round", clang, false, -1, 0, target, run_native);
+        free(strict);
+    }
     if (run_native && !has_mwaitx)
     {
         printf("  x86-mwaitx: native execution skipped (the host hasn't MWAITX); the program compiles and links\n");
