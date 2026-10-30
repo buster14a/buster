@@ -311,9 +311,20 @@ directory of its own (some of c-testsuite's programs write files), with standard
 input from `/dev/null` and standard output and errors into a file, fully
 buffered as a native program's are into a file. The three must end alike: the
 same wait status, interpreter outcome and output. A run the interpreter couldn't
-finish fails, however its forms agree. Where `FILE.expected` exists
+finish fails, however its forms agree: every form must exit normally, so a
+matching timeout or other signal is not a pass. An interpreter resource or
+step-limit result also fails. A program that calls a native `exit` may finish
+normally without an interpreter record; those exits remain supported.
+Where `FILE.expected` exists
 (c-testsuite's convention), the program must exit with status 0 having written
 its bytes.
+
+`test-ssa-source --self-test` checks this boundary on four tiny C fixtures,
+through the real preparation, promotions and three child processes, without
+expected-output sidecars: a normal nonzero return and a native `exit` must pass;
+three identical wall-timeout signals and three interpreter step limits must
+fail. The controls check every process status and retained interpreter record.
+Unexpected failures retain their work directory; `--keep` retains every run.
 
 The interpreter's program is the emission's link, which `ir_source_prepare`
 keeps when asked: the static data published into it as the driver publishes it
@@ -418,9 +429,13 @@ These are medians of the rounds' 21-pass medians, over the 2,602 functions'
 A promotion is all of `ssa_ir_promote`: the input's verification, CFG and
 classification, the shared dominance analysis, construction and cleanup, the
 IR's rebuild and both IR verifiers on the output. The two paths make the same
-phis. Against main, `promote` took +0.16% and `promote-scalar` −0.32% (each within
-its rounds' spread), with 0.003% more instructions, the promotion's tests of its
-verifier argument. After 200 ms of scalar work before each pass, `promote` took
+phis. Against main, the record reports `promote` +0.16% and `promote-scalar`
+−0.32%, with 0.003% more reported instructions and the promotion's added tests
+of its verifier argument. The small timing changes remain unattributed:
+unchanged-control timings do not establish a placement/noise bound for changed
+promotion code. The [additive interpretation note](https://github.com/buster14a/buster-performance/blob/224d16c36bc688bc40ddc2a6b30fe7f4f537ce95/docs/measurement-review-notes/pr149-timing-interpretation-2026-10-30.md)
+retains the original packet and records its counter-coverage and local-snapshot
+limitations. After 200 ms of scalar work before each pass, `promote` took
 141.16 ns per entry against main's 141.17.
 
 ### Synthetic CFGs

@@ -71,6 +71,10 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Reject unfinished SSA-source runs and preserve normal program exits [3 CPUs]
+# #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
+# native exit pass; matching alarms and interpreter step limits fail, with every process status and record checked.
+./build/compiler test-ssa-source --self-test
 == Promote c-testsuite's programs to SSA and run them in the IR's three forms [3 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
