@@ -120,6 +120,30 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_UMWAIT,
     CBUILTIN_X86_HELPER_TPAUSE,
     CBUILTIN_X86_HELPER_XBEGIN,
+    CBUILTIN_X86_HELPER_TILEZERO,
+    CBUILTIN_X86_HELPER_TILELOADD,
+    CBUILTIN_X86_HELPER_TILELOADDT1,
+    CBUILTIN_X86_HELPER_TILELOADDRS,
+    CBUILTIN_X86_HELPER_TILELOADDRST1,
+    CBUILTIN_X86_HELPER_TILESTORED,
+    CBUILTIN_X86_HELPER_TDPBSSD,
+    CBUILTIN_X86_HELPER_TDPBSUD,
+    CBUILTIN_X86_HELPER_TDPBUSD,
+    CBUILTIN_X86_HELPER_TDPBUUD,
+    CBUILTIN_X86_HELPER_TDPBF16PS,
+    CBUILTIN_X86_HELPER_TDPFP16PS,
+    CBUILTIN_X86_HELPER_TCMMIMFP16PS,
+    CBUILTIN_X86_HELPER_TCMMRLFP16PS,
+    CBUILTIN_X86_HELPER_TDPBF8PS,
+    CBUILTIN_X86_HELPER_TDPBHF8PS,
+    CBUILTIN_X86_HELPER_TDPHBF8PS,
+    CBUILTIN_X86_HELPER_TDPHF8PS,
+    CBUILTIN_X86_HELPER_TCVTROWD2PS,
+    CBUILTIN_X86_HELPER_TCVTROWPS2BF16H,
+    CBUILTIN_X86_HELPER_TCVTROWPS2BF16L,
+    CBUILTIN_X86_HELPER_TCVTROWPS2PHH,
+    CBUILTIN_X86_HELPER_TCVTROWPS2PHL,
+    CBUILTIN_X86_HELPER_TILEMOVROW,
     CBUILTIN_X86_HELPER_COUNT,
 } CBuiltinX86HelperKind;
 
@@ -468,6 +492,16 @@ static const X86Instruction cbuiltin_x86_helper_xbegin[] = {
 // passes in the XMM registers and returns in xmm0, rather than unsigned longs, the target's extensions it takes
 // (X86Target.extensions), and its branch, a Jcc_REL8's record and its target's, where it has one (branch sizing's
 // columns).
+typedef enum CBuiltinAmxFamily
+{
+    CBUILTIN_AMX_NONE,
+    CBUILTIN_AMX_ZERO,
+    CBUILTIN_AMX_LOAD,
+    CBUILTIN_AMX_STORE,
+    CBUILTIN_AMX_DOT,
+    CBUILTIN_AMX_ROW,
+} CBuiltinAmxFamily;
+
 typedef struct CBuiltinX86HelperInfo CBuiltinX86HelperInfo;
 struct CBuiltinX86HelperInfo
 {
@@ -487,14 +521,22 @@ struct CBuiltinX86HelperInfo
     uint32_t branch_count;
     uint32_t branch;
     uint32_t target;
+    // AMX internal builtins use scalar dimensions and addresses, plus a final output address for a nonvoid result.
+    // Their generated bodies configure the tile shapes locally and release them before returning.
+    uint8_t amx;
+    uint16_t amx_form;
+    uint16_t output_bytes;
 };
 #define BUSTER_CBUILTIN_X86_VECTOR_RESULT 0x80u
 
 #define BUSTER_CBUILTIN_X86_LEAF(id, ...) [id] = { __VA_ARGS__ },
 static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER_COUNT] = {
 #include "c_builtin_x86_leaves.inc"
+#include "c_builtin_amx_leaves.inc"
 };
 #undef BUSTER_CBUILTIN_X86_LEAF
+
+#include "c_builtin_amx_helpers.c"
 
 // The kind of a builtin's name, CBUILTIN_X86_HELPER_NONE for a builtin no leaf computes.
 static CBuiltinX86HelperKind cbuiltin_x86_helper_kind(const char* name, uint32_t length)
@@ -522,32 +564,39 @@ static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* 
     else
     {
         const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + kind;
-        const uint64_t length = output->length;
-        X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, info->record_count);
-        // The branch's columns: its record, then its target's.
-        uint32_t* columns = records != NULL && info->branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : NULL;
-        if (records == NULL || (info->branch_count != 0 && columns == NULL))
+        if (info->amx != 0)
         {
-            output->length = length;
-            result.code.error = TIER0_ERROR_MEMORY;
+            result = cbuiltin_amx_helper(info, output);
         }
         else
         {
-            memcpy(records, info->records, (uint64_t)info->record_count * sizeof(*records));
-            result.code.records = records;
-            result.code.count = info->record_count;
-            if (columns != NULL)
+            const uint64_t length = output->length;
+            X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, info->record_count);
+            // The branch's columns: its record, then its target's.
+            uint32_t* columns = records != NULL && info->branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : NULL;
+            if (records == NULL || (info->branch_count != 0 && columns == NULL))
             {
-                columns[0] = info->branch;
-                columns[1] = info->target;
-                result.code.branches = columns;
-                result.code.targets = columns + 1;
-                result.code.branch_count = info->branch_count;
+                output->length = length;
+                result.code.error = TIER0_ERROR_MEMORY;
             }
-            result.code.frame_saved = info->saved;
-            result.code.frame_pointer = info->pointer;
-            result.parameter_count = info->parameter_count;
-            result.result_class = (info->vectors & BUSTER_CBUILTIN_X86_VECTOR_RESULT) ? BUSTER_TYPED_CLASS_VECTOR : info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
+            else
+            {
+                memcpy(records, info->records, (uint64_t)info->record_count * sizeof(*records));
+                result.code.records = records;
+                result.code.count = info->record_count;
+                if (columns != NULL)
+                {
+                    columns[0] = info->branch;
+                    columns[1] = info->target;
+                    result.code.branches = columns;
+                    result.code.targets = columns + 1;
+                    result.code.branch_count = info->branch_count;
+                }
+                result.code.frame_saved = info->saved;
+                result.code.frame_pointer = info->pointer;
+                result.parameter_count = info->parameter_count;
+                result.result_class = (info->vectors & BUSTER_CBUILTIN_X86_VECTOR_RESULT) ? BUSTER_TYPED_CLASS_VECTOR : info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
+            }
         }
     }
     return result;
