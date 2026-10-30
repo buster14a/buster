@@ -465,24 +465,27 @@ has the commands, the logs and the default path's numbers against main.
     address that another statement's template defines;
   - a label inside a helper at its exact record, whose snippet another
     statement's template calls;
-  - musl's atomics as `atomic_arch.h` writes them (lock prefixes as statements
-    of their own on `cmpxchg`, `xadd` and the arithmetic, `xchg`, `bsf`, `bsr`
-    and `__get_tp`'s `%fs` load), the SSE templates of its x86_64 math
+  - the forms of musl's atomics (`atomic_arch.h`), in functions of the test's
+    own (lock prefixes as statements of their own on `cmpxchg`, `xadd` and the
+    arithmetic, `xchg`, `bsf`, `bsr` and a `%fs` load), the SSE templates of its
+    x86_64 math, likewise
     (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
     dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
     `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA;
-  - explicit register variables: musl's syscall wrappers (r10, r8 and r9 beside
-    the fixed registers) on harmless system calls, and each shape of a
+  - explicit register variables: wrappers of the test's own in the shape of
+    musl's syscall wrappers (r10, r8 and r9 beside the fixed registers) on
+    harmless system calls, and each shape of a
     variable's operand: a constraint's letter replaced, a cast that keeps the
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
-  - the x87's operands: musl's long double functions (`fabsl`, `sqrtl`,
-    `rintl`, `fmodl`'s and `remainderl`'s fprem loops with the status word in
-    `%ax`, `lrintl`'s and `llrintl`'s popping `fistpll`, and `remquol` whole),
-    and each shape of the stack's rules (fsincos's two outputs, fyl2x's popped
-    st(1), fscale's kept one, outputs pushed by the template, a `float`'s and a
-    `double`'s operands, templates of no instructions).
+  - the x87's operands: the shapes of musl's long double functions, in
+    functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
+    and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
+    from that word, `fistpll`'s popping store, and `X` operands), and each shape
+    of the stack's rules (fsincos's two outputs, fyl2x's popped st(1), fscale's
+    kept one, outputs pushed by the template, a `float`'s and a `double`'s
+    operands, templates of no instructions).
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one

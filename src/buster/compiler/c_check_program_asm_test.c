@@ -358,50 +358,61 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
         "#endif\n"
         "return z;}", "asm-flag-output-fallback", clang);
-    // musl's atomics (arch/x86_64/atomic_arch.h, as musl writes them): lock prefixes as statements of their own before
-    // cmpxchg, xadd, and, or, incl and decl on memory outputs, xchg, a store with a locked or of the stack as its fence,
-    // pause, the bit scans of a_ctz_64 and a_clz_64 (of operands never zero, whose result the scans leave undefined), and
-    // __get_tp's load of the thread pointer through %fs. hlt (a_crash) is compiled, assembled and linked, never run.
+    // The forms of musl's x86_64 atomics (arch/x86_64/atomic_arch.h), in functions of this test's own: lock prefixes as
+    // statements of their own before cmpxchg, xadd, and, or, xor, inc and dec on memory outputs (an "=m" one beside
+    // an "m" input of its object, and "+m"), xchg, a store fenced by a locked or of the stack, pause, the bit scans
+    // (of operands never zero, whose result the scans leave undefined), and a load of the thread pointer through %fs.
+    // hlt is compiled, assembled and linked, never run.
     check_test_program_source(test,
-        "static inline int a_cas(volatile int *p, int t, int s){__asm__ __volatile__(\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");return t;}"
-        "static inline void *a_cas_p(volatile void *p, void *t, void *s){__asm__(\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*(void *volatile *)p) : \"a\"(t), \"r\"(s) : \"memory\");return t;}"
-        "static inline int a_swap(volatile int *p, int v){__asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");return v;}"
-        "static inline int a_fetch_add(volatile int *p, int v){__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");return v;}"
-        "static inline void a_and(volatile int *p, int v){__asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
-        "static inline void a_or(volatile int *p, int v){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
-        "static inline void a_and_64(volatile unsigned long *p, unsigned long v){__asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
-        "static inline void a_or_64(volatile unsigned long *p, unsigned long v){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
-        "static inline void a_inc(volatile int *p){__asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\");}"
-        "static inline void a_dec(volatile int *p){__asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\");}"
-        "static inline void a_store(volatile int *p, int x){__asm__ __volatile__(\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"r\"(x) : \"memory\");}"
-        "static inline void a_spin(void){__asm__ __volatile__(\"pause\" : : : \"memory\");}"
-        "static inline int a_ctz_64(unsigned long x){__asm__(\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x));return x;}"
-        "static inline int a_clz_64(unsigned long x){__asm__(\"bsr %1,%0 ; xor $63,%0\" : \"=r\"(x) : \"r\"(x));return x;}"
-        "static inline unsigned long get_tp(void){unsigned long tp;__asm__(\"mov %%fs:0,%0\" : \"=r\"(tp));return tp;}"
-        "void a_crash(void){__asm__ __volatile__(\"hlt\" : : : \"memory\");}"
-        "int tested(int n){volatile int x=n;int r=a_cas(&x,n,n*5);r=r*3+a_cas(&x,n,7)+x*11;void* volatile q=&x;void* old=a_cas_p(&q,&x,(void*)&r);"
-        "r+=(old==(void*)&x)+(q==(void*)&r)*2;r=r*7+a_swap(&x,n-9);r=r*5+a_fetch_add(&x,n*3)+x;a_and(&x,0x5a5a);a_or(&x,(n&15)<<4);a_inc(&x);a_inc(&x);a_dec(&x);"
-        "volatile unsigned long w=(unsigned long)n*0x100000001ul;a_and_64(&w,0xffff0000fffful);a_or_64(&w,(unsigned long)n<<40);a_store(&x,x+r);a_spin();"
-        "unsigned long b=(unsigned long)(n*n+1)<<(n&31);return r+x*13+(int)(w>>32)+(int)w+a_ctz_64(b)*17+a_clz_64(b)*19+a_ctz_64(b|0x8000000000000000ul)+"
-        "(int)((get_tp()!=0)+(get_tp()&0xff0));}",
-        "asm-musl-atomics", clang);
-    // musl's x86_64 math (src/math/x86_64): sqrtsd and sqrtss, cvtsd2si and cvtss2si into 64- and 32-bit registers under
-    // MXCSR's rounding, and fabs's and fabsf's mask, all ones (pcmpeqd) shifted right (psrlq, psrld) and and-ed (andps).
+        "static int swap_if(volatile int* slot, int expected, int wanted){int seen;__asm__ __volatile__(\"lock ; cmpxchg %3, %1\" : \"=a\"(seen), \"=m\"(*slot) : \"a\"(expected), \"r\"(wanted) : \"memory\");return seen;}"
+        "static void* swap_pointer_if(void* volatile* slot, void* expected, void* wanted){__asm__(\"lock ; cmpxchg %3, %1\" : \"=a\"(expected), \"=m\"(*slot) : \"a\"(expected), \"r\"(wanted) : \"memory\");return expected;}"
+        "static long swap_long_if(volatile long* slot, long expected, long wanted){__asm__ __volatile__(\"lock ; cmpxchgq %2, %1\" : \"+a\"(expected), \"+m\"(*slot) : \"r\"(wanted) : \"memory\", \"cc\");return expected;}"
+        "static int trade(volatile int* slot, int value){int old;__asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(value) : \"memory\");return old;}"
+        "static int add_returning_old(volatile int* slot, int amount){int old;__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(amount) : \"memory\");return old;}"
+        "static long add_long_returning_old(volatile long* slot, long amount){__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"+r\"(amount), \"+m\"(*slot) : : \"memory\", \"cc\");return amount;}"
+        "static void keep_bits(volatile unsigned* slot, unsigned bits){__asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void set_bits(volatile unsigned* slot, unsigned bits){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void keep_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void set_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile__(\"lock ; or %1, %0\" : \"+m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void flip_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile__(\"lock ; xor %1, %0\" : \"+m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void count_up(volatile int* slot){__asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*slot) : \"m\"(*slot) : \"memory\");}"
+        "static void count_down(volatile int* slot){__asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*slot) : \"m\"(*slot) : \"memory\");}"
+        "static void count_down_long(volatile long* slot){__asm__ __volatile__(\"lock ; decq %0\" : \"+m\"(*slot) : : \"memory\");}"
+        "static void fenced_store(volatile long* slot, long value){__asm__ __volatile__(\"movq %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*slot) : \"r\"(value) : \"memory\");}"
+        "static void wait_a_little(void){__asm__ __volatile__(\"pause\" : : : \"memory\");}"
+        "static int lowest_set(unsigned long bits){__asm__(\"bsf %1,%0\" : \"=r\"(bits) : \"r\"(bits));return (int)bits;}"
+        "static int highest_set(unsigned long bits){__asm__(\"bsr %1,%0\" : \"=r\"(bits) : \"r\"(bits));return (int)bits;}"
+        "static unsigned long thread_pointer(void){unsigned long here;__asm__(\"mov %%fs:0,%0\" : \"=r\"(here));return here;}"
+        "void stop_here(void){__asm__ __volatile__(\"hlt\" : : : \"memory\");}"
+        "int tested(int n){volatile int word=n*7;int r=swap_if(&word,n*7,n+3);r=r*5+swap_if(&word,-1,9)+word*3;"
+        "void* volatile cell=&r;void* before=swap_pointer_if(&cell,&r,(void*)&word);r+=(before==(void*)&r)*2+(cell==(void*)&word)*4;"
+        "volatile long big=(long)n<<36;long previous=swap_long_if(&big,(long)n<<36,-n);r+=(int)(previous>>36)+(int)big;"
+        "r=r*3+trade(&word,n-1)+word;r=r*7+add_returning_old(&word,n*5)+word;volatile long total=1000;r+=(int)add_long_returning_old(&total,n)+(int)total;"
+        "volatile unsigned mask=0xf0f0u+n;keep_bits(&mask,0x3c3cu);set_bits(&mask,(unsigned)n<<8);"
+        "volatile unsigned long flags=(unsigned long)n*0x100000001ul;keep_wide_bits(&flags,0xffff0000fffful);set_wide_bits(&flags,(unsigned long)n<<44);flip_wide_bits(&flags,0x11);"
+        "volatile int tally=n;count_up(&tally);count_up(&tally);count_down(&tally);volatile long countdown=n*4;count_down_long(&countdown);"
+        "volatile long stored=0;fenced_store(&stored,(long)r*2);wait_a_little();unsigned long probe=((unsigned long)n*2654435761u+1)<<(n&15);"
+        "return r+(int)mask*11+(int)(flags>>20)+(int)flags+tally*13+(int)countdown*17+(int)stored+lowest_set(probe)*19+highest_set(probe)*23+"
+        "(thread_pointer()!=0);}",
+        "asm-lock-prefix-statements", clang);
+    // The forms of musl's x86_64 math (src/math/x86_64), in functions of this test's own: sqrtsd and sqrtss, cvtsd2si and
+    // cvtss2si into 64- and 32-bit registers under MXCSR's rounding, and a magnitude's mask, all ones (pcmpeqd) shifted
+    // right (psrlq, psrld), and-ed in (andps).
     check_test_program_source(test,
-        "static double m_sqrt(double x){__asm__(\"sqrtsd %1, %0\" : \"=x\"(x) : \"x\"(x));return x;}"
-        "static float m_sqrtf(float x){__asm__(\"sqrtss %1, %0\" : \"=x\"(x) : \"x\"(x));return x;}"
-        "static long m_lrint(double x){long r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
-        "static long m_lrintf(float x){long r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
-        "static int m_irint(double x){int r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
-        "static int m_irintf(float x){int r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
-        "static double m_fabs(double x){double t;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(t));__asm__(\"psrlq   $1, %0\" : \"+x\"(t));"
-        "__asm__(\"andps   %1, %0\" : \"+x\"(x) : \"x\"(t));return x;}"
-        "static float m_fabsf(float x){float t;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(t));__asm__(\"psrld   $1, %0\" : \"+x\"(t));"
-        "__asm__(\"andps   %1, %0\" : \"+x\"(x) : \"x\"(t));return x;}"
-        "int tested(int n){double d=n*0.75-2.5;float f=(float)n*-1.25f+0.5f;double a=m_fabs(d);float b=m_fabsf(f);"
-        "return (int)(m_sqrt(a)*1000)+(int)(m_sqrtf(b)*100)*3+(int)m_lrint(d*1e12/7)%100000+(int)m_lrintf(f*3)*5+m_irint(d*31)*7+m_irintf(f*17)*11+"
+        "static double root(double v){double r;__asm__(\"sqrtsd %1, %0\" : \"=x\"(r) : \"x\"(v));return r;}"
+        "static float root_float(float v){float r;__asm__(\"sqrtss %1, %0\" : \"=x\"(r) : \"x\"(v));return r;}"
+        "static long to_long(double v){long r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static long float_to_long(float v){long r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static int to_int(double v){int r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static int float_to_int(float v){int r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static double magnitude_mask(void){double m;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(m));__asm__(\"psrlq   $1, %0\" : \"+x\"(m));return m;}"
+        "static double magnitude(double v){double m=magnitude_mask();__asm__(\"andps   %1, %0\" : \"+x\"(v) : \"x\"(m));return v;}"
+        "static float float_magnitude_mask(void){float m;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(m));__asm__(\"psrld   $1, %0\" : \"+x\"(m));return m;}"
+        "static float float_magnitude(float v){float m=float_magnitude_mask();__asm__(\"andps   %1, %0\" : \"+x\"(v) : \"x\"(m));return v;}"
+        "int tested(int n){double d=n*0.625-3.5;float f=(float)n*-0.875f+1.5f;double a=magnitude(d);float b=float_magnitude(f);"
+        "return (int)(root(a)*1000)+(int)(root_float(b)*100)*3+(int)(to_long(d*1e11/9)%100000)+(int)float_to_long(f*5)*5+to_int(d*27)*7+float_to_int(f*19)*11+"
         "(int)(a*8)+(int)(b*4)*13;}",
-        "asm-musl-math", clang);
+        "asm-sse-scalar-math", clang);
     // dr_flac's lzcnt, `rep; bsr` in GCC's dialect alternatives (the AT&T one, `bsrq %1, %0`), and tzcnt so: their bytes
     // (F3 0F BD and BC), which run as the scans where the processor has no LZCNT or BMI (of operands never zero, alike).
     check_test_program_source(test,
@@ -410,38 +421,37 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static unsigned long ctz(unsigned long x){unsigned long r;__asm__ __volatile__(\"rep\\n\\tbsfq %1, %0\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
         "int tested(int n){unsigned long x=(unsigned long)(n*n*1000003+1)<<(n&15);return (int)clz(x)*100+(int)clz32((unsigned)x|1)*10+(int)ctz(x);}",
         "asm-rep-bsr", clang);
-    // FMA3's scalar forms, as musl's fma and fmaf take them where the target has FMA: compiled and linked everywhere, run
-    // where the host has FMA.
+    // FMA3's scalar forms, as musl's fma and fmaf take them where the target has FMA, in functions of this test's own:
+    // compiled and linked everywhere, run where the host has FMA.
     const bool fused_native = (native.features & BUSTER_X86_FEATURE(FMA)) != 0;
     if (!fused_native)
     {
-        printf("test-checker: asm-musl-fma: FMA unavailable; checking compile/link without native execution\n");
+        printf("test-checker: asm-fma-scalar: FMA unavailable; checking compile/link without native execution\n");
     }
     check_test_program_source_native(test,
-        "static double m_fma(double x,double y,double z){__asm__(\"vfmadd132sd %1, %2, %0\" : \"+x\"(x) : \"x\"(y), \"x\"(z));return x;}"
-        "static float m_fmaf(float x,float y,float z){__asm__(\"vfmadd132ss %1, %2, %0\" : \"+x\"(x) : \"x\"(y), \"x\"(z));return x;}"
-        "int tested(int n){double a=n*0.1+1/3.0,b=n-0.7,c=1e-17*n;float d=n*0.3f+1/3.0f,e=n-0.7f,f=1e-8f*n;"
-        "double r=m_fma(a,b,c)-a*b;float s=m_fmaf(d,e,f)-d*e;return (int)(r*1e18)+(int)(s*1e9f)*7+(int)m_fma(b,b,a)*3;}",
-        "asm-musl-fma", clang, fused_native);
-    // Explicit register variables as operands, musl's syscall wrappers (arch/x86_64/syscall_arch.h): the fourth to sixth
-    // arguments in r10, r8 and r9, `register long r10 __asm__("r10") = a4;` and "r"(r10), beside the fixed registers of
-    // the others. getpid, rt_sigprocmask's mask, prctl's PR_GET_DUMPABLE and an anonymous page mapped and unmapped, each
-    // the same in clang's build in the same process.
+        "static double fused(double a,double b,double c){__asm__(\"vfmadd132sd %1, %2, %0\" : \"+x\"(a) : \"x\"(b), \"x\"(c));return a;}"
+        "static float fused_float(float a,float b,float c){__asm__(\"vfmadd132ss %1, %2, %0\" : \"+x\"(a) : \"x\"(b), \"x\"(c));return a;}"
+        "int tested(int n){double x=n*0.3+1/7.0,y=n-0.4,z=3e-17*n;float u=n*0.7f+1/7.0f,v=n-0.4f,w=3e-8f*n;"
+        "double r=fused(x,y,z)-x*y;float s=fused_float(u,v,w)-u*v;return (int)(r*1e18)+(int)(s*1e9f)*7+(int)fused(y,y,x)*3;}",
+        "asm-fma-scalar", clang, fused_native);
+    // Explicit register variables as operands, in the shape of musl's syscall wrappers (arch/x86_64/syscall_arch.h), in
+    // functions of this test's own: the fourth to sixth arguments in r10, r8 and r9 (`register long fourth __asm__("r10")
+    // = d;` and "r"(fourth)), beside the fixed registers of the others. getppid, getuid, prctl's PR_GET_NAME,
+    // rt_sigprocmask's mask and two pages mapped, written and unmapped, each the same in clang's build in the same
+    // process.
     check_test_program_source(test,
-        "static __inline long __syscall0(long n){unsigned long ret;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n) : \"rcx\", \"r11\", \"memory\");return ret;}"
-        "static __inline long __syscall2(long n, long a1, long a2){unsigned long ret;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2)"
-        ": \"rcx\", \"r11\", \"memory\");return ret;}"
-        "static __inline long __syscall4(long n, long a1, long a2, long a3, long a4){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
-        "__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10): \"rcx\", \"r11\", \"memory\");return ret;}"
-        "static __inline long __syscall5(long n, long a1, long a2, long a3, long a4, long a5){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
-        "register long r8 __asm__(\"r8\") = a5;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10), \"r\"(r8)"
-        " : \"rcx\", \"r11\", \"memory\");return ret;}"
-        "static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
-        "register long r8 __asm__(\"r8\") = a5;register long r9 __asm__(\"r9\") = a6;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2),"
-        "\"d\"(a3), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");return ret;}"
-        "int tested(int n){long pid=__syscall0(39);unsigned long mask[2]={0,0};long masked=__syscall4(14,0,0,(long)mask,8);long dumpable=__syscall5(157,3,0,0,0,0);"
-        "long page=__syscall6(9,0,4096,1,0x22,-1,0);long unmapped=__syscall2(11,page,4096);"
-        "return (pid>0)+(int)(mask[0]&0xffff)*2+(int)masked*3+(int)dumpable*5+(page>0&&(page&4095)==0)*7+(int)unmapped*11+n;}",
+        "static long call0(long number){long result;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"0\"(number) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call2(long number, long first, long second){long result;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(first),"
+        " \"S\"(second) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call4(long number, long a, long b, long c, long d){long result;register long fourth __asm__(\"r10\") = d;"
+        "__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(a), \"S\"(b), \"d\"(c), \"r\"(fourth) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call6(long number, long a, long b, long c, long d, long e, long f){long result;register long fourth __asm__(\"r10\") = d;"
+        "register long fifth __asm__(\"r8\") = e;register long sixth __asm__(\"r9\") = f;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(a),"
+        " \"S\"(b), \"d\"(c), \"r\"(fourth), \"r\"(fifth), \"r\"(sixth) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "int tested(int n){long parent=call0(110);long user=call0(102);char name[16]={0};long named=call2(157,16,(long)name);"
+        "unsigned long old_mask[2]={0,0};long masked=call4(14,0,0,(long)old_mask,8);long page=call6(9,0,8192,3,0x22,-1,0);"
+        "if(page>0)((volatile char*)page)[4096]=(char)n;long gone=call2(11,page,8192);"
+        "return (parent>0)+(user>=0)*2+(named==0)*3+(name[0]!=0)*5+(int)masked*7+(page>0&&(page&4095)==0)*11+(int)gone*13+n;}",
         "asm-register-variables-syscalls", clang);
     // Each shape of a register variable's operand, as clang places it: an input in the variable's register whatever its
     // letters ("a"), through a cast that keeps its width, by a 32-bit name of a 64-bit register and as an int's 32-bit
@@ -459,27 +469,27 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "register long i __asm__(\"r10\")=n+100;__asm__(\"\" : \"+r\"(i));"
         "return (int)o1+(int)(o2>>33)*3+(int)o3*5+o4*7+(int)e+(int)f*11+(int)g*13+(int)o5*17+(int)(o6*4)*19+(int)i*23;}",
         "asm-register-variables", clang);
-    // musl's long double functions (src/math/x86_64): fabs, fsqrt and frndint on a `+t` operand; fprem's and fprem1's loops
-    // with y in st(1) and the status word through fnstsw %ax ("=a"), whose st(1) the helper pops after it stores x;
-    // fistpll's store of a "t" input it pops (its "st" clobber); and remquol's whole, its "X" operands of a template of no
-    // instructions among it.
+    // The forms of musl's long double functions (src/math/x86_64), in functions of this test's own: fabs, fsqrt and
+    // frndint on a `+t` operand; fprem's and fprem1's loops with y in st(1) and the status word through fnstsw %ax ("=a"),
+    // whose st(1) the helper pops after it stores x; a remainder's quotient bits from that word (C0, C3 and C1, its bits
+    // 2, 1 and 0); fistpll's store of a "t" input it pops (its "st" clobber); and "X" operands of a template of no
+    // instructions.
     check_test_program_source(test,
-        "static long double m_fabsl(long double x){__asm__(\"fabs\" : \"+t\"(x));return x;}"
-        "static long double m_sqrtl(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
-        "static long double m_rintl(long double x){__asm__(\"frndint\" : \"+t\"(x));return x;}"
-        "static long double m_fmodl(long double x, long double y){unsigned short fpsr;do __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(fpsr) : \"u\"(y));"
-        "while(fpsr & 0x400);return x;}"
-        "static long double m_remainderl(long double x, long double y){unsigned short fpsr;do __asm__(\"fprem1; fnstsw %%ax\" : \"+t\"(x), \"=a\"(fpsr) : \"u\"(y));"
-        "while(fpsr & 0x400);return x;}"
-        "static long m_lrintl(long double x){long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(x) : \"st\");return r;}"
-        "static long long m_llrintl(long double x){long long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(x) : \"st\");return r;}"
-        "static long double m_remquol(long double x, long double y, int *quo){signed char *cx=(void *)&x, *cy=(void *)&y;__asm__(\"\" :: \"X\"(cx), \"X\"(cy));"
-        "long double t=x;unsigned fpsr;do __asm__(\"fprem1; fnstsw %%ax\" : \"+t\"(t), \"=a\"(fpsr) : \"u\"(y));while(fpsr & 0x400);"
-        "unsigned char i=fpsr>>8;i=i>>4|i<<4;unsigned qbits=0x7575313164642020>>(i&60);qbits&=7;*quo=(cx[9]^cy[9])<0 ? -qbits : qbits;return t;}"
-        "int tested(int n){long double a=n*1.75L-3,b=n%5+1.5L;int q=0;long double r=m_remquol(a*7,b,&q);"
-        "return (int)(m_sqrtl(m_fabsl(a))*1000)+(int)(m_rintl(a*2.5L)*3)+(int)(m_fmodl(a*11,b)*100)*5+(int)(m_remainderl(a*13,b)*100)*7+(int)m_lrintl(a*3.3L)*11+"
-        "(int)m_llrintl(a*-2.2L)*13+(int)(r*100)*17+q*19;}",
-        "asm-musl-x87", clang);
+        "static long double absolute(long double v){__asm__(\"fabs\" : \"+t\"(v));return v;}"
+        "static long double square_root(long double v){__asm__(\"fsqrt\" : \"+t\"(v));return v;}"
+        "static long double rounded(long double v){__asm__(\"frndint\" : \"+t\"(v));return v;}"
+        "static long double truncated_remainder(long double x, long double y){unsigned short status;"
+        "do __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(status) : \"u\"(y));while((status>>10)&1);return x;}"
+        "static long double nearest_remainder(long double x, long double y, int* quotient){unsigned short status;long double r=x;"
+        "const void* inputs[2]={&x,&y};__asm__(\"\" :: \"X\"(inputs[0]), \"X\"(inputs[1]));"
+        "do __asm__(\"fprem1\\n\\tfnstsw %%ax\" : \"+t\"(r), \"=a\"(status) : \"u\"(y));while((status>>10)&1);"
+        "int low=((status>>8)&1)<<2|((status>>14)&1)<<1|((status>>9)&1);*quotient=(x<0)!=(y<0) ? -low : low;return r;}"
+        "static long whole(long double v){long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(v) : \"st\");return r;}"
+        "static long long whole_long_long(long double v){long long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(v) : \"st\");return r;}"
+        "int tested(int n){long double a=n*1.25L-4,b=n%6+0.75L;int q=0;long double r=nearest_remainder(a*9,b,&q);"
+        "return (int)(square_root(absolute(a))*1000)+(int)(rounded(a*3.5L)*3)+(int)(truncated_remainder(a*13,b)*100)*5+(int)(r*100)*7+q*11+"
+        "(int)whole(a*2.2L)*13+(int)whole_long_long(a*-2.75L)*17;}",
+        "asm-x87-library-shapes", clang);
     // Each shape of the x87's operands, by the rules clang's code follows (LLVM's stackifier): two outputs from st(0)
     // (fsincos), a matching input popped with st(1)'s clobbered input (fyl2x) and with st(1)'s kept one, which the helper
     // pops (fscale), outputs of a template that pushes them (fld1, fldpi into a double), a float's and a double's
