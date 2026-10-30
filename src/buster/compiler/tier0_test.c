@@ -716,9 +716,9 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
                 (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
                 a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
-    same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
-    same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
-    same = same && memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0;
+    same = same && (a->count == 0 || memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0);
+    same = same && (a->branch_count == 0 || memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0);
+    same = same && (a->branch_count == 0 || memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0);
     same = same && (a->label_count == 0 || memcmp(a->label_records, b->label_records, a->label_count * sizeof(uint32_t)) == 0);
     for (uint32_t r = 0; same && r < a->reference_count; r += 1)
     {
@@ -1083,7 +1083,24 @@ static void tier0_test_inputs(uint64_t seed, uint64_t inputs[BUSTER_TIER0_TEST_I
 // thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone (nothing but
 // the program's code runs while it is the block's), and copies them back beside the other globals, whose bytes it
 // hashes as the interpreter's.
-static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
+typedef uint64_t (*Tier0TestRunEntry)(uint64_t, uint64_t, uint64_t);
+
+// The entry's call with FS the program's block (`fs`) from its start to its end, then `saved` again: by the system call
+// itself, and without a sanitizer's instrumentation, which reaches its thread's state through FS. The result goes to
+// `value`, whose shadow the caller's initialization made clean.
+static __attribute__((noinline)) BUSTER_NO_SANITIZER_INSTRUMENTATION void tier0_test_call_tls(Tier0TestRunEntry entry, const uint64_t inputs[3], uint64_t fs, uint64_t saved,
+                                                                                            uint64_t* value)
+{
+    int64_t call = SYS_arch_prctl;
+    __asm__ volatile("syscall" : "+a"(call) : "D"(ARCH_SET_FS), "S"(fs) : "rcx", "r11", "memory");
+    *value = entry(inputs[0], inputs[1], inputs[2]);
+    call = SYS_arch_prctl;
+    __asm__ volatile("syscall" : "+a"(call) : "D"(ARCH_SET_FS), "S"(saved) : "rcx", "r11", "memory");
+}
+
+// Generated code has no Clang function-type prefix before its entry point.
+// Disable only that metadata check at the call boundary; keep all other checks.
+static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* code, const Tier0TestData* data, uint64_t inputs[BUSTER_TIER0_TEST_INPUTS][3],
                            Tier0TestOutcome* outcomes, int* status)
 {
     const uint64_t code_pages = ((uint64_t)code->size + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
@@ -1094,6 +1111,9 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
     const uint64_t data_pages = (data_bytes + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE + BUSTER_TIER0_TEST_PAGE;
     Tier0TestOutcome* shared = mmap(0, sizeof(Tier0TestOutcome) * BUSTER_TIER0_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     bool result = shared != MAP_FAILED;
+    // The child leaves no copy of buffered output to write again at its exit (a sanitizer's _exit flushes).
+    fflush(stdout);
+    fflush(stderr);
     const pid_t child = result ? fork() : -1;
     if (child == 0)
     {
@@ -1146,8 +1166,7 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
         {
             _exit(5);
         }
-        typedef uint64_t (*Tier0TestEntry)(uint64_t, uint64_t, uint64_t);
-        Tier0TestEntry entry = 0;
+        Tier0TestRunEntry entry = 0;
         void* entry_address = region + code->offsets[program->function_count - 1];
         memcpy(&entry, &entry_address, sizeof(entry));
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_INPUTS; r += 1)
@@ -1158,14 +1177,14 @@ static bool tier0_test_run(const Tier0Program* program, const Tier0TestCode* cod
                 const uint32_t bytes = tier0_class_bytes(program->global_classes[g]) * program->global_elements[g];
                 memcpy(tls + data->tls_offsets[g], data_base + data->offsets[g], tier0_test_thread_local(program, g) ? bytes : 0);
             }
+            uint64_t value = 0;
             if (data->tls_size != 0)
             {
-                syscall(SYS_arch_prctl, ARCH_SET_FS, self);
+                tier0_test_call_tls(entry, inputs[r], self, saved_fs, &value);
             }
-            const uint64_t value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
-            if (data->tls_size != 0)
+            else
             {
-                syscall(SYS_arch_prctl, ARCH_SET_FS, saved_fs);
+                value = entry(inputs[r][0], inputs[r][1], inputs[r][2]);
             }
             for (uint32_t g = 0; g < program->global_count; g += 1)
             {
@@ -2778,7 +2797,7 @@ static uint32_t tier0_test_probe(X86Instruction* records, uint64_t state)
 // d0 - (d1 - (d2 - (d3 - (long)(f0 - (f1 - (double)call))))), in postorder, so that each entry's last operand is the
 // entry before it. Both paths must compile each alike; the records encoded by each encoder run in a child, under an
 // alarm.
-static void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* tables)
+static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* tables)
 {
     enum
     {
@@ -3086,7 +3105,7 @@ static const char* const tier0_test_unsigned_names[4] = { "to double", "to float
 static const uint8_t tier0_test_unsigned_to[4] = { BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
 static const uint8_t tier0_test_unsigned_from[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
 
-static void tier0_test_unsigned_floating(Tier0TestTally* tally)
+static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floating(Tier0TestTally* tally)
 {
     const uint64_t* integers = tier0_test_unsigned_integers;
     const double* doubles = tier0_test_unsigned_doubles;
@@ -3401,7 +3420,7 @@ static bool tier0_test_pushes(const Tier0Code* code, uint8_t reg)
 }
 
 // Signature `signature`'s function at `address` called on value v, its out[0] and out[1] into out: the conversion's bits.
-static uint64_t tier0_test_limit_call(void* address, uint32_t signature, uint32_t v, uint64_t* out)
+static __attribute__((no_sanitize("function"))) uint64_t tier0_test_limit_call(void* address, uint32_t signature, uint32_t v, uint64_t* out)
 {
     uint64_t bits = 0;
     if (signature == 0)
@@ -4614,7 +4633,7 @@ static uint8_t* tier0_test_aggregate_place(uint8_t* data, uint32_t s, uint32_t s
 
 // Runs `count` pages of `code` in a child, each from runs[0] poisoned, which is then copied to its own run's: the
 // function at page `first + r`'s address, called with no arguments. Returns whether the child exited with status 0.
-static bool tier0_test_aggregate_run(Tier0TestShared* shared, uint8_t* code, uint32_t first)
+static __attribute__((no_sanitize("function"))) bool tier0_test_aggregate_run(Tier0TestShared* shared, uint8_t* code, uint32_t first)
 {
     const pid_t child = fork();
     if (child == 0)

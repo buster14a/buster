@@ -929,9 +929,14 @@ BUSTER_INLINE void refine_pass_c(const RefineIdentifiers* identifiers, uint64_t 
     {
         const uint64_t index = first - begin;
         const __mmask16 lanes = (__mmask16)(identifiers->masks[index / BUSTER_REFINE_STEP_TOKENS] >> (index % BUSTER_REFINE_STEP_TOKENS));
-        const __m512i group_ids = _mm512_maskz_expand_epi32(lanes, _mm512_loadu_si512(identifiers->ids + position));
+        const uint32_t live = (uint32_t)__builtin_popcount(lanes);
+        // Only the compressed live IDs have been written. Loading sixteen
+        // before the expand reads indeterminate tail values in the scalar host
+        // twin, even though the expand would discard those lanes afterward.
+        const __m512i ids = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, live), identifiers->ids + position);
+        const __m512i group_ids = _mm512_maskz_expand_epi32(lanes, ids);
         _mm512_mask_storeu_epi32(values + first, lanes, group_ids);
-        position += (uint32_t)__builtin_popcount(lanes);
+        position += live;
     }
 }
 

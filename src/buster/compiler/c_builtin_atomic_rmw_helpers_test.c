@@ -280,7 +280,8 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
 #undef BUSTER_CBUILTIN_RMW_TEST_ORACLE
 #pragma clang diagnostic pop
 
-static uint64_t cbuiltin_atomic_rmw_test_invoke(const CBuiltinAtomicRmwTestCase* item, uint32_t path, uint32_t variant, volatile void* object, void* expected, uint64_t expected_value, uint64_t value, bool weak, int order, int failure)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) uint64_t cbuiltin_atomic_rmw_test_invoke(const CBuiltinAtomicRmwTestCase* item, uint32_t path, uint32_t variant, volatile void* object, void* expected, uint64_t expected_value, uint64_t value, bool weak, int order, int failure)
 {
     uint64_t arguments[5] = { value, (uint64_t)order, 0, 0, 0 };
     if ((item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_CAS) != 0)
@@ -792,7 +793,8 @@ static void* cbuiltin_atomic_rmw_test_sender(void* opaque)
         running = cbuiltin_atomic_rmw_test_wait(exchange, &exchange->acknowledged, i - 1);
         if (running)
         {
-            exchange->payload = i * UINT64_C(0x102030405);
+            // Relaxed (a plain mov on x86): the generated release orders it, which a detector can't see.
+            __atomic_store_n(&exchange->payload, i * UINT64_C(0x102030405), __ATOMIC_RELAXED);
             cbuiltin_atomic_rmw_test_invoke(exchange->item, exchange->path, 2, &exchange->ready, NULL, 0, i, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
         }
     }
@@ -863,7 +865,7 @@ static void cbuiltin_atomic_rmw_test_threads(CBuiltinAtomicRmwTest* test, const 
                 running = cbuiltin_atomic_rmw_test_wait(&exchange, &exchange.ready, i);
                 if (running)
                 {
-                    running = exchange.payload == i * UINT64_C(0x102030405);
+                    running = __atomic_load_n(&exchange.payload, __ATOMIC_RELAXED) == i * UINT64_C(0x102030405);
                     if (!running)
                     {
                         __atomic_store_n(&exchange.failed, 1, __ATOMIC_RELAXED);

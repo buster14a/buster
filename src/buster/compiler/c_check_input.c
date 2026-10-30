@@ -774,7 +774,7 @@ struct CheckInputReader
     uint32_t section_record_from;
     // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
     // (check_input_cleanup_declaration), a weak one, which only then each declarator's are for its linkage, and a weak,
-    // a constructor or a destructor, which only then each redeclaration's are for those after a definition
+    // a constructor, a destructor or unscoped standard noreturn, which only then each redeclaration's are for those after a definition
     // (check_input_attribute_late).
     bool cleanup_attributes;
     bool weak_attributes;

@@ -333,6 +333,165 @@ what clang ignores, and every flagged feature on and off.
 functions, each by an attribute of its own, inherited, `arch=`, trimmed and
 `"default"`, against clang -O0's code, and checks each refusal by name.
 
+### Code generation's check of target features
+
+Clang's code generation refuses a call that would inline a function into one
+without its features (`CodeGenFunction::EmitCall` and `checkTargetFeatures`):
+at `-c` and when it links, not at `-fsyntax-only`, and so does the C driver
+after `-c`'s selection, before lowering (#775, `c_check_target_feature.c`'s
+`check_program_target_features`). A direct call of an `always_inline` function
+where either function has a target attribute, or a call in a `flatten` function
+where either has one, is checked: where the callee's attribute applies (one
+version), the first feature of its map that the caller's lacks is an error,
+the attribute's own features first in its order; otherwise, where the caller's
+applies, each feature of the callee's map that the caller's lacks is one. The
+maps are `predefines_apply`'s, and the attributes those of the declarations
+before the call (the callee's) or up to the definition (the caller's), as clang
+inherits them; `CheckProgram.attribute_keys` keeps them, in a unit with a target
+attribute alone. The calls are those clang emits: the walk of the x86 builtins'
+range errors (#487) reaches what a constant condition leaves running, and a
+direct callee is the function's name alone, not `(*f)` or `(&f)`. A `cleanup`
+attribute's call (#147, `CallCleanupFunction::Emit`) is one too, of the function
+its argument names, by that function's declarations before the argument. Clang
+emits it where the variable's scope ends, as it pops the cleanup: once, however
+many exits from the scope reach it, after the scope's statements and the
+innermost variable's first, and reports it at the attribute
+(`[[gnu::cleanup(f)]]`'s at its scope, `gnu`). So the walk marks each variable
+whose cleanup it reaches at any exit (a statement expression's end marks its
+block's own, which run once its value is computed), and the check places the
+call at the CLEANUP control of its scope's closing token, in that control's
+statement, or in a statement expression's, the statement that reached it.
+
+That walk is Sema's reachability, its CFG's, which #487's range warnings
+follow, as clang's do. Code generation emits other code in a few shapes, and the
+check walks as it does there (`CheckTargetFeatureEmission`), #487's walk
+unchanged:
+
+- An expression statement whose code ends in a block that nothing branches to
+  ends what is emitted, up to a label: a call of a function that doesn't
+  return, by its declarations before the call (`noreturn`, `_Noreturn`,
+  `[[noreturn]]`), leaves such a block (`EmitCall`'s dummy block), and so does
+  `__builtin_unreachable()`, and `EmitStmt` erases it where only straight-line
+  code followed the call in the statement. So `exit(1);`, `(void)fatal();`,
+  `x = stopi();`, `g(stopi());` and `(stop(), x++);` stop it, and so do
+  `0 ? (void)0 : stop();` and `1 && stopi();`, whose constant conditions code
+  generation folds. A join after the call (`&&`, `||` or `?:` whose condition
+  isn't a constant, but a `?:` of two constants, which is a select; `va_arg`; a
+  statement expression with statements before its value) has a predecessor, so
+  `c ? (void)0 : stop();` and `c && stopi();` don't, where `(stop(), c ? 1 : 2);`
+  does; nor does a declaration's initializer (`int y = stopi();`), which
+  `EmitStmt` doesn't erase, nor `__builtin_trap()`. Calls in the statement
+  after the call are emitted (`stopi() + h(x)`).
+- A `while` or `for` statement's body is emitted whatever its condition
+  (`while (0)`'s too). A `for` statement's condition, a constant one too,
+  branches to its end, but `while (1)` doesn't. A `do` statement's condition
+  and end, and a `for` statement's increment, are emitted once their
+  statement's code begins, whatever its body's code leaves (a `return`, or a
+  call that doesn't return, at its end).
+- Code after a label is emitted whatever precedes it: the walk starts from
+  each source label of the body outside statement expressions too
+  (`CheckProgram.label_positions`, which the control writer records).
+
+An unscoped C23 `[[noreturn]]` or `[[_Noreturn]]` first added after a
+definition is ignored, as clang's declaration-attribute merge ignores it.
+The input marks that declaration's record ignored before this pass reads it;
+an earlier accepted standard record stays effective. GNU's `noreturn`,
+including `[[gnu::noreturn]]`, changes the function type instead, and the C
+`_Noreturn` keyword is explicitly allowed after a definition, so those keep
+their effect. A shared specifier list is copied per declarator before any
+record is marked ignored.
+
+It still differs where clang emits a statement that holds a label from its
+start: an `if`, loop or `switch` statement after a point where emission stops,
+and an `if`'s or a `switch`'s arm that a constant condition would leave out,
+which the walk takes from the label on; and a statement expression holding a
+label in an operand a constant condition leaves out. A call through a pointer
+to a function that doesn't return, and a call of a C library function that
+clang knows doesn't return (`exit`, `abort`) where its declaration lacks the
+attribute (glibc's headers have it), go on (#891 has the rest).
+
+Clang's errors are unrecoverable. It emits the functions it must emit where the
+unit defines them (`ASTContext::DeclMustBeEmitted`: an external definition, by
+GNU's and C99's rules of inline functions, or a function with a `used`,
+`constructor` or `destructor` attribute) and none after the first that has an
+error, nor the functions it defers to the unit's end; where none of those has
+one, it emits every deferred function, past their errors. It decides where it
+emits a function when the parser hands over the definition, by the declarations
+that exist then, those up to the definition: a later declaration is no emission
+point. One that makes an inline definition external (C99's `extern int f(int);`
+after `inline int f(int) {...}`, GNU89's plain `inline` declaration after
+`extern inline`) only queues the function for the unit's end, where the deferred
+functions are emitted, and a `used`, `constructor` or `destructor` attribute on
+a later declaration adds nothing to the definition before it. So the driver
+reports the first such function's errors alone, or else every deferred
+function's, by the selection's classification of each body
+(`CheckProgram.body_eager`, made by `check_program_body_eager` from the rules
+that decide which inline definitions `-c` emits, applied to the function's
+declarations up to the definition rather than to all of them): each function's
+in clang's emission order, by statement in the lowering's order of them (a for
+loop's increment after its body) and in a statement by the calls' ends (an
+argument's call before its own), after its closing brace, as clang reports them
+when it emits the function, or at the unit's end for a deferred one. Clang emits
+the deferred functions in the order its emission first referred to them or a
+declaration queued them, depth first, and the driver in source order: the errors
+of two deferred functions come in the other order where their definitions are in
+the other order from the first uses or the declarations that queue them. Where
+clang evaluates a statement out of source order (an assignment's right side
+first), the order of several errors in it may differ; and where an error's
+feature is the first of the rest of a map (an `arch=` CPU's, or a caller's
+attribute that turns several features off), clang's order is its `StringMap`'s
+and the driver's `predefines_features`', so the two may name different features.
+`--lower-all`, #129's test option, checks every definition it lowers, those
+clang never emits among them.
+
+`test-checker-driver` compares each fixture's first error at `-c` with clang
+`-c`'s, by both paths and both routes, and checks that `-fsyntax-only` takes it:
+callees' attributes before and after the call, callers' that add and turn off
+features, `flatten`, calls through the address, dead branches, which function's
+errors clang reports and in which order, `<immintrin.h>`'s `_bzhi_u32` at
+targets with BMI2 and without, and a cleanup's call, with its controls: the
+unit's features or the caller's attribute holding the cleanup function's, its
+attributes declared after the cleanup, and cleanups that no exit reaches, in
+dead code and after an endless loop; and calls after calls that don't return
+(the shapes above that stop the code, `<stdlib.h>`'s `exit` and `abort`), with
+a `noreturn` attribute declared after the call as their control.
+Forty-five fixtures' every error, line for line, must be clang's: the first
+external function's alone, calls in their
+arguments in the order of their ends, an external function's that leave a
+deferred one's unreported, two deferred functions', where no external function
+has any, loops' and a statement expression's, a for loop's increment after its
+body, and which functions clang emits where they are: GNU89's plain inline,
+C99's extern inline and a `gnu_inline` plain inline definition before an
+ordinary function, inline-only definitions, `used` beside `retain`, and a
+destructor and a constructor. And where they are not: a C99 inline definition
+released by a later `extern` or plain declaration, with an ordinary function's
+errors before the declaration, after it, or both, or with none, which leaves the
+released function's errors to the unit's end beside a static function's; an
+earlier `extern` declaration, which makes the definition external where it is;
+the same for GNU89's `extern inline` and a later or an earlier plain `inline`
+declaration, and an earlier `gnu_inline` attribute, which the definition
+inherits; and `used`, `constructor` and `destructor` on a later declaration (no
+effect) and on an earlier one (as on the definition). And cleanups' calls: at
+their scopes' ends among the calls, once where returns, breaks, continues and a
+goto leave the scope (also where no path reaches its end), a statement
+expression's after its value and a return out of one, a for statement's own
+variable's after its increment, the innermost first, a `flatten` caller's (both
+messages), a standard attribute's at its scope, one among other attributes and
+two from a macro, and those no exit reaches in deferred functions. And code
+generation's emission: the calls it emits around calls that don't return (in
+a declaration's initializer, after a join, in the same statement, after a
+label and after `__builtin_trap()`), a join after the call in its statement
+and a `?:` of constants, a select, which isn't one, such calls in operands that
+constant conditions leave out, loops' blocks it emits whatever their conditions
+and bodies' code leave, code after labels (one that nothing names, one that
+only a goto after the call names, and after a `return`), and cleanups after
+calls that don't return. C23 fixtures compare the ignored late unscoped
+standard spellings with effective earlier standard, late GNU, scoped GNU and
+keyword spellings, including a mixed attribute list and shared declarators.
+
+A builtin's own required features (`'__builtin_ia32_palignr128' needs target
+feature ssse3`) aren't checked yet.
+
 ## Sources and reproduction
 
 The instruction-set levels follow the

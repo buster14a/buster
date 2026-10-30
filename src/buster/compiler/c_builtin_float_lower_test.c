@@ -364,7 +364,8 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
     return result;
 }
 
-static void cbuiltin_float_lower_test_case(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, uint64_t* state)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_case(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, uint64_t* state)
 {
     CBuiltinFloatLowerTestProgram programs[2] = { 0 };
     bool ok = cbuiltin_float_lower_test_programs(tally, arena, call, programs);
@@ -713,7 +714,8 @@ static bool cbuiltin_float_lower_test_x87_program(CBuiltinFloatLowerTestTally* t
 
 // One long double recipe on every input, by both paths' code, against clang's own builtin and, for the named encodings,
 // the fixture's results.
-static void cbuiltin_float_lower_test_x87_case(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, uint64_t* state)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_x87_case(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, uint64_t* state)
 {
     CBuiltinFloatLowerTestProgram programs[2] = { 0 };
     bool ok = cbuiltin_float_lower_test_x87_program(tally, arena, call, programs);

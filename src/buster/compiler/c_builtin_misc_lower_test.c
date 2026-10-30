@@ -215,7 +215,8 @@ static bool cbuiltin_misc_lower_test_program(CBuiltinMiscLowerTestTally* tally, 
     return result;
 }
 
-static uint64_t cbuiltin_misc_lower_test_invoke(const CBuiltinMiscLowerTestProgram* program, uint64_t a, uint64_t b, uint64_t c)
+// Generated entry points have no Clang function-type prefix.
+static __attribute__((no_sanitize("function"))) uint64_t cbuiltin_misc_lower_test_invoke(const CBuiltinMiscLowerTestProgram* program, uint64_t a, uint64_t b, uint64_t c)
 {
     uint64_t (*entry)(uint64_t, uint64_t, uint64_t) = (uint64_t (*)(uint64_t, uint64_t, uint64_t))(void*)program->bytes;
     const uint64_t result = entry(a, b, c) - BUSTER_CBUILTIN_MISC_TEST_SENTINEL;
