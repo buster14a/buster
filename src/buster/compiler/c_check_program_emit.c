@@ -204,8 +204,9 @@ typedef enum CheckProgramAgain
 // The epoch's next part to take (low 32 bits of `ticket`) and its parts' count (low 32 bits of `limit`), each beside the
 // epoch (their high 32 bits): a take is a compare-and-swap of the ticket, whose epoch must be the limit's, so that a lane
 // that read an epoch's ticket takes none of the next's. Its owner sets the epoch's `run` and `order` (its parts, the
-// costliest first) before its ticket and waits, before the epoch's emission goes on, until `done` counts every part,
-// the last of which publishes `complete` (lane_publish, lane_wait): no lane reads the epoch's run after it.
+// costliest first) before its ticket. Each part finishes every access to the run before incrementing `done`; the last
+// publishes `complete` (lane_publish, lane_wait), which the owner acquires before its emission goes on or the share
+// opens another epoch. The count alone is not that handoff: the last part may not have published complete yet.
 typedef struct CheckEmitShare CheckEmitShare;
 struct CheckEmitShare
 {
@@ -741,7 +742,8 @@ static bool check_program_share_take(CheckEmitShare* share, uint64_t* taken)
 
 // The part `taken` of `share`'s epoch, on its run's lane state `state` (a writer and arenas made at the state's first
 // part, as a lane's: check_program_emit_lane_prepare), then counted done; the last part done publishes the epoch
-// complete.
+// complete. Every access to the run, including its part count, precedes this part's acknowledgment: another part may
+// publish complete as soon as this one increments done, letting the owner reuse the run and its arenas.
 static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint32_t state)
 {
     CheckEmitRun* run = share->run;
@@ -757,7 +759,8 @@ static void check_program_share_run(CheckEmitShare* share, uint64_t taken, uint3
     {
         check_program_emit_part_refused(part);
     }
-    if (__atomic_add_fetch(&share->done, 1, __ATOMIC_ACQ_REL) == run->part_count)
+    const uint32_t parts = run->part_count;
+    if (__atomic_add_fetch(&share->done, 1, __ATOMIC_ACQ_REL) == parts)
     {
         lane_publish(&share->complete, 2);
     }
@@ -794,11 +797,9 @@ static void check_program_emit_shared(CheckEmitRun* run, CheckEmitBoard* board, 
             nanosleep(&pause, NULL);
         }
     }
-    // The parts the other lanes took, which the last of them publishes done.
-    if (__atomic_load_n(&share->done, __ATOMIC_ACQUIRE) != parts)
-    {
-        lane_wait(&share->complete, 0);
-    }
+    // There is at least one part (the caller has bodies and active > 1). Acquire its last publisher even if done
+    // already counts every part: it may still be about to publish complete, which must not reach the next epoch.
+    lane_wait(&share->complete, 0);
 }
 
 // A lane of the units' board with no unit left to take (#777): takes the parts that the other lanes' emissions share,
