@@ -1304,8 +1304,26 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
                 check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
             }
         }
+        else if (attribute->kind == CHECK_ATTRIBUTE_ALIAS && !attribute->ignored && function && definition)
+        {
+            // Clang points at the alias attribute when a function has both a body and an alias target.
+            check_input_report(reader, attribute->name_token, CHECK_INPUT_ALIAS_DEFINITION);
+            valid = false;
+        }
     }
     return valid;
+}
+
+// An alias declaration defines its function even though it has no body. Keep that fact separate from `defined`,
+// whose users also identify bodies (for example, the old-style parameter compatibility check).
+static bool check_input_attribute_alias_definition(const CheckInputAttributes* attributes)
+{
+    bool alias = false;
+    for (uint32_t i = 0; !alias && attributes != 0 && i < attributes->count; i += 1)
+    {
+        alias = attributes->records[i].kind == CHECK_ATTRIBUTE_ALIAS && !attributes->records[i].ignored;
+    }
+    return alias;
 }
 
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute

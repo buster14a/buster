@@ -19,6 +19,16 @@ target triple. These actions need no source file and accept `-target` or `--targ
 targets; without one, the build Clang's configured vendor is used. They do not implement `-v` or the other driver
 compatibility options still tracked in [#805](https://github.com/buster14a/buster/issues/805).
 
+The driver's warning coverage is incomplete. Accepting `-Wall`, `-Wextra` or
+`-Werror` does not guarantee the warnings or build failures Clang gives for the
+same source: some warnings are not produced, and some produced warnings are not
+promoted by `-Werror`. For example, an unused local, an address of a local
+returned from a function, or a mismatched `printf` format can pass with
+`-Wall -Werror`. Use Clang as a separate diagnostic check when those warnings
+matter. The individual supported diagnostics and their boundaries are described
+in this guide; the remaining warning work is tracked in
+[#823](https://github.com/buster14a/buster/issues/823).
+
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
 `check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced

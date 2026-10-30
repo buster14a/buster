@@ -771,6 +771,12 @@ static ForeignFailure foreign_arguments(ForeignCommand* command, int argc, char*
         result = foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0);
     }
     uint8_t flags = 0;
+    uint8_t* states = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count + 1);
+    uint64_t state_count = 0;
+    if (states == 0)
+    {
+        result = foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0);
+    }
     for (uint64_t i = 0; result.error == FOREIGN_ERROR_NONE && i < count; i += 1)
     {
         const char* argument = argv[i];
@@ -808,6 +814,22 @@ static ForeignFailure foreign_arguments(ForeignCommand* command, int argc, char*
         {
             command->undefined[command->undefined_count] = foreign_string(value);
             command->undefined_count += 1;
+        }
+        else if (strcmp(argument, "--push-state") == 0)
+        {
+            states[state_count++] = flags;
+        }
+        else if (strcmp(argument, "--pop-state") == 0)
+        {
+            if (state_count == 0)
+            {
+                result = foreign_failure(FOREIGN_ERROR_ARGUMENTS, 0, 0, 0);
+                result.argument = (uint32_t)i;
+            }
+            else
+            {
+                flags = states[--state_count];
+            }
         }
         else if (strcmp(argument, "--whole-archive") == 0)
         {

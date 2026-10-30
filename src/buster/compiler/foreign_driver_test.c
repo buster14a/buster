@@ -15,6 +15,7 @@ typedef enum ForeignDriverTestFixture
     FOREIGN_DRIVER_TEST_ENTRY,
     FOREIGN_DRIVER_TEST_DEAD,
     FOREIGN_DRIVER_TEST_CALL,
+    FOREIGN_DRIVER_TEST_SCOPED_CALL,
     FOREIGN_DRIVER_TEST_FIRST,
     FOREIGN_DRIVER_TEST_SECOND,
     FOREIGN_DRIVER_TEST_POISON,
@@ -69,6 +70,14 @@ static const ForeignDriverTestSource foreign_driver_test_sources[FOREIGN_DRIVER_
         .name = "fdriver_call",
         .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
                 ".cfi_startproc\ncall driver_pick@PLT\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.cfi_endproc\n.size _start,.-_start\n"
+                ".section .note.GNU-stack,\"\",@progbits\n",
+    },
+    // Both calls must resolve: pick comes from the scoped archive, unused from its DSO with no archive substitute.
+    [FOREIGN_DRIVER_TEST_SCOPED_CALL] = {
+        .name = "fdriver_scoped_call",
+        .text = ".section .text.start,\"ax\",@progbits\n.globl _start\n.type _start,@function\n_start:\n"
+                "call driver_pick@PLT\nmov %eax,%ebx\ncall driver_unused@PLT\nadd %ebx,%eax\n"
+                "mov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n"
                 ".section .note.GNU-stack,\"\",@progbits\n",
     },
     [FOREIGN_DRIVER_TEST_FIRST] = {
@@ -1440,6 +1449,39 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
         const bool second = mode != 1 || (found > 1 && needed[1] != 0 && strcmp(needed[1], "libfdriver_unused.so") == 0);
         foreign_test_expect(tally, image.valid && found == expected && first && second, "driver preserves library search mode and as-needed scope", name);
     }
+    {
+        char* arguments[] = {
+            (char*)"-pie", (char*)"-dynamic-linker", interpreter.pointer, files->objects[FOREIGN_DRIVER_TEST_CALL],
+            (char*)"-L", (char*)directory, (char*)"--as-needed", (char*)"-Bdynamic", (char*)"--push-state",
+            (char*)"-Bstatic", (char*)"--no-as-needed", (char*)"--push-state", (char*)"-Bdynamic",
+            (char*)"--pop-state", (char*)"-lfdriver_pick", (char*)"--pop-state", (char*)"-lfdriver_unused",
+        };
+        const String8 bytes = foreign_driver_test_invoke(tally, directory, "nested_state", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        const char* needed[2] = { 0 };
+        foreign_test_expect(tally, image.valid && dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed)) == 0,
+                            "nested state restores static library selection and as-needed", 0);
+    }
+    ForeignTestPath no_archive;
+    snprintf(no_archive, sizeof(no_archive), "%s/libfdriver_unused.a", directory);
+    foreign_test_expect(tally, access(no_archive, F_OK) != 0 && errno == ENOENT, "scoped-static fixture has no DSO archive fallback", no_archive);
+    for (uint32_t alias = 0; alias < 2; alias += 1)
+    {
+        const char* name = alias == 0 ? "scoped_static_restores_dso" : "scoped_bstatic_restores_dso";
+        char* arguments[] = {
+            (char*)"-pie", (char*)"-dynamic-linker", interpreter.pointer, files->objects[FOREIGN_DRIVER_TEST_SCOPED_CALL],
+            (char*)"-L", (char*)directory, (char*)"--as-needed", (char*)"--push-state",
+            (char*)(alias == 0 ? "-static" : "-Bstatic"), (char*)"--push-state", (char*)"-Bdynamic", (char*)"--pop-state",
+            (char*)"-lfdriver_pick", (char*)"--pop-state", (char*)"-lfdriver_unused",
+        };
+        const String8 bytes = foreign_driver_test_invoke(tally, directory, name, "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 49, arena);
+        foreign_driver_test_structure(tally, bytes, ET_DYN, interpreter, name);
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        const char* needed[2] = { 0 };
+        const uint32_t found = dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed));
+        foreign_test_expect(tally, image.valid && found == 1 && needed[0] != 0 && strcmp(needed[0], "libfdriver_unused.so") == 0,
+                            "scoped static archive is required and pop restores the required DSO", name);
+    }
     foreign_test_expect(tally, system->found, "find explicit system CRT inputs", 0);
     if (system->found)
     {
@@ -1458,14 +1500,16 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
             arguments[count++] = system->directories[i];
         }
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         arguments[count++] = (char*)"-lc";
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         for (uint32_t i = RUNTIME_OBJECT_END; i < RUNTIME_OBJECTS; i += 1)
         {
             arguments[count++] = system->objects[i];

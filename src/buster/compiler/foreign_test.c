@@ -2465,6 +2465,19 @@ static bool foreign_test_refusals(const char* directory, Arena* arena)
                         "a script that doesn't parse", foreign_test_errors[failure.error]);
     failure = foreign_test_failure(bad_option, 1, arena);
     foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_ARGUMENTS && failure.argument == 0, "an unknown option", foreign_test_errors[failure.error]);
+    // Nested states restore all three input controls, including after changing them again inside an inner state.
+    char* states[] = { (char*)"--as-needed", (char*)"-Bstatic", (char*)"--whole-archive", (char*)"--push-state", (char*)"--no-as-needed",
+                       (char*)"-Bdynamic", (char*)"--no-whole-archive", (char*)"first.o", (char*)"--push-state", (char*)"--as-needed",
+                       (char*)"-Bstatic", (char*)"--whole-archive", (char*)"second.o", (char*)"--pop-state", (char*)"third.o", (char*)"--pop-state", (char*)"fourth.o" };
+    ForeignCommand state_command;
+    failure = foreign_arguments(&state_command, BUSTER_ARRAY_LENGTH(states), states, arena);
+    const uint8_t all_flags = BUSTER_FOREIGN_INPUT_AS_NEEDED | BUSTER_FOREIGN_INPUT_STATIC | BUSTER_FOREIGN_INPUT_WHOLE_ARCHIVE;
+    foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_NONE && state_command.argument_count == 4 && state_command.arguments[0].flags == 0 &&
+                                   state_command.arguments[1].flags == all_flags && state_command.arguments[2].flags == 0 && state_command.arguments[3].flags == all_flags,
+                        "nested linker state restores all input controls", 0);
+    char* unbalanced[] = { (char*)"--pop-state" };
+    failure = foreign_test_failure(unbalanced, BUSTER_ARRAY_LENGTH(unbalanced), arena);
+    foreign_test_expect(&tally, failure.error == FOREIGN_ERROR_ARGUMENTS && failure.argument == 0, "pop without a push is refused", 0);
     // A FIFO: the open mustn't wait for a writer, and the input isn't a regular file.
     char fifo[BUSTER_FOREIGN_TEST_PATH_BYTES];
     snprintf(fifo, sizeof(fifo), "%s/input.fifo", directory);
