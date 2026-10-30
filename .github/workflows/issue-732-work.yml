@@ -18,14 +18,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if test -f .github/issue732-fix.b64; then
-            base64 -d .github/issue732-fix.b64 | gzip -d > "$RUNNER_TEMP/implementation.patch"
-            echo "f639d8c68eb094da4ddca2e4ea1bdabd2d420a90f6e807c616b4faa92bbafc37  $RUNNER_TEMP/implementation.patch" | sha256sum --check
+          if test -f .github/issue732-next.part0; then
+            cat .github/issue732-next.part* | base64 -d | gzip -d > "$RUNNER_TEMP/implementation.patch"
+            echo "6cc60378c996806e07492f4948c500f7cbe1ea4de056e424f07620180fd2b4b3  $RUNNER_TEMP/implementation.patch" | sha256sum --check
             git apply --check "$RUNNER_TEMP/implementation.patch"
             git apply "$RUNNER_TEMP/implementation.patch"
-            git rm .github/issue732-fix.b64
-            git add src/buster/compiler
-            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'fix(ir): preserve scalar lowering clients and sparse interpreter admission'
+            git rm .github/issue732-next.part*
+            git add src/buster/compiler docs tests/ir tools/ci/correctness.tests THIRD_PARTY_NOTICES.md
+            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'test(ir): cover real vector producers and shared-interpreter control flow'
             git push origin HEAD:chatgpt/issue-732-vector-integration
           fi
           git diff --check
@@ -40,8 +40,23 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter; do
+          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter test-ssa; do
             build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$test.log" || failed=1
+          done
+          build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c 2>&1 | tee "$RUNNER_TEMP/issue-732-source-test.log" || failed=1
+          exit "$failed"
+      - name: Sanitized build
+        env:
+          BUSTER_SANITIZER: address
+          BUSTER_SANITIZER_OPTIMIZATION: 1
+        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-732-sanitized-build.log"
+      - name: Sanitized regression tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          failed=0
+          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter; do
+            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-sanitized-$test.log" || failed=1
           done
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
