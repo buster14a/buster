@@ -705,7 +705,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_OVERFLOW;
     }
-    else if (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE)
+    else if (cbuiltin_vector(id))
     {
         op = CHECK_OP_BUILTIN_VECTOR;
     }
@@ -1924,7 +1924,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         check_builtin_vector(types, &input, &checked, 1);
         *result = checked.action;
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_VECTOR_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
-        for (uint32_t i = 0; i < action->argument_count && i < 3; i += 1)
+        for (uint32_t i = 0; i < action->argument_count && i < BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS; i += 1)
         {
             action->argument_conversions[i] = checked.argument_conversions[i];
         }

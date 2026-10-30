@@ -578,11 +578,11 @@ static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node
     {
         index = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
         const uint32_t count = index != BUSTER_CHECK_NONE ? stream->vectors[index].evaluated_argument_count : 0;
-        if (count > 3 || count > program->input->graph.argument_counts[node])
+        if (count > BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS || count > program->input->graph.argument_counts[node])
         {
             check_program_fail(program, CHECK_PROGRAM_INVALID, program->input->graph.tokens[node]);
         }
-        mask = count <= 3 ? (1u << count) - 1 : 0;
+        mask = count <= BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS ? (1u << count) - 1 : 0;
     }
     else if (op == CHECK_OP_BUILTIN_X86)
     {

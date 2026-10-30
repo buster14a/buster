@@ -1067,8 +1067,9 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
+            // The C library's and libm's functions are a shared library's, which the GOT reaches.
             access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
-                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX) || runtime >= BUSTER_CHECK_LOWER_LIBM_FIRST
                                  ? BUSTER_TIER0_ACCESS_GOT
                                  : BUSTER_TIER0_ACCESS_DIRECT;
         }
