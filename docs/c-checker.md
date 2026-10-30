@@ -2042,7 +2042,7 @@ What the lowering covers past scalars (#145's programs):
   half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
   bit reversal of elements wider than a byte, byte bit reversal without
-  AVX512-BMM, the funnel shifts of 8-bit elements, the
+  AVX512-BMM, funnel shifts of 8-bit elements outside 16-byte vectors or without XOP, the
   leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
   at underaligned addresses, bit casts of other types, and the rows whose
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
