@@ -51,11 +51,14 @@ static IrDataflowSample ir_dataflow_sample(const IrFunction* function, IrDataflo
         }
     }
     const Tier0BenchmarkReading end = tier0_benchmark_read(counters);
-    valid = valid && output->length == mark && scratch->length == temporary && end.cycles > begin.cycles && end.nanoseconds > begin.nanoseconds;
+    // The shared counter reader returns zero on read failure. Preparation has already executed before sampling,
+    // so neither opening a readable counter nor a failed read can masquerade as a valid zero starting endpoint.
+    valid = valid && output->length == mark && scratch->length == temporary && begin.cycles != 0 && begin.instructions != 0 &&
+        end.cycles > begin.cycles && end.instructions > begin.instructions && end.nanoseconds > begin.nanoseconds;
     const IrDataflowSample sample = {
         .nanoseconds = valid ? end.nanoseconds - begin.nanoseconds : 0,
         .cycles = valid ? end.cycles - begin.cycles : 0,
-        .instructions = valid && end.instructions >= begin.instructions ? end.instructions - begin.instructions : 0,
+        .instructions = valid ? end.instructions - begin.instructions : 0,
         .iterations = iterations,
         .valid = valid,
     };
