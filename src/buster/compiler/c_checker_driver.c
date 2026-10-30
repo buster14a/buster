@@ -1276,16 +1276,14 @@ struct CheckDriverWrite
     bool succeeded;
 };
 
-// A command of several units' flow (#905, c_checker_units.c), which every lane of its session runs: lane 0 runs the
-// units' driver alone (check_driver_units), and each of its wide parts is a round, which lane 0 announces with its kind
-// and lanes and every lane runs, the first `lanes` of them its operation: the units' run, the link's merge, the link's
-// check and the executable's write. Lane 0 calls its round's operation itself, between check_units_round_begin and
-// check_units_round_end; the others follow the rounds (check_units_follow), calling each by its kind, until lane 0 ends
-// the flow (check_units_flow_end). So no call the units' run makes leads back to it, which a units' compile's driver
-// reaching a round of every kind would (the call graph check). A round's lanes are those the worker budget gives of
-// those it wants, taken before its setup and given back after it, before any serial work (check_units_slots,
-// check_units_slots_back). A flow without other lanes (one lane, or a session whose lanes didn't start) runs its rounds
-// on lane 0 alone.
+// A command of several units' flow (#905, c_checker_units.c), a LaneFlow of its session's lanes: lane 0 runs the units'
+// driver alone (check_driver_units), and each of its wide parts is a round of a CheckUnitsRound kind: the units' run, the
+// link's merge, the link's check and the executable's write. Lane 0 calls its round's operation itself, between
+// lane_flow_round_begin and lane_flow_round_end; the others follow the rounds (check_units_follow), calling each by its
+// kind, until lane 0 ends the flow (check_units_flow_end). A unit's compile reaches the driver's link through the
+// one-unit driver, so lane 0 calling the operations by kind would close a cycle that the call graph check refuses. A
+// round's lanes are those the worker budget gives of those it wants, taken before its setup and given back after it,
+// before any serial work (check_units_slots, check_units_slots_back).
 typedef struct CheckUnitsFlow CheckUnitsFlow;
 typedef enum CheckUnitsRound
 {
@@ -1297,23 +1295,13 @@ typedef enum CheckUnitsRound
 } CheckUnitsRound;
 struct CheckUnitsFlow
 {
-    // The flow's group, which lane 0 leaves to run alone (check_units_flow_begin), and lane 0's lane alone during a
-    // round.
-    Lane group;
-    Lane alone;
-    // The operation of the round lane 0 announced last, which only the round's lanes read, before they arrive at its end
-    // (lane_widen), which lane 0 waits for before it writes another.
-    void* argument;
+    LaneFlow rounds;
     // Whether a round's slots failed to go back to the worker budget, which fails the command.
     bool slots_lost;
 };
 static void check_units_flow_begin(CheckUnitsFlow* flow);
 static void check_units_flow_end(CheckUnitsFlow* flow);
 static void check_units_follow(CheckUnitsFlow* flow);
-// Lane 0: a round of `round` on `lanes` of the flow's lanes, `argument` its operation's, which lane 0 calls itself after
-// check_units_round_begin, and check_units_round_end ends.
-static void check_units_round_begin(CheckUnitsFlow* flow, CheckUnitsRound round, void* argument, uint32_t lanes);
-static void check_units_round_end(CheckUnitsFlow* flow);
 // A round's lanes: `wanted` of them as `budget` gives (all of them without one), in `lease`, which
 // check_units_slots_back gives back, a failure to which `flow` (if any) records.
 static uint32_t check_units_slots(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease);
@@ -1346,9 +1334,9 @@ static LinkError check_driver_link_check(Link* link, CheckProgramLanes* lanes, u
     const uint32_t granted = wanted > 1 && lanes->units_flow != NULL ? check_units_slots(lanes->budget, wanted, &lease) : 1;
     if (granted > 1)
     {
-        check_units_round_begin(lanes->units_flow, CHECK_UNITS_ROUND_CHECK, &check, granted);
+        lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_CHECK, &check, granted);
         check_driver_check_main(&check);
-        check_units_round_end(lanes->units_flow);
+        lane_flow_round_end(&lanes->units_flow->rounds);
     }
     else
     {
@@ -1832,9 +1820,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             bool wrote = true;
             if (write_lanes > 1)
             {
-                check_units_round_begin(lanes->units_flow, CHECK_UNITS_ROUND_WRITE, &write, write_lanes);
+                lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_WRITE, &write, write_lanes);
                 check_driver_write_main(&write);
-                check_units_round_end(lanes->units_flow);
+                lane_flow_round_end(&lanes->units_flow->rounds);
             }
             else
             {
@@ -2410,7 +2398,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
 }
 
 // A command of the semantic driver as its flow runs it (#905): what check_driver_command made of its options, the flow's
-// rounds' rendezvous (a unit's emission's, CheckEmitFlow), and the command's exit status, lane 0's.
+// rounds (a unit's emission's, and several units' wide parts', LaneFlows), and the command's exit status, lane 0's.
 typedef struct CheckDriverRun CheckDriverRun;
 struct CheckDriverRun
 {
@@ -2425,7 +2413,7 @@ struct CheckDriverRun
     Arena* scratch;
     Arena* output_arena;
     bool release;
-    CheckEmitFlow flow;
+    LaneFlow flow;
     CheckUnitsFlow units_flow;
     // The lanes the command asks for (check_driver_run), which --time-stages reports with those its flow ran on.
     uint32_t capacity;
@@ -2482,9 +2470,9 @@ static void check_driver_flow(void* argument)
     else if (lane_index() == 0)
     {
         run->lanes->flow = &run->flow;
-        check_program_emit_flow_begin(&run->flow);
+        lane_flow_begin(&run->flow);
         run->result = check_driver_one_unit(run);
-        check_program_emit_flow_end(&run->flow);
+        lane_flow_end(&run->flow);
         run->lanes->flow = NULL;
     }
     else

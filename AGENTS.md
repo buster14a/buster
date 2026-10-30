@@ -2732,7 +2732,9 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   0, parked broadcasts, narrowings to 1, 2, 3, every lane and more, nested,
   each narrowed group syncing, broadcasting and taking parts, lane 0 serving
   regions of 1, 3, every lane and more, and regions whose lane 0 serves the
-  region's lanes, after which it serves the session's again, a run, a team, a
+  region's lanes, after which it serves the session's again, a flow of rounds
+  (`LaneFlow`) of 1, 3, every lane and more, of two kinds, lane 0 running its
+  part itself and the others theirs by kind, a run, a team, a
   cold group and a session of several refused where they would create a
   thread, and a child forked from lane 0, which forgets the session; then
   sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
@@ -5267,9 +5269,10 @@ bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`). In
 the C driver they are its session's (#905): every lane runs the command's flow
 (`check_driver_flow`), lane 0 the unit's stages alone, and an emission that
-pays for more than one lane is a round of the flow (`CheckEmitFlow`), which
-lane 0 announces and every lane runs, the first of them the bodies' parts, a
-direct call (`check_program_emit_wide`); the worker budget's slots are taken
+pays for more than one lane is a round of the flow (a `LaneFlow`, `lane.c`),
+which lane 0 announces and every lane runs, the first of them the bodies'
+parts, a direct call (`check_program_emit_round` and
+`check_program_emit_follow`); the worker budget's slots are taken
 before the round, without waiting, and given back after it. Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 

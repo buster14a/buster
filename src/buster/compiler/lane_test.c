@@ -58,7 +58,9 @@
 //     broadcasts from each lane; narrowings to 1, 2, 3, every lane and more, nested, each narrowed group syncing,
 //     broadcasting and taking parts, the others untouched; lane 0 serving regions of 1, 3, every lane and more lanes,
 //     each region's lanes running it once, a nested run in a region refused, and regions whose lane 0 serves the
-//     region's lanes, after which it serves the session's again; a lane alone running lane_run on itself;
+//     region's lanes, after which it serves the session's again; a flow of rounds (LaneFlow) of 1, 3, every lane and
+//     more, of two kinds, lane 0 running its part itself and the others theirs by kind; a lane alone running lane_run on
+//     itself;
 //     a run, a team, a cold group and a session of several refused where they would create a thread; and a child forked
 //     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
 //     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
@@ -1816,6 +1818,9 @@ struct LaneSessionTest
     uint32_t region_lanes;
     // The calls of a region that a region's lane 0 serves (lane_test_session_nested), by lane.
     uint32_t nested_calls[2];
+    // A flow of rounds (LaneFlow), lane 0's, which the others follow, and each lane's calls of each of its two kinds.
+    LaneFlow flow;
+    uint32_t round_calls[2][BUSTER_LANE_TEST_MAX_LANES];
     uint32_t parts[BUSTER_LANE_TEST_SESSION_PARTS];
     uint32_t forbidden_calls;
     // Whether lane 0 forks a child in the flow.
@@ -1900,6 +1905,16 @@ static void lane_test_session_nested(void* argument)
     {
         lane_serve();
     }
+}
+
+// A flow's round of `kind` (1 or 2): each of its lanes counts itself, and they sync and broadcast in their own group.
+static void lane_test_session_round(LaneSessionTest* test, uint32_t kind)
+{
+    const uint32_t index = lane_index();
+    test->round_calls[kind - 1][index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += 1;
+    lane_sync();
+    const uint32_t lanes = lane_count();
+    test->failures[index < BUSTER_LANE_TEST_MAX_LANES ? index : 0] += lane_broadcast(index + kind, lanes - 1) != lanes - 1 + kind ? 1 : 0;
 }
 
 // A narrowing of every lane of the current group to `lanes` of them: the narrowed lanes sync, broadcast and take every
@@ -2032,6 +2047,46 @@ static void lane_test_session_main(void* argument)
     else
     {
         lane_serve();
+    }
+    // A flow of rounds (LaneFlow): lane 0 runs rounds of 1, 3, every lane and more lanes than the session has, of each of
+    // two kinds, its part itself; the others run each by its kind on its lanes; each round's lanes run it once, and lane
+    // 0 is a lane of the session's group again at the end.
+    static const uint32_t rounds[] = { 1, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 9 };
+    if (index == 0)
+    {
+        lane_flow_begin(&test->flow);
+        failures += lane_count() != 1 || lane_flow_lanes(&test->flow) != lanes ? 1 : 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rounds); i += 1)
+        {
+            const uint32_t round_lanes = rounds[i] < lanes ? rounds[i] : lanes;
+            for (uint32_t kind = 1; kind <= 2; kind += 1)
+            {
+                memset(test->round_calls, 0, sizeof(test->round_calls));
+                lane_flow_round_begin(&test->flow, kind, test, rounds[i]);
+                lane_test_session_round(test, kind);
+                lane_flow_round_end(&test->flow);
+                for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+                {
+                    failures += test->round_calls[kind - 1][lane] != (lane < round_lanes ? 1u : 0u) || test->round_calls[2 - kind][lane] != 0 ? 1 : 0;
+                }
+                failures += lane_count() != 1 ? 1 : 0;
+            }
+        }
+        lane_flow_end(&test->flow);
+        failures += lane_count() != lanes || lane_index() != 0 ? 1 : 0;
+    }
+    else
+    {
+        void* argument = NULL;
+        for (uint32_t kind = lane_flow_next(&test->flow, &argument); kind != 0; kind = lane_flow_next(&test->flow, &argument))
+        {
+            if (argument != NULL)
+            {
+                lane_test_session_round(argument, kind);
+            }
+            lane_widen();
+        }
+        failures += lane_count() != lanes ? 1 : 0;
     }
     // A child forked from lane 0 while the others park: it forgets the session, is one lane, and may start a cold group
     // of its own, which no session forbids there.

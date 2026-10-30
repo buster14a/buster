@@ -1415,9 +1415,9 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     }
     else
     {
-        check_units_round_begin(flow, CHECK_UNITS_ROUND_MERGE, &merge, lanes);
+        lane_flow_round_begin(&flow->rounds, CHECK_UNITS_ROUND_MERGE, &merge, lanes);
         check_units_merge_lane(&merge);
-        check_units_round_end(flow);
+        lane_flow_round_end(&flow->rounds);
         result = merge.valid;
         if (!merge.atoms_added && !merge.duplicated && (!merge.symbols_added || merge.begun))
         {
@@ -1599,73 +1599,33 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
 
 static void check_units_flow_begin(CheckUnitsFlow* flow)
 {
-    flow->group = lane_alone();
-    flow->argument = NULL;
+    lane_flow_begin(&flow->rounds);
     flow->slots_lost = false;
 }
 
-// Whether the flow has lanes besides lane 0's to run its rounds on: a lazy session's lane 0 learns here how they started.
-static bool check_units_flow_shared(const CheckUnitsFlow* flow)
+static void check_units_flow_end(CheckUnitsFlow* flow)
 {
-    return flow != NULL && lane_session_settle() > 1 && flow->group.count > 1;
+    lane_flow_end(&flow->rounds);
 }
 
-// The lanes the flow's rounds may take: its group's, or one.
-static uint32_t check_units_flow_lanes(const CheckUnitsFlow* flow)
-{
-    return check_units_flow_shared(flow) ? flow->group.count : 1;
-}
-
-// Lane 0 is always among a round's lanes, a lane alone in a flow without others.
-static void check_units_round_begin(CheckUnitsFlow* flow, CheckUnitsRound round, void* argument, uint32_t lanes)
-{
-    assert(flow != NULL);
-    flow->argument = argument;
-    const bool shared = check_units_flow_shared(flow);
-    flow->alone = lane_alone();
-    if (shared)
-    {
-        lane_restore(flow->group);
-        lane_park_broadcast((uint64_t)round << 32 | lanes, 0);
-    }
-    lane_narrow(shared ? lanes : 1);
-}
-
-static void check_units_round_end(CheckUnitsFlow* flow)
-{
-    lane_widen();
-    lane_restore(flow->alone);
-}
-
-// The flow's other lanes: each round's operation on its first lanes, by its kind, until lane 0 ends the flow.
+// The flow's other lanes: each round's operation on its lanes, by its kind, until lane 0 ends the flow.
 static void check_units_follow(CheckUnitsFlow* flow)
 {
-    for (uint64_t announced = lane_park_broadcast(0, 0); (announced >> 32) != CHECK_UNITS_ROUND_END; announced = lane_park_broadcast(0, 0))
+    void* argument = NULL;
+    for (uint32_t round = lane_flow_next(&flow->rounds, &argument); round != CHECK_UNITS_ROUND_END; round = lane_flow_next(&flow->rounds, &argument))
     {
-        const CheckUnitsRound round = (CheckUnitsRound)(announced >> 32);
-        if (lane_narrow((uint32_t)announced))
+        if (argument != NULL)
         {
-            switch (round)
+            switch ((CheckUnitsRound)round)
             {
-                case CHECK_UNITS_ROUND_UNITS: check_units_lane(flow->argument); break;
-                case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(flow->argument); break;
-                case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(flow->argument); break;
-                case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(flow->argument); break;
+                case CHECK_UNITS_ROUND_UNITS: check_units_lane(argument); break;
+                case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(argument); break;
+                case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(argument); break;
+                case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(argument); break;
                 case CHECK_UNITS_ROUND_END: break;
             }
         }
         lane_widen();
-    }
-}
-
-// Lane 0: the flow's end, which the other lanes' check_units_follow returns at, and lane 0 a lane of the flow's group
-// again (none if the session's lanes didn't start).
-static void check_units_flow_end(CheckUnitsFlow* flow)
-{
-    if (check_units_flow_shared(flow))
-    {
-        lane_restore(flow->group);
-        lane_park_broadcast((uint64_t)CHECK_UNITS_ROUND_END << 32, 0);
     }
 }
 
@@ -1762,7 +1722,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         // The command's session's lanes (#905), which a lazy session's lane 1 started while the tables above were built:
         // lane 0 learns how they started, and the units' run, the merge, the link's check and the write are rounds of
         // them (CheckUnitsFlow).
-        const uint32_t flow_lanes = check_units_flow_lanes(lanes->units_flow);
+        const uint32_t flow_lanes = lanes->units_flow != NULL ? lane_flow_lanes(&lanes->units_flow->rounds) : 1;
         lanes->lanes = lanes->lanes < flow_lanes ? lanes->lanes : flow_lanes;
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
         const uint64_t paid = (uint64_t)count + source_bytes / BUSTER_CHECK_UNITS_LANE_BYTES;
@@ -1798,9 +1758,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
             // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
-            check_units_round_begin(lanes->units_flow, CHECK_UNITS_ROUND_UNITS, &run, active);
+            lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_UNITS, &run, active);
             check_units_lane(&run);
-            check_units_round_end(lanes->units_flow);
+            lane_flow_round_end(&lanes->units_flow->rounds);
             check_units_slots_back(lanes->units_flow, &lease);
             // A unit no lane took compiles on lane 0 alone.
             const Lane caller = lane_alone();

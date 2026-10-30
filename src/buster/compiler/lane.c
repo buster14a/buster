@@ -44,7 +44,9 @@
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team or a session, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
 //   - Sessions: lane_session_run, lane_session_current, and lane_serve_begin, lane_serve_end, lane_serve and
-//     lane_serving, with which lane 0 runs the regions of a flow that is still serial code with lane_run calls.
+//     lane_serving, with which lane 0 runs the regions of a flow that is still serial code with lane_run calls; and a
+//     command's flow of rounds: LaneFlow, lane_flow_begin, lane_flow_lanes, lane_flow_round_begin, lane_flow_round_end,
+//     lane_flow_next and lane_flow_end.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -1282,6 +1284,36 @@ static __attribute__((unused)) void lane_serve(void);
 // Whether the calling thread is lane 0 serving its group's other lanes.
 static __attribute__((unused)) bool lane_serving(void);
 
+// A command's flow of rounds (#905), which every lane of a session's group runs: lane 0 runs the command alone from
+// lane_flow_begin, and each of its wide parts is a round, which lane 0 announces with its kind (the command's own,
+// nonzero) and its lanes. Lane 0 runs its part of a round itself, between lane_flow_round_begin and
+// lane_flow_round_end; the flow's other lanes take each round from lane_flow_next and run its operation by its kind
+// when they are among its lanes, then lane_widen; lane_flow_end, which they get as kind 0, ends the flow. Lane 0 calling
+// its own operation directly, and the others by kind, keeps a command's calls from leading back to its round through a
+// shared dispatch, which the call graph check refuses. A flow without other lanes (a session of one, one whose lanes
+// didn't start, or none) runs its rounds on lane 0 alone. Only a round's lanes read its operation, before they arrive at
+// its end, which lane 0 waits for before it announces another.
+typedef struct LaneFlow LaneFlow;
+struct LaneFlow
+{
+    // The flow's group, which lane 0 leaves to run alone, and lane 0's lane alone during a round.
+    Lane group;
+    Lane alone;
+    // The operation of the round lane 0 announced last.
+    void* argument;
+};
+static __attribute__((unused)) void lane_flow_begin(LaneFlow* flow);
+// The lanes the flow's rounds may take: its group's, or one; a lazy session's lane 0 learns here how its lanes started.
+static __attribute__((unused)) uint32_t lane_flow_lanes(const LaneFlow* flow);
+// Lane 0: a round of `kind` on `lanes` of the flow's lanes (at most its own), `argument` its operation's, which lane 0,
+// always among its lanes, runs before lane_flow_round_end.
+static __attribute__((unused)) void lane_flow_round_begin(LaneFlow* flow, uint32_t kind, void* argument, uint32_t lanes);
+static __attribute__((unused)) void lane_flow_round_end(LaneFlow* flow);
+// The flow's other lanes: the next round's kind, 0 at the flow's end, and with one, its operation in `*argument` for a
+// lane among its lanes or null for the others; either then calls lane_widen.
+static __attribute__((unused)) uint32_t lane_flow_next(LaneFlow* flow, void** argument);
+static __attribute__((unused)) void lane_flow_end(LaneFlow* flow);
+
 typedef struct LaneTeamWorker LaneTeamWorker;
 struct LaneTeamWorker
 {
@@ -1977,5 +2009,64 @@ static void lane_serve(void)
             group->entry(group->argument);
         }
         lane_widen();
+    }
+}
+
+static void lane_flow_begin(LaneFlow* flow)
+{
+    flow->group = lane_alone();
+    flow->alone = flow->group;
+    flow->argument = 0;
+}
+
+// Whether the flow has lanes besides lane 0 to run its rounds on.
+static bool lane_flow_shared(const LaneFlow* flow)
+{
+    return lane_session_settle() > 1 && flow->group.count > 1;
+}
+
+static uint32_t lane_flow_lanes(const LaneFlow* flow)
+{
+    return lane_flow_shared(flow) ? flow->group.count : 1;
+}
+
+static void lane_flow_round_begin(LaneFlow* flow, uint32_t kind, void* argument, uint32_t lanes)
+{
+    assert(kind != 0);
+    flow->argument = argument;
+    const bool shared = lane_flow_shared(flow);
+    flow->alone = lane_alone();
+    if (shared)
+    {
+        lane_restore(flow->group);
+        lane_park_broadcast((uint64_t)kind << 32 | lanes, 0);
+    }
+    lane_narrow(shared ? lanes : 1);
+}
+
+static void lane_flow_round_end(LaneFlow* flow)
+{
+    lane_widen();
+    lane_restore(flow->alone);
+}
+
+static uint32_t lane_flow_next(LaneFlow* flow, void** argument)
+{
+    const uint64_t announced = lane_park_broadcast(0, 0);
+    const uint32_t kind = (uint32_t)(announced >> 32);
+    *argument = 0;
+    if (kind != 0 && lane_narrow((uint32_t)announced))
+    {
+        *argument = flow->argument;
+    }
+    return kind;
+}
+
+static void lane_flow_end(LaneFlow* flow)
+{
+    if (lane_flow_shared(flow))
+    {
+        lane_restore(flow->group);
+        lane_park_broadcast(0, 0);
     }
 }
