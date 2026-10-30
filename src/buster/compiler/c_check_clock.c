@@ -164,8 +164,9 @@ struct CheckClock
     uint32_t lanes;
 };
 
-// Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock.
-static void check_clock_lanes(CheckClock* stage_clock, uint32_t asked, uint32_t lanes)
+// Records the command's lanes for the report (CheckClock.lanes_asked and lanes), with a clock. The driver calls it, but
+// not every unit that includes this file (tests/peak-rss.c).
+static __attribute__((unused)) void check_clock_lanes(CheckClock* stage_clock, uint32_t asked, uint32_t lanes)
 {
     if (stage_clock != NULL)
     {
