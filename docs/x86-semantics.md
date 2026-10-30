@@ -678,7 +678,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
     saturating forms (vpadds, vpaddus, vpsubs, vpsubus in b and w), vpmin and
     vpmax (signed and unsigned, b, w, d and q), vpabs, vpavgb and vpavgw,
     vpmaddwd, vpmaddubsw, vpmullw, vpmulld, vpmullq, vpmulhw, vpmulhuw,
-    vpmulhrsw, vpmuldq, vpmuludq, vpsadbw, the horizontal vphadd and vphsub
+    vpmulhrsw, vpmuldq, vpmuludq, vpsadbw, vdbpsadbw, VEX's vmpsadbw (and
+    AVX10.2's of 64 bytes), vpclmulqdq (VEX's and EVEX's), the horizontal
+    vphadd and vphsub
     (w, d, sw), vpsign, vphminposuw, vpconflictd, vpconflictq, vplzcntd,
     vplzcntq, vpopcnt (b, w, d, q), vpmultishiftqb,
     and the accumulating dot products (AVX512VNNI's and AVX-VNNI's vpdpbusd,
@@ -689,7 +691,7 @@ Mutations of the tables, each built and run once, are caught. Among them:
     XMM register's count, vpsraq, the variable ones (vpsllv, vpsrlv, vpsrav in
     w, d and q), vpslldq, vpsrldq, the rotates by an immediate (vprold,
     vprolq, vprord, vprorq), and AVX512VBMI2's concatenating vpshldv and
-    vpshrdv (w, d, q);
+    vpshrdv, and vpshld and vpshrd by an immediate (w, d, q);
   - the moves of elements: the permutes (vpermb, vpermw, vpermd, vpermq,
     vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd,
     and VEX's vperm2f128 and vperm2i128), vpshufb, vpshufd, vpshuflw,
@@ -713,9 +715,10 @@ Mutations of the tables, each built and run once, are caught. Among them:
   - gathers and scatters: vpgatherdd, vpgatherdq, vpgatherqq, vpscatterdd,
     vpscatterqd, vpscatterqq (VEX and EVEX);
   - AES and GF(2^8): vaesenc, vaesenclast, vaesdec, vaesdeclast, vaesimc,
-    vgf2p8affineqb, vgf2p8mulb;
+    vgf2p8affineqb, vgf2p8affineinvqb, vgf2p8mulb;
   - the opmask registers: kmov (to and from general registers, memory and each
-    other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck and kshiftl;
+    other), kand, kandn, kor, kxor, kxnor, kadd, knot, kunpck, kshiftl and
+    kshiftr;
   - BMI's andn, bextr, bzhi, pdep and pext (their VEX forms), paddd (SSE2's,
     the vector check's) and prefetchit0 and prefetchit1;
   - AMD's XOP (#136): vfrczps, vfrczpd, vfrczss and vfrczsd (whose scalar

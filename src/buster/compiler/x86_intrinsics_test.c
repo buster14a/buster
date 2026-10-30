@@ -63,20 +63,21 @@ struct X86IntrinsicCase
 // VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads, AVX10.2's intrinsics of AVX-VNNI-INT8's and
 // AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), SHA512's, SM3's and SM4's; then AVX10.2's
 // saturating conversions, bf16 operations and compares, conversions to and from 8-bit floats and of two vectors of
-// floats to halves, and dot products of halves, MOVRS's vector loads and AVX512-BMM's products of bit matrices; then the
-// system instructions of extensions no host of the tests has, or whose effects are on the machine's state (a
-// transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE, SERIALIZE, UINTR's,
-// PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's, AMX-TILE's
-// configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores; and the
-// leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
+// floats to halves, dot products of halves and sums of absolute differences of 64 bytes' blocks (#148: the probe's
+// function of _mm512_mpsadbw_epu8, a macro of a constant immediate), MOVRS's vector loads and AVX512-BMM's products of
+// bit matrices; then the system instructions of extensions no host of the tests has, or whose effects are on the
+// machine's state (a transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE,
+// SERIALIZE, UINTR's, PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's,
+// AMX-TILE's configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores; and
+// the leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
 // TPAUSE, and RTM's XBEGIN, whose paths the traces follow. clang's code of the aesenc and aesdec ones stores the result
 // where ZF is 1 and zeros where it is 0, the other way from Intel's manual, clang's own keylockerintrin.h and GCC's
 // code, which the compiler follows: their cases compare clang's paths with their conditions negated (inverted). Last,
-// AVX10.2's bf16 arithmetic, square roots and fused multiply-adds, and some of their masked forms: in a unit whose target
-// hasn't AVX10.2, znver5's, clang computes the arithmetic in float, its excess precision, and folds a negated operand of
-// a multiply-add into the form. tools/ci/correctness.tests runs the command again with --march diamondrapids, whose
-// target has AVX10.2, and --option -mno-apxf, on tests/x86-intrinsics/avx10.2-units.txt's cases, whose arithmetic is then
-// AVX10.2's own.
+// AVX10.2's bf16 arithmetic, square roots and fused multiply-adds, and some of their masked forms: in a unit whose
+// target hasn't AVX10.2, znver5's, clang computes the arithmetic in float, its excess precision, and folds a negated
+// operand of a multiply-add into the form. tools/ci/correctness.tests runs the command again with --march
+// diamondrapids, whose target has AVX10.2, and --option -mno-apxf, on tests/x86-intrinsics/avx10.2-units.txt's cases,
+// whose arithmetic is then AVX10.2's own.
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -462,6 +463,7 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_Z(_mm512_dpph_ps)
     BUSTER_X86_INTRINSIC_Y(_mm256_dpph_ps)
     BUSTER_X86_INTRINSIC_X(_mm_dpph_ps)
+    BUSTER_X86_INTRINSIC_Z(buster_intrinsic_mpsadbw512)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi16)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi32)
     BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi64)
@@ -579,14 +581,17 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 #undef BUSTER_X86_INTRINSIC_V
 #undef BUSTER_X86_INTRINSIC_INVERTED_B
 
-// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, and
-// byte funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves.
+// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, byte
+// funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves, and a macro's intrinsic of an immediate
+// (AVX10.2's sums of absolute differences of 64 bytes' blocks), whose address a case takes through a function.
 static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_sub_ab(__m128i a, __m128i b) { return _mm_sub_epi32(a, b); }\n"
                                                     "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n"
                                                     "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshl_bytes(__m128i a,__m128i b,__m128i c)"
                                                     "{return (__m128i)__builtin_elementwise_fshl((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
                                                     "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshr_bytes(__m128i a,__m128i b,__m128i c)"
-                                                    "{return (__m128i)__builtin_elementwise_fshr((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n";
+                                                    "{return (__m128i)__builtin_elementwise_fshr((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
+                                                    "__attribute__((target(\"avx10.2\"))) __m512i buster_intrinsic_mpsadbw512(__m512i a,__m512i b)"
+                                                    "{return _mm512_mpsadbw_epu8(a,b,0x2d);}\n";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The objects

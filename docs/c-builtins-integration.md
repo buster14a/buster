@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 316 audited SemaX86 constraint facts for 314
+`c_check_builtin_x86.c` adds 353 audited SemaX86 constraint facts for 351
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 162 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 199 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -825,7 +825,18 @@ the existing families or of new ones:
   `vinsertf128` builtins as VINSERTF32X4) and extracted, under a mask into w
   (`extractf32x4_mask` to `extracti64x2_512_mask`) or not (`extract128i256`),
   at the index's low bits; and `insertps128`, INSERTPS's element of b into a
-  under its zero mask.
+  under its zero mask;
+- the ternary logic of 16 and 32 bytes merged under a mask, and zeroed under one
+  at every width (`pternlogd128_mask` to `pternlogq512_maskz`); the
+  concatenating shifts by an immediate (`vpshldd128` to `vpshrdw512`, VPSHLD's
+  and VPSHRD's: a's and b's elements joined, as clang's funnel shifts join
+  them, the count modulo the elements' bits); the sums of absolute differences
+  (`dbpsadbw128` to `dbpsadbw512`, and VEX's `mpsadbw128` and `mpsadbw256` and
+  AVX10.2's `mpsadbw512`), the carry-less products (`pclmulqdq128`, VEX's with
+  PCLMUL, to `pclmulqdq512`) and the affine transforms of GF(2^8)
+  (`vgf2p8affineqb_v16qi` to `vgf2p8affineinvqb_v64qi`), each with the
+  immediate's whole byte; and the masks' other shifts (`kshiftliqi` to
+  `kshiftridi`), whose count past the mask's bits gives 0.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

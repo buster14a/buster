@@ -119,6 +119,11 @@
 #define BUSTER_CHECK_X86_FMA(name, element, bytes, form, round_form, into) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_MASK_TERNARY, element, bytes, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, \
       X86_FORM_##form, 0, false, 0, X86_FORM_##round_form, CHECK_X86_ROUND_ER, CHECK_X86_INTO_##into)
+// A ternary logic's rule (TERNARY's of an immediate, its fourth argument): merged into a under its mask, or with `into`
+// A_ZEROED zeroed where the mask's bits are clear (CHECK_X86_INTO_*).
+#define BUSTER_CHECK_X86_TERNARY_LOGIC(name, element, bytes, form, into) \
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_" name, sizeof("__builtin_ia32_" name) - 1, CHECK_X86_LOWER_TERNARY, element, bytes, false, false, 3, X86_FORM_##form, 0, false, \
+      0, 0, CHECK_X86_ROUND_NONE, CHECK_X86_INTO_##into)
 // A REDUCE rule of 64 bytes' elements.
 #define BUSTER_CHECK_X86_REDUCE(name, element, reduction) \
     BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_reduce_" name, sizeof("__builtin_ia32_reduce_" name) - 1, CHECK_X86_LOWER_REDUCE, element, 64, false, false, \
@@ -323,6 +328,14 @@
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_ktestzdi", CHECK_X86_LOWER_KBINARY, 8, X86_FORM_KANDQ_K_K_K, true, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlihi", CHECK_X86_LOWER_KSHIFT, 2, X86_FORM_KSHIFTLW_K_K_IMM8, false, 0)
     BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlidi", CHECK_X86_LOWER_KSHIFT, 8, X86_FORM_KSHIFTLQ_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    // #148: the masks' other shifts, of bytes, doublewords and words and quadwords right (KSHIFTL and KSHIFTR, the count
+    // the immediate's low byte, which gives 0 past the mask's bits, as clang's code gives).
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftliqi", CHECK_X86_LOWER_KSHIFT, 1, X86_FORM_KSHIFTLB_K_K_IMM8, false, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftlisi", CHECK_X86_LOWER_KSHIFT, 4, X86_FORM_KSHIFTLD_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftriqi", CHECK_X86_LOWER_KSHIFT, 1, X86_FORM_KSHIFTRB_K_K_IMM8, false, BUSTER_X86_FEATURE(AVX512DQ))
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftrihi", CHECK_X86_LOWER_KSHIFT, 2, X86_FORM_KSHIFTRW_K_K_IMM8, false, 0)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftrisi", CHECK_X86_LOWER_KSHIFT, 4, X86_FORM_KSHIFTRD_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_MASK("__builtin_ia32_kshiftridi", CHECK_X86_LOWER_KSHIFT, 8, X86_FORM_KSHIFTRQ_K_K_IMM8, false, BUSTER_CHECK_X86_BW)
     // Compress and expand, of bytes and words with AVX-512VBMI2.
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressqi", "_mask", CHECK_X86_LOWER_COMPRESS, 1, false, VPCOMPRESSB, XM128_X, YM256_Y, ZM512_Z, BUSTER_X86_FEATURE(AVX512VBMI2))
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compresshi", "_mask", CHECK_X86_LOWER_COMPRESS, 2, false, VPCOMPRESSW, XM128_X, YM256_Y, ZM512_Z, BUSTER_X86_FEATURE(AVX512VBMI2))
@@ -386,6 +399,57 @@
     // Three vectors: the first is the destination. VPTERNLOG's immediate is its fourth argument and its mask its fifth.
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogd512_mask", CHECK_X86_LOWER_TERNARY, 4, 64, false, 3, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8, 0, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogq512_mask", CHECK_X86_LOWER_TERNARY, 8, 64, false, 3, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8, 0, 0)
+    // #148: the ternary logic of 16 and 32 bytes, merged into a under the mask, and zeroed (the maskz builtins, the 64-byte
+    // ones' too); the concatenating shifts by an immediate (VPSHLD, VPSHRD: a's and b's elements joined, a's the high half
+    // in a left shift's and the low one in a right one's, as clang's funnel shifts join them, the count modulo the
+    // elements' bits); the sums of absolute differences of each lane's doublewords (VDBPSADBW) and of byte blocks (VEX's
+    // VMPSADBW, and AVX10.2's of 64 bytes); the carry-less products of quadwords (VPCLMULQDQ: VEX's of 16 bytes, PCLMUL's,
+    // and of 32, VPCLMULQDQ's, and EVEX's of 64); and the affine transforms of GF(2^8) of the bytes and of their inverses
+    // (VGF2P8AFFINEQB, VGF2P8AFFINEINVQB). Each takes the immediate's whole byte, as the instruction reads it.
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd128_mask", 4, 16, VPTERNLOGD_X_X_XM128_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd128_maskz", 4, 16, VPTERNLOGD_X_X_XM128_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd256_mask", 4, 32, VPTERNLOGD_Y_Y_YM256_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd256_maskz", 4, 32, VPTERNLOGD_Y_Y_YM256_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogd512_maskz", 4, 64, VPTERNLOGD_Z_Z_ZM512_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq128_mask", 8, 16, VPTERNLOGQ_X_X_XM128_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq128_maskz", 8, 16, VPTERNLOGQ_X_X_XM128_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq256_mask", 8, 32, VPTERNLOGQ_Y_Y_YM256_IMM8, A)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq256_maskz", 8, 32, VPTERNLOGQ_Y_Y_YM256_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_TERNARY_LOGIC("pternlogq512_maskz", 8, 64, VPTERNLOGQ_Z_Z_ZM512_IMM8, A_ZEROED)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, false, 2, VPSHLDD, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldq", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, false, 2, VPSHLDQ, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshldw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, false, 2, VPSHLDW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdd", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, false, 2, VPSHRDD, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdq", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, false, 2, VPSHRDQ, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_vpshrdw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 2, false, 2, VPSHRDW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_dbpsadbw", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, false, 2, VDBPSADBW, X_X_XM128_IMM8, Y_Y_YM256_IMM8, Z_Z_ZM512_IMM8,
+                                BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_mpsadbw128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, false, 2, X86_FORM_VMPSADBW_X_X_XM128_IMM8, BUSTER_X86_FEATURE(AVX))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_mpsadbw256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, false, 2, X86_FORM_VMPSADBW_Y_Y_YM256_IMM8, BUSTER_X86_FEATURE(AVX2))
+    BUSTER_CBUILTIN_X86_ROW("__builtin_ia32_mpsadbw512", sizeof("__builtin_ia32_mpsadbw512") - 1, CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 64, false, false, 2,
+                            X86_FORM_VMPSADBW_Z_Z_ZM512_IMM8, 0, false, 0, 0, CHECK_X86_ROUND_NONE, 0, BUSTER_CHECK_X86_AVX10)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 16, false, false, 2, X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8,
+                          BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(PCLMUL))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq256", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 32, false, false, 2, X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8,
+                          BUSTER_X86_FEATURE(AVX) | BUSTER_X86_FEATURE(VPCLMULQDQ))
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pclmulqdq512", CHECK_X86_LOWER_BINARY_IMMEDIATE, 8, 64, false, false, 2, X86_FORM_VPCLMULQDQ_Z_Z_ZM512_IMM8,
+                          BUSTER_X86_FEATURE(VPCLMULQDQ))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineqb_v16qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2, X86_FORM_VGF2P8AFFINEQB_X_X_XM128_IMM8_EVEX, 0,
+                                BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineqb_v32qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, 2, X86_FORM_VGF2P8AFFINEQB_Y_Y_YM256_IMM8_EVEX, 0,
+                                BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v16qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2,
+                                X86_FORM_VGF2P8AFFINEINVQB_X_X_XM128_IMM8_EVEX, 0, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v32qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 32, false, 2,
+                                X86_FORM_VGF2P8AFFINEINVQB_Y_Y_YM256_IMM8_EVEX, 0, BUSTER_X86_FEATURE(GFNI))
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vgf2p8affineinvqb_v64qi", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 64, false, 2, X86_FORM_VGF2P8AFFINEINVQB_Z_Z_ZM512_IMM8,
+                                0, BUSTER_X86_FEATURE(GFNI))
     // The dot products of AVX-512VNNI: of bytes (unsigned by signed) and of words, each with signed saturation (`s`).
     BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpbusd", CHECK_X86_LOWER_TERNARY, 4, false, VPDPBUSD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
                            BUSTER_X86_FEATURE(AVX512VNNI))

@@ -294,9 +294,9 @@ static bool x86_target_test_gas(const char* directory)
 {
     // GAS 2.47's dual FMA/AVX512F templates admit these explicit EVEX forms without AVX512VL, and so do its dual
     // AVX/AVX2 and AVX512F ones (#760: the X86 rows' variable shifts, vpermd, vpermq, vpermps, vpermpd, vpermilps, the
-    // broadcasts, vaesenc, vaesdec and vgf2p8mulb, their broadcast forms too). Keep the architectural policy strict: the
-    // independent minimal-feature tests above require F and VL for every row. Count this external-oracle gap only where
-    // GAS accepts it; a corrected assembler follows the normal check.
+    // broadcasts, vaesenc, vaesdec and vgf2p8mulb, their broadcast forms too; #148: vpclmulqdq). Keep the architectural
+    // policy strict: the independent minimal-feature tests above require F and VL for every row. Count this
+    // external-oracle gap only where GAS accepts it; a corrected assembler follows the normal check.
     static const uint8_t gas_vl_fma[X86_FORM_COUNT] = {
         [X86_FORM_VAESDECLAST_X_X_XM128_EVEX] = 1,
         [X86_FORM_VAESDECLAST_Y_Y_YM256_EVEX] = 1,
@@ -312,6 +312,8 @@ static bool x86_target_test_gas(const char* directory)
         [X86_FORM_VGF2P8MULB_Y_Y_YM256_EVEX] = 1,
         [X86_FORM_VPBROADCASTD_X_XM32_EVEX] = 1,
         [X86_FORM_VPBROADCASTD_Y_XM32_EVEX] = 1,
+        [X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8_EVEX] = 1,
+        [X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8_EVEX] = 1,
         [X86_FORM_VPERMD_Y_Y_M32BCST] = 1,
         [X86_FORM_VPERMD_Y_Y_YM256_EVEX] = 1,
         [X86_FORM_VPERMILPS_X_M32BCST_IMM8] = 1,

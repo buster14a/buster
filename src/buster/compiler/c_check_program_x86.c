@@ -45,7 +45,7 @@ typedef enum CheckX86LowerFamily
     // (mask a, mask b): the form's k1, k1, k2 of a in k1 and b in k2 (KAND, KOR, KXOR, KADD, KUNPCK: vvvv's a is the
     // high half), or with `zero_test` whether that is 0 (ktestz's, which the caller tests: a row can't take its flag).
     CHECK_X86_LOWER_KBINARY,
-    // (mask a, int count): a shifted by the count, an immediate (KSHIFTL, which gives 0 past the mask's bits).
+    // (mask a, int count): a shifted by the count, an immediate (KSHIFTL or KSHIFTR, which give 0 past the mask's bits).
     CHECK_X86_LOWER_KSHIFT,
     // (vector a, vector w, mask m): VPCOMPRESS's (or with `swap` VPEXPAND's) of a under m, merged into w.
     CHECK_X86_LOWER_COMPRESS,
@@ -68,7 +68,7 @@ typedef enum CheckX86LowerFamily
     // (vector a): the form's dest, a (VPCONFLICTD).
     CHECK_X86_LOWER_UNARY,
     // (vector a, vector b, vector c[, int immediate][, mask m]): the form's a (the destination too), b, c: VPERMT2's,
-    // VPDPBUSD's, and VPTERNLOG's with its immediate, under m merged into a.
+    // VPDPBUSD's, and VPTERNLOG's with its immediate, under m merged into a, or zeroed (`fixed`, CHECK_X86_INTO_A_ZEROED).
     CHECK_X86_LOWER_TERNARY,
     // (vector a, vector w, mask m): VPMOV's truncation of a's elements under m, merged into w, of `other` bytes.
     CHECK_X86_LOWER_TRUNCATE,
@@ -785,7 +785,7 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_KBINARY || rule->family == CHECK_X86_LOWER_KSHIFT)
         {
-            // a in k1 (and b in k2), the form into k1, and k1 back; KSHIFTL's count its immediate's low byte.
+            // a in k1 (and b in k2), the form into k1, and k1 back; a shift's count its immediate's low byte.
             const bool shift = rule->family == CHECK_X86_LOWER_KSHIFT;
             uint32_t r = 0;
             row->records[r++] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(0));
@@ -985,8 +985,10 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         }
         else if (rule->family == CHECK_X86_LOWER_TERNARY)
         {
-            // VPTERNLOG's (the one with an immediate) under its mask, merged into a.
+            // VPTERNLOG's (the one with an immediate) under its mask, merged into a, or with `fixed` INTO_A_ZEROED zeroed
+            // where the mask's bits are clear (the maskz builtins).
             const bool ternary_logic = rule->immediate != BUSTER_CHECK_X86_NO_IMMEDIATE;
+            const uint8_t zeroing = rule->fixed == CHECK_X86_INTO_A_ZEROED ? BUSTER_X86_DECORATION_ZEROING : 0;
             uint32_t r = 0;
             if (ternary_logic)
             {
@@ -994,7 +996,7 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             }
             row->records[r] = check_x86_lower_record(rule->form, v0, v1, v2);
             row->records[r].immediate = ternary_logic ? (int32_t)(immediate & 0xff) : 0;
-            row->records[r].decorations = ternary_logic ? 1 : 0;
+            row->records[r].decorations = ternary_logic ? (uint8_t)(1 | zeroing) : 0;
             row->record_count = (uint8_t)(r + 1);
             row->operand_count = ternary_logic ? 4 : 3;
             for (uint32_t j = 0; j < 3; j += 1)
