@@ -132,7 +132,10 @@ stacks, a caller-owned scratch arena, symbol bindings and resource limits.
 Program recursion creates interpreter frames without recursive C calls. The IR
 front handles integer widths through 128 bits and host x87 extended precision;
 the current typed input only expresses its existing integer widths and f32/f64.
-Phi operands are snapshotted before any phi destination is written.
+Phi operands are snapshotted before any phi destination is written. The IR
+front verifies each function once per execution, at its first frame, since its
+IR can't change while it runs (#134: a recursion's every call verified its
+callee twice, 45% of a c-testsuite program's time).
 Callable program mappings share one symbol namespace: IDs zero and UINT32_MAX
 are reserved, and function, data and native IDs must be distinct. Different IDs
 may intentionally refer to the same address.
@@ -152,6 +155,15 @@ their default promotions. Because IR integers have no signedness, native i8/i16
 arguments require explicit extension metadata in `native_extensions`; the typed
 front supplies it from machine classes. Ambiguous narrow native calls fail with
 `INTERPRETER_NATIVE`. The text command can express a promoted i32 signature.
+The IR lowered from a typed stream has the stream's pointers as `i64`s: the IR
+front takes a flagged native's pointer operands and result (the allocators',
+the copies' and the fill's) as pointers, as the typed front takes its `U64`s.
+Nor does that IR keep which of a variadic call's arguments are named (its
+`IrCall` takes them all as named): such a call's named arguments are its
+interpreted callee's parameters, its first, and the rest are unnamed, which a
+variadic definition's frame reads, and a callee without one ignores (a variadic
+function that never calls `va_start`, or a function C calls without a
+prototype, which passes its arguments as a variadic call does).
 `interpreter_link.c` materializes Link data atoms and symbol addresses, applies
 supported data fixups, resolves global names across units and preserves local
 symbol identity. Unsupported data forms are reported rather than guessed.
@@ -330,11 +342,15 @@ checked expressions and supported static data, and its owner is implementing
 the executable source-body/control-flow handoff in #133. No frontend work is
 replaced by generated streams or handwritten IR here.
 
-Whole-source-corpus structural roundtrips, c-testsuite execution from checked C,
-and real Csmith/YARPGen interpreter campaigns require that producer. The callable
-oracles and text command are available for Tier 0, IR passes and the configurable
-#142 harness as those source inputs become available. These dependencies remain
-acceptance work; passing synthetic execution tests does not establish them.
+c-testsuite's programs run from checked C through the IR front: #134's
+`test-ssa-source` runs each program of the declared subset in three IR forms,
+every local in memory and each promotion path's SSA, against its expected
+output ([the SSA guide](ssa.md)'s "Real and generated C"). Running them from
+their typed streams (the typed front), whole-source-corpus structural roundtrips
+and real Csmith/YARPGen interpreter campaigns remain acceptance work. The
+callable oracles and text command are available for Tier 0, IR passes and the
+configurable #142 harness; passing synthetic execution tests does not establish
+them.
 
 No interpreter speed claim is made: #176 deliberately specifies a scalar oracle
 off the compiler path. Parser throughput also requires separate target-host

@@ -1665,6 +1665,12 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         {
             source_bytes += units[u].bytes;
         }
+        // The command's session's lanes (#905), which a lazy session's lane 1 started while the tables above were built:
+        // lane 0 learns how they started, and serves them from here, the units' run, the merge, the link's check and the
+        // write each a region of them.
+        lane_session_settle();
+        lanes->lanes = lanes->lanes < lane_count() ? lanes->lanes : lane_count();
+        lane_serve_begin();
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
         const uint64_t paid = (uint64_t)count + source_bytes / BUSTER_CHECK_UNITS_LANE_BYTES;
         const uint32_t wanted = most < paid ? most : (uint32_t)paid;
@@ -1696,15 +1702,11 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .lanes = states,
                 .board = board,
             };
-            // One team of threads for the units' run and the executable's write (lane_team_start, as link-foreign's,
-            // #501), which keep their scratch arenas from one to the other (#778).
-            LaneTeam team = { 0 };
-            if (active > 1 && lane_team_start(&team, active, NULL))
-            {
-                lane_team_keep_scratch(&team);
-            }
+            // The units' run, the merge, the link's check and the executable's write are regions of the command's session
+            // (#905), whose lanes this driver's lane 0 serves (check_driver_flow), keeping their scratch arenas from one
+            // to the next (#778). A session of one lane runs them all on it.
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
-            // Lanes that couldn't start (lane_run runs none of them then) leave their units untaken: the calling thread
+            // Lanes that couldn't run (lane_run refuses a nested run) leave their units untaken: the calling thread
             // compiles those alone, as its own lane 0.
             const bool ran = lane_run(active, check_units_lane, &run, NULL);
             const Lane caller = lane_alone();
@@ -1768,7 +1770,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 arena_release(&states[l].kept_bytes);
                 arena_release(&states[l].kept);
             }
-            lane_team_stop(&team);
         }
         // The lease's slots go back whatever happened since it was taken.
         if (!worker_budget_release(&lease))

@@ -58,11 +58,13 @@ executable's writers, which run on as many, and its slots go back once both
 are done. Lanes that can't start leave their units to the calling thread,
 which compiles them alone: the same outputs.
 
-The command's lanes are one team (`lane_team_start`, as `link-foreign`'s:
-#501), started before the units run: the units' run, the merge of their links,
-its `link_check` and the executable's write are each an operation of the
-team's workers, which keep their threads and scratch arenas from one to the
-next rather than starting and joining threads of their own (#778).
+The command's lanes are its session's (#905, `lane_session_run`, as
+`link-foreign`'s), created once after its options and before any source is
+read: the units' run, the merge of their links, its `link_check` and the
+executable's write are each a region of lane 0's (`lane_run`) that the session's
+other lanes serve, keeping their threads and scratch arenas from one to the
+next rather than starting and joining threads of their own (#778). The units'
+lanes are at most the session's: one when its lanes couldn't start.
 
 Before the lanes start, the calling thread builds the tables every unit's code
 reads and the first unit to need them would otherwise build: the parser's

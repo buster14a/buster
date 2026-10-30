@@ -130,7 +130,9 @@ instrumented.
 Under TSan alone, the parser driver's and the units driver's walks that fail each
 reservation in turn are not run: TSan maps shadow for each new mapping and keeps it, so the address space
 neither returns to its base nor bounds the run's own reservations. ASan, MSan,
-UBSan and ordinary builds still run it.
+UBSan and ordinary builds still run it. TSan also kills a child that starts a
+thread after a fork from a process of several threads, so under it
+`test-lanes`' child forked from a session's lane 0 (#905) runs a group of one.
 
 `tools/ci/sanitizers.sh` replaces inherited runtime options with a fixed fatal
 policy and matching symbolizer. Deliberate faults prove each enabled detector,

@@ -2158,7 +2158,10 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
             check_builtins(types, &builtin, &checked, 1, true);
         }
         result = checked.action;
-        check_action_fp_environment(types, &action, &result);
+        if ((action.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+        {
+            check_action_fp_environment(types, &action, &result);
+        }
         result.warnings |= (typed.warnings & BUSTER_CHECK_BUILTIN_TYPED_OVERFLOW_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         if (checked.store && result.diagnostic == CHECK_DIAG_NONE)
         {
