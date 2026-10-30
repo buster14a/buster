@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+name: Whole issue approved toolchain
+on:
+  push:
+    branches: [chatgpt/whole-issues-source-20261030]
+    paths: [.github/workflows/whole-issues-toolchain.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: caef4ea2cd1f47311842b2c1a4f87e55f14c29ea
+          persist-credentials: false
+      - run: bash tools/ci/setup-hosted.sh
+      - name: Retain the approved external compiler and its required notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          ldd "$(readlink -f "$(command -v clang)")"
+          tar -czf "$RUNNER_TEMP/clang-23.1.4.tar.gz" -C "$RUNNER_TEMP/llvm-23.1.4" bin/clang bin/clang-23 bin/clang++ bin/lld bin/ld.lld bin/llvm-readobj bin/llvm-dwarfdump bin/llvm-symbolizer lib/clang LICENSE.TXT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: approved-clang-23.1.4
+          path: ${{ runner.temp }}/clang-23.1.4.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
