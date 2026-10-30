@@ -836,6 +836,16 @@ static const char check_test_program_harness[] =
     "_Atomic(ExternalAtomic16) external_atomic16(_Atomic(ExternalAtomic16) x){ExternalAtomic16 v=x;return v+3;}"
     "int external_apply_atomic16(_Atomic(ExternalAtomic16)(*f)(_Atomic(ExternalAtomic16)),int n){ExternalAtomic16 v={0};"
     "for(int i=0;i<16;i++)v[i]=n+i;_Atomic(ExternalAtomic16) out=f(v);ExternalAtomic16 r=out;int h=0;for(int i=0;i<16;i++)h+=r[i]*(i+1);return h;}\n"
+    // Atomic vectors of 8 and 4 bytes (#137), which LLVM passes and returns as their values in XMM registers, as it does
+    // a <2 x i16>, which an integer of 4 bytes passes otherwise when it isn't _Atomic.
+    "typedef signed char ExternalAtomicQ8 __attribute__((vector_size(8)));"
+    "_Atomic(ExternalAtomicQ8) external_atomic_q8(_Atomic(ExternalAtomicQ8) x,int k){ExternalAtomicQ8 v=x;return v+(signed char)k;}"
+    "int external_apply_atomic_q8(_Atomic(ExternalAtomicQ8)(*f)(_Atomic(ExternalAtomicQ8),int),int n){ExternalAtomicQ8 v={0};"
+    "for(int i=0;i<8;i++)v[i]=(signed char)(n*3+i);_Atomic(ExternalAtomicQ8) out=f(v,5);ExternalAtomicQ8 r=out;int h=0;for(int i=0;i<8;i++)h+=r[i]*(i+1);return h;}\n"
+    "typedef short ExternalAtomicH2 __attribute__((vector_size(4)));"
+    "_Atomic(ExternalAtomicH2) external_atomic_h2(_Atomic(ExternalAtomicH2) x,int k){ExternalAtomicH2 v=x;return v*(short)k;}"
+    "int external_apply_atomic_h2(_Atomic(ExternalAtomicH2)(*f)(_Atomic(ExternalAtomicH2),int),int n){ExternalAtomicH2 v={(short)n,(short)(-7*n)};"
+    "_Atomic(ExternalAtomicH2) out=f(v,3);ExternalAtomicH2 r=out;return r[0]*5+r[1];}\n"
     "#endif\n"
     // Variadic functions that a program calls through pointers with values past Tier 0's depth tables (#434's
     // review): their arguments as clang's callee reads them, folded into one value. external_variadic's doubles come

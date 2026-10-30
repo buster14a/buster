@@ -1393,7 +1393,13 @@ What the lowering covers past scalars (#145's programs):
   evaluation remain outside that retry. This does not extend the existing
   floating retry-exception conformance claim.
   Atomic vector loads, stores, exchange and compare-exchange retain vector value
-  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  bytes and their declared atomic ABI, including calls and returns. A vector of 4
+  or 8 bytes is read from and written to its plan's buffers, which have 16 bytes
+  at least, through their addresses at its own bytes
+  (`check_lower_atomic_narrow_vector`), as Tier 0's `LOCAL` of a vector reads
+  its object's whole bytes; and a 4-byte one returns as its value alone in xmm0,
+  as LLVM returns a `<4 x i8>` or a `<2 x i16>`, which Tier 0 takes as an
+  eightbyte's part (#137). Read-modify-write
   updates of atomic vectors are explicitly refused until their retry computation
   has a vector lowering.
 

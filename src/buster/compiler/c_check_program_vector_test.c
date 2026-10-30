@@ -7,7 +7,8 @@
 // members of vector type. Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals
 // realign its frame (#552); one program's are vectors of 8 and 4 bytes (MMX's __m64 and the narrow vectors), their
 // operators, calls, members, arrays, globals, casts to and from integers of their bytes and nontemporal stores, and their
-// divisions' floating-point flags under FENV_ACCESS. Then what the lowering refuses by name: vectors on x86-64,
+// divisions' floating-point flags under FENV_ACCESS; and _Atomic vectors of 4 to 64 bytes, their atomic loads, stores,
+// exchanges and compare-exchanges and calls both ways. Then what the lowering refuses by name: vectors on x86-64,
 // operators AVX-512 has no instruction for and other sizes. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
@@ -139,6 +140,34 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "ok16=__c11_atomic_compare_exchange_strong(&s16,&e16,a16+3,5,0);FOLD(ok16);FOLD(e16);"
             "r16=__c11_atomic_exchange(&s16,a16+4,5);FOLD(r16);__c11_atomic_store(&s16,a16+5,5);r16=__c11_atomic_load(&s16,5);FOLD(r16);"
             "_Atomic(A16) z16=external_atomic16(a16);r16=z16;FOLD(r16);int q16=external_apply_atomic16(local_atomic16,n);FOLD(q16);"
+            "return (int)h;}",
+        },
+        {
+            // Atomic vectors of 8 and 4 bytes (#137): their atomic loads and stores, which go through their buffers'
+            // addresses at their own bytes (check_lower_atomic_narrow_vector), exchanges and compare-exchanges, globals,
+            // and parameters and results in XMM registers (a 4-byte one's value alone in xmm0), with calls both ways
+            // with clang's code.
+            "atomic-vector-narrow-transport",
+            "typedef signed char Q8 __attribute__((vector_size(8)));typedef short H2 __attribute__((vector_size(4)));"
+            "typedef float F2 __attribute__((vector_size(8)));typedef unsigned char U4 __attribute__((vector_size(4)));"
+            "_Atomic(Q8) external_atomic_q8(_Atomic(Q8),int);int external_apply_atomic_q8(_Atomic(Q8)(*)(_Atomic(Q8),int),int);"
+            "_Atomic(H2) external_atomic_h2(_Atomic(H2),int);int external_apply_atomic_h2(_Atomic(H2)(*)(_Atomic(H2),int),int);"
+            "static _Atomic(Q8) local_q8(_Atomic(Q8) x,int k){Q8 v=x;return v-(signed char)k;}"
+            "static _Atomic(H2) local_h2(_Atomic(H2) x,int k){H2 v=x;return v+(short)k;}"
+            "static __attribute__((noinline)) _Atomic(F2) pass_f2(_Atomic(F2) x,_Atomic(U4) y,_Atomic(F2)*out){F2 v=x;U4 u=y;*out=v*2.0f;"
+            "return v+(float)u[1];}"
+            "static _Atomic(Q8) global_q8;static _Atomic(U4) global_u4;"
+            "int tested(int n){unsigned h=2166136261u;"
+            "Q8 a={(signed char)n,2,-3,4,5,(signed char)(n*7),-128,127};_Atomic(Q8) s=a;Q8 r=s;FOLD(r);"
+            "s=a+1;Q8 e=a+1;int ok=__c11_atomic_compare_exchange_strong(&s,&e,a+2,5,0);FOLD(ok);"
+            "ok=__c11_atomic_compare_exchange_strong(&s,&e,a+3,5,0);FOLD(ok);FOLD(e);"
+            "r=__c11_atomic_exchange(&s,a+4,5);FOLD(r);__c11_atomic_store(&s,a+5,5);r=__c11_atomic_load(&s,5);FOLD(r);"
+            "_Atomic(Q8) z=external_atomic_q8(a,n);r=z;FOLD(r);int q=external_apply_atomic_q8(local_q8,n);FOLD(q);"
+            "H2 b={(short)(n*1000),-2};_Atomic(H2) t=b;H2 rb=t;FOLD(rb);H2 eb=b;ok=__c11_atomic_compare_exchange_strong(&t,&eb,b*2,5,0);FOLD(ok);"
+            "rb=__c11_atomic_exchange(&t,b+3,5);FOLD(rb);rb=t;FOLD(rb);"
+            "_Atomic(H2) w=external_atomic_h2(b,n);rb=w;FOLD(rb);q=external_apply_atomic_h2(local_h2,n);FOLD(q);"
+            "F2 f={1.5f*(float)n,-0.25f};U4 u={1,(unsigned char)n,3,4};_Atomic(F2) out;_Atomic(F2) g=pass_f2(f,u,&out);F2 gv=g,ov=out;FOLD(gv);"
+            "FOLD(ov);global_q8=a;global_u4=u;Q8 gq=global_q8;U4 gu=global_u4;FOLD(gq);FOLD(gu);"
             "return (int)h;}",
         },
         {
