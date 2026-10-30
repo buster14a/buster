@@ -91,10 +91,20 @@ struct CheckValue
     uint32_t flags;
     CheckConstantKind constant_kind;
     unsigned __int128 integer;
-    long double floating;
+    // Integer storage comes first so omitted payloads in aggregate initializers are zeroed without x87.
+    // The floating view preserves the existing format, alignment and all arithmetic consumers.
+    union
+    {
+        uint64_t floating_storage[2];
+        long double floating;
+    };
     // Floating complex constants retain both source-format components. GNU integer-complex constants use
     // integer's low/high 64-bit halves, each masked to the component type's width.
-    long double imaginary;
+    union
+    {
+        uint64_t imaginary_storage[2];
+        long double imaginary;
+    };
     uint32_t object;
     // An immutable overload-set head plus one. It must obtain a contextual function identity before ordinary use.
     uint32_t overload_head;

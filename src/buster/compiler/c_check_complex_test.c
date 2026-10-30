@@ -28,8 +28,11 @@ static CheckValue check_test_integer_complex_value(TypeId type, uint64_t real, u
     return value;
 }
 
+#include "c_check_value_storage_test.c"
+
 static void check_test_complex_literals(CheckTest* test)
 {
+    check_test_value_storage(test);
     const char* spellings[] = { "1.0i", "2.0fi", "2.0if", "4i", "5j", "0x1.8p1Li", "6fi", "1i2", "1ii", "1ij" };
     const TypeId types[] = { BUSTER_TYPE_COMPLEX_DOUBLE, BUSTER_TYPE_COMPLEX_FLOAT, BUSTER_TYPE_COMPLEX_FLOAT,
                              BUSTER_TYPE_COMPLEX(type_index(BUSTER_TYPE_INT)), BUSTER_TYPE_COMPLEX(type_index(BUSTER_TYPE_INT)),
