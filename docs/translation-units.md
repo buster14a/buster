@@ -53,18 +53,31 @@ sources (`BUSTER_CHECK_UNITS_LANE_BYTES`), whose only work is the units'
 functions' parts (#777, below); by default no more than one per CPU the
 process may run on, and with `--lanes N` no more than N; and the worker budget (#673:
 `--worker-budget`, GNU make's jobserver) limits the lanes past the calling
-thread's own as it limits #151's. Its lease covers the units' lanes and the
-executable's writers, which run on as many, and its slots go back once both
-are done. Lanes that can't start leave their units to the calling thread,
-which compiles them alone: the same outputs.
+thread's own as it limits #151's. Each of the command's wide parts takes its
+own lease and gives its slots back as it ends, before any serial work: the
+units' run, and the executable's merge, `link_check` and write, which want as
+many lanes as the units' run took. A unit no lane took compiles on the calling
+thread alone: the same outputs.
+
+If the parallel merge cannot reserve its scratch workspace, it pops that
+workspace and returns the merge's worker-budget lease before calling the serial
+twin. The caller's final return remains idempotent; an early return failure is
+sticky in both the budget and the flow and still fails the command.
 
 The command's lanes are its session's (#905, `lane_session_run`, as
 `link-foreign`'s), created once after its options and before any source is
-read: the units' run, the merge of their links, its `link_check` and the
-executable's write are each a region of lane 0's (`lane_run`) that the session's
-other lanes serve, keeping their threads and scratch arenas from one to the
-next rather than starting and joining threads of their own (#778). The units'
-lanes are at most the session's: one when its lanes couldn't start.
+read, and every lane runs the command's flow (`CheckUnitsFlow`, a `LaneFlow`
+of `lane.c`'s): lane 0 runs the driver alone, and each wide part (the units'
+run, the merge of their links, its `link_check` and the executable's write) is
+a round, which lane 0 announces with its kind and lanes and every lane runs,
+the first of them its operation by a direct call: lane 0 between
+`lane_flow_round_begin` and `lane_flow_round_end`, the others by its kind
+(`check_units_follow`), so that nothing a unit's compile calls leads back to
+the units' run, as the call graph check requires. The lanes keep their threads
+and scratch arenas from one round to the next rather than starting and
+joining threads of their own (#778). The units' lanes are at most the
+session's: one when its lanes couldn't start, and then lane 0 runs every
+round alone.
 
 Before the lanes start, the calling thread builds the tables every unit's code
 reads and the first unit to need them would otherwise build: the parser's
@@ -592,6 +605,14 @@ driver as a process, in a directory of its own:
   `can't reserve the lane's memory`), its file cache's after its intern table
   and the cache's first arrays were reserved, which the lane releases with the
   rest.
+- **The merge-fallback lease:** a small shared scratch arena forces the actual
+  parallel reservation to fail; the serial twin then performs its duplicate-name
+  check. A test broker observes scratch on the real release control/reply
+  protocol while the caller waits for acknowledgement, before serial writes.
+  Moving release after the serial call or leaving it to final cleanup fails this
+  observation. A refused acknowledgement also checks sticky failure through the
+  caller's idempotent final cleanup. The control does not change production
+  dispatch or add a callback.
 - **The jobserver:** four units by `--lanes 4` under a GNU make jobserver of
   three tokens, linked into an executable of more than a megabyte whose path
   is a FIFO, which the test reads: while the writer writes, the jobserver

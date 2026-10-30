@@ -934,8 +934,8 @@ designs and the compilers already built this way.
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
   #87), into the exact path's link; the resolution, the conversion and the
-  write are regions of lane 0's on the session's lanes, which serve them and
-  keep their scratch arenas from one to the next (#501), and `--time` reports
+  write are rounds of the link's flow (a `LaneFlow`) on the session's lanes,
+  which keep their scratch arenas from one to the next (#501), and `--time` reports
   the lanes, the session's start, the first inputs' opening with their
   objects' bytes and the resolution's, the conversion's and the writer's
   phases.
@@ -2740,9 +2740,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   process's threads) and joined after, none for one lane; in the flow, the created lanes' asynchronous signals blocked
   and the synchronous ones not, a signal sent to the process handled on lane
   0, parked broadcasts, narrowings to 1, 2, 3, every lane and more, nested,
-  each narrowed group syncing, broadcasting and taking parts, lane 0 serving
-  regions of 1, 3, every lane and more, and regions whose lane 0 serves the
-  region's lanes, after which it serves the session's again, a run, a team, a
+  each narrowed group syncing, broadcasting and taking parts, a flow of rounds
+  (`LaneFlow`) of 1, 3, every lane and more, of two kinds, lane 0 running its
+  part itself and the others theirs by kind, a nested run in a round refused,
+  a run, a team, a
   cold group and a session of several refused where they would create a
   thread, and a child forked from lane 0, which forgets the session; then
   sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
@@ -2780,9 +2781,9 @@ one lane, which run the command's flow together until it ends. Their sessions
 are lazy (`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts
 the command, while lane 1 creates the others and says how their start went,
 which lane 0 learns (`lane_session_settle`) before it first meets them. Under a session
-nothing creates a thread: `lane_run` runs a region of lane 0's on the lanes
-that serve it, or a lane's alone, and a team, a cold group of several or a
-second session is refused. A session whose lanes can't start runs on one lane,
+nothing creates a thread: a command's wide parts are rounds of its flow
+(`LaneFlow`), `lane_run` runs on a lane alone, and a team, a cold group of
+several or a second session is refused. A session whose lanes can't start runs on one lane,
 never retrying. A terminal command's lanes stay parked for the process's exit
 (but in sanitizer builds), a test's are joined. Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
@@ -5273,9 +5274,10 @@ bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`). In
 the C driver they are its session's (#905): every lane runs the command's flow
 (`check_driver_flow`), lane 0 the unit's stages alone, and an emission that
-pays for more than one lane is a round of the flow (`CheckEmitFlow`), which
-lane 0 announces and every lane runs, the first of them the bodies' parts, a
-direct call (`check_program_emit_wide`); the worker budget's slots are taken
+pays for more than one lane is a round of the flow (a `LaneFlow`, `lane.c`),
+which lane 0 announces and every lane runs, the first of them the bodies'
+parts, a direct call (`check_program_emit_round` and
+`check_program_emit_follow`); the worker budget's slots are taken
 before the round, without waiting, and given back after it. Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 
@@ -5318,9 +5320,8 @@ commands in one process, on a session of 4 lanes: a failing command, objects
 on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
-throughout, no thread created, each object `--lanes 1`'s; then the same from
-lane 0 alone, the others serving its regions, lane 0 serving the session's
-lanes again after each (two sources' command serves its own region's).
+throughout, no thread created, each object `--lanes 1`'s; then the same on a
+lazy session.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
@@ -5359,7 +5360,9 @@ three arenas (`arena_poison`), so that a compile that read a byte it didn't
 write would show. Each lane releases what its units shared, into its pool and
 then the pool itself, on the lane once it takes no more units, and the
 command's session's lanes (#905) run the units, the merge, `link_check` and the
-executable's write (#778), each a region of lane 0's that they serve. A link keeps each
+executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
+that lane 0 announces and every lane runs, with a worker-budget lease of its
+own. A link keeps each
 unit's link (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes

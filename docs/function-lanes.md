@@ -223,11 +223,11 @@ at its first round or at the flow's end (`lane_session_settle`), and a round
 whose lanes didn't start runs its bodies on one lane (`CHECK_PROGRAM_AGAIN_START`). Every lane runs the
 command's flow (`check_driver_flow`): lane 0 the unit's stages alone, while the
 others park on the futex (`lane_park`), and each emission that pays for more
-than one lane is a round of the flow (`CheckEmitFlow`), which lane 0 announces
-with its run and its lanes; every lane runs the round's wide part
-(`check_program_emit_wide`), the first of them the bodies' parts on a group of
-their own (`lane_narrow`), a direct call rather than a `lane_run` of the
-emission's own. A round's lanes are those the lane rule and the worker budget
+than one lane is a round of the flow (a `LaneFlow`, `lane.c`), which lane 0
+announces with its run and its lanes; the first of them, lane 0 among them,
+take the bodies' parts on a group of their own (`lane_narrow`), lane 0 in
+`check_program_emit_round` and the others in `check_program_emit_follow`, a
+direct call rather than a `lane_run` of the emission's own. A round's lanes are those the lane rule and the worker budget
 give it: lane 0 takes the jobserver's slots before the round, without waiting,
 and gives them back after the round's lanes have met, before any serial work,
 so no slot is held through the front end, and no lane waits on the jobserver.
@@ -235,9 +235,10 @@ Lanes that can't start leave the session on one lane, which no round retries;
 a terminal command's lanes stay parked until the process exits. Lane 0's
 stages stay one call chain, its frames holding the unit's state across the
 rounds (an executable's emission takes another round when binding finds the
-runtime's snapshot damaged); several units and `link-foreign` run their
-existing operations as regions of lane 0's that the session's lanes serve
-(`lane_serve`), until their flows are converted.
+runtime's snapshot damaged). Several units' command runs its wide parts as
+rounds of its flow too (`CheckUnitsFlow`, the [translation units
+guide](translation-units.md)), and so does `link-foreign` (the [driver's
+contract](foreign-driver.md)).
 
 ### Memory
 

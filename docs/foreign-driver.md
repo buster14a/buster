@@ -49,9 +49,12 @@ in the linker's design): started once, right after its arguments and before any
 input is opened, as many as the link may take (`--lanes N`'s, or 8, at most one
 per CPU), none for one; lane 0 creates lane 1, which creates the others
 (`BUSTER_LANE_SESSION_LAZY`), and learns how they started before the link sets
-its lanes up. The three stages are regions of lane 0's on them in
-turn (`lane_run` under the session), which the other lanes serve, sleeping
-between them and keeping their scratch arenas from one to the next (#501); when
+its lanes up. The three stages are rounds of the link's flow on them in turn
+(a `LaneFlow`, `lane.c`): lane 0 links alone and runs its part of each round
+itself, and the other lanes follow the rounds by their kinds
+(`ForeignFlowRound`: the resolution's, the conversion's and the write's),
+sleeping between them and keeping their scratch arenas from one to the next
+(#501); when
 the link is done they stay parked, and the process's exit ends them. A session
 whose threads can't start runs the link on one lane, `--lanes` or not, and no
 stage tries to start them again. On the 9700X, against the cold group per stage
