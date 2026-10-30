@@ -4552,6 +4552,7 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
 #include "c_check_symbol_driver_test.c"
+#include "c_check_alias_driver_test.c"
 
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
@@ -4928,7 +4929,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             .name = "alias on a function definition is rejected at the attribute",
             .source = "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void) { return 1; }\n",
             .rejected = true,
-            .message = "function definition cannot also be an alias",
+            .message = "definition 'h' cannot also be an alias",
             .column = 16,
         },
         {
@@ -5460,6 +5461,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_symbols(&test, clang, executable, directory);
+            check_test_driver_aliases(&test, clang, executable, directory);
+            check_test_driver_retained(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_late_attributes(&test, clang, executable, directory);

@@ -12,7 +12,8 @@
 //     for what the programs don't have) and a link without atoms, each unit's object built in memory with and without
 //     function sections, and again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same
 //     (object_build writes every byte). object_view_open reads each one back and checks the rules every object keeps:
-//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC), section headers
+//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has
+//     SHF_GNU_RETAIN), section headers
 //     and contents inside the file, aligned and apart, names in .shstrtab, one symbol table with its locals before
 //     sh_info, symbols inside their sections, extended indices exactly where st_shndx is SHN_XINDEX, and relocation
 //     sections tied to the symbol table and a section with contents, in offset order, against a symbol, over zero
@@ -529,15 +530,22 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
                      symbol->st_shndx, (unsigned long long)section, (unsigned long long)symbol->st_value, (unsigned long long)symbol->st_size);
         }
     }
-    // EI_OSABI: ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC, as GNU as and LLVM mark it.
+    // EI_OSABI: ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC or a section has SHF_GNU_RETAIN, as GNU as and
+    // LLVM mark it.
     bool ifunc = false;
     for (uint64_t i = 1; valid && i < view->symbol_count; i += 1)
     {
         ifunc = ifunc || ELF64_ST_TYPE(view->symbols[i].st_info) == STT_GNU_IFUNC;
     }
-    if (valid && header->e_ident[EI_OSABI] != (ifunc ? ELFOSABI_GNU : ELFOSABI_SYSV))
+    bool retained = false;
+    for (uint64_t i = 1; valid && i < view->section_count; i += 1)
     {
-        snprintf(error, error_size, "EI_OSABI is %u, and the object has %s STT_GNU_IFUNC symbol", header->e_ident[EI_OSABI], ifunc ? "an" : "no");
+        retained = retained || (view->sections[i].sh_flags & SHF_GNU_RETAIN) != 0;
+    }
+    if (valid && header->e_ident[EI_OSABI] != (ifunc || retained ? ELFOSABI_GNU : ELFOSABI_SYSV))
+    {
+        snprintf(error, error_size, "EI_OSABI is %u, and the object has %s STT_GNU_IFUNC symbol and %s SHF_GNU_RETAIN section", header->e_ident[EI_OSABI],
+                 ifunc ? "an" : "no", retained ? "an" : "no");
         valid = false;
     }
 
@@ -1315,6 +1323,8 @@ static const ObjectTestName readelf_flag_letters[] = {
     { "T", SHF_TLS },
     { "C", SHF_COMPRESSED },
     { "E", SHF_EXCLUDE },
+    // Which readelf writes in an ELFOSABI_GNU object, as every object with it is.
+    { "R", SHF_GNU_RETAIN },
 };
 
 static bool object_test_lookup(const ObjectTestName* names, uint64_t count, String8 name, uint64_t* value)
@@ -1891,8 +1901,9 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
 
 // Descriptors for every atom of `link` (ObjectOptions.atom_sections, #619), on `arena`, or 0 without room: of each class
 // that C's named sections reach, every other atom in a named section of the class's kind (the second of three TEXT
-// atoms; the third with .text's own descriptor, which goes in .text), and the others without one, in their classes'
-// own sections.
+// atoms; the third with .text's own descriptor, which goes in .text; and a third of DATA's of them in a section that
+// SHF_GNU_RETAIN keeps, as a retain attribute's, #147, which makes its object ELFOSABI_GNU), and the others without one,
+// in their classes' own sections.
 static ObjectAtomSection* object_test_named_descriptors(const Link* link, Arena* arena)
 {
     ObjectAtomSection* table = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, link->atoms.count);
@@ -1915,7 +1926,9 @@ static ObjectAtomSection* object_test_named_descriptors(const Link* link, Arena*
                              class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS))
             {
                 const ObjectTestSection* format = &object_test_sections[class];
-                const String8 name = class == BUSTER_LINK_CLASS_DATA ? BUSTER_S8(".data.buster_named") :
+                const bool retained = class == BUSTER_LINK_CLASS_DATA && atom % 3 == 1;
+                const String8 name = retained ? BUSTER_S8(".data.buster_retained") :
+                                     class == BUSTER_LINK_CLASS_DATA ? BUSTER_S8(".data.buster_named") :
                                      class == BUSTER_LINK_CLASS_DATA_RELRO ? BUSTER_S8(".data.rel.ro.buster_named") :
                                      class == BUSTER_LINK_CLASS_BSS ? BUSTER_S8(".bss.buster_named") :
                                      class == BUSTER_LINK_CLASS_RODATA ? BUSTER_S8(".rodata.buster_named") :
@@ -1923,7 +1936,7 @@ static ObjectAtomSection* object_test_named_descriptors(const Link* link, Arena*
                 table[atom] = (ObjectAtomSection){
                     .name = name,
                     .type = format->type,
-                    .flags = format->flags,
+                    .flags = format->flags | (retained ? SHF_GNU_RETAIN : 0),
                 };
             }
         }
