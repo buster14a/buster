@@ -143,7 +143,7 @@ static int run_ir_simd_tests(int argc, char** argv)
         const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
         const InterpreterResult interpreted = ir_interpret(&program, 1, NULL, 0, NULL, &output);
         ir_test_expect(&tally, interpreted.status == INTERPRETER_UNSUPPORTED && output.length == 0,
-                       "ordinary two-word interpreter explicitly refuses wide vector values and restores its arena");
+                       "ordinary interpreter explicitly refuses first-class vector ABI results and restores its arena");
         const InterpreterNativeBinding native = { .address = (void*)ir_simd_native_boundary };
         const InterpreterValue argument = { .low = 42 };
         for (uint16_t type = IR_V4I32; type < IR_TYPE_COUNT; type += 1)

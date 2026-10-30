@@ -146,14 +146,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         {
             for (uint32_t d = 0; d < depth; d += 1)
             {
-                stack[d] = ir_typed_emit(&sink, IR_LOAD, (IrType)ir_typed_types[classes[d]], input->local_count + d, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
+                stack[d] = ir_typed_emit(&sink, IR_LOAD, ir_typed_stack_type(classes[d]), input->local_count + d, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
             }
         }
         bool terminated = false;
         for (uint32_t i = first; i < end; i += 1)
         {
             const uint8_t kind = input->kinds[i];
-            const uint8_t class = input->classes[i];
+            const uint8_t class = ir_typed_stack_class(input, i);
             const IrType type = (IrType)types[i];
             const uint64_t value = input->values[i];
             switch (kind)
@@ -161,7 +161,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             case BUSTER_TYPED_CONST:
                 // An __int128's low 64 bits, sign-extended (I128) or zero-extended (U128); a long double's an index into
                 // x87_constants, its 64-bit significand then its sign and exponent; any other's, its bits.
-                if (class == BUSTER_TYPED_CLASS_F80)
+                if (class >= BUSTER_TYPED_CLASS_LIMIT)
+                {
+                    stack[depth] = ir_typed_vector_constant(&sink, type, input->vector_constants + value * 8);
+                }
+                else if (class == BUSTER_TYPED_CLASS_F80)
                 {
                     stack[depth] = ir_typed_wide_constant(&sink, type, input->x87_constants[value * 2], input->x87_constants[value * 2 + 1]);
                 }
@@ -173,7 +177,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 depth += 1;
                 break;
             case BUSTER_TYPED_LOCAL:
-                stack[depth] = ir_typed_emit(&sink, IR_LOAD, type, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(class));
+                stack[depth] = ir_typed_emit(&sink, IR_LOAD, type, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class));
                 classes[depth] = class;
                 depth += 1;
                 break;
@@ -193,6 +197,12 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
             case BUSTER_TYPED_DUP:
                 stack[depth] = stack[depth - 1];
+                classes[depth] = classes[depth - 1];
+                depth += 1;
+                break;
+            case BUSTER_TYPED_X86:
+                depth -= input->operations[value].operand_count;
+                stack[depth] = ir_typed_vector_operation(&sink, plan->operations + value, type, stack + depth);
                 classes[depth] = class;
                 depth += 1;
                 break;
@@ -238,7 +248,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
                 const uint32_t address = local ? (uint32_t)value : ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stack[depth - 1], BUSTER_IR_NONE, local ? ir_typed_alignment(class) : 0);
+                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stack[depth - 1], BUSTER_IR_NONE, local ? (class >= BUSTER_TYPED_CLASS_LIMIT ? input->local_alignments[value] : ir_typed_alignment(class)) : 0);
                 if (kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL)
                 {
                     depth -= 1;
