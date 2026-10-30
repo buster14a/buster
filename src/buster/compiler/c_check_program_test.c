@@ -1408,7 +1408,8 @@ static int check_test_program_key_order(const void* a, const void* b)
 // The passes #592 made sparse, on a checked program, against what they did before: check_data_prepare (`data`, of
 // this program's unit) against the dense oracle above, record for record, with check_data_latest of every object, on
 // both paths, check_program_token_body of every token against the column of every body's tokens the selection filled,
-// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token.
+// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token and
+// the aliases and ifuncs (#147).
 static bool check_test_program_sparse(const CheckProgram* program, const CheckDataPrepared* data, const CheckInput* input, const CheckStream* stream,
                                       const CheckInitializers* initializers, TypeTable* types, bool scalar, Arena* output, Arena* scratch)
 {
@@ -1494,6 +1495,11 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             {
                 expected[object] = 1;
             }
+        }
+        // GNU's aliases and ifuncs, which the unit defines at their definitions' places (#147); a weakref defines nothing.
+        for (uint32_t k = 0; k < program->alias_count; k += 1)
+        {
+            expected[program->aliases[k].object] |= program->aliases[k].kind != CHECK_PROGRAM_WEAKREF;
         }
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
@@ -1688,8 +1694,10 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
+        // Every atom in place, the aliases' and ifuncs' symbols at their definitions (#147; -c's check_program_sections).
         const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, false, true) &&
-                             check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
+                             check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission) &&
+                             check_program_define_aliases(&code, &program);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
         if (lowered && !emitted)
@@ -2153,6 +2161,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_x86_test.c"
 #include "c_check_program_amx_test.c"
 #include "c_check_program_transparent_test.c"
+#include "c_check_program_alias_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
 #include "c_check_program_bf16_test.c"
@@ -2919,6 +2928,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_x86(test, clang);
     check_test_program_amx(test, clang);
     check_test_program_transparent(test, clang);
+    check_test_program_aliases(test, clang);
     check_test_program_vector_builtins(test, clang);
     check_test_program_fp16(test, clang);
     check_test_program_bf16(test, clang);

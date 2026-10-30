@@ -446,6 +446,17 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 definition_flags[definition] = flags;
             }
         }
+        // An alias's or ifunc's base (#147): clang emits every alias and ifunc, and so the definition its symbol is at,
+        // unless the definition is inline only, which the planner keeps (BUSTER_C_LOWERING_ALIAS_TARGET).
+        for (uint32_t k = 0; valid && k < full->alias_count; k += 1)
+        {
+            const CheckProgramAlias* alias = full->aliases + k;
+            const uint32_t definition = alias->kind != CHECK_PROGRAM_WEAKREF && alias->base != 0 && alias->base < objects ? object_definitions[alias->base] : 0;
+            if (definition != 0)
+            {
+                definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
+            }
+        }
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
         {
@@ -458,7 +469,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             valid = first <= limit && count <= limit - first;
             for (uint32_t reference = 0; valid && reference < count; reference += 1)
             {
-                const uint32_t object = references[first + reference];
+                // A weakref's reference is its target's (#147), whose definition it reaches if the unit has one.
+                const uint32_t referenced = references[first + reference];
+                const uint32_t object = full->alias_count != 0 && referenced < objects ? check_program_alias_redirect(full, referenced) : referenced;
                 valid = object != 0 && object < objects && edges < reference_capacity;
                 if (valid)
                 {
@@ -615,13 +628,21 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-        candidate.program.symbol_count = check_program_needed_count(needed, objects, BUSTER_SCALAR_PATH(scalar));
-        candidate.program.symbol_objects = candidate.program.symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.symbol_count) : 0;
-        valid = valid && (candidate.program.symbol_count == 0 || candidate.program.symbol_objects != 0);
-        if (valid)
+        // GNU's aliases and ifuncs (#147) are needed, as clang emits each; this selection's states of the entries are its
+        // own: whether a weakref's target is referenced through weakrefs alone (check_program_alias_number), and whether
+        // an alias's or ifunc's definition is emitted.
+        candidate.program.alias_states = valid && full->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, full->alias_count) : 0;
+        valid = valid && (full->alias_count == 0 || candidate.program.alias_states != 0);
+        for (uint32_t k = 0; valid && k < full->alias_count; k += 1)
         {
-            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, BUSTER_SCALAR_PATH(scalar));
+            const CheckProgramAlias* alias = full->aliases + k;
+            const uint32_t definition = alias->base != 0 && alias->base < objects ? object_definitions[alias->base] : 0;
+            const uint32_t raw = definition != 0 ? (uint32_t)order[definition - 1] : 0;
+            const bool emitted = definition != 0 && (raw < full->body_count ? body_selected[raw] : data_selected[raw - full->body_count]);
+            candidate.program.alias_states[k] = alias->kind != CHECK_PROGRAM_WEAKREF && alias->base != 0 && !emitted ? BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED : 0;
+            needed[alias->object] |= alias->kind != CHECK_PROGRAM_WEAKREF;
         }
+        valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
     }
     if (valid)
     {

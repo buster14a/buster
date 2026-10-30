@@ -1315,8 +1315,9 @@ instruction-set features or waive argument/type/ABI restrictions: native
 lowering still refuses unsupported cases. `__has_constexpr_builtin` has its
 own narrower source-evaluation qualification, not the standalone fold bit.
 
-The cleanup, startup/shutdown and weak-symbol consumers are described in the
-[checker guide](c-checker.md). Overloadable calls and contextual addresses use
+The cleanup, startup/shutdown, weak-symbol, alias, ifunc and weakref (#147)
+consumers are described in the [checker guide](c-checker.md).
+Overloadable calls and contextual addresses use
 the checker's selected object and its emitted ABI name (#821); local/anonymous
 tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
@@ -1326,8 +1327,8 @@ Accepted but unimplemented attributes remain zero, including `always_inline`,
 `noinline`, `format`, `noreturn`, `unused`, `nodiscard`,
 `maybe_unused` and `deprecated`. The last three have parsed records but no
 implemented diagnostic consumer; reporting their C23 date codes would falsely
-advertise that consumer. Unpublished alias/ifunc/weakref/common/retention effects
-also remain zero. Generic GNU atomic load/store/exchange/compare-exchange,
+advertise that consumer. Unpublished common/retention effects also remain
+zero. Generic GNU atomic load/store/exchange/compare-exchange,
 GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
 unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.

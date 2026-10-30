@@ -162,7 +162,8 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             const CheckProgram* program = &selection.program;
             bool emitted = ready && check_program_emit(&code, program, &parser, &identifiers, selection.data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, false, true) &&
                            check_data_publish(&selection.data, &types.table, &stream, program->object_symbols, program->object_count, &code.link, 0,
-                                              &bytes, &scratch, &emitted_data) && link_check(&code.link) == LINK_ERROR_NONE;
+                                              &bytes, &scratch, &emitted_data) && check_program_define_aliases(&code, program) &&
+                           link_check(&code.link) == LINK_ERROR_NONE;
             snprintf(description, sizeof(description), "%s: selected publication matches its supported object obligations", name);
             const bool publication = emission_status == CHECK_PROGRAM_OK ? emitted : ready && !emitted && code.status == emission_status &&
                                   code.link.symbols.count == 0 && code.lowered.functions == 0 && output.length == 0 && bytes.length == 0 && scratch.length == 0;
@@ -412,6 +413,30 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
         "active-section-emits-for-named-section-publication", 1, 1, CHECK_PROGRAM_OK, 0, 0, 0, false);
+    // GNU's aliases and ifuncs (#147) root the definitions their symbols are at, unreferenced and static as they are, as
+    // clang emits every one; an alias of an inline function, which no root emits, isn't emitted (clang's error), and a
+    // weakref's references reach the definition of its target's name.
+    check_test_program_selection_case(test,
+        "static int target(int n){return n+1;}int exported(int) __attribute__((alias(\"target\")));int tested(int n){return n;}",
+        "alias-roots-its-static-target", 2, 0, clang, true);
+    check_test_program_selection_case(test,
+        "static int target(void){return 1;}static int unused(void) __attribute__((alias(\"target\")));int tested(int n){return n;}",
+        "unused-static-alias-roots-its-target", 2, 0, clang, true);
+    check_test_program_selection_case(test,
+        "static int value=3;extern int view __attribute__((alias(\"value\")));static int table[2]={1,2};"
+        "static int alias_chain[2] __attribute__((alias(\"table\")));extern int chained[2] __attribute__((alias(\"alias_chain\")));int tested(int n){return n;}",
+        "aliases-root-their-objects-through-chains", 1, 2, clang, true);
+    check_test_program_selection_case(test,
+        "static int add(int n){return n+7;}static int(*pick(void))(int){return add;}int dispatched(int) __attribute__((ifunc(\"pick\")));"
+        "int tested(int n){return n;}",
+        "ifunc-roots-its-resolver-and-what-it-returns", 3, 0, clang, true);
+    check_test_program_selection_case(test,
+        "static int target(int n){return n*2;}static int unused_target(int n){return n;}static int reference(int) __attribute__((weakref(\"target\")));"
+        "static int unreferenced(int) __attribute__((weakref(\"unused_target\")));int tested(int n){return reference(n);}",
+        "weakref-reaches-its-targets-definition", 2, 0, clang, true);
+    check_test_program_selection_run(test,
+        "inline int inline_only(int n){return n+1;}int exported(int) __attribute__((alias(\"inline_only\")));int tested(int n){return n;}",
+        "alias-of-an-inline-only-function-is-not-emitted", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     // #129's kinds of definition, each emitted exactly where clang -O0 -c emits it.
     check_test_program_selection_case(test,
         "static int used(int n){return n+1;}static int unused(int n){return n+2;}static int only_from_dead(int n){return n+3;}"
