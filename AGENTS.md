@@ -326,7 +326,9 @@ designs and the compilers already built this way.
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
   assembles it, by the checker's path, into records, branch columns,
   references and labels. The statement's code calls the result, a per-unit
-  helper; a template of no instructions, a barrier's, is no code at all. A
+  helper; a template of no instructions, a barrier's, is no code at all, but
+  one with x87 operands, whose helper passes them through the x87's stack as
+  clang's code does. A
   naked function's templates are its whole code. Templates' labels are local
   symbols, and the other names they refer to are the unit's symbols of those
   link names or undefined globals (`check_program_emit_asm_symbols`). A
