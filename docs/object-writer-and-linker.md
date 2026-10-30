@@ -3773,12 +3773,13 @@ with the target's offset in its section added to the addend:
     for an absolute reference without an addend: `lea rax, [rip + .LC0]`'s
     addend is −4, which would land in the string before.
 
-An object that defines an IFUNC is `ELFOSABI_GNU`, as GNU as and LLVM mark
-it, and the others `ELFOSABI_SYSV`. An absolute symbol is in no unit, so no
-object could define it as the link does: `object_prepare` refuses a link
-that has one, rather than write objects that leave it undefined. The
-program's units have none; only imported objects (the static runtime's) do,
-and no object is written for them.
+An object that defines an IFUNC, or has a section whose descriptor's flags
+have `SHF_GNU_RETAIN` (a retain attribute's, #147), is `ELFOSABI_GNU`, as
+GNU as and LLVM mark it, and the others `ELFOSABI_SYSV`. An absolute symbol
+is in no unit, so no object could define it as the link does:
+`object_prepare` refuses a link that has one, rather than write objects
+that leave it undefined. The program's units have none; only imported
+objects (the static runtime's) do, and no object is written for them.
 
 The scalar kernels decide the per-record costs. Writing `Elf64_Rela` from
 columns takes 0.18 ns per record in L1 and 0.61 ns from DRAM, and the AVX-512

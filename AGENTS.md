@@ -2897,7 +2897,9 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
-  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
+  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC` or
+  a section has `SHF_GNU_RETAIN`, as the named sections' descriptors give a
+  third of `.data`'s named atoms);
   and it is compared with the representation, from which the test works out
   every section, symbol and relocation again, with its own tables of section
   formats and relocation types. Among them, every local-exec TLS reference
