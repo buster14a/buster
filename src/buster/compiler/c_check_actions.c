@@ -2783,7 +2783,11 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
             default: check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, 0); break;
         }
     }
-    check_action_fp_environment(table, action, result);
+    // Keep the usual ACCESS-off action out of the environment walk and its stack frame.
+    if ((action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+    {
+        check_action_fp_environment(table, action, result);
+    }
     if (result->diagnostic != CHECK_DIAG_NONE)
     {
         result->value.constant_kind = CHECK_CONSTANT_NONE;
