@@ -3995,16 +3995,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
                     }
                 }
-                // GNU's weak attribute needs external linkage (#147): clang's error at the attribute, but on a typedef,
-                // where it warns and ignores it (all of a typedef's declarators are typedefs).
+                // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
+                // entity is different: clang drops a new attribute before checking its linkage. The binding walk later
+                // diagnoses and drops it (check_input_attribute_late). Do not use a shadowed local as that entity.
                 for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
                 {
                     CheckInputAttribute* attribute = attributes->records + a;
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
                     if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
                     {
-                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
-                        valid = false;
+                        const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
+                        const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+                        const bool late = previous != BUSTER_CHECK_NONE && !reader->defined[name] && reader->linkage[name] != 0 &&
+                            reader->linkage[previous] == reader->linkage[name] && reader->definition_seen[previous] &&
+                            reader->declaration_kinds[previous] == (function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
+                        if (!late)
+                        {
+                            check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
+                            valid = false;
+                        }
                     }
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)

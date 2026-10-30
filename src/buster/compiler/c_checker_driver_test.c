@@ -4323,10 +4323,11 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
         "extern __inline__ int block(int x){return x+9;}"
         "static __inline__ int local(int x){return x+6;}"
         "static int late_used(void){return 1;} static int late_used(void) __attribute__((used,retain,constructor,destructor));"
+        "static int late_weak(void){return 1;} static int late_weak(void) __attribute__((weak));"
         "static int early_used(void) __attribute__((used)); static int early_used(void){return 1;} static int early_used(void) __attribute__((used));"
         "__inline__ int late_gnu(int x){return x;} __inline__ int late_gnu(int x) __attribute__((gnu_inline));"
         "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
-    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "late_used", "early_used", "late_gnu", "use" };
+    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "late_used", "late_weak", "early_used", "late_gnu", "use" };
     static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
         { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
         { "-std=c89", "-fgnu89-inline", "-w" }, { "-std=c17", "-fgnu89-inline", "-w" },
@@ -5201,6 +5202,23 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             .name = "a line marker among a macro's arguments leaves its body in the user's file",
             .source = "# 1 \"sys.h\" 3\n#define F(x) int *f(void) { return 1; } int x;\n# 3 \"user.c\"\nF(\n# 5 \"sys2.h\" 3\ny)\n",
+            .rejected = true,
+        },
+        {
+            .name = "late weak on static function and object warns",
+            .source = "static int f(void){return 1;}\nint f(void) __attribute__((weak));\n"
+                      "static int x=1;\nextern int x __attribute__((weak));\n",
+            .warnings = 2,
+        },
+        {
+            .name = "late weak on static function respects promoted warning policy",
+            .source = "#pragma clang diagnostic error \"-Wignored-attributes\"\nstatic int f(void){return 1;}\n"
+                      "static int f(void) __attribute__((weak));\n",
+            .rejected = true,
+        },
+        {
+            .name = "weak before static function definition remains an error",
+            .source = "static int f(void);\nstatic int f(void) __attribute__((weak));\nstatic int f(void){return 1;}\n",
             .rejected = true,
         },
         {
