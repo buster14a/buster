@@ -3,8 +3,9 @@
 //
 // #131's acceptance on real C (test-ir-source): the IR lowered from every function the driver's -c compiles of a set of
 // files, by both of ir_lower.c's paths, which must agree column for column and verify, each function then promoted by
-// both of ssa_ir.c's paths, whose results must verify with dominance (#134's use of the verifier). Include after
-// ir_lower_test.c, ssa_ir.c and tier0_source_benchmark.c.
+// both of ssa_ir.c's paths, whose results must verify with dominance (#134's use of the verifier). Each lowered and
+// both promoted forms must then round-trip through text by both parsers, preserving structure and canonical bytes
+// (#175). Include after ir_lower_test.c, ir_parse_test.c, ssa_ir.c and tier0_source_benchmark.c.
 //
 //   build/compiler test-ir-source [--print NAME] [preprocessor options] file...
 //
@@ -14,13 +15,15 @@
 // class, or for a function with none its declared result's (ir_source_result). A file the checker rejects, or whose
 // checked program or emission refuses a feature by name, is left out with the reason, as -c refuses it; any other
 // failure of the file fails the command. So does a function either lowering refuses, that the paths lower apart, or
-// that either promotion refuses: the report names each, with the first one's error. --print NAME prints the IR of the
+// that either promotion refuses, or whose text changes meaning: the report names each failure. --print NAME prints the IR of the
 // function of that name, as lowered and as promoted. Before the files, the first is prepared again in a child whose
 // address space can't grow by the preparation's arena, which must fail it as the memory's, touching nothing it couldn't
 // allocate (ir_source_exhausted). It is a test outside the compile path, with no vector path of its own.
 
 #include <sys/resource.h>
 #include <sys/wait.h>
+
+#include "ir_source_roundtrip.c"
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
 // whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
@@ -307,6 +310,9 @@ struct IrSourceTotals
     uint64_t refused;
     uint64_t disagreed;
     uint64_t unpromoted;
+    // Representations checked through both text parser paths, and representations whose round trip failed.
+    uint64_t text_forms;
+    uint64_t text_failed;
 };
 
 static const char* const ir_source_errors[IR_ERROR_IO + 1] = {
@@ -328,7 +334,7 @@ static const char* const ir_source_errors[IR_ERROR_IO + 1] = {
 // per function that fails. `print` names a function to print the IR of, or is null.
 // Each lowering goes into its own arena and each promotion into another, which mustn't hold its input (ssa_ir.c).
 static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, Arena* output, Arena* twin_output, Arena* promoted_output,
-                            Arena* scratch)
+                            Arena* text_output, Arena* scratch)
 {
     uint64_t entries = 0;
     uint64_t instructions = 0;
@@ -365,9 +371,35 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             totals->promoted_instructions += promoted.instruction_count;
             totals->promoted_bytes += promoted.arena_bytes;
         }
+        bool text_valid = true;
+        const IrFunction* const forms[] = {
+            &vector,
+            &promoted,
+            &promoted_twin,
+        };
+        static const char* const form_names[] = {
+            "lowered",
+            "promoted-vector",
+            "promoted-scalar",
+        };
+        for (uint32_t form = 0; agree && form < (promotes ? 3u : 1u); form += 1)
+        {
+            IrSourceTextCheck check = { 0 };
+            const bool roundtrip = ir_source_text_roundtrip(forms[form], text_output, scratch, &check);
+            totals->text_forms += 1;
+            totals->text_failed += !roundtrip;
+            text_valid = text_valid && roundtrip;
+            if (!roundtrip)
+            {
+                printf("ir-source: file=%s function=%s form=%s text_failed=\"%s\" parse_error=%u line=%" PRIu64 " column=%" PRIu64 " ir_error=%u instruction=%u detail=%u\n",
+                       name, source->name, form_names[form], check.reason, (unsigned)check.parsed.error,
+                       (uint64_t)check.parsed.line, (uint64_t)check.parsed.column, (unsigned)check.parsed.check.error,
+                       check.parsed.check.instruction, check.parsed.check.detail);
+            }
+        }
+        failures += !promotes || !text_valid;
         if (!promotes)
         {
-            failures += 1;
             const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
             printf("ir-source: file=%s function=%s %s error=%s instruction=%u detail=%u\n", name, source->name,
                    !lowered ? "refused" : !agree ? "the paths disagree" : "unpromoted", ir_source_errors[first.error <= IR_ERROR_IO ? first.error : IR_ERROR_IO],
@@ -475,9 +507,11 @@ static int run_ir_source_tests(int count, char** arguments)
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena twin_output = arena_reserve(UINT64_C(1) << 34);
     Arena promoted = arena_reserve(UINT64_C(1) << 34);
+    Arena text_output = arena_reserve(UINT64_C(1) << 34);
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
-    valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0;
+    valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && text_output.base != 0 && scratch.base != 0;
     IrSourceTotals totals = { 0 };
+    const bool text_oracle = valid && ir_source_text_tests(&arena, &output, &twin_output, &text_output, &scratch);
     const bool exhausted = valid && ir_source_exhausted(files[0], options, option_count, &lowered, &arena);
     if (valid)
     {
@@ -489,7 +523,7 @@ static int run_ir_source_tests(int count, char** arguments)
         ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            ir_source_check(&totals, &file, files[i], print, &output, &twin_output, &promoted, &scratch);
+            ir_source_check(&totals, &file, files[i], print, &output, &twin_output, &promoted, &text_output, &scratch);
         }
         else
         {
@@ -505,16 +539,17 @@ static int run_ir_source_tests(int count, char** arguments)
     {
         printf("ir-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " entries=%" PRIu64 " tokens=%" PRIu64
                " instructions=%" PRIu64 " bytes=%" PRIu64 " (%.2f per token) promoted_instructions=%" PRIu64 " promoted_bytes=%" PRIu64
-               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 "\n",
+               " refused=%" PRIu64 " disagreed=%" PRIu64 " unpromoted=%" PRIu64 " text_forms=%" PRIu64 " text_failed=%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.entries, totals.tokens, totals.instructions, totals.bytes,
                totals.tokens != 0 ? (double)totals.bytes / (double)totals.tokens : 0.0, totals.promoted_instructions, totals.promoted_bytes, totals.refused,
-               totals.disagreed, totals.unpromoted);
+               totals.disagreed, totals.unpromoted, totals.text_forms, totals.text_failed);
     }
     else
     {
         fprintf(stderr, "usage: compiler test-ir-source [--print NAME] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
+    arena_release(&text_output);
     arena_release(&promoted);
     arena_release(&twin_output);
     arena_release(&output);
@@ -522,5 +557,5 @@ static int run_ir_source_tests(int count, char** arguments)
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && exhausted && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
+    return valid && exhausted && text_oracle && totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
 }
