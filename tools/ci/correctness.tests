@@ -71,6 +71,16 @@ unset CPATH C_INCLUDE_PATH
 # then run; --cross-check also writes each as an object that cc links, whose functions and objects must be
 # clang -O0 -c's (#129). The declared subset must pass. A worker per CPU of the heading's.
 ./build/compiler test-c-testsuite --cross-check --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Promote c-testsuite's programs to SSA and run them in the IR's three forms [3 CPUs]
+# #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
+# ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
+# in its three forms at once (all locals in memory, and each path's SSA), which must agree with each other and with
+# the program's expected output.
+./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+== Promote and run random C programs of structured and unstructured control flow [3 CPUs]
+# #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
+# continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
+./build/compiler test-ssa-source --generate 48 --clang clang
 == Test the parser's snippets against clang
 # The snippets, each also checked against clang, the generated inputs and the driver's checks.
 ./build/compiler test-parser --clang
@@ -294,6 +304,17 @@ musl="$corpus/libc/musl"
 ./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
 ./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 ./build/compiler test-ir-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
+# #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
+# function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+./build/compiler test-ssa-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+./build/compiler test-ssa-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Check the frozen SQLite source against Clang

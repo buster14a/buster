@@ -11,9 +11,10 @@ Both constructors use #174's shared `dominators_analyze` interface; the vector
 constructor consumes its frontier rows and the IR adapter uses its subtree
 intervals directly.
 
-The construction core and IR adapter have local semantic tests. #134's complete
-source-corpus, general interpreter and Tier 1 acceptance still requires the
-integration work at the end of this guide.
+Both paths are checked on every function of the corpora and of random C
+programs, and the programs run in each of their three forms by the shared IR's
+interpreter ("Real and generated C" below); the comparison with Tier 1's
+compiled code waits for Tier 1 (the end of this guide).
 
 ## Input and handoff
 
@@ -274,6 +275,115 @@ calls with no unapproved cycle. The cloud-only compiler invocation added
 `-mmwaitx` because the VM hides that feature; no production build flag changed
 and lane waits were not executed there.
 
+## Real and generated C
+
+`test-ssa-source` (`ssa_source_test.c`) is #134's acceptance on C programs: the
+functions `-c` compiles of each file, as `test-ir-source` prepares them
+(`ir_source_prepare`), lowered with every local in memory and promoted by both
+paths, and each program with a `main` run in each of its three forms by the
+shared IR's interpreter (#176).
+
+```sh
+./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ssa-source --generate 48 --clang clang
+./build/compiler test-ssa-source [preprocessor options] sqlite3.c
+```
+
+### The checks
+
+Each promotion goes through `ssa_ir_promote_verified`, which runs `ssa_verify` on
+the core's view of the function and its result before the IR is built: every use
+dominated by its definition, a phi operand per predecessor, no trivial phi, and
+the independent reaching-definition equations. The core's result is the output's
+phis and replacements one for one (`ssa_ir_fill`), so these are the output's
+checks. There the vector path's constructor runs wherever its memory bound
+admits, past the 16,384 cells where `ssa_ir_promote` takes the scalar
+constructor (#787), so that it is checked on SQLite's largest functions too. The
+rebuilt IR then passes both IR verifiers with dominance, as every promotion's
+does, and `ssa_ir_phis` checks the IR itself: the lowering makes no phi, so a
+trivial phi there (of one value but itself, however many times) would be the
+adapter's.
+
+### Running a program
+
+A file with a `main` runs in its three forms at once, a child process each, in a
+directory of its own (some of c-testsuite's programs write files), with standard
+input from `/dev/null` and standard output and errors into a file, fully
+buffered as a native program's are into a file. The three must end alike: the
+same wait status, interpreter outcome and output. A run the interpreter couldn't
+finish fails, however its forms agree. Where `FILE.expected` exists
+(c-testsuite's convention), the program must exit with status 0 having written
+its bytes.
+
+The interpreter's program is the emission's link, which `ir_source_prepare`
+keeps when asked: the static data published into it as the driver publishes it
+(`check_data_publish`), its atoms' bytes copied out of the arenas the file's end
+releases, and each symbol's size as the program declares it. The child
+materializes it with `interpreter_link_materialize` from a copy whose code atoms
+have no fixups: the materializer refuses those, and the interpreter runs the IR,
+which carries its own references, never the code. Each function's symbol is the
+interpreter's token for it (a copy of its `IrFunction`), and each label's is its
+`labels` entry, in the child's arena beside the data, so that a jump table's
+32-bit entries (`PC32`, as clang's `.long .LBB - .LJTI` are) reach their labels.
+What the program refers to and doesn't define comes from the process, by name:
+its functions as natives (`dlsym`, and `libgcc_s.so.1` for libgcc's), the
+allocators, copies and fill with their bookkeeping, and its objects (`stdout`)
+by the sizes it declares them with. `main` gets `argc` 1, `argv` and an empty
+environment. Memory checking is on and undefined-byte checking off: a native
+writes the memory a program gives it (`strcpy`'s) without telling the
+interpreter which bytes it defined. A run is bounded by 2^32 steps (`--steps`)
+and an alarm (`--timeout`, 600 s by default).
+
+Three of the IR front's rules came out of these runs (the [tools
+guide](ir-tools.md)'s "Execution contract"): it verifies each function once per
+execution rather than at every call, which had been 45% of a recursive
+program's time; it takes a flagged native's `i64` operands and result, which
+the typed stream's pointers lower to, as pointers, as the typed front takes its
+`U64`s; and since the lowered IR takes every argument of a variadic call as
+named, such a call's named arguments are its callee's parameters, the rest
+ignored by a callee without a variadic frame (a variadic function that never
+calls `va_start`, and a function C calls without a prototype).
+
+### Random programs
+
+`--generate N` writes N programs (`ssa_source_generate.c`, from `--seed`'s on)
+into the work directory, each built by clang -O0 (through the oracle cache) and
+run for the output and status its forms must give. A program's functions mix
+structured and unstructured control flow: if and else, while, do and for loops
+nested to depth 7, break and continue at any depth (conditional or not),
+switches whose cases fall through and whose case labels may sit inside their
+bodies' loops and blocks (as Duff's device's do), gotos forward and backward to
+labels anywhere in the function, into loops and switches and out of them, and
+early returns. Their locals: integers of every width and signedness, `_Bool`,
+`unsigned __int128`, float, double, long double and a pointer, which promotion
+takes, and an address-taken integer, a volatile one, an array and a struct,
+which stay in memory. Everything is defined behavior (the generator's header
+has its rules), and every cycle of a function's control flow decrements its
+fuel, which ends the function at zero.
+
+### Results
+
+Every function of the corpora passes both promotions' checks, and every program
+gives its expected output in all three forms. Locally (a Zen 4 laptop, Clang
+23.1.4), with the 9700X job's options for `sqlite3.c` and musl:
+
+| Input | Functions | Lowered instructions | Promoted | Phis (vector / scalar) | Programs run |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| c-testsuite's subset | 430 | 22,142 | 18,719 | 140 / 140 | 220 of 220 |
+| frozen `sqlite3.c` | 2,602 | 598,425 | 493,552 | 6,097 / 6,097 | none |
+| musl 1.2.5 (1,050 units; 305 left out by name) | 1,918 | 247,429 | 203,490 | 2,777 / 2,777 | none |
+| Lua 5.4.8 but `lua.c` and `luac.c` | 1,059 | 133,643 | 102,685 | 1,126 / 1,126 | none |
+| 1,000 generated programs (seed 7) | 6,000 | 27,737,466 | 10,269,192 | 835,918 / 835,918 | 1,000 of 1,000 |
+
+The paths' phis are the same on every function: both constructors' results go
+through the same trivial-phi and redundant-cycle cleanup, which leaves minimal
+SSA. The runs' steps show what promotion saves: c-testsuite's programs took
+1,358,335,785 interpreter steps with every local in memory and 1,093,122,877 in
+either SSA form (8 queens, `00040.c`, 1.35 billion and 1.09 billion of them),
+the generated programs 519,202,382 and 536,015,938: their phis, at loop headers
+and labels reached by many gotos, cost more steps than their loads and stores
+did.
+
 ## Benchmark
 
 ```sh
@@ -341,17 +451,12 @@ retains the complete SSA benchmark step, source hashes and qualification
 excerpts. It precedes shared-dominator adoption; the revised analysis path
 requires its own protected target result.
 
-## Integration still required for #134
+## What remains for #134
 
-- Connect #133's complete typed-stream lowering, including volatility, aggregate
-  and address-taking metadata, so actual source functions reach this pass.
-- Compare full IR execution through #176 and Tier 1 generated code through #138.
-- Run the source corpora and random C control flow, then measure cycles per IR
-  instruction and phi counts on SQLite's functions under the locked 9700X.
-
-The local-event and typed-IR interpreters check their supported inputs. They do
-not provide the complete source-program and downstream-code acceptance above.
-Keep #134 open until those requirements are demonstrated.
+The comparison of Tier 1's compiled code with the three interpreted forms, once
+Tier 1 compiles general CFGs and phis (#138, which depends on this issue): it
+refuses them today, so no promoted function with control flow reaches native
+code yet.
 
 ## Algorithm references
 
