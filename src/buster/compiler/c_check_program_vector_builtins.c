@@ -1621,3 +1621,72 @@ static const char* check_vector_reduce_rows(const TypeTable* types, const X86Tar
     }
     return reason;
 }
+
+// Whether a reduction's vector of `vector`'s type has lanes past its elements (an ext_vector_type of 3 floats or of 6
+// shorts, padded to a power of two), whose bytes may hold anything; then `row` gives the vector its operation's identity
+// in them, as LLVM's widening of the vector does before clang's code reduces it, so that the reduction's halvings
+// (check_vector_reduce_rows, check_vector_reduce_floating_rows) take the elements alone: (v & keep) | fill, VPTERNLOGD
+// 0xEA of the vector and its constant operands `keep` (all ones in the elements' bytes) and `fill` (the identity past
+// them): 0 for add, or, xor and an unsigned max; all ones for and and an unsigned min; 1 for mul; the largest value for
+// a signed min and the smallest for a signed max; -inf for maximum, +inf for minimum and -0.0 for assoc_fadd.
+static bool check_vector_reduce_fill_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, uint64_t keep[8], uint64_t fill[8])
+{
+    const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
+    const uint32_t used = shape.lanes * shape.element;
+    const bool padded = shape.element != 0 && used < shape.bytes && shape.bytes <= 64;
+    memset(row, 0, sizeof(*row));
+    memset(keep, 0, 8 * sizeof(*keep));
+    memset(fill, 0, 8 * sizeof(*fill));
+    if (padded)
+    {
+        const bool d = shape.element == 8;
+        const uint64_t ones = d ? UINT64_MAX : (UINT64_C(1) << (8 * shape.element)) - 1;
+        uint64_t identity = 0;
+        if (builtin == CBUILTIN_REDUCE_AND || (builtin == CBUILTIN_REDUCE_MIN && !shape.is_signed))
+        {
+            identity = ones;
+        }
+        else if (builtin == CBUILTIN_REDUCE_MUL)
+        {
+            identity = 1;
+        }
+        else if (builtin == CBUILTIN_REDUCE_MIN)
+        {
+            identity = ones >> 1;
+        }
+        else if (builtin == CBUILTIN_REDUCE_MAX && shape.is_signed)
+        {
+            identity = (ones >> 1) + 1;
+        }
+        else if (builtin == CBUILTIN_REDUCE_MAXIMUM || builtin == CBUILTIN_REDUCE_MINIMUM)
+        {
+            // The infinity of the element's type, negative for maximum.
+            identity = (d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000)) | (builtin == CBUILTIN_REDUCE_MAXIMUM ? check_vector_floating_sign(d) : 0);
+        }
+        else if (builtin == CBUILTIN_REDUCE_ASSOC_FADD)
+        {
+            identity = check_vector_floating_sign(d);
+        }
+        uint8_t* kept = (uint8_t*)keep;
+        uint8_t* filled = (uint8_t*)fill;
+        for (uint32_t b = 0; b < shape.bytes; b += 1)
+        {
+            kept[b] = b < used ? 0xff : 0;
+            filled[b] = b < used ? 0 : (uint8_t)(identity >> (8 * (b % shape.element)));
+        }
+        static const CheckVectorForms ternary = BUSTER_CHECK_VECTOR_FORMS(VPTERNLOGD_X_X_XM128_IMM8, VPTERNLOGD_Y_Y_YM256_IMM8, VPTERNLOGD_Z_Z_ZM512_IMM8);
+        row->records[0] = check_vector_lower_record(ternary.forms[check_vector_builtin_width(shape.bytes)], BUSTER_TIER0_ROLE_VECTOR(0),
+                                                    BUSTER_TIER0_ROLE_VECTOR(1), BUSTER_TIER0_ROLE_VECTOR(2));
+        row->records[0].immediate = 0xea;
+        row->record_count = 1;
+        row->operand_count = 3;
+        for (uint32_t j = 0; j < 3; j += 1)
+        {
+            row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[j] = (uint8_t)shape.bytes;
+        }
+        row->result_class = BUSTER_TYPED_CLASS_VECTOR;
+        row->result_bytes = (uint8_t)shape.bytes;
+    }
+    return padded;
+}

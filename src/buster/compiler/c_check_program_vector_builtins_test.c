@@ -522,6 +522,31 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // Reductions of vectors their elements don't fill (ext_vector_type's of 3, 5, 6, 7, 10 and 12 elements, padded
+            // to a power of two), every byte of them written first, the padding's too: those lanes take no part, as
+            // clang's code gives them the operation's identity.
+            "vector-padded-reductions",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "typedef signed char c3 __attribute__((ext_vector_type(3)));typedef unsigned char u10 __attribute__((ext_vector_type(10)));"
+            "typedef short s6 __attribute__((ext_vector_type(6)));typedef unsigned short w7 __attribute__((ext_vector_type(7)));"
+            "typedef int i3 __attribute__((ext_vector_type(3)));typedef unsigned u5 __attribute__((ext_vector_type(5)));"
+            "typedef long long l3 __attribute__((ext_vector_type(3)));typedef unsigned long long q5 __attribute__((ext_vector_type(5)));"
+            "typedef float f3 __attribute__((ext_vector_type(3)));typedef float f7 __attribute__((ext_vector_type(7)));"
+            "typedef float f12 __attribute__((ext_vector_type(12)));typedef double e3 __attribute__((ext_vector_type(3)));"
+            "typedef double e5 __attribute__((ext_vector_type(5)));\n"
+            "#define R(f,v) {__typeof__(v[0]) r=__builtin_reduce_##f(v);FOLD(r);}\n"
+            "#define INT(v) R(add,v)R(mul,v)R(and,v)R(or,v)R(xor,v)R(min,v)R(max,v)\n"
+            "#define FLT(v) R(maximum,v)R(minimum,v)R(assoc_fadd,v){__typeof__(v[0]) r=__builtin_reduce_assoc_fadd(v,1.5f);FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;c3 a;u10 b;s6 c;w7 d;i3 e;u5 f;l3 g;q5 k;f3 x;f7 y;f12 z;e3 p;e5 q;"
+            "fill(&a,sizeof a,n);fill(&b,sizeof b,n+1);fill(&c,sizeof c,n+2);fill(&d,sizeof d,n+3);fill(&e,sizeof e,n+4);fill(&f,sizeof f,n+5);"
+            "fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);INT(a)INT(b)INT(c)INT(d)INT(e)INT(f)INT(g)INT(k)"
+            "for(int round=0;round<2;round++){if(round){modest(&x,sizeof x/4,n+8,0,0);modest(&y,sizeof y/4,n+9,0,0);modest(&z,sizeof z/4,n+10,0,0);"
+            "modest(&p,sizeof p/8,n+11,1,0);modest(&q,sizeof q/8,n+12,1,0);}else{specials(&x,sizeof x/4,n+8,0);specials(&y,sizeof y/4,n+9,0);"
+            "specials(&z,sizeof z/4,n+10,0);specials(&p,sizeof p/8,n+11,1);specials(&q,sizeof q/8,n+12,1);}FLT(x)FLT(y)FLT(z)FLT(p)FLT(q)}"
+            "return (int)h;}",
+        },
+        {
             // Bit reversal and the integer functions past the 23 observed spellings: trailing zero counts (of nonzero
             // elements alone with one operand, which clang leaves undefined for zero, and with zeros among them with
             // two), bit deposits and extractions, of every element size at each width, and xor reductions.

@@ -2029,7 +2029,13 @@ What the lowering covers past scalars (#145's programs):
     records. Byte product reductions first zero-extend to 16-bit elements and
     use VPMULLW, keeping the final low byte. A 64-byte input widens its two
     halves separately and multiplies them before the halvings. Row boundaries
-    always keep each shuffle and its multiplication together;
+    always keep each shuffle and its multiplication together. A vector its
+    elements don't fill (an `ext_vector_type` of 3 ints or of 6 shorts, padded
+    to a power of two) first gets its operation's identity in the lanes past
+    them, as LLVM's widening gives them before clang's code reduces it: a row
+    of VPTERNLOGD 0xEA, (v & keep) | fill, by two constants
+    (`check_vector_reduce_fill_row`), for the floating reductions too; the
+    halvings once reduced whatever those lanes held;
   - byte bit reversal uses AVX512-BMM's VBITREVB at 16, 32 or 64 bytes. Its
     masked intrinsics use the existing masked byte selection. The opcode and
     result/effect traces are compared with clang by `test-x86-intrinsics`;

@@ -8044,6 +8044,22 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     }
 }
 
+// Pushes a reduction's vector operand, `source`, and where its elements don't fill it, the row that gives the lanes past
+// them the reduction's identity (check_vector_reduce_fill_row) with its two constants, which run after the operand.
+static void check_lower_reduce_operand(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, TypeId source)
+{
+    Tier0Operation row;
+    uint64_t keep[8];
+    uint64_t fill[8];
+    if (check_vector_reduce_fill_row(writer->program->types, builtin, source, &row, keep, fill))
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &row));
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, fill, row.result_bytes));
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, keep, row.result_bytes));
+    }
+    check_lower_operand(writer, node, 3, false, source);
+}
+
 // The generic vector builtins' X86 entries (c_check_program_vector_builtins.c), or their refusal by name. A row's
 // operands are the builtin's vector arguments at their types, whose tasks run before its entry's (the tasks run in the
 // reverse of their pushes):
@@ -8250,7 +8266,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
                     check_lower_instruction(writer, BUSTER_TYPED_CONST, class, check_vector_floating_sign(d));
                 }
             }
-            check_lower_operand(writer, node, 3, false, source);
+            check_lower_reduce_operand(writer, node, builtin, source);
             writer->vectors = true;
         }
     }
@@ -8300,7 +8316,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             {
                 check_lower_instruction(writer, BUSTER_TYPED_X86, rows[r].result_class, check_lower_operation_index(writer, rows + r));
             }
-            check_lower_operand(writer, node, 3, false, source);
+            check_lower_reduce_operand(writer, node, builtin, source);
             writer->vectors = true;
         }
     }
