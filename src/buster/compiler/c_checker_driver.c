@@ -1875,8 +1875,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
     return valid;
 }
 
-// How many CPUs the process may run on (sched_getaffinity's), at most the lanes an emission runs: the functions' lanes'
-// default, of which the bodies' tokens then decide how many pay (check_program_emit_lanes).
+// How many CPUs the process may run on (sched_getaffinity's), at most the lanes a command takes: the functions' lanes'
+// default, which the command's session bounds by those CPUs' cores (BUSTER_LANE_SESSION_PER_CORE), and of which the
+// bodies' tokens then decide how many pay (check_program_emit_lanes).
 static uint32_t check_driver_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -2487,17 +2488,20 @@ static void check_driver_flow(void* argument)
     {
         check_program_emit_follow(&run->flow);
     }
-    // The lanes the flow ran on, whose group lane 0 is a lane of again at its end: one after a failed start.
+    // The lanes the session asked for, by default one per core of the capacity's CPUs, and those the flow ran on, whose
+    // group lane 0 is a lane of again at its end: one after a failed start.
     if (lane_index() == 0)
     {
-        check_clock_lanes(run->stage_clock, run->capacity, lane_count());
+        const uint32_t asked = lane_session_current() != NULL ? lane_session_asked() : run->capacity;
+        check_clock_lanes(run->stage_clock, asked < run->capacity ? asked : run->capacity, lane_count());
     }
 }
 
 // Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
-// (at most its allowed CPUs, --lanes N and --worker-budget N), but one for one source file without code to emit
-// (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`) leaves
-// its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
+// (at most its allowed CPUs, --lanes N and --worker-budget N), by default at most one per core of those CPUs, which lane
+// 1 counts while lane 0 starts the command (BUSTER_LANE_SESSION_PER_CORE), but one for one source file without code to
+// emit (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`)
+// leaves its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
 // (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's alone. Returns the
 // command's exit status.
 static int check_driver_run(CheckDriverRun* run, bool* announced)
@@ -2518,8 +2522,11 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
         // process's exit, its lanes parked on it, and a reusable one releases it once the lanes have joined.
         Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
         LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
-        // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY).
-        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
+        // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY), by default no more
+        // than the cores, which it counts first: two lanes on one core's SMT siblings compiled sqlite3.c slower, in 18%
+        // more user time and 44 MB more peak memory, on the 9700X.
+        const uint32_t per_core = run->lanes->every_lane ? 0 : BUSTER_LANE_SESSION_PER_CORE;
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END);
         if (session == NULL || lane_session_run(session, capacity, NULL, check_driver_flow, run, flags) == 0)
         {
             // A thread already in a team's or a cold group's operation, which a session can't nest in: alone.
@@ -2640,9 +2647,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const char* unsupported_codegen = NULL;
     const char* unsupported_stack_protector = NULL;
     const char* unsupported_cf_protection = NULL;
-    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
-    // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them. With several
-    // source files, the lanes their units compile on, one unit at a time each (check_driver_units).
+    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per core of the CPUs the
+    // process may run on (#905), as many as the bodies' tokens pay for; --lanes N runs N, at most one per CPU, as long as
+    // there are bodies for them. With several source files, the lanes their units compile on, one unit at a time each
+    // (check_driver_units).
     CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
     // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.

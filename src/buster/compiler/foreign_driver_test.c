@@ -1674,8 +1674,8 @@ static bool foreign_driver_test_large(ForeignTestTally* tally, const char* direc
 // lanes) and the phases of the resolution, the conversion and the writer on standard error, at 1 and 3 lanes and by
 // default, and still writes the program; a link that fails reports no stages, only its diagnostic; one of 8 lanes
 // started on one CPU runs on one lane, the most the command takes (foreign_driver_cpus), on a session of one; and by
-// default, a link of one small object runs on one lane of a session of the most its objects may pay for, and its
-// opening reports the objects' bytes that chose it.
+// default, a link of one small object runs on one lane of a session of the most its objects may pay for, at most one per
+// core (#905), and its opening reports the objects' bytes that chose it.
 static void foreign_driver_test_time(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena)
 {
     static const char* const expected[] = {
@@ -1749,9 +1749,12 @@ static void foreign_driver_test_time(ForeignTestTally* tally, const char* direct
         snprintf(opened, sizeof(opened), " objects %llu bytes\n", sized ? (unsigned long long)object.st_size : 0ull);
         const bool counted = report.pointer != 0 && memmem(report.pointer, report.length, " objects ", strlen(" objects ")) != 0;
         complete = complete && (chosen ? sized && memmem(report.pointer, report.length, opened, strlen(opened)) != 0 : !counted);
-        // The session's lanes (#905): as many as the link may take, the most its objects may pay for by default, though
-        // it runs on fewer.
-        const uint32_t session = way == 1 ? lanes : chosen ? (cpus < BUSTER_FOREIGN_DRIVER_LANES ? cpus : BUSTER_FOREIGN_DRIVER_LANES) : 1;
+        // The session's lanes (#905): as many as the link may take, the most its objects may pay for by default, at most
+        // one per core (by /proc/cpuinfo, or sysfs where it doesn't list them), though it runs on fewer.
+        const uint32_t most = cpus < BUSTER_FOREIGN_DRIVER_LANES ? cpus : BUSTER_FOREIGN_DRIVER_LANES;
+        const uint32_t listed = chosen ? lane_test_process_cores() : 0;
+        const uint32_t cores = listed != 0 ? listed : lane_core_count();
+        const uint32_t session = way == 1 ? lanes : chosen ? (cores < most ? cores : most) : 1;
         char sessioned[64];
         snprintf(sessioned, sizeof(sessioned), " session %u of %u\n", session, session);
         complete = complete && (fails || memmem(report.pointer, report.length, sessioned, strlen(sessioned)) != 0);
@@ -1858,9 +1861,9 @@ static void foreign_driver_test_unstarted(ForeignTestTally* tally, const char* d
 // its session makes once for the whole command, before any input is opened, one per lane past the first: none on one
 // lane, and on 3 (or the CPUs') as many as the lanes past the first, for a static executable, a PIE, and with section
 // GC, unwind deduplication and string merging after the conversion; and by default, whatever lanes its objects' bytes
-// then pay for (#594), the most the command takes (BUSTER_FOREIGN_DRIVER_LANES, at most the CPUs), for a small object and
-// for the large one, whose link on the lanes its bytes pay for writes the bytes of its link on one lane, which starts
-// none. Each program must still run.
+// then pay for (#594), the most the command takes (BUSTER_FOREIGN_DRIVER_LANES, at most the CPUs' cores, #905, and its
+// lane 1, which counts them, where one core leaves it no other), for a small object and for the large one, whose link on
+// the lanes its bytes pay for writes the bytes of its link on one lane, which starts none. Each program must still run.
 static void foreign_driver_test_threads(ForeignTestTally* tally, const char* directory, ForeignDriverTestFiles* files, Arena* arena, String8 interpreter, bool large)
 {
     static const char counter[] = "#define _GNU_SOURCE\n"
@@ -1915,7 +1918,13 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         const bool chosen = way == 4 || way == 5;
         const bool on_large = way == 5 || way == 6;
         const uint32_t most = BUSTER_FOREIGN_DRIVER_LANES < cpus ? BUSTER_FOREIGN_DRIVER_LANES : cpus;
-        const uint32_t lanes = way == 0 || way == 6 ? 1 : chosen ? most : cpus < 3 ? cpus : 3;
+        // By default one lane per core of the most it takes (by /proc/cpuinfo, or sysfs where it doesn't list them): its
+        // session's lane 1, created from 2 lanes on, counts them, and runs alone where they leave it no other lane.
+        const uint32_t listed = chosen ? lane_test_process_cores() : 0;
+        const uint32_t cores = listed != 0 ? listed : lane_core_count();
+        const uint32_t per_core = cores < most ? cores : most;
+        const uint32_t lanes = way == 0 || way == 6 ? 1 : chosen ? per_core : cpus < 3 ? cpus : 3;
+        const uint32_t threads = chosen && most > 1 && per_core < 2 ? 1 : lanes - 1;
         ForeignTestPath executable;
         ForeignTestPath counted;
         char preload[BUSTER_FOREIGN_TEST_PATH_BYTES + 16];
@@ -1987,11 +1996,11 @@ static void foreign_driver_test_threads(ForeignTestTally* tally, const char* dir
         char expected[32];
 #if __has_feature(thread_sanitizer)
         // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
-        const uint32_t detector = lanes > 1 ? 1 : 0;
+        const uint32_t detector = threads > 0 ? 1 : 0;
 #else
         const uint32_t detector = 0;
 #endif
-        snprintf(expected, sizeof(expected), "%u\n", lanes - 1 + detector);
+        snprintf(expected, sizeof(expected), "%u\n", threads + detector);
         const bool started = text.pointer != 0 && text.length == strlen(expected) && memcmp(text.pointer, expected, text.length) == 0;
         char detail[BUSTER_FOREIGN_TEST_PATH_BYTES + 64];
         snprintf(detail, sizeof(detail), "%s: %.*s thread(s) for %u lane(s)", executable, text.pointer != 0 ? (int)strcspn(text.pointer, "\n") : 0, text.pointer != 0 ? text.pointer : "",
