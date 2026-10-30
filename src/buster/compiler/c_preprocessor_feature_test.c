@@ -241,8 +241,8 @@ static bool pp_test_builtin_targets(const char* directory)
         free(clang_text);
         arena_release(&arena);
     }
-    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the immediate names',
-    // whose features c_builtin_immediate_scope.inc writes out) and each catalog name's language modes.
+    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the supplementary
+    // names', whose features c_builtin_supplementary_scope.inc writes out) and each catalog name's language modes.
     uint32_t facts = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {

@@ -744,11 +744,16 @@ ranges: `pshufd`, `pshufhw`, `pshuflw` and `shufps` (0 to 255),
 `psrldqi128_byteshift` and `palignr128` (0 to 255), `vec_ext_v8hi` and
 `vec_set_v8hi` (0 to 7). Their target features (SSE2, and SSSE3 for
 `palignr128`) are no more checked than any x86 builtin's.
-The separately attested #799 scope adds `shufpd` (immediate 0 to 3), and
-`pblendw128`, `pshufd256`, `permdi256` and `palignr256` (0 to 255). Their
-lowering uses VEX forms and requires AVX or AVX2; the existing vector backend
-also requires AVX-512F and AVX-512VL. The attestation does not change the frozen
-own-main inventory or admit other catalogue entries.
+The separately attested supplementary scope (`c_builtin_supplementary_scope.inc`,
+each name with its required target features in clang's metadata, in strcmp's
+order for its lookups' binary searches) holds the x86 names past the inventory.
+#799 added `shufpd` (immediate 0 to 3), and `pblendw128`, `pshufd256`,
+`permdi256` and `palignr256` (0 to 255). Their lowering uses VEX forms and
+requires AVX or AVX2; the existing vector backend also requires AVX-512F and
+AVX-512VL. The attestation does not change the frozen own-main inventory or
+admit other catalogue entries; `test-builtin-intrinsic-catalog` checks that
+each supplementary name is an x86 record of the catalogue the inventory hasn't,
+and that the names are sorted.
 `builtin_intrinsic_own_main_prototype_in_scope` also admits
 the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,

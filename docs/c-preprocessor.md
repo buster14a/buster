@@ -1298,8 +1298,9 @@ decisions in #154 and on #117's configuration):
   Builtins use the shared catalog's explicit source and constant-expression
   capabilities, plus the preprocessor's four `__is_target_*` builtins. Native
   intrinsic names come from the actual x86 lowering rows/leaves, intersected
-  with the checker's frozen source scope; the full Clang recognition catalog
-  is not an implementation list. The fourteen fortified libc builtins reuse
+  with the checker's source scope (the frozen inventory and its sorted
+  supplementary names, `c_builtin_supplementary_scope.inc`); the full Clang
+  recognition catalog is not an implementation list. The fourteen fortified libc builtins reuse
   the checker's separate exact-name admission table and ordinary native call
   path (#803); none has a source constant-expression capability. An
   implemented builtin answers 1 only where clang 23 makes it one, as clang's

@@ -195,18 +195,23 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
     builtin_intrinsic_catalog_test_expect(test, outside_info != NULL && strcmp(outside_info->shard, "x86") == 0 &&
         builtin_intrinsic_own_main_lookup(outside, sizeof(outside) - 1) == NULL && !builtin_intrinsic_own_main_x86_in_scope(outside, sizeof(outside) - 1),
         "valid full-catalog lfence target is rejected because it is absent from the frozen workload");
-    static const char* const immediate_names[] = { "__builtin_ia32_palignr256", "__builtin_ia32_pblendw128", "__builtin_ia32_permdi256",
-                                                  "__builtin_ia32_pshufd256", "__builtin_ia32_shufpd" };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediate_names); i += 1)
+    // The supplementary scope (c_builtin_supplementary_scope.inc): its names in strcmp's order, which its lookup's binary
+    // search needs, each an x86 record of the full catalogue that the frozen inventory hasn't, admitted whole and not
+    // by a prefix or a longer slice.
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(builtin_intrinsic_supplementary_names); i += 1)
     {
-        const char* name = immediate_names[i];
-        const uint32_t length = strlen(name);
-        builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_lookup(name, length) != NULL &&
-            builtin_intrinsic_immediate_in_scope(name, length) && builtin_intrinsic_own_main_prototype_in_scope(name, length) &&
-            !builtin_intrinsic_immediate_in_scope(name, length - 1), "extra immediate scope admits only each complete catalogued name");
+        const BuiltinIntrinsicName* entry = builtin_intrinsic_supplementary_names + i;
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(entry->name, entry->length);
+        char longer[160];
+        snprintf(longer, sizeof(longer), "%s_", entry->name);
+        builtin_intrinsic_catalog_test_expect(test, info != NULL && (strcmp(info->shard, "x86") == 0 || strcmp(info->shard, "x86_64") == 0) &&
+            builtin_intrinsic_own_main_lookup(entry->name, entry->length) == NULL && (i == 0 || strcmp(entry[-1].name, entry->name) < 0) &&
+            builtin_intrinsic_supplementary_in_scope(entry->name, entry->length) && builtin_intrinsic_own_main_prototype_in_scope(entry->name, entry->length) &&
+            !builtin_intrinsic_supplementary_in_scope(entry->name, entry->length - 1) && !builtin_intrinsic_supplementary_in_scope(longer, entry->length + 1),
+            "the supplementary scope's names are sorted catalogued x86 records past the inventory, admitted only whole");
     }
-    builtin_intrinsic_catalog_test_expect(test, !builtin_intrinsic_immediate_in_scope(NULL, 1) &&
-        !builtin_intrinsic_immediate_in_scope(outside, sizeof(outside) - 1), "extra immediate scope rejects unrelated and null names");
+    builtin_intrinsic_catalog_test_expect(test, !builtin_intrinsic_supplementary_in_scope(NULL, 1) &&
+        !builtin_intrinsic_supplementary_in_scope(outside, sizeof(outside) - 1), "the supplementary scope rejects unrelated and null names");
     builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_own_main_lookup(suffix, sizeof(positive) - 1) == positive_info &&
         builtin_intrinsic_own_main_x86_in_scope(suffix, sizeof(positive) - 1) &&
         builtin_intrinsic_own_main_lookup(prefix + 1, sizeof(positive) - 1) == positive_info,
