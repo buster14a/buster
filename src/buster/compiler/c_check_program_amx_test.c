@@ -392,8 +392,64 @@ static void check_test_program_amx_oracle(CheckTest* test, const char* clang)
     }
 }
 
+// Cached scalar lowering is deliberately independent of the owning TypeTable. The task-stack fixtures use this
+// contract too; adding a special aggregate dispatch must not consult program.types for an ordinary scalar value.
+static void check_test_program_amx_cached_scalars(CheckTest* test)
+{
+    const CheckProgram program = { 0 };
+    uint8_t type_classes[256] = { 0 };
+    uint8_t type_facts[256] = { 0 };
+    type_classes[type_index(BUSTER_TYPE_INT)] = BUSTER_TYPED_CLASS_I32;
+    type_classes[type_index(BUSTER_TYPE_ULONG)] = BUSTER_TYPED_CLASS_U64;
+    type_classes[type_index(BUSTER_TYPE_DOUBLE)] = BUSTER_TYPED_CLASS_F64;
+    static const struct
+    {
+        CheckValue value;
+        uint64_t bits;
+    } constants[] = {
+        { { .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 7 }, 7 },
+        { { .type = BUSTER_TYPE_ULONG, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = UINT64_C(0xfedcba9876543210) }, UINT64_C(0xfedcba9876543210) },
+        { { .type = BUSTER_TYPE_DOUBLE, .constant_kind = CHECK_CONSTANT_FLOATING, .floating = 1.5L }, UINT64_C(0x3ff8000000000000) },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(constants); c += 1)
+    {
+        CheckProgramLowered output = { 0 };
+        uint8_t kinds[1], classes[1];
+        uint64_t values[1];
+        CheckLowerWriter writer = {
+            .program = &program,
+            .output = &output,
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .capacity = 1,
+            .type_classes = type_classes,
+            .type_facts = type_facts,
+            .type_count = BUSTER_ARRAY_LENGTH(type_classes),
+            .class_limit = BUSTER_TYPED_CLASSES,
+        };
+        check_lower_constant(&writer, &constants[c].value);
+        check_test_expect(test, output.status == CHECK_PROGRAM_OK && writer.count == 1 && kinds[0] == BUSTER_TYPED_CONST &&
+                          classes[0] == type_classes[type_index(constants[c].value.type)] && values[0] == constants[c].bits,
+                          "AMX dispatch preserves cached scalar constants without a TypeTable");
+        writer.count = 0;
+        check_lower_scalar_conversion_body(&writer, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG, false);
+        check_test_expect(test, output.status == CHECK_PROGRAM_OK && writer.count == 1 && kinds[0] == BUSTER_TYPED_CONVERT &&
+                          classes[0] == BUSTER_TYPED_CLASS_U64,
+                          "AMX dispatch preserves cached scalar conversions without a TypeTable");
+    }
+}
+
 static void check_test_program_amx(CheckTest* test, const char* clang)
 {
+    check_test_program_amx_cached_scalars(test);
+    for (uint32_t kind = CBUILTIN_X86_HELPER_TILEZERO; kind < CBUILTIN_X86_HELPER_COUNT; kind += 1)
+    {
+        const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + kind;
+        char description[192];
+        snprintf(description, sizeof(description), "AMX source query advertises its implemented native leaf: %s", info->name);
+        check_test_expect(test, cbuiltin_source_intrinsic((const uint8_t*)info->name, info->name_length), description);
+    }
     check_test_program_amx_oracle(test, clang);
     X86Target target = { 0 };
     const bool parsed = x86_target_parse("znver5", strlen("znver5"), &target);

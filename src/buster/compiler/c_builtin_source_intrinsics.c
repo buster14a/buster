@@ -26,9 +26,12 @@ static const CBuiltinSourceName cbuiltin_source_rows[] = {
 
 #define BUSTER_CBUILTIN_SOURCE_LEAF(name, ...) { name, sizeof(name) - 1 },
 #define BUSTER_CBUILTIN_X86_LEAF(id, ...) BUSTER_CBUILTIN_SOURCE_LEAF(__VA_ARGS__)
+#define BUSTER_CBUILTIN_AMX(id, builtin, ...) { "__builtin_ia32_" builtin "_internal", sizeof("__builtin_ia32_" builtin "_internal") - 1 },
 static const CBuiltinSourceName cbuiltin_source_leaves[] = {
 #include "c_builtin_x86_leaves.inc"
+#include "c_builtin_amx_leaves.inc"
 };
+#undef BUSTER_CBUILTIN_AMX
 #undef BUSTER_CBUILTIN_X86_LEAF
 #undef BUSTER_CBUILTIN_SOURCE_LEAF
 

@@ -530,10 +530,19 @@ struct CBuiltinX86HelperInfo
 #define BUSTER_CBUILTIN_X86_VECTOR_RESULT 0x80u
 
 #define BUSTER_CBUILTIN_X86_LEAF(id, ...) [id] = { __VA_ARGS__ },
+#define BUSTER_CBUILTIN_AMX(id, builtin, family, parameters, bytes, form, extension) \
+    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_##id, \
+        .name = "__builtin_ia32_" builtin "_internal", .name_length = sizeof("__builtin_ia32_" builtin "_internal") - 1, \
+        .parameter_count = parameters, .amx = CBUILTIN_AMX_##family, .amx_form = X86_FORM_##form, .output_bytes = bytes, \
+        .features = CBUILTIN_AMX_##family == CBUILTIN_AMX_ROW ? BUSTER_X86_FEATURE(AVX512F) : 0, \
+        .extensions = BUSTER_X86_EXTENSION(AMXTILE) | BUSTER_X86_EXTENSION(extension) | \
+                      (CBUILTIN_AMX_##family == CBUILTIN_AMX_ROW ? BUSTER_X86_EXTENSION(AVX10_2) : 0), \
+        .refusal = "this AMX intrinsic without its required target features")
 static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER_COUNT] = {
 #include "c_builtin_x86_leaves.inc"
 #include "c_builtin_amx_leaves.inc"
 };
+#undef BUSTER_CBUILTIN_AMX
 #undef BUSTER_CBUILTIN_X86_LEAF
 
 #include "c_builtin_amx_helpers.c"

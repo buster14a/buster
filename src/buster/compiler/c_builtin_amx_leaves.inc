@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// AMX internal intrinsic signatures. Tile and ZMM results use a final output pointer; tile arguments use addresses.
-#define BUSTER_CBUILTIN_AMX(id, builtin, family, parameters, bytes, form, extension) \
-    BUSTER_CBUILTIN_X86_LEAF(CBUILTIN_X86_HELPER_##id, \
-        .name = "__builtin_ia32_" builtin "_internal", .name_length = sizeof("__builtin_ia32_" builtin "_internal") - 1, \
-        .parameter_count = parameters, .amx = CBUILTIN_AMX_##family, .amx_form = X86_FORM_##form, .output_bytes = bytes, \
-        .features = CBUILTIN_AMX_##family == CBUILTIN_AMX_ROW ? BUSTER_X86_FEATURE(AVX512F) : 0, \
-        .extensions = BUSTER_X86_EXTENSION(AMXTILE) | BUSTER_X86_EXTENSION(extension) | \
-                      (CBUILTIN_AMX_##family == CBUILTIN_AMX_ROW ? BUSTER_X86_EXTENSION(AVX10_2) : 0), \
-        .refusal = "this AMX intrinsic without its required target features")
+// AMX internal intrinsic signatures. Define BUSTER_CBUILTIN_AMX before including this table to project native
+// helper metadata or source-query names. Tile and ZMM results use a final output pointer; tile arguments use addresses.
 
 BUSTER_CBUILTIN_AMX(TILEZERO, "tilezero", ZERO, 3, 1024, TILEZERO_TMM, AMXTILE)
 BUSTER_CBUILTIN_AMX(TILELOADD, "tileloadd64", LOAD, 5, 1024, TILELOADD_TMM_SIBMEM, AMXTILE)
@@ -35,5 +28,3 @@ BUSTER_CBUILTIN_AMX(TCVTROWPS2BF16L, "tcvtrowps2bf16l", ROW, 5, 64, TCVTROWPS2BF
 BUSTER_CBUILTIN_AMX(TCVTROWPS2PHH, "tcvtrowps2phh", ROW, 5, 64, TCVTROWPS2PHH_Z_TMM_R32, AMXAVX512)
 BUSTER_CBUILTIN_AMX(TCVTROWPS2PHL, "tcvtrowps2phl", ROW, 5, 64, TCVTROWPS2PHL_Z_TMM_R32, AMXAVX512)
 BUSTER_CBUILTIN_AMX(TILEMOVROW, "tilemovrow", ROW, 5, 64, TILEMOVROW_Z_TMM_R32, AMXAVX512)
-
-#undef BUSTER_CBUILTIN_AMX

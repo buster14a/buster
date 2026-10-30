@@ -2301,7 +2301,7 @@ static __attribute__((noinline)) void check_lower_aggregate_conversion(CheckLowe
     const bool from_aggregate = check_lower_aggregate(writer, from);
     const bool to_aggregate = check_lower_aggregate(writer, to);
     const bool limbs = check_lower_limb_value(writer, from) || check_lower_limb_value(writer, to);
-    if ((check_lower_tile_type(types, from) || check_lower_tile_type(types, to)) &&
+    if (((from_aggregate && check_lower_tile_type(types, from)) || (to_aggregate && check_lower_tile_type(types, to))) &&
         type_conversion_operand(types, from) != type_conversion_operand(types, to))
     {
         check_lower_unsupported(writer, "conversions or splats of 1024-byte tile vectors");
@@ -4988,7 +4988,7 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
         // A __float128's, the one aggregate whose value the checker folds to a floating constant.
         check_lower_quad_constant(writer, value);
     }
-    else if (check_lower_tile_type(writer->program->types, value->type))
+    else if (check_lower_aggregate(writer, value->type) && check_lower_tile_type(writer->program->types, value->type))
     {
         check_lower_unsupported(writer, "constant expressions of 1024-byte tile vectors");
     }
