@@ -126,6 +126,8 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
     uint32_t count = 1;
     bool pie = false;
     bool static_link = false;
+    // Scoped -static is only an input-search control; foreign_arguments owns its saved flags and underflow check.
+    uint32_t state_depth = 0;
     bool shared = false;
     bool no_interpreter = false;
     for (int i = 0; valid && i < argc; i += 1)
@@ -184,9 +186,22 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         {
             pie = true;
         }
+        else if (strcmp(argument, "--push-state") == 0 || strcmp(argument, "--pop-state") == 0)
+        {
+            if (strcmp(argument, "--push-state") == 0)
+            {
+                state_depth += 1;
+            }
+            else if (state_depth != 0)
+            {
+                state_depth -= 1;
+            }
+            inputs[count] = argv[i];
+            count += 1;
+        }
         else if (strcmp(argument, "-static") == 0)
         {
-            static_link = true;
+            static_link = static_link || state_depth == 0;
             inputs[count] = argv[i];
             count += 1;
         }
