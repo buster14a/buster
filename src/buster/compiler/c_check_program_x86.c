@@ -31,7 +31,7 @@ typedef enum CheckX86LowerFamily
     // (vector a, int count): a shifted by the count, moved into an XMM register zero-extended (the form's count operand,
     // whose low 64 bits it reads: a count past the elements' bits gives 0, or the sign, as clang's code does).
     CHECK_X86_LOWER_SHIFT,
-    // (vector a, int index): the element at the index, an immediate, in a general register.
+    // (vector a, int index): the element at the index, an immediate, in a general register, or a float's in a floating one.
     CHECK_X86_LOWER_EXTRACT,
     // (vector a, int value, int index): a with the element at the index, an immediate, the value.
     CHECK_X86_LOWER_INSERT,
@@ -696,10 +696,13 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
         else if (rule->family == CHECK_X86_LOWER_EXTRACT)
         {
             // The element at the index's low bits, zero-extended into the general register (but VPEXTRQ's, whole); of a
-            // 256-bit vector, from its high lane extracted first where the index is in it.
+            // 256-bit vector, from its high lane extracted first where the index is in it. A float's (VPERMILPS, the rule's
+            // form) is the floating result's first element instead, its bits a float's: the caller converts an integer
+            // result by its value.
             const uint64_t count = (uint64_t)rule->bytes / rule->element;
             const uint64_t lane = 16u / rule->element;
             const uint64_t index = immediate & (count - 1);
+            const bool floating = rule->form == X86_FORM_VPERMILPS_X_XM128_IMM8_EVEX;
             uint32_t r = 0;
             if (index >= lane)
             {
@@ -709,23 +712,45 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             }
             // VPEXTRW's form takes the general register in reg and the vector in rm; the others' the other way round.
             const uint8_t vector = index >= lane ? v1 : v0;
-            row->records[r] = rule->form == X86_FORM_VPEXTRW_R32_X_IMM8_EVEX ? check_x86_lower_record(rule->form, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, vector) :
+            row->records[r] = floating ? check_x86_lower_record(rule->form, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, vector) :
+                              rule->form == X86_FORM_VPEXTRW_R32_X_IMM8_EVEX ? check_x86_lower_record(rule->form, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, vector) :
                                                                                  check_x86_lower_record(rule->form, vector, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
             row->records[r].immediate = (int32_t)(index & (lane - 1));
             row->record_count = (uint8_t)(r + 1);
             row->operand_count = 1;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;
-            row->result_class = rule->element == 1 ? BUSTER_TYPED_CLASS_U8 : rule->element == 2 ? BUSTER_TYPED_CLASS_U16 :
+            row->result_class = floating ? BUSTER_TYPED_CLASS_F32 : rule->element == 1 ? BUSTER_TYPED_CLASS_U8 : rule->element == 2 ? BUSTER_TYPED_CLASS_U16 :
                                 rule->element == 4 ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_I64;
             row->result_bytes = 0;
         }
         else if (rule->family == CHECK_X86_LOWER_INSERT)
         {
-            const uint64_t count = 16u / rule->element;
-            row->records[0] = check_x86_lower_record(rule->form, v0, v0, BUSTER_TIER0_ROLE_INTEGER(1));
-            row->records[0].immediate = (int64_t)(immediate & (count - 1));
-            row->record_count = 1;
+            // The element at the index's low bits, in place, of a vector of 8 or 16 bytes; of a 256-bit vector, into a copy of
+            // the lane that holds it in VECTOR(1) (its high lane extracted first, or its low one read where it is), which then
+            // goes back into its lane (VINSERTI32X4): an insertion of 16 bytes zeroes its register's bytes past them.
+            const uint64_t count = (uint64_t)rule->bytes / rule->element;
+            const uint64_t lane = 16u / rule->element;
+            const uint64_t index = immediate & (count - 1);
+            const bool wide = rule->bytes == 32;
+            const bool high = index >= lane;
+            uint32_t r = 0;
+            if (wide && high)
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, v0, 0, v1);
+                row->records[r].immediate = 1;
+                r += 1;
+            }
+            row->records[r] = check_x86_lower_record(rule->form, wide ? v1 : v0, high ? v1 : v0, BUSTER_TIER0_ROLE_INTEGER(1));
+            row->records[r].immediate = (int64_t)(index & (lane - 1));
+            r += 1;
+            if (wide)
+            {
+                row->records[r] = check_x86_lower_record(X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, v0, v0, v1);
+                row->records[r].immediate = high ? 1 : 0;
+                r += 1;
+            }
+            row->record_count = (uint8_t)r;
             row->operand_count = 2;
             row->operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
             row->operand_bytes[0] = rule->bytes;

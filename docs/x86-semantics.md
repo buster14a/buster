@@ -697,9 +697,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vshuff64x2, vshufi32x4, vshufi64x2, VEX's blends by an immediate
     (vblendps, vblendpd, vpblendd, vpblendw), the broadcasts
     (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
-    register too), the inserts and extracts (vinserti32x4, vinserti64x4,
-    vinsertf64x4, vextract in f32x4, f64x4, i32x4 and i64x4, vpinsr and vpextr
-    in b, w, d, q), the packs (vpacksswb,
+    register too), the inserts and extracts (vinsert and vextract in f32x4,
+    f32x8, f64x2, f64x4, i32x4, i32x8, i64x2 and i64x4, vinsertps, vpinsr and
+    vpextr in b, w, d, q), the packs (vpacksswb,
     vpackssdw, vpackuswb, vpackusdw), the narrowing moves (vpmov, vpmovs and
     vpmovus from d and q to b, w and d, and from w to b) and the widening ones
     (vpmovzx and vpmovsx from b, w and d), and the compresses

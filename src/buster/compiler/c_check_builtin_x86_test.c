@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 282 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 316 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -264,6 +264,27 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_blendpd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 700 },
     { "__builtin_ia32_blendps", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 699 },
     { "__builtin_ia32_blendps256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 838 },
+    { "__builtin_ia32_extract128i256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 564 },
+    { "__builtin_ia32_extractf32x4_256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 571 },
+    { "__builtin_ia32_extractf32x4_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 599 },
+    { "__builtin_ia32_extractf32x8_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 567 },
+    { "__builtin_ia32_extractf64x2_256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 569 },
+    { "__builtin_ia32_extractf64x2_512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 601 },
+    { "__builtin_ia32_extractf64x4_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 565 },
+    { "__builtin_ia32_extracti32x4_256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 572 },
+    { "__builtin_ia32_extracti32x8_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 568 },
+    { "__builtin_ia32_extracti64x2_256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 570 },
+    { "__builtin_ia32_extracti64x2_512_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 602 },
+    { "__builtin_ia32_insertf32x4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 626 },
+    { "__builtin_ia32_insertf32x4_256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 588 },
+    { "__builtin_ia32_insertf32x8", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 582 },
+    { "__builtin_ia32_insertf64x2_256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 586 },
+    { "__builtin_ia32_insertf64x2_512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 624 },
+    { "__builtin_ia32_insertf64x4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 584 },
+    { "__builtin_ia32_inserti32x4_256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 589 },
+    { "__builtin_ia32_inserti32x8", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 583 },
+    { "__builtin_ia32_inserti64x2_256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 587 },
+    { "__builtin_ia32_inserti64x2_512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 625 },
     { "__builtin_ia32_palignr512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 842 },
     { "__builtin_ia32_pblendd128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 698 },
     { "__builtin_ia32_pblendd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 839 },
@@ -304,9 +325,22 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_ucmpq256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 659 },
     { "__builtin_ia32_ucmpw128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 653 },
     { "__builtin_ia32_ucmpw256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 657 },
+    { "__builtin_ia32_vec_ext_v16hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 15, 0, 693 },
     { "__builtin_ia32_vec_ext_v2di", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 560 },
+    { "__builtin_ia32_vec_ext_v32qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 31, 0, 719 },
+    { "__builtin_ia32_vec_ext_v4hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 595 },
+    { "__builtin_ia32_vec_ext_v4sf", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 3, 0, 597 },
+    { "__builtin_ia32_vec_ext_v8si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 609 },
+    { "__builtin_ia32_vec_set_v16hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 714 },
     { "__builtin_ia32_vec_set_v16qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 713 },
     { "__builtin_ia32_vec_set_v2di", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 577 },
+    { "__builtin_ia32_vec_set_v32qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 31, 0, 738 },
+    { "__builtin_ia32_vec_set_v4di", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 619 },
+    { "__builtin_ia32_vec_set_v4hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 617 },
+    { "__builtin_ia32_vec_set_v8si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 673 },
+    { "__builtin_ia32_vinsertf128_pd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 578 },
+    { "__builtin_ia32_vinsertf128_ps256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 579 },
+    { "__builtin_ia32_vinsertf128_si256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 580 },
     { "__builtin_ia32_vperm2f128_pd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 832 },
     { "__builtin_ia32_vperm2f128_ps256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 833 },
     { "__builtin_ia32_vperm2f128_si256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 834 },
@@ -380,7 +414,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 282, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 316, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];

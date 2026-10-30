@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 282 audited SemaX86 constraint facts for 280
+`c_check_builtin_x86.c` adds 316 audited SemaX86 constraint facts for 314
 affected names in the frozen 1,492-name own-main target-builtin scope and the
 supplementary scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 128 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 162 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -813,7 +813,19 @@ the existing families or of new ones:
   (`blendps`, `blendpd`, `pblendd`, `pblendw256`). The immediate is the
   instruction's whole byte, which reads the bits clang's code reads: an align's
   low bits, a shuffle's and a blend's bit per element, a permute's bits 3 and
-  7, which zero its lanes, and a byte shift past its lane, which gives zeros.
+  7, which zero its lanes, and a byte shift past its lane, which gives zeros;
+- the rest of the elements and lanes: the elements of 256-bit vectors and of
+  8-byte ones (`vec_ext_v8si` to `vec_set_v32qi`, `vec_ext_v4hi` and
+  `vec_set_v4hi`) at the index's low bits, a 256-bit vector's lane taken out
+  into another register around an insertion and put back (VINSERTI32X4: an
+  insertion into 16 bytes zeroes its register past them), and a float's
+  (`vec_ext_v4sf`) into the floating result by VPERMILPS, its bits a float's
+  where an integer result would be converted by its value; the lanes of 128
+  and 256 bits inserted (`insertf32x4` to `inserti64x2_512`, and VEX's
+  `vinsertf128` builtins as VINSERTF32X4) and extracted, under a mask into w
+  (`extractf32x4_mask` to `extracti64x2_512_mask`) or not (`extract128i256`),
+  at the index's low bits; and `insertps128`, INSERTPS's element of b into a
+  under its zero mask.
 
 `test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
 at its immediate's edges, and past them, where a pragma turns off clang's

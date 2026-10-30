@@ -88,6 +88,63 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             "I2(permti256,v4di,q4,r4)I2(blendpd,v2df,d2,e2)I2(blendpd256,v4df,d4,e4)I2(blendps,v4sf,f4,g4)I2(blendps256,v8sf,f8,g8)"
             "I2(pblendd128,v4si,a4,b4)I2(pblendd256,v8si,a8,b8)I2(pblendw256,v16hi,w16,x16)return (int)h;}",
         },
+        {
+            // The elements of 256-bit vectors and of 8-byte ones extracted and inserted at every index, a float's too, and
+            // past the indices; the lanes of 128 and 256 bits inserted and extracted, under masks of none, some and all, at
+            // every index and past them; and INSERTPS at immediates that pick each element of b, each place in a and each
+            // zero mask.
+            "x86-rest-elements-lanes",
+            "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\n"
+            "typedef short v4hi __attribute__((vector_size(8)));\n"
+            "#define E4(name,v) __builtin_ia32_##name(v,0),__builtin_ia32_##name(v,1),__builtin_ia32_##name(v,2),__builtin_ia32_##name(v,3)\n"
+            "#define E8(name,v) E4(name,v),__builtin_ia32_##name(v,4),__builtin_ia32_##name(v,5),__builtin_ia32_##name(v,6),__builtin_ia32_##name(v,7)\n"
+            "#define E16(name,v) E8(name,v),__builtin_ia32_##name(v,8),__builtin_ia32_##name(v,9),__builtin_ia32_##name(v,10),__builtin_ia32_##name(v,11),"
+            "__builtin_ia32_##name(v,12),__builtin_ia32_##name(v,13),__builtin_ia32_##name(v,14),__builtin_ia32_##name(v,15)\n"
+            "#define E32(name,v) E16(name,v),__builtin_ia32_##name(v,16),__builtin_ia32_##name(v,17),__builtin_ia32_##name(v,18),__builtin_ia32_##name(v,19),"
+            "__builtin_ia32_##name(v,20),__builtin_ia32_##name(v,21),__builtin_ia32_##name(v,22),__builtin_ia32_##name(v,23),__builtin_ia32_##name(v,24),"
+            "__builtin_ia32_##name(v,25),__builtin_ia32_##name(v,26),__builtin_ia32_##name(v,27),__builtin_ia32_##name(v,28),__builtin_ia32_##name(v,29),"
+            "__builtin_ia32_##name(v,30),__builtin_ia32_##name(v,31)\n"
+            "#define S(name,v,x,i) __builtin_ia32_##name(v,x,i)\n"
+            "#define S4(name,v,x) S(name,v,x,0),S(name,v,x,1),S(name,v,x,2),S(name,v,x,3)\n"
+            "#define S8(name,v,x) S4(name,v,x),S(name,v,x,4),S(name,v,x,5),S(name,v,x,6),S(name,v,x,7)\n"
+            "#define S16(name,v,x) S8(name,v,x),S(name,v,x,8),S(name,v,x,9),S(name,v,x,10),S(name,v,x,11),S(name,v,x,12),S(name,v,x,13),S(name,v,x,14),"
+            "S(name,v,x,15)\n"
+            "#define S32(name,v,x) S16(name,v,x),S(name,v,x,16),S(name,v,x,17),S(name,v,x,18),S(name,v,x,19),S(name,v,x,20),S(name,v,x,21),S(name,v,x,22),"
+            "S(name,v,x,23),S(name,v,x,24),S(name,v,x,25),S(name,v,x,26),S(name,v,x,27),S(name,v,x,28),S(name,v,x,29),S(name,v,x,30),S(name,v,x,31)\n"
+            "#define L2(name,T,a,b) {T r[]={__builtin_ia32_##name(a,b,0),__builtin_ia32_##name(a,b,1),__builtin_ia32_##name(a,b,2),"
+            "__builtin_ia32_##name(a,b,3),__builtin_ia32_##name(a,b,4),__builtin_ia32_##name(a,b,-1)};FOLD(r);}\n"
+            "#define X2(name,T,a,w) {T r[]={__builtin_ia32_##name(a,0,w,0xff),__builtin_ia32_##name(a,1,w,0xff),__builtin_ia32_##name(a,2,w,0xff),"
+            "__builtin_ia32_##name(a,3,w,0xff),__builtin_ia32_##name(a,4,w,0xff),__builtin_ia32_##name(a,1,w,(unsigned char)m),"
+            "__builtin_ia32_##name(a,0,w,(unsigned char)(m>>8)),__builtin_ia32_##name(a,3,w,0),__builtin_ia32_##name(a,-1,w,(unsigned char)(m>>16))};FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v4sf f;v8si a;v16hi w;v32qi c;v4hi s;v4di q;v16sf f16;v8sf f8,g8;v4sf f4,g4;v8df d8;v4df d4,e4;"
+            "v2df d2;v16si i16;v8si i8;v4si i4;v8di q8;v2di q2;fill(&a,32,n);fill(&w,32,n+1);fill(&c,32,n+2);fill(&s,8,n+3);fill(&q,32,n+4);"
+            "fill(&i16,64,n+5);fill(&i8,32,n+6);fill(&i4,16,n+7);fill(&q8,64,n+8);fill(&q2,16,n+9);unsigned long long m=mask(n);"
+            "for(int i=0;i<4;i++){f[i]=(float)(i*7-n)*0.5f;f4[i]=(float)(i+n);g4[i]=-(float)(i*n)-0.25f;d4[i]=(double)i*n;e4[i]=-1.5*i;}"
+            "for(int i=0;i<8;i++){f8[i]=(float)(n-i)*1.25f;g8[i]=(float)(i*n);d8[i]=(double)(i-n)/3;}for(int i=0;i<16;i++)f16[i]=(float)(i*i-n);"
+            "d2[0]=n*0.75;d2[1]=-2.5;"
+            "float fe[]={E4(vec_ext_v4sf,f),__builtin_ia32_vec_ext_v4sf(f,4),__builtin_ia32_vec_ext_v4sf(f,-1)};FOLD(fe);"
+            "int ie[]={E8(vec_ext_v8si,a),__builtin_ia32_vec_ext_v8si(a,8),__builtin_ia32_vec_ext_v8si(a,-1)};FOLD(ie);"
+            "short we[]={E16(vec_ext_v16hi,w),__builtin_ia32_vec_ext_v16hi(w,16),__builtin_ia32_vec_ext_v4hi(s,0),__builtin_ia32_vec_ext_v4hi(s,1),"
+            "__builtin_ia32_vec_ext_v4hi(s,2),__builtin_ia32_vec_ext_v4hi(s,3),__builtin_ia32_vec_ext_v4hi(s,4)};FOLD(we);"
+            "char ce[]={E32(vec_ext_v32qi,c),__builtin_ia32_vec_ext_v32qi(c,32),__builtin_ia32_vec_ext_v32qi(c,-1)};FOLD(ce);"
+            "short x=(short)(n*977-3);char y=(char)(n*31+7);long long z=(long long)n*0x0123456789ll-5;int t=n*-12345+1;"
+            "v4hi ss[]={S4(vec_set_v4hi,s,x),S(vec_set_v4hi,s,x,4),S(vec_set_v4hi,s,x,-1)};FOLD(ss);"
+            "v8si as[]={S8(vec_set_v8si,a,t),S(vec_set_v8si,a,t,8),S(vec_set_v8si,a,-1,7)};FOLD(as);"
+            "v4di qs[]={S4(vec_set_v4di,q,z),S(vec_set_v4di,q,z,4),S(vec_set_v4di,q,-1,2)};FOLD(qs);"
+            "v16hi ws[]={S16(vec_set_v16hi,w,x),S(vec_set_v16hi,w,x,16)};FOLD(ws);v32qi cs[]={S32(vec_set_v32qi,c,y),S(vec_set_v32qi,c,y,33)};FOLD(cs);"
+            "L2(insertf32x4,v16sf,f16,f4)L2(insertf32x4_256,v8sf,f8,f4)L2(insertf32x8,v16sf,f16,g8)L2(insertf64x2_256,v4df,d4,d2)"
+            "L2(insertf64x2_512,v8df,d8,d2)L2(insertf64x4,v8df,d8,e4)L2(inserti32x4_256,v8si,i8,i4)L2(inserti32x8,v16si,i16,i8)"
+            "L2(inserti64x2_256,v4di,q,q2)L2(inserti64x2_512,v8di,q8,q2)L2(vinsertf128_pd256,v4df,d4,d2)L2(vinsertf128_ps256,v8sf,f8,g4)"
+            "L2(vinsertf128_si256,v8si,i8,i4)"
+            "X2(extractf32x4_mask,v4sf,f16,g4)X2(extractf32x4_256_mask,v4sf,f8,g4)X2(extractf32x8_mask,v8sf,f16,g8)X2(extractf64x2_256_mask,v2df,d4,d2)"
+            "X2(extractf64x2_512_mask,v2df,d8,d2)X2(extractf64x4_mask,v4df,d8,e4)X2(extracti32x4_256_mask,v4si,i8,i4)X2(extracti32x8_mask,v8si,i16,i8)"
+            "X2(extracti64x2_256_mask,v2di,q,q2)X2(extracti64x2_512_mask,v2di,q8,q2)"
+            "v2di xl[]={__builtin_ia32_extract128i256(q,0),__builtin_ia32_extract128i256(q,1),__builtin_ia32_extract128i256(q,2),"
+            "__builtin_ia32_extract128i256(q,-1)};FOLD(xl);"
+            "v4sf ip[]={__builtin_ia32_insertps128(f4,g4,0),__builtin_ia32_insertps128(f4,g4,0x10),__builtin_ia32_insertps128(f4,g4,0x60),"
+            "__builtin_ia32_insertps128(f4,g4,0xb0),__builtin_ia32_insertps128(f4,g4,0xc5),__builtin_ia32_insertps128(f4,g4,0x0f),"
+            "__builtin_ia32_insertps128(g4,f4,0x5a),__builtin_ia32_insertps128(f4,g4,0xff)};FOLD(ip);return (int)h;}",
+        },
     };
     const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
