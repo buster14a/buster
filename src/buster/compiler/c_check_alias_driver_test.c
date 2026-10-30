@@ -150,8 +150,77 @@ static void check_test_alias_errors(CheckTest* test, const char* clang, const ch
     unlink(path);
 }
 
+// Aliases of overloadable functions, whose names are their symbols' as the emission gives them: the mangled names of
+// global and static ones, and an asm label's, which replaces the mangling. Each alias at its definition's section, value
+// and size in clang's object and in both paths', and the program run as clang's build.
+static void check_test_driver_alias_overloads(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "#include <stdio.h>\n"
+        "int f(int x) __attribute__((overloadable));\n"
+        "int f(int x) __attribute__((overloadable)) { return x + 1; }\n"
+        "long f(long x) __attribute__((overloadable)) { return x + 2; }\n"
+        "int g(int) __attribute__((alias(\"_Z1fi\")));\n"
+        "long h(long) __attribute__((alias(\"_Z1fl\")));\n"
+        "static int s(int x) __attribute__((overloadable)) { return x * 3; }\n"
+        "static int s(char x) __attribute__((overloadable)) { return x; }\n"
+        "int t(int) __attribute__((alias(\"_ZL1si\")));\n"
+        "int k(int x) __asm__(\"k_label\") __attribute__((overloadable));\n"
+        "int k(int x) __attribute__((overloadable)) { return x - 4; }\n"
+        "int m(int) __attribute__((alias(\"k_label\")));\n"
+        "int main(void) { printf(\"%d %ld %d %d %d %d %d\\n\", g(1), h(2), t(3), m(10), s((char)5), f(7), k(20)); return 0; }\n";
+    static const char* const placed[][2] = { { "g", "_Z1fi" }, { "h", "_Z1fl" }, { "t", "_ZL1si" }, { "m", "k_label" } };
+    char path[512];
+    char objects[3][512];
+    char programs[3][512];
+    char captured[3][512] = { { 0 } };
+    snprintf(path, sizeof(path), "%s/alias-overloads.c", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1);
+    check_test_expect(test, written, "the overloadable aliases' fixture is written");
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        snprintf(objects[p], sizeof(objects[p]), "%s/alias-overloads-%u.o", directory, p);
+        snprintf(programs[p], sizeof(programs[p]), "%s/alias-overloads-%u", directory, p);
+        char* text = NULL;
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        if (!compiled && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        check_test_expect(test, compiled, "aliases of overloadable functions compile through clang and both checker paths");
+        for (uint32_t a = 0; compiled && a < BUSTER_ARRAY_LENGTH(placed); a += 1)
+        {
+            CheckTestAliasSymbol alias = { 0 };
+            CheckTestAliasSymbol base = { 0 };
+            const bool read = check_test_alias_symbol(objects[p], placed[a][0], &alias) && check_test_alias_symbol(objects[p], placed[a][1], &base);
+            char description[256];
+            snprintf(description, sizeof(description), "%s is at %s's section, value and size in %s's object", placed[a][0], placed[a][1],
+                     p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path");
+            check_test_expect(test, read && alias.section != SHN_UNDEF && alias.section == base.section && alias.value == base.value && alias.size == base.size,
+                              description);
+        }
+        char* const link[] = { (char*)clang, objects[p], "-o", programs[p], NULL };
+        const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "the overloadable aliases' objects link and run");
+        unlink(objects[p]);
+        unlink(programs[p]);
+    }
+    for (uint32_t p = 1; written && p < 3; p += 1)
+    {
+        char description[1536];
+        snprintf(description, sizeof(description), "the %s path's overloadable aliases run as clang's: %s against %s", p == 1 ? "vector" : "scalar", captured[p],
+                 captured[0]);
+        check_test_expect(test, captured[0][0] != 0 && strcmp(captured[p], captured[0]) == 0, description);
+    }
+    unlink(path);
+}
+
 static void check_test_driver_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_alias_overloads(test, clang, executable, directory);
     static const char source[] =
         "#include <stdio.h>\n"
         "#if __has_attribute(alias) && __has_attribute(__ifunc__) && __has_attribute(weakref) && __has_c_attribute(gnu::alias)\n"
@@ -353,6 +422,12 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
                             "extern int v;\nint v = 1;\nint g(void) __attribute__((alias(\"v\")));\nint f(void) { return 1; }\n"
                             "extern int w __attribute__((alias(\"f\")));\n",
                             "cannot alias a variable with a function", false);
+    // An overloadable function's identifier, which names nothing: its symbol's name is its mangled one, which clang's
+    // second note gives (check_driver_overload_name).
+    check_test_alias_errors(test, clang, executable, directory, "an overloadable function's identifier",
+                            "int f(int x) __attribute__((overloadable));\nint f(int x) __attribute__((overloadable)) { return x; }\n"
+                            "int g(int) __attribute__((alias(\"f\")));\n",
+                            "alias must point to a defined variable or function", false);
     check_test_alias_errors(test, clang, executable, directory, "alias of an inline function",
                             "inline int f(void) { return 1; }\nint g(void) __attribute__((alias(\"f\")));\n", "alias must point to a defined variable or function",
                             false);

@@ -1118,6 +1118,35 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
     return valid && count == 0;
 }
 
+// The name clang gives an overloadable function's symbol where no asm label renames it, its mangled one
+// (check_mangle_name), in `output`: an empty one for an object that isn't an overloadable function's, or whose signature
+// the mangling refuses.
+static String8 check_driver_overload_name(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, uint32_t object, Arena* output)
+{
+    const CheckGraph* graph = &program->input->graph;
+    String8 spelling = { 0 };
+    for (uint32_t i = 0; spelling.length == 0 && i < graph->overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object == object)
+        {
+            CheckMangleSource mangling = {
+                .input = program->input,
+                .parser = parser,
+                .identifiers = identifiers,
+                .types = program->types,
+                .output = output,
+                .scalar = parser->options.scalar,
+                .internal = program->input->linkage[candidate->declaration] == 1,
+            };
+            Scratch work = scratch_begin(output);
+            check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);
+            scratch_end(work);
+        }
+    }
+    return spelling;
+}
+
 // Code generation's check of GNU's aliases and ifuncs (#147, CheckProgram.aliases): clang's errors, at -c and when it
 // links but not at -fsyntax-only, as CodeGenModule::checkAliases reports them at the unit's end, at each one's attribute,
 // in the order clang emits them (by their first declarations with the attribute), with clang's notes. A shape the
@@ -1199,8 +1228,10 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
             if (declaration < parser->tokens.count && parser->tokens.names[declaration] == spelled)
             {
                 const String8 label = check_program_alias_label(program->input, declaration);
-                const String8 name = label.length != 0 ? label :
-                                     (String8){ .pointer = (char*)intern_bytes(pp->table, spelled), .length = intern_length(pp->table, spelled) };
+                const String8 mangled = label.length == 0 ? check_driver_overload_name(program, parser, pp->table, program->symbol_objects[s], scratch) : (String8){ 0 };
+                const String8 name = label.length != 0   ? label :
+                                     mangled.length != 0 ? mangled :
+                                                           (String8){ .pointer = (char*)intern_bytes(pp->table, spelled), .length = intern_length(pp->table, spelled) };
                 char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, name.length + 64);
                 valid = text != 0;
                 if (valid)

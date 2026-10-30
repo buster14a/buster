@@ -125,9 +125,10 @@ static bool check_program_alias_named(const CheckProgram* program, const CheckPr
 
 // The entries' names' objects (CheckProgramAlias.target_object), with their definitions: one per distinct name, a
 // group, which `groups` gives each entry. A group's object is its earliest declaration's that the name names: by its
-// identifier where its object has no asm label (on any declaration), or by its label. The first scan finds the labels
-// and the identifiers' matches, the second the groups' objects' definitions: a function's body, or a variable's
-// definition, else its first tentative one.
+// identifier where its object has no asm label (on any declaration), or by its label, and an overloadable function's
+// by its mangled name where it has no label, never by its identifier. The first scan finds the labels and the
+// identifiers' matches, the second the groups' objects' definitions: a function's body, or a variable's definition,
+// else its first tentative one.
 static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* aliases, uint32_t count, const InternTable* identifiers, bool scalar,
                                       Arena* scratch)
 {
@@ -214,14 +215,77 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
             }
         }
     }
-    // An identifier names its object where no declaration of it has a label.
+    // An overloadable function's name is the one the emission gives its symbol (check_program_emit): its mangled one
+    // (check_mangle_name) where none of its declarations has a label, and never its identifier, which the scan below
+    // passes over. Each such object of the unit's overload candidates once (`overloaded`: 1 for an overloadable
+    // function's object, 2 once its name is matched), an object with a label left to the labels.
+    const CheckGraph* graph = &input->graph;
+    uint8_t* overloaded = valid && graph->overload_candidate_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
+    valid = valid && (graph->overload_candidate_count == 0 || overloaded != 0);
+    if (overloaded != 0)
+    {
+        memset(overloaded, 0, program->object_count);
+    }
+    for (uint32_t i = 0; overloaded != 0 && i < graph->overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0 && candidate->object != 0 && candidate->object < program->object_count)
+        {
+            overloaded[candidate->object] = 1;
+        }
+    }
+    CheckMangleSource mangling = {
+        .input = input,
+        .parser = parser,
+        .identifiers = identifiers,
+        .types = program->types,
+        .output = scratch,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
+    };
+    Scratch mangle = { 0 };
+    for (uint32_t i = 0; valid && overloaded != 0 && identifiers != NULL && i < graph->overload_candidate_count; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + i;
+        const uint32_t object = candidate->object;
+        const uint32_t token = candidate->declaration;
+        const bool unnamed = object != 0 && object < program->object_count && overloaded[object] == 1 && token < token_count &&
+                             check_program_alias_named(program, aliases, count, token);
+        const uint32_t labelled = unnamed ? check_program_alias_lower(by_object, label_count, object) : label_count;
+        if (unnamed && (labelled == label_count || (uint32_t)(by_object[labelled] >> 32) != object))
+        {
+            overloaded[object] = 2;
+            mangle = mangle.arena == NULL ? scratch_begin(scratch) : mangle;
+            mangling.internal = input->linkage[token] == 1;
+            String8 spelling = { 0 };
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[token], mangle.arena, &spelling);
+            // A signature the mangling refuses names nothing here, and the emission refuses it if it emits the function.
+            valid = status != CHECK_MANGLE_RESOURCE;
+            const uint32_t hash = status == CHECK_MANGLE_OK ? (uint32_t)link_hash((const uint8_t*)spelling.pointer, spelling.length) : 0;
+            for (uint32_t h = status == CHECK_MANGLE_OK ? check_program_alias_lower(by_hash, count, hash) : count; h < count && (uint32_t)(by_hash[h] >> 32) == hash;
+                 h += 1)
+            {
+                const uint32_t k = (uint32_t)by_hash[h];
+                const uint32_t group = groups[k];
+                if (check_program_alias_same(aliases[k].target, spelling) && token < earliest[group])
+                {
+                    earliest[group] = token;
+                }
+            }
+        }
+    }
+    if (mangle.arena != NULL)
+    {
+        scratch_end(mangle);
+    }
+    // An identifier names its object where no declaration of it has a label, but an overloadable function's.
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
         const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_nonzero(input->static_objects, first, token_count);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            const uint32_t identifier = check_program_alias_named(program, aliases, count, token) ? parser->tokens.names[token] : 0;
+            const bool named = check_program_alias_named(program, aliases, count, token) && (overloaded == 0 || overloaded[input->objects[token]] == 0);
+            const uint32_t identifier = named ? parser->tokens.names[token] : 0;
             const uint32_t at = identifier != 0 ? check_program_alias_lower(by_name, group_count, identifier) : group_count;
             const uint32_t object = input->objects[token];
             const uint32_t labelled = at < group_count && (uint32_t)(by_name[at] >> 32) == identifier ? check_program_alias_lower(by_object, label_count, object) : label_count;

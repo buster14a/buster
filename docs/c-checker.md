@@ -2440,7 +2440,9 @@ What the lowering covers past scalars (#145's programs):
   symbol it names: an object's asm label (from any of its declarations), or
   else its identifier, of a file-scope declaration with linkage that isn't a
   weakref's (a weakref's own name is no symbol); a block-scope static's made
-  name is none, as clang finds none. The names are grouped by their bytes'
+  name is none, as clang finds none. An overloadable function's name is the
+  one its symbol gets: its mangled name (`check_mangle_name`, `_Z1fi`) where
+  no asm label replaces it, never its identifier. The names are grouped by their bytes'
   hashes and found by their identifiers' ids in two scans of the static
   declarations, 64 tokens at a time, which a unit without these attributes
   never makes. The chains of aliases are followed by pointer jumping (at most
@@ -2476,7 +2478,8 @@ What the lowering covers past scalars (#145's programs):
   order clang emits the aliases): "alias must point to a defined variable or
   function" and "ifunc must point to a defined function" with clang's notes
   (that the name must be the mangled one, and the name clang gives each
-  emitted, referenced or defined declaration of that identifier), "alias (or
+  emitted, referenced or defined declaration of that identifier, an
+  overloadable function's mangled one: `check_driver_overload_name`), "alias (or
   ifunc) definition is part of a cycle", "cannot alias a variable with a
   function" and "cannot alias a function with a variable" with the aliasee's
   definition noted, and "ifunc resolver function must return a pointer".
