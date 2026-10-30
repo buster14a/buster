@@ -44,9 +44,9 @@
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team or a session, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
 //   - Sessions: lane_session_run, lane_session_current, and lane_serve_begin, lane_serve_end, lane_serve and
-//     lane_serving, with which lane 0 runs the regions of a flow that is still serial code with lane_run calls; and a
-//     command's flow of rounds: LaneFlow, lane_flow_begin, lane_flow_lanes, lane_flow_round_begin, lane_flow_round_end,
-//     lane_flow_next and lane_flow_end.
+//     lane_serving, with which lane 0 runs the regions of serial code with lane_run calls (the in-process driver
+//     tests'); and a command's flow of rounds: LaneFlow, lane_flow_begin, lane_flow_lanes, lane_flow_round_begin,
+//     lane_flow_round_end, lane_flow_next and lane_flow_end.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -1276,8 +1276,8 @@ static __attribute__((unused)) uint32_t lane_session_settle(void);
 static __attribute__((unused)) LaneSession* lane_session_current(void);
 // Lane 0 of a session's group serves the others' regions (lane_run) from its serial work: lane_serve_begin, which settles
 // a lazy session first (lane_session_settle), makes it run alone between them, and lane_serve_end ends the serving
-// lanes' lane_serve. The other lanes of the group call
-// lane_serve meanwhile: a transitional shape (#905) for the flows that are still serial code with lane_run calls.
+// lanes' lane_serve. The other lanes of the group call lane_serve meanwhile (#905): for serial code with lane_run calls,
+// which the in-process driver tests are, where a command's flow is a LaneFlow (below).
 static __attribute__((unused)) void lane_serve_begin(void);
 static __attribute__((unused)) void lane_serve_end(void);
 static __attribute__((unused)) void lane_serve(void);

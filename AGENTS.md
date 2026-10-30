@@ -926,8 +926,8 @@ designs and the compilers already built this way.
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
   #87), into the exact path's link; the resolution, the conversion and the
-  write are regions of lane 0's on the session's lanes, which serve them and
-  keep their scratch arenas from one to the next (#501), and `--time` reports
+  write are rounds of the link's flow (a `LaneFlow`) on the session's lanes,
+  which keep their scratch arenas from one to the next (#501), and `--time` reports
   the lanes, the session's start, the first inputs' opening with their
   objects' bytes and the resolution's, the conversion's and the writer's
   phases.

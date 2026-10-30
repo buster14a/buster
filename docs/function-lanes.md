@@ -237,9 +237,9 @@ stages stay one call chain, its frames holding the unit's state across the
 rounds (an executable's emission takes another round when binding finds the
 runtime's snapshot damaged). Several units' command runs its wide parts as
 rounds of its flow too (`CheckUnitsFlow`, the [translation units
-guide](translation-units.md)); `link-foreign` runs its existing operations
-as regions of lane 0's that the session's lanes serve (`lane_serve`), until its
-flow is converted.
+guide](translation-units.md)), and so does `link-foreign` (the [driver's
+contract](foreign-driver.md)): only the in-process driver tests' session
+serves regions (`lane_serve`).
 
 ### Memory
 

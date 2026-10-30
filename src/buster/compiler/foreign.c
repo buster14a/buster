@@ -584,7 +584,20 @@ struct Foreign
     bool started;
     // The first failure by position, once the lanes are done.
     ForeignFailure failure;
+    // link-foreign's flow of rounds (#905, foreign_driver.c), whose session's lanes the resolution and the conversion run
+    // on as rounds rather than lane_run's group: null elsewhere (the tests' and the benchmarks' calls).
+    LaneFlow* flow;
 };
+
+// link-foreign's rounds' kinds (#905): the resolution's (foreign_lane_main), the conversion's (foreign_link_lane) and the
+// writer's (foreign_driver_write_lane), which foreign_driver.c's flow follows.
+typedef enum ForeignFlowRound
+{
+    FOREIGN_FLOW_END,
+    FOREIGN_FLOW_RESOLVE,
+    FOREIGN_FLOW_CONVERT,
+    FOREIGN_FLOW_WRITE,
+} ForeignFlowRound;
 
 // Reads a command line's inputs and the options this linker takes: paths; -l NAME and -lNAME (-l:FILE for a file by
 // name); -L DIR and -LDIR; -u NAME, --undefined NAME and --undefined=NAME; --whole-archive and --no-whole-archive;
@@ -3668,9 +3681,19 @@ static ForeignFailure foreign_run_lanes(Foreign* foreign, uint32_t lanes, const 
     {
         // The lanes past `lanes` hold nothing: only foreign_open_first, lane 0's, ran before.
         foreign->lanes = lanes;
-        // lane_run returns false when it couldn't start every lane, and then ran none, and also when a lane couldn't be
-        // pinned to its CPU, which only a benchmark asks for: the lanes ran then.
-        lane_run(lanes, foreign_lane_main, foreign, cpus);
+        if (foreign->flow != 0)
+        {
+            // link-foreign's: a round of its flow, which every lane runs (#905).
+            lane_flow_round_begin(foreign->flow, FOREIGN_FLOW_RESOLVE, foreign, lanes);
+            foreign_lane_main(foreign);
+            lane_flow_round_end(foreign->flow);
+        }
+        else
+        {
+            // lane_run returns false when it couldn't start every lane, and then ran none, and also when a lane couldn't
+            // be pinned to its CPU, which only a benchmark asks for: the lanes ran then.
+            lane_run(lanes, foreign_lane_main, foreign, cpus);
+        }
         if (!foreign->started)
         {
             result = foreign_failure(FOREIGN_ERROR_LANES, 0, 0, 0);
