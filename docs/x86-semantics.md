@@ -687,8 +687,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
   - the logic: vpandq, vporq, vpxorq, vpternlogd and vpternlogq;
   - the shifts: vpsll, vpsrl and vpsra in w, d and q, by an immediate and by an
     XMM register's count, vpsraq, the variable ones (vpsllv, vpsrlv, vpsrav in
-    w, d and q), vpslldq, vpsrldq, vprold, and AVX512VBMI2's concatenating
-    vpshldv and vpshrdv (w, d, q);
+    w, d and q), vpslldq, vpsrldq, the rotates by an immediate (vprold,
+    vprolq, vprord, vprorq), and AVX512VBMI2's concatenating vpshldv and
+    vpshrdv (w, d, q);
   - the moves of elements: the permutes (vpermb, vpermw, vpermd, vpermq,
     vpermps, vpermpd, vpermilps, vpermilpd, vpermt2 in b, w, d, q, ps and pd),
     vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,

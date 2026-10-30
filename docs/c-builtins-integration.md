@@ -726,11 +726,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 222 audited SemaX86 constraint facts for 220
-affected names in the frozen 1,492-name own-main target-builtin scope and five
-additional names: 87
+`c_check_builtin_x86.c` adds 239 audited SemaX86 constraint facts for 237
+affected names in the frozen 1,492-name own-main target-builtin scope and the
+supplementary scope: 87
 rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 68 direct ranges.
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 85 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -790,6 +790,29 @@ under each of MXCSR's four rounding modes, set and restored around it, and throu
 znver5. The program that includes the header lowers only what its roots reach,
 as `-c` does (`check_test_program_includes`), since the header's MMX functions
 call builtins no row takes.
+
+#148's rest of clang's x86 builtins, which no build of this compiler calls, join
+the supplementary scope by family, each with its SemaX86 facts and the rows of
+the existing families or of new ones:
+
+- the unsigned compares of quadwords and words at 16 and 32 bytes
+  (`ucmpq128_mask` to `ucmpw256_mask`), whose rows the compares' family had; a
+  quadword's extract and the insertions of a byte and a quadword
+  (`vec_ext_v2di`, `vec_set_v16qi`, `vec_set_v2di`), which had rows too;
+- the rotates by an immediate at each width (`prold`, `prolq`, `prord` and
+  `prorq` of 128, 256 and 512 bits), VPROL's and VPROR's: the count is the
+  immediate's whole byte, which the instruction takes modulo the elements' bits
+  as clang's funnel shifts take theirs.
+
+`test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
+at its immediate's edges, and past them, where a pragma turns off clang's
+`-Wargument-outside-range` and both compilers' code takes the immediate's low
+bits (an index's, a predicate's), against clang -O0's code for znver5, run
+where the host has the features. `test-check-builtins-x86` compiles every
+supplementary fact's edges with clang (`check_builtin_x86_test_clang_supplementary`):
+a function per value of the constrained argument, the others at values their
+facts accept, declared at the prototype's types as clang spells them. Clang
+must refuse exactly the values the fact refuses, with the fact's bounds.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these

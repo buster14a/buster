@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 222 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 239 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -255,6 +255,24 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_vec_ext_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 7, 0, 608 },
     { "__builtin_ia32_vec_set_v4si", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 618 },
     { "__builtin_ia32_vec_set_v8hi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 672 },
+    // #148: the x86 builtins past the inventory (c_builtin_supplementary_scope.inc), by SemaX86.cpp too.
+    { "__builtin_ia32_prold128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 789 },
+    { "__builtin_ia32_prold256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 790 },
+    { "__builtin_ia32_prolq128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 791 },
+    { "__builtin_ia32_prolq256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 792 },
+    { "__builtin_ia32_prolq512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 788 },
+    { "__builtin_ia32_prord128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 795 },
+    { "__builtin_ia32_prord256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 796 },
+    { "__builtin_ia32_prorq128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 797 },
+    { "__builtin_ia32_prorq256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 798 },
+    { "__builtin_ia32_prorq512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 794 },
+    { "__builtin_ia32_ucmpq128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 655 },
+    { "__builtin_ia32_ucmpq256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 659 },
+    { "__builtin_ia32_ucmpw128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 653 },
+    { "__builtin_ia32_ucmpw256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 657 },
+    { "__builtin_ia32_vec_ext_v2di", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 560 },
+    { "__builtin_ia32_vec_set_v16qi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 15, 0, 713 },
+    { "__builtin_ia32_vec_set_v2di", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 1, 0, 577 },
 };
 
 static bool check_builtin_x86_test_expect(CheckBuiltinX86Test* test, bool condition, const char* description, uint32_t item)
@@ -319,7 +337,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 222, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 239, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];
@@ -761,6 +779,182 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
 #undef BUSTER_CHECK_BUILTIN_X86_TEST_TYPES
 #undef BUSTER_CHECK_BUILTIN_X86_TEST_TARGET
 
+// A fact's value of its constrained argument that clang takes: a range's from its bottom to its top, a set's members.
+static bool check_builtin_x86_test_accepts(const CheckBuiltinX86TestFact* fact, int64_t value)
+{
+    const bool result = fact->constraint == CHECK_BUILTIN_X86_CONSTRAINT_RANGE ? value >= fact->low && value <= fact->high :
+                                                                                 value >= 0 && value < 32 && (fact->accepted & (UINT32_C(1) << value)) != 0;
+    return result;
+}
+
+// The supplementary scope's facts against clang itself (#148): for each fact of a name the scope holds, a function per value
+// of its constrained argument, which calls the builtin with the function's parameters as its other arguments, declared at
+// the prototype's types (clang's metadata decoded, spelled as clang spells them: type_print), the name's other facts'
+// arguments at values they accept and its other ICEs 0. A range's values are its edges, its bottom and top and one past
+// each; a set's are -1 to 16. Clang must report an error on each line whose value the fact refuses, and on no other: a
+// range's with its bounds (warn_argument_invalid_range, an error by default), a set's as an invalid rounding argument or
+// scale. So each fact read from SemaX86.cpp is clang's, its argument's index too.
+static void check_builtin_x86_test_clang_supplementary(CheckBuiltinX86Test* test, TypeTable* table, const char* clang)
+{
+    const size_t capacity = (size_t)1 << 22;
+    char* source = malloc(capacity);
+    char* diagnostics = malloc(capacity);
+    // Each line's case: its fact's index and its value, the first line the file's own.
+    uint32_t* lines = malloc(sizeof(uint32_t) * 8192);
+    int64_t* values = malloc(sizeof(int64_t) * 8192);
+    bool ready = source != NULL && diagnostics != NULL && lines != NULL && values != NULL;
+    check_builtin_x86_test_expect(test, ready, "supplementary facts' Clang source memory", 0);
+    size_t used = 0;
+    uint32_t line_count = 1;
+    uint32_t facts = 0;
+    Arena text = arena_reserve(UINT64_C(1) << 20);
+    ready = ready && text.base != NULL;
+    for (uint32_t f = 0; ready && f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
+    {
+        const CheckBuiltinX86TestFact* fact = check_builtin_x86_test_facts + f;
+        const uint32_t length = (uint32_t)strlen(fact->name);
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_supplementary_in_scope(fact->name, length) ? builtin_intrinsic_lookup(fact->name, length) : NULL;
+        BuiltinIntrinsicTypeResult types = { 0 };
+        if (info != NULL)
+        {
+            const BuiltinIntrinsicTypeInput input = {
+                .encoding = info->encoding,
+                .encoding_length = info->encoding_length,
+                .attributes = info->attributes,
+                .attributes_length = info->attributes_length,
+                .custom_typechecking = info->custom_typechecking,
+            };
+            builtin_intrinsic_types_decode(table, &input, &types);
+            check_builtin_x86_test_expect(test, types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && fact->argument < types.parameter_count,
+                                          "a supplementary fact's prototype decodes with its argument", f);
+        }
+        const bool range = fact->constraint == CHECK_BUILTIN_X86_CONSTRAINT_RANGE;
+        const int64_t range_values[] = { (int64_t)fact->low - 1, fact->low, fact->high, (int64_t)fact->high + 1 };
+        const uint32_t value_count = range ? 4 : 18;
+        for (uint32_t v = 0; info != NULL && types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && fact->argument < types.parameter_count && v < value_count;
+             v += 1)
+        {
+            const int64_t value = range ? range_values[v] : (int64_t)v - 1;
+            ready = ready && line_count < 8192 && used + 4096 < capacity;
+            if (ready)
+            {
+                used += (size_t)snprintf(source + used, capacity - used, "void f%u(", line_count);
+                for (uint32_t p = 0; p < types.parameter_count; p += 1)
+                {
+                    char name[16];
+                    snprintf(name, sizeof(name), "p%u", p);
+                    const String8 printed = type_print(table, &text, types.parameters[p], (String8){ .pointer = name, .length = strlen(name) }, 0, 0);
+                    used += (size_t)snprintf(source + used, capacity - used, "%s%.*s", p != 0 ? "," : "", (int)printed.length, printed.pointer);
+                    arena_pop_to(&text, 0);
+                }
+                used += (size_t)snprintf(source + used, capacity - used, "){(void)%s(", fact->name);
+                for (uint32_t p = 0; p < types.parameter_count; p += 1)
+                {
+                    // The fact's argument takes the value, another fact's of the name a value it accepts, another ICE 0.
+                    int64_t constant = (types.ice_parameters & (UINT64_C(1) << p)) != 0 ? 0 : -2;
+                    for (uint32_t other = 0; other < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); other += 1)
+                    {
+                        const CheckBuiltinX86TestFact* companion = check_builtin_x86_test_facts + other;
+                        if (strcmp(companion->name, fact->name) == 0 && companion->argument == p)
+                        {
+                            constant = companion->constraint == CHECK_BUILTIN_X86_CONSTRAINT_RANGE ? (int64_t)companion->low :
+                                       companion->constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ? 1 : 4;
+                        }
+                    }
+                    constant = p == fact->argument ? value : constant;
+                    if (constant == -2 && p != fact->argument)
+                    {
+                        used += (size_t)snprintf(source + used, capacity - used, "%sp%u", p != 0 ? "," : "", p);
+                    }
+                    else
+                    {
+                        used += (size_t)snprintf(source + used, capacity - used, "%s%lld", p != 0 ? "," : "", (long long)constant);
+                    }
+                }
+                used += (size_t)snprintf(source + used, capacity - used, ");}\n");
+                lines[line_count] = f;
+                values[line_count] = value;
+                line_count += 1;
+            }
+        }
+        facts += info != NULL;
+    }
+    char directory[] = "/tmp/buster-check-x86-supplementary-XXXXXX";
+    ready = ready && mkdtemp(directory) != NULL;
+    char path[160];
+    snprintf(path, sizeof(path), "%s/facts.c", directory);
+    ready = ready && parse_test_write(path, source, used);
+    char* arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-march=znver5", "-fno-caret-diagnostics", "-fno-color-diagnostics",
+                          "-ferror-limit=0", path, NULL };
+    OracleRun run = {
+        .purpose = "checker x86 supplementary facts oracle",
+        .arguments = arguments,
+        .dependencies = true,
+        .timeout = 60,
+    };
+    const int status = ready ? oracle_test_run(&run, 0, 0, diagnostics, capacity) : -1;
+    ready = ready && (status == 0 || status == 1);
+    check_builtin_x86_test_expect(test, ready, "supplementary facts' Clang run", 0);
+    // The lines with an error, each against its case: refused exactly where the fact refuses, with the fact's message.
+    uint8_t* reported = calloc(line_count + 1, 1);
+    ready = ready && reported != NULL;
+    const size_t path_length = strlen(path);
+    for (const char* cursor = ready ? diagnostics : NULL; cursor != NULL && *cursor != 0;)
+    {
+        const char* end = strchr(cursor, '\n');
+        const size_t length = end != NULL ? (size_t)(end - cursor) : strlen(cursor);
+        if (length > path_length + 1 && memcmp(cursor, path, path_length) == 0 && cursor[path_length] == ':')
+        {
+            char* after = NULL;
+            const unsigned long line = strtoul(cursor + path_length + 1, &after, 10);
+            const char* error = strstr(cursor, ": error: ");
+            if (line > 0 && line < line_count && error != NULL && error < cursor + length)
+            {
+                const CheckBuiltinX86TestFact* fact = check_builtin_x86_test_facts + lines[line];
+                char expected[96];
+                if (fact->constraint == CHECK_BUILTIN_X86_CONSTRAINT_RANGE)
+                {
+                    snprintf(expected, sizeof(expected), "is outside the valid range [%u, %u]", fact->low, fact->high);
+                }
+                else
+                {
+                    snprintf(expected, sizeof(expected), "%s", fact->constraint == CHECK_BUILTIN_X86_CONSTRAINT_SCALE ? "scale argument must be" : "invalid rounding argument");
+                }
+                const char* found = strstr(error, expected);
+                reported[line] |= found != NULL && found < cursor + length ? 1 : 2;
+            }
+        }
+        cursor = end != NULL ? end + 1 : NULL;
+    }
+    uint32_t mismatched = 0;
+    for (uint32_t line = 1; ready && line < line_count; line += 1)
+    {
+        const CheckBuiltinX86TestFact* fact = check_builtin_x86_test_facts + lines[line];
+        const bool refused = !check_builtin_x86_test_accepts(fact, values[line]);
+        const bool right = refused ? reported[line] == 1 : reported[line] == 0;
+        if (!right && mismatched < 8)
+        {
+            fprintf(stderr, "test-check-builtins-x86: supplementary fact %s at %lld: clang %s\n", fact->name, (long long)values[line],
+                    reported[line] == 0 ? "accepts it" : reported[line] == 1 ? "refuses it" : "refuses it otherwise");
+        }
+        mismatched += !right;
+    }
+    char description[160];
+    snprintf(description, sizeof(description), "the supplementary scope's %u facts are clang's (%u cases, %u not)", facts, line_count - 1, mismatched);
+    check_builtin_x86_test_expect(test, ready && facts != 0 && mismatched == 0, description, 0);
+    if (ready)
+    {
+        unlink(path);
+        rmdir(directory);
+    }
+    arena_release(&text);
+    free(reported);
+    free(values);
+    free(lines);
+    free(diagnostics);
+    free(source);
+}
+
 static int run_check_builtin_x86_tests(int argc, char** argv)
 {
     const bool epoch = oracle_epoch_begin();
@@ -792,6 +986,7 @@ static int run_check_builtin_x86_tests(int argc, char** argv)
             check_builtin_x86_test_contexts(&test, &types.table);
             check_builtin_x86_test_witnesses(&test, &types.table);
             check_builtin_x86_test_pages(&test, &types.table);
+            check_builtin_x86_test_clang_supplementary(&test, &types.table, clang);
         }
         check_test_types_close(&types);
         check_builtin_x86_test_clang(&test, clang);

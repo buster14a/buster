@@ -64,6 +64,12 @@
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_BINARY, 1, swap, form, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512, features)
 #define BUSTER_CHECK_X86_SHIFTS(name, form, element, features) \
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_SHIFT, element, false, form, X_X_XM128_EVEX, Y_Y_XM128_EVEX, Z_Z_XM128, features)
+// A family of one form name with an immediate argument (its index) at 16, 32 and 64 bytes: `x`, `y` and `z` are its
+// forms' suffixes.
+#define BUSTER_CHECK_X86_IMMEDIATES(name, family, element, swap, immediate, form, x, y, z, features) \
+    BUSTER_CHECK_X86_RULE(name "128", family, element, 16, false, swap, immediate, X86_FORM_##form##_##x, features) \
+    BUSTER_CHECK_X86_RULE(name "256", family, element, 32, false, swap, immediate, X86_FORM_##form##_##y, features) \
+    BUSTER_CHECK_X86_RULE(name "512", family, element, 64, false, swap, immediate, X86_FORM_##form##_##z, features)
 // A truncation under a mask of `bytes` bytes into a result of `result` bytes (TRUNCATE's `other`), and the stores of
 // one at each width, whose forms are the register ones into memory.
 #define BUSTER_CHECK_X86_TRUNCATION(name, element, bytes, form, result, features) \
@@ -366,7 +372,12 @@
                                 BUSTER_X86_FEATURE(GFNI))
     // One vector by an immediate: VPSHUFD's destination in reg, VPROLD's and VPSLLDQ's in vvvv (`swap`).
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufd512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 64, false, 1, X86_FORM_VPSHUFD_Z_ZM512_IMM8, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_prold512", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 64, true, 1, X86_FORM_VPROLD_Z_ZM512_IMM8, 0, 0)
+    // The rotates by an immediate at each width (#148), VPROL's and VPROR's of doublewords and quadwords: the count the
+    // immediate's whole byte, which the instruction takes modulo the elements' bits, as clang's funnel shifts take theirs.
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prold", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, true, 1, VPROLD, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prolq", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, true, 1, VPROLQ, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prord", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, true, 1, VPRORD, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
+    BUSTER_CHECK_X86_IMMEDIATES("__builtin_ia32_prorq", CHECK_X86_LOWER_UNARY_IMMEDIATE, 8, true, 1, VPRORQ, X_XM128_IMM8, Y_YM256_IMM8, Z_ZM512_IMM8, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pslldqi128_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 16, true, 1, X86_FORM_VPSLLDQ_X_XM128_IMM8, 0, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpconflictsi_512", CHECK_X86_LOWER_UNARY, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPCONFLICTD_Z_ZM512, 0,
                                 BUSTER_X86_FEATURE(AVX512CD))
