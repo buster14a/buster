@@ -12,6 +12,21 @@
 #ifndef BUSTER_C_CHECK_CORPUS_SYMBOLS_TEST_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_SYMBOLS_TEST_INCLUDED
 
+// check_corpus_symbol_dropped_data of `name` through an index of the selections as they are now, built in `arena` and
+// released after it.
+static bool check_test_corpus_symbol_dropped(const CheckInput* input, const CheckProgramSelection* selected, const CheckProgramCode* code,
+                                             const CheckProgramSelection* kept, const LoweringNames* names, const LoweringSymbol* name,
+                                             uint8_t* explained, Arena* arena)
+{
+    const uint64_t mark = arena->length;
+    const CheckProgramSelection reached = { 0 };
+    CheckCorpusSymbolIndex index = { 0 };
+    const bool dropped = check_corpus_symbol_index(&index, input, NULL, NULL, selected, code, &reached, kept, names, arena) &&
+                         check_corpus_symbol_dropped_data(&index, name, explained);
+    arena_pop_to(arena, mark);
+    return dropped;
+}
+
 static void check_test_corpus_symbol_object_budget(CheckTest* test)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 16);
@@ -47,31 +62,31 @@ static void check_test_corpus_symbol_object_budget(CheckTest* test)
         uint8_t explained[4] = { 0 };
         LoweringSymbol wrong = difference;
         wrong.type = BUSTER_LINK_SYMBOL_FUNCTION;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &wrong, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &wrong, explained, &arena),
                           "--symbols does not explain an emitted type mismatch as dropped data");
         wrong = difference;
         wrong.binding = BUSTER_LINK_SYMBOL_GLOBAL;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &wrong, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &wrong, explained, &arena),
                           "--symbols does not explain an emitted binding mismatch as dropped data");
         wrong = difference;
         wrong.uniqued = false;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &wrong, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &wrong, explained, &arena),
                           "--symbols keeps exact user names distinct from normalized shadowed names");
         String8 label = { .pointer = (char*)code.link.names.bytes[1], .length = code.link.names.length[1] };
         names.labels = &label;
         names.label_count = 1;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &difference, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &difference, explained, &arena),
                           "--symbols does not normalize away a user asm label's numeric suffix");
         names.labels = NULL;
         names.label_count = 0;
         const AtomId atom = code.link.symbols.atom[1];
         code.link.symbols.atom[1] = 0;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &difference, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &difference, explained, &arena),
                           "--symbols requires a defined emitted object");
         code.link.symbols.atom[1] = atom;
         kept.data.objects = objects;
         kept.data.count = 3;
-        check_test_expect(test, !check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &difference, explained),
+        check_test_expect(test, !check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &difference, explained, &arena),
                           "--symbols does not drop an exact source object retained by the model");
         kept.data.objects = objects + 1;
         kept.data.count = 2;
@@ -79,7 +94,7 @@ static void check_test_corpus_symbol_object_budget(CheckTest* test)
         for (uint32_t i = 0; i < 3; i += 1)
         {
             difference.name = code.link.names.bytes[i + 1];
-            justified += check_corpus_symbol_dropped_data(&input, &selected, &code, &kept, &names, &difference, explained);
+            justified += check_test_corpus_symbol_dropped(&input, &selected, &code, &kept, &names, &difference, explained, &arena);
         }
         check_test_expect(test, justified == 1 && explained[1] == 1 && explained[2] == 0 && explained[3] == 0,
                           "--symbols cannot reuse one dropped object's proof for multiple equal-key differences");
