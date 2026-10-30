@@ -235,9 +235,11 @@ Lanes that can't start leave the session on one lane, which no round retries;
 a terminal command's lanes stay parked until the process exits. Lane 0's
 stages stay one call chain, its frames holding the unit's state across the
 rounds (an executable's emission takes another round when binding finds the
-runtime's snapshot damaged); several units and `link-foreign` run their
-existing operations as regions of lane 0's that the session's lanes serve
-(`lane_serve`), until their flows are converted.
+runtime's snapshot damaged). Several units' command runs its wide parts as
+rounds of its flow too (`CheckUnitsFlow`, the [translation units
+guide](translation-units.md)); `link-foreign` runs its existing operations
+as regions of lane 0's that the session's lanes serve (`lane_serve`), until its
+flow is converted.
 
 ### Memory
 

@@ -5314,7 +5314,8 @@ sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
 throughout, no thread created, each object `--lanes 1`'s; then the same from
 lane 0 alone, the others serving its regions, lane 0 serving the session's
-lanes again after each (two sources' command serves its own region's).
+lanes again after each (two sources' command runs rounds of its own on its
+region's).
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
@@ -5353,7 +5354,9 @@ three arenas (`arena_poison`), so that a compile that read a byte it didn't
 write would show. Each lane releases what its units shared, into its pool and
 then the pool itself, on the lane once it takes no more units, and the
 command's session's lanes (#905) run the units, the merge, `link_check` and the
-executable's write (#778), each a region of lane 0's that they serve. A link keeps each
+executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
+that lane 0 announces and every lane runs, with a worker-budget lease of its
+own. A link keeps each
 unit's link (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes

@@ -61,8 +61,8 @@
 //   lanes and by 1, every lane calling each (run_check_command's collective call): each lane the same thread
 //   throughout, the session's barrier advancing, no thread created, the failure's status and each object --lanes 1's in
 //   a process of its own. Then the same commands from lane 0 alone while the others serve its regions (a test's serial
-//   code), with the same results, lane 0 serving the session's lanes again after each: two sources' command serves its
-//   own region's lanes.
+//   code), with the same results, lane 0 serving the session's lanes again after each: two sources' command runs rounds
+//   of its own on its region's lanes.
 
 #include "worker_budget_test.c"
 
@@ -1946,7 +1946,7 @@ static void check_lanes_test_session_flow(void* argument)
 }
 
 // The same commands from lane 0 alone while the others serve its regions, as a test's serial code calls them: after each,
-// lane 0 serves the session's lanes again, though two sources' command serves its region's lanes.
+// lane 0 serves the session's lanes again, though two sources' command runs rounds of its own on its region's lanes.
 static void check_lanes_test_session_served(void* argument)
 {
     CheckLanesSession* session = argument;
@@ -1992,8 +1992,8 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
     char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
     const bool referenced = written && closed && check_lanes_test_run(reference_arguments, errors) == 0;
     check_lanes_test_expect(tally, referenced, "the session's reference object and failing source", program);
-    // Two sources' commands between the others: each serves its own lanes in the served flow, after which the next ones
-    // must find lane 0 serving the session's lanes again.
+    // Two sources' commands between the others: each runs rounds on its region's lanes in the served flow, after which
+    // the next ones must find lane 0 serving the session's lanes again.
     char* commands[BUSTER_CHECK_LANES_SESSION_COMMANDS][8] = {
         { (char*)"-c", (char*)"-o", (char*)"/dev/null", broken, NULL },
         { (char*)"--lanes", (char*)"3", (char*)"-fsyntax-only", second, program, NULL },

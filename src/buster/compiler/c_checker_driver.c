@@ -1276,6 +1276,42 @@ struct CheckDriverWrite
     bool succeeded;
 };
 
+// A command of several units' flow (#905, c_checker_units.c), which every lane of its session runs: lane 0 runs the
+// units' driver alone (check_driver_units), and each of its wide parts is a round, which lane 0 announces with its kind
+// and lanes and every lane runs, the first `lanes` of them its operation: the units' run, the link's merge, the link's
+// check and the executable's write. The others follow the rounds (check_units_follow) until lane 0 ends the flow
+// (check_units_flow_end). A round's lanes are those the worker budget gives of those it wants, taken before its setup and
+// given back after it, before any serial work (check_units_slots, check_units_slots_back). A flow without other lanes
+// (one lane, or a session whose lanes didn't start) runs its rounds on lane 0 alone.
+typedef struct CheckUnitsFlow CheckUnitsFlow;
+typedef enum CheckUnitsRound
+{
+    CHECK_UNITS_ROUND_END,
+    CHECK_UNITS_ROUND_UNITS,
+    CHECK_UNITS_ROUND_MERGE,
+    CHECK_UNITS_ROUND_CHECK,
+    CHECK_UNITS_ROUND_WRITE,
+} CheckUnitsRound;
+struct CheckUnitsFlow
+{
+    // The flow's group, which lane 0 leaves to run alone (check_units_flow_begin).
+    Lane group;
+    // The operation of the round lane 0 announced last, which only the round's lanes read, before they arrive at its end
+    // (lane_widen), which lane 0 waits for before it writes another.
+    void* argument;
+    // Whether a round's slots failed to go back to the worker budget, which fails the command.
+    bool slots_lost;
+};
+static void check_units_flow_begin(CheckUnitsFlow* flow);
+static void check_units_flow_end(CheckUnitsFlow* flow);
+static void check_units_follow(CheckUnitsFlow* flow);
+// Lane 0: a round of `round` on `lanes` of the flow's lanes, `argument` its operation's.
+static void check_units_round(CheckUnitsFlow* flow, CheckUnitsRound round, void* argument, uint32_t lanes);
+// A round's lanes: `wanted` of them as `budget` gives (all of them without one), in `lease`, which
+// check_units_slots_back gives back, a failure to which `flow` (if any) records.
+static uint32_t check_units_slots(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease);
+static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* lease);
+
 // link_check_lanes's run on a group of lanes (several units' link, #778), whose lane 0 says what it found.
 typedef struct CheckDriverCheck CheckDriverCheck;
 struct CheckDriverCheck
@@ -1294,13 +1330,23 @@ static void check_driver_check_main(void* argument)
     }
 }
 
-// The bound link's link_check: on `lanes` lanes (link_check_lanes, the same answer), or on the calling thread when there
-// is one, or the lanes can't start.
-static LinkError check_driver_link_check(Link* link, uint32_t lanes)
+// The bound link's link_check: on `wanted` lanes, a round of several units' flow (#905) on those the worker budget gives
+// (link_check_lanes, the same answer), or on the calling thread when there is one.
+static LinkError check_driver_link_check(Link* link, CheckProgramLanes* lanes, uint32_t wanted)
 {
     CheckDriverCheck check = { .link = link, .result = LINK_ERROR_NONE };
-    const bool ran = lanes > 1 && lane_run(lanes, check_driver_check_main, &check, 0);
-    return ran ? check.result : link_check(link);
+    WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+    const uint32_t granted = wanted > 1 && lanes->units_flow != NULL ? check_units_slots(lanes->budget, wanted, &lease) : 1;
+    if (granted > 1)
+    {
+        check_units_round(lanes->units_flow, CHECK_UNITS_ROUND_CHECK, &check, granted);
+    }
+    else
+    {
+        check.result = link_check(link);
+    }
+    check_units_slots_back(lanes->units_flow, &lease);
+    return check.result;
 }
 
 _Static_assert(EXECUTABLE_PHASES == BUSTER_CHECK_CLOCK_WRITE_PHASES, "--time-stages names every phase of executable_write");
@@ -1528,7 +1574,7 @@ typedef struct CheckUnitsUnit CheckUnitsUnit;
 static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
                               Arena* bytes, Arena* scratch);
 static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
-                                    Arena* bytes, Arena* scratch, uint32_t lanes);
+                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow);
 static bool check_units_system_declared(const CheckUnitsUnit* units, uint32_t count, const Link* link, NameId name);
 
 // Links the checked program straight into an executable at `output_path` (#157's direct path, #145's slice): a dynamic
@@ -1595,13 +1641,17 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
         // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
-        // vector path (#778), and by its twin on one lane or the scalar path.
-        const bool merged_on_lanes = units != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar);
-        const bool emitted = !valid || (merged_on_lanes ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
-                                                                                  scratch, lanes->lanes) :
-                                        units != NULL   ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
-                                                        check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
-                                                                                 &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+        // vector path (#778), a round of their flow on those the worker budget gives (#905), and by its twin on one lane
+        // or the scalar path.
+        WorkerBudgetLease merge_lease = { .control = -1, .reply = -1, .child = -1 };
+        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar) ?
+                                         check_units_slots(lanes->budget, lanes->lanes, &merge_lease) : 1;
+        const bool emitted = !valid || (merge_lanes > 1   ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
+                                                                                    scratch, merge_lanes, lanes->units_flow) :
+                                        units != NULL     ? check_units_merge(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes, scratch) :
+                                                            check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output,
+                                                                                     &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify, lanes, stage_clock));
+        check_units_slots_back(lanes->units_flow, &merge_lease);
         if (units != NULL)
         {
             check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
@@ -1708,7 +1758,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         if (valid)
         {
             // Several units' bound link is checked on their lanes (#778).
-            const LinkError checked = check_driver_link_check(&code.link, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
+            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
             valid = checked == LINK_ERROR_NONE && dynamic_inputs(&dynamic, &runtime, &bind, &arena);
             // An import the code reaches other than through the GOT, by a call or from data, which a shared library's
             // data needs without copy relocations, which the direct path makes none of (#84). Tier 0 reaches every symbol
@@ -1766,9 +1816,21 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .exact = BUSTER_SCALAR_PATH(scalar),
                 },
             };
-            // Several units' executable is written on their lanes (`lanes`' count), one unit's by its calling thread.
-            const uint32_t write_lanes = units != NULL && lanes->lanes > 1 ? lanes->lanes : 1;
-            valid = lane_run(write_lanes, check_driver_write_main, &write, 0) && write.succeeded;
+            // Several units' executable is written on their lanes (`lanes`' count), a round of their flow on those the
+            // worker budget gives (#905); one unit's by its calling thread.
+            WorkerBudgetLease write_lease = { .control = -1, .reply = -1, .child = -1 };
+            const uint32_t write_lanes = units != NULL && lanes->lanes > 1 && lanes->units_flow != NULL ? check_units_slots(lanes->budget, lanes->lanes, &write_lease) : 1;
+            bool wrote = true;
+            if (write_lanes > 1)
+            {
+                check_units_round(lanes->units_flow, CHECK_UNITS_ROUND_WRITE, &write, write_lanes);
+            }
+            else
+            {
+                wrote = lane_run(1, check_driver_write_main, &write, 0);
+            }
+            check_units_slots_back(lanes->units_flow, &write_lease);
+            valid = wrote && write.succeeded;
             // The write's phases, for --time-stages (#778): each from its start or the phase before it.
             uint64_t phase_begin = write.result.start_time;
             for (uint32_t phase = 0; stage_clock != NULL && valid && phase < EXECUTABLE_PHASES; phase += 1)
@@ -2353,6 +2415,7 @@ struct CheckDriverRun
     Arena* output_arena;
     bool release;
     CheckEmitFlow flow;
+    CheckUnitsFlow units_flow;
     // The lanes the command asks for (check_driver_run), which --time-stages reports with those its flow ran on.
     uint32_t capacity;
     int result;
@@ -2377,8 +2440,8 @@ static int check_driver_one_unit(const CheckDriverRun* run)
 
 // The command's flow, which every lane of its session runs (#905). One source file: lane 0 runs the unit's stages alone,
 // and every lane runs each round of its emission (check_program_emit_round), the bodies' parts on as many lanes as the
-// bodies' tokens and the worker budget pay for. Several (#152): lane 0 runs their driver, whose operations are regions
-// of the lanes, which the others serve (lane_serve) until their flow is the lanes' own. The command's lanes are the
+// bodies' tokens and the worker budget pay for. Several (#152): lane 0 runs their driver alone, and every lane runs each
+// of its rounds (CheckUnitsFlow): the units' run, the merge, the link's check and the write. The command's lanes are the
 // session's at most: one after a failed start.
 static void check_driver_flow(void* argument)
 {
@@ -2390,20 +2453,19 @@ static void check_driver_flow(void* argument)
     }
     if (run->input_count > 1)
     {
-        // Lane 0 starts serving once the units' tables are built (check_driver_units), the lanes' start having gone on
-        // meanwhile; a command that ends before begins serving here, to end it.
+        // Lane 0 runs the units' driver alone, its wide parts rounds of the flow (CheckUnitsFlow), the lanes' start having
+        // gone on until the first.
         if (lane_index() == 0)
         {
+            run->lanes->units_flow = &run->units_flow;
+            check_units_flow_begin(&run->units_flow);
             run->result = check_driver_units(run->command, run->inputs, run->input_count, run->lanes, run->stage_clock);
-            if (!lane_serving())
-            {
-                lane_serve_begin();
-            }
-            lane_serve_end();
+            check_units_flow_end(&run->units_flow);
+            run->lanes->units_flow = NULL;
         }
         else
         {
-            lane_serve();
+            check_units_follow(&run->units_flow);
         }
     }
     else if (lane_index() == 0)

@@ -295,6 +295,9 @@ struct CheckProgramLanes
     // In a command's flow (#905), its rounds' rendezvous: the emission's lanes are rounds of the flow's lanes rather
     // than a lane_run of its own. Null elsewhere.
     CheckEmitFlow* flow;
+    // In a command of several units' flow (#905, c_checker_units.c), the rounds of the units' run, the link's merge,
+    // check and write. Null elsewhere.
+    struct CheckUnitsFlow* units_flow;
     // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
     // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
     // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
