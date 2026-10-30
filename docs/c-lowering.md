@@ -325,11 +325,13 @@ The harness finds the definitions that may explain a difference by binary
 searches (`check_corpus_symbol_index`): once per file it sorts the selections'
 symbols, data entries and bodies by the names they are compared by, then by the
 order in which a pass over the selection would meet them, which is the order in
-which the reasons take them. On the Zen 4 laptop, a pass per difference made
-`main.c`'s comparison take 36 s, its 12,016 differences against a selection of
-10,105 functions and 125,262 objects at `d12fd583`; with the index it takes
-17 s, and gives the same counts on `main.c`, musl's eight directories,
-`sqlite3.c` and c-testsuite.
+which the reasons take them. On the 9700X, a pass per difference made
+`main.c`'s comparison take 13.7 s, its 12,016 differences against a selection
+of 10,105 functions and 125,262 objects at `d12fd583`; with the index it takes
+8.8 s, and musl's eight directories take 6.3 s either way
+([the record](https://github.com/buster14a/buster-performance/tree/bcb44f9de7a071a502e4c81ebf9afe52d085c3b5/docs/measurements/main-c-ci-gates-129-2026-10-30)).
+Both give the same counts there, and on the Zen 4 laptop on `sqlite3.c` and
+c-testsuite too.
 
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
