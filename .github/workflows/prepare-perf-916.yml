@@ -1,0 +1,144 @@
+name: Prepare bounded FENV call guards
+on:
+  push:
+    branches: [codex/prepare-perf-916-fenv-20261030]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: d12fd5831f9c73bb7b30505da2ce9616e915143e
+          fetch-depth: 1
+      - name: Install approved toolchain
+        run: bash tools/ci/setup-hosted.sh
+      - name: Apply exact bounded changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object src/buster/compiler/c_check_actions.c)" = 72385a6ebdfb1e06e3dedc5b6c1cf185915296d6
+          test "$(git hash-object src/buster/compiler/c_checker.c)" = 844c29c8108259779caf4ec09920b4404fcac730
+          test "$(git hash-object src/buster/compiler/c_check_fp_actions_test.c)" = 026d8bff571d5969778c5e65ba1b5841cd0904ef
+          cat > "$RUNNER_TEMP/fenv.patch" <<'PATCH'
+          --- a/src/buster/compiler/c_check_actions.c
+          +++ b/src/buster/compiler/c_check_actions.c
+          @@ -2774,6 +2774,10 @@
+                   }
+               }
+          -    check_action_fp_environment(table, action, result);
+          +    // Keep the usual ACCESS-off action out of the environment walk and its stack frame.
+          +    if ((action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+          +    {
+          +        check_action_fp_environment(table, action, result);
+          +    }
+               if (result->diagnostic != CHECK_DIAG_NONE)
+               {
+                   result->value.constant_kind = CHECK_CONSTANT_NONE;
+          --- a/src/buster/compiler/c_checker.c
+          +++ b/src/buster/compiler/c_checker.c
+          @@ -2159,6 +2159,9 @@
+                   }
+                   result = checked.action;
+          -        check_action_fp_environment(types, &action, &result);
+          +        if ((action.fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
+          +        {
+          +            check_action_fp_environment(types, &action, &result);
+          +        }
+                   result.warnings |= (typed.warnings & BUSTER_CHECK_BUILTIN_TYPED_OVERFLOW_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
+                   if (checked.store && result.diagnostic == CHECK_DIAG_NONE)
+                   {
+          --- a/src/buster/compiler/c_check_fp_actions_test.c
+          +++ b/src/buster/compiler/c_check_fp_actions_test.c
+          @@ -7,4 +7,56 @@
+           #define BUSTER_C_CHECK_FP_ACTIONS_TEST_INCLUDED
+          +
+          +// The call guard must not clear an inherited witness, mark integer-only actions, or disturb an error.
+          +// Mix those cases with newly sensitive arithmetic/conversions across complete and partial action batches.
+          +static void check_test_fp_action_guards(CheckTest* test, TypeTable* table)
+          +{
+          +    CheckValue inherited = check_test_float(BUSTER_TYPE_DOUBLE, 1);
+          +    inherited.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
+          +    const CheckAction fixtures[] =
+          +    {
+          +        { .op = CHECK_OP_DIVIDE, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1), check_test_float(BUSTER_TYPE_DOUBLE, 3) } },
+          +        { .op = CHECK_OP_CAST, .operands = { check_test_integer(BUSTER_TYPE_INT, 16777217) }, .type = BUSTER_TYPE_FLOAT },
+          +        { .op = CHECK_OP_SELECT, .operands = { inherited } },
+          +        { .op = CHECK_OP_ADD, .operands = { check_test_integer(BUSTER_TYPE_INT, 1), check_test_integer(BUSTER_TYPE_INT, 2) } },
+          +        { .op = CHECK_OP_CAST, .operands = { check_test_float(BUSTER_TYPE_DOUBLE, 1) }, .type = 0 },
+          +        { .op = CHECK_OP_LOGICAL_AND, .operands = { check_test_integer(BUSTER_TYPE_INT, 0), inherited } },
+          +    };
+          +    for (uint32_t rotation = 0; rotation < BUSTER_ARRAY_LENGTH(fixtures); rotation += 1)
+          +    {
+          +        for (uint32_t phase = 0; phase < 2; phase += 1)
+          +        {
+          +            for (uint32_t count = 0; count <= 17; count += 1)
+          +            {
+          +                CheckAction actions[17];
+          +                CheckActionResult scalar[17];
+          +                CheckActionResult vector[18];
+          +                CheckActionResult untouched;
+          +                memset(vector, 0xa5, sizeof(vector));
+          +                memset(&untouched, 0xa5, sizeof(untouched));
+          +                for (uint32_t i = 0; i < count; i += 1)
+          +                {
+          +                    const uint32_t kind = (rotation + i) % BUSTER_ARRAY_LENGTH(fixtures);
+          +                    const bool enabled = ((i + phase) & 1) != 0;
+          +                    actions[i] = fixtures[kind];
+          +                    actions[i].fp_environment = enabled ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
+          +                    check_action_scalar(table, actions + i, scalar + i);
+          +                    const bool marked = kind == 2 || (kind < 2 && enabled);
+          +                    check_test_expect(test, ((scalar[i].value.flags & BUSTER_CHECK_FP_ENVIRONMENT) != 0) == marked &&
+          +                                           ((scalar[i].diagnostic != CHECK_DIAG_NONE) == (kind == 4)),
+          +                                      "ACCESS call guard preserves new/inherited witnesses, short circuiting and invalid actions");
+          +                }
+          +                check_actions(table, actions, vector, count);
+          +                for (uint32_t i = 0; i < count; i += 1)
+          +                {
+          +                    check_test_expect(test, check_test_action_equal(scalar + i, vector + i),
+          +                                      "mixed ACCESS-on/off action batches match scalar values, conversions and diagnostics");
+          +                }
+          +                check_test_expect(test, memcmp(vector + count, &untouched, sizeof(untouched)) == 0,
+          +                                  "empty and partial ACCESS action batches leave the following result untouched");
+          +            }
+          +        }
+          +    }
+          +}
+           
+           static void check_test_fp_action_values(CheckTest* test, TypeTable* table)
+           {
+          @@ -160,5 +212,6 @@
+           static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, TypeTable* table)
+           {
+          +    check_test_fp_action_guards(test, table);
+               check_test_fp_action_values(test, table);
+               check_test_fp_graph(test, table);
+           }
+          PATCH
+          git apply --check "$RUNNER_TEMP/fenv.patch"
+          git apply "$RUNNER_TEMP/fenv.patch"
+          git diff --check
+          git diff --stat
+      - name: Build and exercise full checker on hosted baseline
+        shell: bash
+        env:
+          BUSTER_HOST_ARCH: x86-64
+          BUSTER_DEBUG_INFO: '0'
+        run: |
+          set -euo pipefail
+          clang --version
+          ./build.sh
+          ./build/compiler test-checker
+      - name: Publish implementation without preparation workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "${BUSTER_DCO_SIGN_OFF:-}"
+          test "$(git rev-parse HEAD)" = d12fd5831f9c73bb7b30505da2ce9616e915143e
+          git add src/buster/compiler/c_check_actions.c src/buster/compiler/c_checker.c src/buster/compiler/c_check_fp_actions_test.c
+          git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'perf(checker): skip inactive floating-environment calls' -m 'Refs #916. Preserve the environment classifier and guard both callers; test mixed ACCESS states, inherited effects, invalid actions and partial batches. No host stack-protection policy change. Human contribution certification remains pending.'
+          git push origin HEAD:refs/heads/codex/perf-916-fenv-call-guards
+          git show --stat --oneline HEAD
