@@ -17,7 +17,13 @@ static __attribute__((noinline)) void check_test_corpus_symbol_reasons(CheckTest
         "int dropped(int n){long x=n;int r;if(sizeof(x)==sizeof(int))r=narrow(n);else if(sizeof(x)==sizeof(long))r=wide(n);else r=widest(n);return r;}\n"
         "static const int limit=5;int folded(int n){return n<limit;}\n"
         "static int unselected_call(void){return 1;}int unselected(int n){if(sizeof(n)==4?n:unselected_call())return 1;return 0;}\n"
-        "static inline __attribute__((always_inline)) int inlined_call(int n){return n*3;}int inlined(int n){return inlined_call(n)+1;}\n";
+        "static inline __attribute__((always_inline)) int inlined_call(int n){return n*3;}int inlined(int n){return inlined_call(n)+1;}\n"
+        // --symbols verifies emitted helper frames too: sqrt/floor reserve stack space, while copysign is frameless.
+        "double helper_sqrt(double x){return __builtin_sqrt(x);}float helper_sqrtf(float x){return __builtin_sqrtf(x);}\n"
+        "double helper_floor(double x){return __builtin_floor(x);}float helper_floorf(float x){return __builtin_floorf(x);}\n"
+        "double helper_copysign(double x,double y){return __builtin_copysign(x,y);}"
+        "float helper_copysignf(float x,float y){return __builtin_copysignf(x,y);}\n"
+        "int helper_rounding_mode(void){return __builtin_flt_rounds();}\n";
     char directory[] = "/tmp/buster-symbol-reasons-XXXXXX";
     char path[160];
     char objects[160];
