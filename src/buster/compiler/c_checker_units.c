@@ -652,7 +652,8 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
 }
 
 // The units' merge on lanes (#778): check_units_merge's link, the same records with the same ids, built by every lane
-// of the units' team (check_units_merge_lanes); check_units_merge is its exact twin, which --scalar and one lane run.
+// of a round of the units' flow (check_units_merge_lanes); check_units_merge is its exact twin, which --scalar and one
+// lane run.
 //   1. The global names, rule 4's exchange: each lane counts its range of the units' global symbols by partition of
 //      their names' hashes and places them, partition by partition and in the lanes' order, so that each partition
 //      holds its symbols in the units' order. Then each lane resolves the partitions it takes, in a table of each one's
@@ -1332,11 +1333,12 @@ static void check_units_merge_lane(void* argument)
     }
 }
 
-// The units' merge on `lanes` lanes of the units' team (see the comment before CheckUnitsMerge): check_units_merge's
-// link and results, from shared state in `scratch` that the calling thread reserves before the lanes start. Lanes that
-// can't start leave the merge to check_units_merge, on the calling thread.
+// The units' merge on `lanes` lanes of the units' flow (see the comment before CheckUnitsMerge), a round of `flow`'s
+// (#905): check_units_merge's link and results, from shared state in `scratch` that lane 0 reserves before the round.
+// Without its memory, return the round's lease before check_units_merge runs on lane 0 alone. The caller's final
+// return remains idempotent, and a failed early return stays in flow->slots_lost.
 static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uint32_t count, CheckProgramBinding* binding, ExecutableDebug* debug, Arena* output,
-                                    Arena* bytes, Arena* scratch, uint32_t lanes)
+                                    Arena* bytes, Arena* scratch, uint32_t lanes, CheckUnitsFlow* flow, WorkerBudgetLease* lease)
 {
     const uint64_t mark = scratch->length;
     uint64_t symbols = 0;
@@ -1406,14 +1408,18 @@ static bool check_units_merge_lanes(Link* link, const CheckUnitsUnit* units, uin
     }
     merge.valid = merge.valid && reserved;
     bool result = false;
-    if (!reserved || !lane_run(lanes, check_units_merge_lane, &merge, 0))
+    if (!reserved)
     {
-        // Without its memory or its lanes, the twin, from the link as it was.
+        // Without its memory, the twin, from the link as it was.
         arena_pop_to(scratch, mark);
+        check_units_slots_back(flow, lease);
         result = check_units_merge(link, units, count, binding, debug, output, bytes, scratch);
     }
     else
     {
+        lane_flow_round_begin(&flow->rounds, CHECK_UNITS_ROUND_MERGE, &merge, lanes);
+        check_units_merge_lane(&merge);
+        lane_flow_round_end(&flow->rounds);
         result = merge.valid;
         if (!merge.atoms_added && !merge.duplicated && (!merge.symbols_added || merge.begun))
         {
@@ -1590,6 +1596,56 @@ static bool check_units_objects(CheckUnitsUnit* units, uint32_t count, Arena* ar
     return reserved && distinct;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The units' flow (#905, see CheckUnitsFlow)
+
+static void check_units_flow_begin(CheckUnitsFlow* flow)
+{
+    lane_flow_begin(&flow->rounds);
+    flow->slots_lost = false;
+}
+
+static void check_units_flow_end(CheckUnitsFlow* flow)
+{
+    lane_flow_end(&flow->rounds);
+}
+
+// The flow's other lanes: each round's operation on its lanes, by its kind, until lane 0 ends the flow.
+static void check_units_follow(CheckUnitsFlow* flow)
+{
+    void* argument = NULL;
+    for (uint32_t round = lane_flow_next(&flow->rounds, &argument); round != CHECK_UNITS_ROUND_END; round = lane_flow_next(&flow->rounds, &argument))
+    {
+        if (argument != NULL)
+        {
+            switch ((CheckUnitsRound)round)
+            {
+                case CHECK_UNITS_ROUND_UNITS: check_units_lane(argument); break;
+                case CHECK_UNITS_ROUND_MERGE: check_units_merge_lane(argument); break;
+                case CHECK_UNITS_ROUND_CHECK: check_driver_check_main(argument); break;
+                case CHECK_UNITS_ROUND_WRITE: check_driver_write_main(argument); break;
+                case CHECK_UNITS_ROUND_END: break;
+            }
+        }
+        lane_widen();
+    }
+}
+
+static uint32_t check_units_slots(WorkerBudget* budget, uint32_t wanted, WorkerBudgetLease* lease)
+{
+    *lease = (WorkerBudgetLease){ .control = -1, .reply = -1, .child = -1 };
+    return budget != NULL ? worker_budget_acquire(budget, wanted, lease) : wanted;
+}
+
+static void check_units_slots_back(CheckUnitsFlow* flow, WorkerBudgetLease* lease)
+{
+    const bool returned = worker_budget_release(lease);
+    if (!returned && flow != NULL)
+    {
+        flow->slots_lost = true;
+    }
+}
+
 // The command's translation units (`count` source files, `inputs`, two or more): the lanes compile them (at most
 // `lanes->lanes` of them, a unit at a time each and past the units as many as their sources pay for, which a GNU make
 // jobserver's budget may reduce; the lanes without a unit left take the units' functions' parts), the units' diagnostics are
@@ -1658,24 +1714,23 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
         // A lane per unit, and past the units, lanes whose only work is the units' functions' parts (#777): one per
         // BUSTER_CHECK_UNITS_LANE_BYTES of the units' sources, so that a few large units' functions get about the lanes
         // they would get alone; no more than `lanes->lanes`, and those past the calling thread's own as the budget gives
-        // them (#673). The lease covers the units' lanes and the executable's writers, as many, and goes back once both
-        // are done.
+        // them (#673). The lease covers the units' run alone, and goes back after it (#905): the merge, the link's check
+        // and the write take their own.
         uint64_t source_bytes = 0;
         for (uint32_t u = 0; u < count; u += 1)
         {
             source_bytes += units[u].bytes;
         }
         // The command's session's lanes (#905), which a lazy session's lane 1 started while the tables above were built:
-        // lane 0 learns how they started, and serves them from here, the units' run, the merge, the link's check and the
-        // write each a region of them.
-        lane_session_settle();
-        lanes->lanes = lanes->lanes < lane_count() ? lanes->lanes : lane_count();
-        lane_serve_begin();
+        // lane 0 learns how they started, and the units' run, the merge, the link's check and the write are rounds of
+        // them (CheckUnitsFlow).
+        const uint32_t flow_lanes = lanes->units_flow != NULL ? lane_flow_lanes(&lanes->units_flow->rounds) : 1;
+        lanes->lanes = lanes->lanes < flow_lanes ? lanes->lanes : flow_lanes;
         const uint32_t most = lanes->lanes != 0 ? lanes->lanes : 1;
         const uint64_t paid = (uint64_t)count + source_bytes / BUSTER_CHECK_UNITS_LANE_BYTES;
         const uint32_t wanted = most < paid ? most : (uint32_t)paid;
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
-        const uint32_t active = ready && lanes->budget != NULL ? worker_budget_acquire(lanes->budget, wanted, &lease) : wanted;
+        const uint32_t active = ready ? check_units_slots(lanes->budget, wanted, &lease) : wanted;
         CheckUnitsLane* states = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, CheckUnitsLane, active) : NULL;
         // check_units_objects says why it fails.
         if (named && states == NULL)
@@ -1702,13 +1757,14 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 .lanes = states,
                 .board = board,
             };
-            // The units' run, the merge, the link's check and the executable's write are regions of the command's session
-            // (#905), whose lanes this driver's lane 0 serves (check_driver_flow), keeping their scratch arenas from one
-            // to the next (#778). A session of one lane runs them all on it.
+            // The units' run is a round of the command's flow (#905), whose lanes keep their scratch arenas from one round
+            // to the next (#778), on lane 0 alone in a flow of one; its slots go back after it.
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
-            // Lanes that couldn't run (lane_run refuses a nested run) leave their units untaken: the calling thread
-            // compiles those alone, as its own lane 0.
-            const bool ran = lane_run(active, check_units_lane, &run, NULL);
+            lane_flow_round_begin(&lanes->units_flow->rounds, CHECK_UNITS_ROUND_UNITS, &run, active);
+            check_units_lane(&run);
+            lane_flow_round_end(&lanes->units_flow->rounds);
+            check_units_slots_back(lanes->units_flow, &lease);
+            // A unit no lane took compiles on lane 0 alone.
             const Lane caller = lane_alone();
             arena_pool = &states->pool;
             bool alone = false;
@@ -1727,7 +1783,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             arena_pool = 0;
             arena_pool_release(&states->pool);
             lane_restore(caller);
-            lanes->active = ran ? active : 1;
+            lanes->active = active;
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
             // The units' diagnostics, in the command line's order.
             result = 0;
@@ -1758,8 +1814,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
             if (result == 0 && command->link)
             {
-                // The executable is written on the units' lanes.
-                CheckProgramLanes writers = { .lanes = ran ? active : 1 };
+                // The executable is written on as many lanes as the units' run took, each of its rounds (the merge, the
+                // link's check and the write) on those the worker budget gives of them.
+                CheckProgramLanes writers = { .lanes = active, .budget = lanes->budget, .units_flow = lanes->units_flow };
                 const bool linked = check_driver_executable(NULL, NULL, NULL, NULL, NULL, command->output != NULL ? command->output : "a.out", command->scalar,
                                                             command->verify, command->source_rows, command->unwind_tables, command->libraries, &writers, &arena,
                                                             stage_clock, units, count);
@@ -1771,8 +1828,10 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                 arena_release(&states[l].kept);
             }
         }
-        // The lease's slots go back whatever happened since it was taken.
-        if (!worker_budget_release(&lease))
+        // The units' run's slots go back whatever happened since they were taken, and the command fails if any round's
+        // didn't.
+        check_units_slots_back(lanes->units_flow, &lease);
+        if (lanes->units_flow != NULL && lanes->units_flow->slots_lost)
         {
             fprintf(stderr, "error: could not return GNU make worker slots\n");
             result = 1;

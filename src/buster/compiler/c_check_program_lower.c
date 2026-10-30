@@ -829,9 +829,10 @@ static uint8_t check_lower_type_class(const TypeTable* types, TypeId type)
         // entry that makes or moves one has its bytes (check_lower_vector_bytes), as the class has no width.
         result = BUSTER_TYPED_CLASS_VECTOR;
     }
-    else if (type_kind(types, type_unqualified(type_strip_aligned(types, type))) != BUSTER_TYPE_KIND_ATOMIC && check_action_half_format(base) != CHECK_HALF_NONE)
+    else if (check_action_half_format(base) != CHECK_HALF_NONE)
     {
-        // An _Atomic one's operations would be the atomics', which refuse a type of no class.
+        // An _Atomic one's too (#137): its loads and stores are the atomics' of its 2 bytes, through buffers whose LOCAL
+        // and SET_LOCAL of the class are a U16's (check_lower_half_entry), and its value the type's.
         result = check_action_half_format(base) == CHECK_HALF_IEEE ? BUSTER_CHECK_LOWER_CLASS_BINARY16 : BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
     }
     return result;
@@ -862,17 +863,20 @@ static bool check_lower_wide_class(uint8_t class)
 }
 
 // A complex type's element, unqualified, for one the lowering takes, or 0: a floating element (_Complex _Float16,
-// float, double, long double and __float128), or an integer one: GNU's complex integer types (_Complex char to _Complex unsigned
+// __bf16, float, double, long double and __float128: the half-precision ones carried and converted, not computed with,
+// check_lower_complex_compute), or an integer one: GNU's complex integer types (_Complex char to _Complex unsigned
 // __int128), and the complex _BitInts that the usual arithmetic conversions make (#137), whose parts Tier 0's classes
-// hold as a _BitInt's values (check_lower_type_class) up to 128 bits, and past them frame objects of their limbs.
+// hold as a _BitInt's values (check_lower_type_class) up to 128 bits, and past them frame objects of their limbs. C can't
+// spell a _Complex __bf16, but the usual arithmetic conversions make one (of a _Complex int and a __bf16), which clang
+// passes as a <2 x bfloat>, as it passes a _Complex _Float16 as a <2 x half> (#137).
 static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_conversion_operand(types, type);
     const TypeId element = type_kind(types, base) == BUSTER_TYPE_KIND_COMPLEX ? type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
     // _Complex __float128's parts are __float128s, and a complex _BitInt's past 128 bits are _BitInts past 128 bits: values
     // carried by their addresses (check_lower_complex_parts).
-    const bool floating = element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE || element == BUSTER_TYPE_LONG_DOUBLE ||
-                          element == BUSTER_TYPE_FLOAT128;
+    const bool floating = element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16 || element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE ||
+                          element == BUSTER_TYPE_LONG_DOUBLE || element == BUSTER_TYPE_FLOAT128;
     const bool integer = element >= BUSTER_TYPE_CHAR && element <= BUSTER_TYPE_UINT128;
     const bool bit_int = element != 0 && type_kind(types, element) == BUSTER_TYPE_KIND_BIT_INT;
     return floating || integer || bit_int ? element : 0;
@@ -1247,12 +1251,11 @@ static uint8_t check_lower_value_class(const CheckLowerWriter* writer, TypeId ty
     return check_lower_aggregate(writer, type) ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
 }
 
-// A type's half-precision format (CheckHalf, c_check_program_half.c's values), or none for an _Atomic one: its
-// operations are the atomics', which refuse it.
+// A type's half-precision format (CheckHalf, c_check_program_half.c's values): an _Atomic one's value's too, as its class
+// is (check_lower_type_class), whose loads and stores are the atomics'.
 static CheckHalf check_lower_half(const TypeTable* types, TypeId type)
 {
-    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
-    return type_kind(types, stripped) != BUSTER_TYPE_KIND_ATOMIC ? check_action_half_format(type_conversion_operand(types, type)) : CHECK_HALF_NONE;
+    return check_action_half_format(type_conversion_operand(types, type));
 }
 
 // A type's half-precision format from its cached class (check_lower_class_half of check_lower_class's).
@@ -1288,7 +1291,7 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
         // One check_lower_complex doesn't take: a complex type of another floating type.
-        feature = "complex types other than _Complex _Float16, float, double, long double and __float128";
+        feature = "complex types other than _Complex _Float16, __bf16, float, double, long double and __float128";
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -3346,11 +3349,12 @@ static uint32_t check_lower_complex_compute(CheckLowerWriter* writer, CheckOp op
     const bool product = integer && op == CHECK_OP_MULTIPLY && a.complex && b.complex;
     const bool quotient = integer && op == CHECK_OP_DIVIDE;
     uint32_t result = BUSTER_CHECK_NONE;
-    if (element == BUSTER_TYPE_FLOAT16)
+    if (element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16)
     {
-        // Copies, conversions and bit casts need only the two binary16 representations. Arithmetic needs its own
-        // excess-precision/native-FP16 rules and complex library calls; never compute with the representation's bits.
-        check_lower_unsupported(writer, "arithmetic and comparisons of _Complex _Float16 values");
+        // Copies, conversions and bit casts need only the two binary16 or bfloat16 representations. Arithmetic needs its
+        // own excess-precision/native rules and complex library calls; never compute with the representation's bits.
+        check_lower_unsupported(writer, element == BUSTER_TYPE_FLOAT16 ? "arithmetic and comparisons of _Complex _Float16 values" :
+                                                                         "arithmetic and comparisons of _Complex __bf16 values");
     }
     else if (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL)
     {
@@ -8382,8 +8386,16 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     }
 }
 
+// Whether a type is a complex half-precision one (_Complex _Float16, or the _Complex __bf16 the usual arithmetic
+// conversions make): four bytes of its two parts' bits, an aggregate's value.
+static bool check_lower_complex_half(const TypeTable* types, TypeId type)
+{
+    const TypeId element = check_lower_complex_element(types, type);
+    return element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16;
+}
+
 // A __builtin_bit_cast side's class where its bits are the value of a register: an integer's, an enum's or a pointer's, a
-// float's or a double's, or a vector's, and a half-precision value's bits, a U16's. A complex binary16 value's four
+// float's or a double's, or a vector's, and a half-precision value's bits, a U16's. A complex half-precision value's four
 // bytes have U32's bits, read from or written to its frame object (check_lower_bit_cast); UINT8_MAX for any other
 // (other aggregates, arrays, long double and 128-bit integers), whose bits the lowering doesn't move.
 static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId type)
@@ -8395,7 +8407,7 @@ static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId
     const bool real = kind == BUSTER_TYPE_KIND_FLOATING && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64);
     const bool vector = class == BUSTER_TYPED_CLASS_VECTOR && check_lower_vector_of(writer, type) != 0;
     const bool half = check_lower_class_half(class) != CHECK_HALF_NONE;
-    const bool complex_half = check_lower_complex_element(writer->program->types, type) == BUSTER_TYPE_FLOAT16;
+    const bool complex_half = check_lower_complex_half(writer->program->types, type);
     return integer || real || vector ? class : half ? BUSTER_TYPED_CLASS_U16 : complex_half ? BUSTER_TYPED_CLASS_U32 : UINT8_MAX;
 }
 
@@ -8412,20 +8424,20 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
     const TypeId result = stream->values[node].type;
     const uint8_t from = effect != NULL ? check_lower_bit_cast_class(writer, effect->source_type) : UINT8_MAX;
     const uint8_t to = result != 0 ? check_lower_bit_cast_class(writer, result) : UINT8_MAX;
-    const bool source_complex = effect != NULL && check_lower_complex_element(writer->program->types, effect->source_type) == BUSTER_TYPE_FLOAT16;
-    const bool target_complex = result != 0 && check_lower_complex_element(writer->program->types, result) == BUSTER_TYPE_FLOAT16;
+    const bool source_complex = effect != NULL && check_lower_complex_half(writer->program->types, effect->source_type);
+    const bool target_complex = result != 0 && check_lower_complex_half(writer->program->types, result);
     if (effect == NULL)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (from == UINT8_MAX || to == UINT8_MAX)
     {
-        check_lower_unsupported(writer, "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, _Complex _Float16 and vectors");
+        check_lower_unsupported(writer, "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors");
     }
     else if (target_complex)
     {
-        // A complex binary16 result is its own four-byte object, never a U32 value mistaken for an address. SET_LOCAL
-        // writes the source's representation directly, so even signaling NaNs and signed zeros retain every bit.
+        // A complex half-precision result is its own four-byte object, never a U32 value mistaken for an address.
+        // SET_LOCAL writes the source's representation directly, so even signaling NaNs and signed zeros retain every bit.
         const uint32_t local = check_lower_object(writer, 4, type_alignment_log2(writer->program->types, result));
         const uint8_t stored = from == BUSTER_TYPED_CLASS_VECTOR || source_complex || effect->folded ? BUSTER_TYPED_CLASS_U32 : from;
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
