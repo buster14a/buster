@@ -1756,9 +1756,9 @@ static uint32_t lane_cores_number(const char* text, ssize_t length, ssize_t* at,
     return value;
 }
 
-// A list's read costs about 4 µs, the open, kernfs' formatting and the close: 31 µs for the 8 cores of a 16-CPU Zen 4,
-// and 50 to 65 µs as a process's first count. The time is the system calls', with no vector path to take, and a
-// session counts on lane 1, off lane 0's path (BUSTER_LANE_SESSION_PER_CORE).
+// A list's read is its open, kernfs' formatting and the close: on the 9700X 9.4 µs for its 8 cores, and 19 to 55 µs as
+// a process's first count; on a 16-CPU Zen 4 31 µs, and 50 to 65 µs. The time is the system calls', with no vector path
+// to take, and a session counts on lane 1, off lane 0's path (BUSTER_LANE_SESSION_PER_CORE).
 static uint32_t lane_cores(const char* topology, const uint64_t* mask, uint32_t words)
 {
     const uint32_t cpus = (words < BUSTER_LANE_CPU_MASK_WORDS ? words : BUSTER_LANE_CPU_MASK_WORDS) * 64;

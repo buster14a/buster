@@ -2799,7 +2799,8 @@ the command, while lane 1 creates the others and says how their start went,
 which lane 0 learns (`lane_session_settle`) before it first meets them. By
 default a session asks for no more lanes than the cores of the CPUs the process
 may run on (`BUSTER_LANE_SESSION_PER_CORE`): lane 1 counts them from sysfs'
-sibling lists first (`lane_core_count`), about 4 µs a core, off lane 0's path,
+sibling lists first (`lane_core_count`), a read per core (9.4 µs for the 9700X's
+8, 19 to 55 µs as a process's first count), off lane 0's path,
 and says how many lanes the session asks for (`lane_session_asked`), on a core's
 two siblings one, itself then joined. Under a session
 nothing creates a thread: a command's wide parts are rounds of its flow

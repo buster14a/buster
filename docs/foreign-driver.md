@@ -49,7 +49,7 @@ The command's threads are its session's (#905, "The session owns the threads"
 in the linker's design): started once, right after its arguments and before any
 input is opened, as many as the link may take (`--lanes N`'s, at most one per
 CPU, or 8, at most one per core), none for one; lane 0 creates lane 1, which
-without `--lanes` counts the cores from sysfs' sibling lists, about 4 µs a core
+without `--lanes` counts the cores from sysfs' sibling lists, a read per core
 off lane 0's path (`lane_core_count`), creates the others
 (`BUSTER_LANE_SESSION_LAZY`), and lane 0 learns how they started before the
 link sets its lanes up. The three stages are rounds of the link's flow on them

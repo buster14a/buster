@@ -4829,7 +4829,7 @@ lane 1 creates the others and opens the gate they wait at, or closes it if one
 can't start; lane 0 learns which (`lane_session_settle`) before it first meets
 them. The compiler's commands ask by default for no more lanes than the cores of
 the CPUs they may run on (`BUSTER_LANE_SESSION_PER_CORE`), which lane 1 counts
-from sysfs' sibling lists before it creates the others, about 4 µs a core off
+from sysfs' sibling lists before it creates the others, a read per core off
 lane 0's path; lane 0 reads the count when a wide part first needs it
 (`lane_session_asked`). A session whose
 lanes can't start runs the flow on lane 0 alone and never tries again; a
