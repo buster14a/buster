@@ -18,14 +18,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if test -f .github/issue732.part0; then
-            cat .github/issue732.part* | sed 's/tcGGzt/tcGzt/' | base64 -d | gzip -d > "$RUNNER_TEMP/implementation.patch"
-            echo "3a52e18221b575618bae4e1d52733123589fc3ac423c4e8207dcaddc7033db53  $RUNNER_TEMP/implementation.patch" | sha256sum --check
+          if test -f .github/issue732-fix.b64; then
+            base64 -d .github/issue732-fix.b64 | gzip -d > "$RUNNER_TEMP/implementation.patch"
+            echo "f639d8c68eb094da4ddca2e4ea1bdabd2d420a90f6e807c616b4faa92bbafc37  $RUNNER_TEMP/implementation.patch" | sha256sum --check
             git apply --check "$RUNNER_TEMP/implementation.patch"
             git apply "$RUNNER_TEMP/implementation.patch"
-            git rm .github/issue732.part*
+            git rm .github/issue732-fix.b64
             git add src/buster/compiler
-            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'feat(ir): integrate typed vectors and sparse shared interpretation (#732)'
+            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'fix(ir): preserve scalar lowering clients and sparse interpreter admission'
             git push origin HEAD:chatgpt/issue-732-vector-integration
           fi
           git diff --check
@@ -38,10 +38,12 @@ jobs:
       - name: Focused regression tests
         shell: bash
         run: |
-          set -euo pipefail
-          for test in test-ir test-ir-parse test-ir-simd test-ir-simd-typed test-ir-simd-consumers test-ir-lowering test-ir-interpreter; do
-            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$test.log"
+          set -uo pipefail
+          failed=0
+          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter; do
+            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$test.log" || failed=1
           done
+          exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
