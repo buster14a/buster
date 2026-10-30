@@ -2775,7 +2775,11 @@ never retrying. A terminal command's lanes stay parked for the process's exit
 (but in sanitizer builds), a test's are joined. Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
 operations. An operation's phases stay direct calls within its whole-operation
-lane entry.
+lane entry. `test-checker-driver` and `test-check-units` run on one session of
+8 lanes each (`check_test_in_session`): lane 0 runs the tests, and the driver's
+commands they run in-process are regions of the session's lanes, which the
+others serve, so that none of them creates or joins a thread; a child they
+fork forgets the session.
 
 ## Deterministic output tests
 
