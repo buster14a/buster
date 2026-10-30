@@ -1681,16 +1681,17 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
                                   "return (int)h;}");
     // #799: independent Clang execution compares every byte, including lane boundaries and both operand orders.
     check_test_program_x86_source(test, clang, target, run_native, "x86-immediate-sse-avx2-intrinsics",
-                                  "#include <immintrin.h>\n"
-                                  "int tested(int n){unsigned h=2166136261u;__m128d a,b;__m128i p,q;__m256i x,y;"
+                                  "int tested(int n){unsigned h=2166136261u;v2df a,b;v8hi p,q;v8si x,y;v4di u,v;v32qi c,d;"
                                   "fill(&a,16,n);fill(&b,16,n+1);fill(&p,16,n+2);fill(&q,16,n+3);fill(&x,32,n+4);fill(&y,32,n+5);"
-                                  "__m128d d[]={_mm_shuffle_pd(a,b,0),_mm_shuffle_pd(a,b,3),_mm_shuffle_pd(b,a,1)};FOLD(d);"
-                                  "__m128i w[]={_mm_blend_epi16(p,q,0),_mm_blend_epi16(p,q,255),_mm_blend_epi16(q,p,0xa5)};FOLD(w);"
-                                  "__m256i z[]={_mm256_shuffle_epi32(x,0),_mm256_shuffle_epi32(x,255),_mm256_shuffle_epi32(y,0x4e),"
-                                  "_mm256_permute4x64_epi64(x,0),_mm256_permute4x64_epi64(x,255),_mm256_permute4x64_epi64(y,0x1b),"
-                                  "_mm256_alignr_epi8(x,y,0),_mm256_alignr_epi8(x,y,15),_mm256_alignr_epi8(x,y,16),"
-                                  "_mm256_alignr_epi8(y,x,17),_mm256_alignr_epi8(x,y,32),_mm256_alignr_epi8(x,y,255)};FOLD(z);"
-                                  "__m256i deep=x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(_mm256_shuffle_epi32(y,0x4e))))))))))))))))));FOLD(deep);return (int)h;}");
+                                  "fill(&u,32,n+6);fill(&v,32,n+7);fill(&c,32,n+8);fill(&d,32,n+9);"
+                                  "v2df f[]={__builtin_ia32_shufpd(a,b,0),__builtin_ia32_shufpd(a,b,3),__builtin_ia32_shufpd(b,a,1)};FOLD(f);"
+                                  "v8hi w[]={__builtin_ia32_pblendw128(p,q,0),__builtin_ia32_pblendw128(p,q,255),__builtin_ia32_pblendw128(q,p,0xa5)};FOLD(w);"
+                                  "v8si z[]={__builtin_ia32_pshufd256(x,0),__builtin_ia32_pshufd256(x,255),__builtin_ia32_pshufd256(y,0x4e)};FOLD(z);"
+                                  "v4di k[]={__builtin_ia32_permdi256(u,0),__builtin_ia32_permdi256(u,255),__builtin_ia32_permdi256(v,0x1b)};FOLD(k);"
+                                  "v32qi l[]={__builtin_ia32_palignr256(c,d,0),__builtin_ia32_palignr256(c,d,15),__builtin_ia32_palignr256(c,d,16),"
+                                  "__builtin_ia32_palignr256(d,c,17),__builtin_ia32_palignr256(c,d,32),__builtin_ia32_palignr256(c,d,255)};FOLD(l);"
+                                  "v8si deep=x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(__builtin_ia32_pshufd256(y,0x4e))))))))))))))))));"
+                                  "FOLD(deep);return (int)h;}");
     check_test_program_includes = false;
 }
 
@@ -1719,10 +1720,10 @@ static void check_test_program_x86_refusals(CheckTest* test)
                                            "sse-builtin-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
         check_test_program_boundary_target(test, "typedef double v2df __attribute__((vector_size(16)));int tested(int n){v2df a={n,1};"
                                                  "v2df b=__builtin_ia32_shufpd(a,a,3);return (int)b[0];}",
-                                           "sse-shufpd-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
+                                           "sse-shufpd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
         check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
                                                  "v8si b=__builtin_ia32_pshufd256(a,0x1b);return b[0];}",
-                                           "avx2-pshufd-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
+                                           "avx2-pshufd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);

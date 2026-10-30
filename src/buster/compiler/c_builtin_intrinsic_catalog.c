@@ -166,8 +166,8 @@ static const char* const builtin_intrinsic_prototype_names[] =
     "__builtin_unpredictable",
 };
 
-// Whether a call of the frozen scope's name is checked by its prototype (and an x86 one also by its SemaX86 rules): an
-// x86 record, or a generic one of builtin_intrinsic_prototype_names.
+// Whether a name is checked by its prototype (and an x86 one also by its SemaX86 rules): an x86 record of the frozen
+// scope or its separately attested additions, or a generic one of builtin_intrinsic_prototype_names.
 static __attribute__((unused)) bool builtin_intrinsic_own_main_prototype_in_scope(const char* name, uint32_t length)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_lookup(name, length);

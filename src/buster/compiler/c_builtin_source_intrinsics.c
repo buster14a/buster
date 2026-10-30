@@ -32,8 +32,8 @@ static const CBuiltinSourceName cbuiltin_source_leaves[] = {
 #undef BUSTER_CBUILTIN_X86_LEAF
 #undef BUSTER_CBUILTIN_SOURCE_LEAF
 
-// The source checker deliberately accepts only this frozen workload's intrinsic declarations. A lowering row
-// outside it is not a callable source builtin. Reuse its exact sorted name inventory, without importing its types.
+// The source checker accepts this frozen workload's intrinsic declarations and separately attested additions below.
+// A lowering row outside those scopes is not a callable source builtin. Reuse the sorted inventory, without its types.
 #define BUSTER_BUILTIN_METADATA(n, t, a, f, h, l, s, line, ordinal, custom, evaluable, kind, constraints) { n, sizeof(n) - 1 },
 static const CBuiltinSourceName cbuiltin_source_intrinsic_scope[] = {
 #include "generated/clang_builtin_own_main_23_1_1.inc"
