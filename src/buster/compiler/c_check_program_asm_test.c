@@ -55,6 +55,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_source(test,
         "int tested(int n){unsigned lo,hi;__asm__ volatile(\"pause\\n\\tlfence\\n\\tmfence\\n\\tsfence\\n\\trdtsc\" : \"=a\"(lo), \"=d\"(hi) : : \"memory\");"
         "return (lo!=0 || hi!=0)+n;}", "asm-pause-fences-rdtsc", clang);
+    check_test_program_source(test,
+        "int tested(int n){__asm__ volatile(\"rep nop\\n\\trep; nop\" : : : \"memory\");return n+1;}",
+        "asm-rep-nop", clang);
     // Branches to the template's own labels: %='s labels forward, a numeric one backward in a loop.
     check_test_program_source(test,
         "int tested(int n){int r;__asm__(\"testl %1, %1\\n\\tjle .Lneg%=\\n\\tmovl $5, %0\\n\\tjmp .Lend%=\\n.Lneg%=:\\n\\tmovl $7, %0\\n.Lend%=:\" : \"=r\"(r) : \"r\"(n));"

@@ -118,6 +118,7 @@ The admitted families are:
   (#798). The assembler requires a target with RDTSCP for `rdtscp`; inline
   templates admit it independently of the target, so their author is responsible
   for selecting instructions supported by the CPU and declaring register outputs;
+- the spin-wait spellings `rep nop` and `rep; nop`, each encoded as `pause`;
 - what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
   between an XMM register and a general one or memory, the x87's `fld` and
   `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and
