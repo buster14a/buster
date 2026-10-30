@@ -539,7 +539,7 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
         const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)columns.fixed.count * columns.count <= simple_budget;
         if (simple)
         {
-            tier1_allocation_filter_fixed_simple(&columns, BUSTER_VECTOR_PATH(vector), allowed);
+            tier1_allocation_filter_fixed_simple(input, BUSTER_VECTOR_PATH(vector), allowed);
         }
         else
         {
@@ -595,7 +595,8 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     (void)vector;
 
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing each store below could change
-    // *input, and clang would reload them after every one.
+    // *input, and clang would reload them after every one. Its address must not escape, or the stores could alias
+    // it as well: the helpers take input and make their own copies.
     const Tier1AllocationInput columns = input != 0 ? *input : (Tier1AllocationInput){ 0 };
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
@@ -739,7 +740,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 value_active_end[value] = columns.ends[i];
             }
         }
-        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(&columns, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
@@ -778,7 +779,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                tier1_allocation_color(&columns, class, class_events, class_event_count, regs);
+                tier1_allocation_color(input, class, class_events, class_event_count, regs);
                 allocation.vector_intervals += class_count;
             }
             else
@@ -788,11 +789,11 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = tier1_allocate_scan_uses(&columns, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces);
+                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces);
                 }
                 else
                 {
-                    assigned = tier1_allocate_scan(&columns, class, events, event_count, allowed, regs, split, kinds);
+                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds);
                 }
                 if (!assigned)
                 {
