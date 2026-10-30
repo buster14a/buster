@@ -107,6 +107,9 @@ The admitted families are:
 - the corresponding VEX forms and `vzeroupper`; 512-bit AVX-512F packed float
   arithmetic/moves, `vpaddd/vpsubd/vpxord/vmovdqa32/vmovdqu32`, with destination
   masks/zeroing and supported `{1to8}`/`{1to16}` memory broadcasts;
+- VEX `kmovb/kmovw/kmovd/kmovq` between mask registers, memory and general
+  registers, including `k0`, subject to each form's target features. Byte and
+  word moves use 32-bit general registers; qword moves use 64-bit ones;
 - the processor-state instructions C's inline assembly uses (#147): `cpuid`,
   `xgetbv`, `xchg`, `bswap`, the x87's `fnstcw/fldcw/fnstsw/fnclex`,
   `stmxcsr/ldmxcsr`, and SSE2's `pcmpeqd` in its legacy forms. An `xchg` takes

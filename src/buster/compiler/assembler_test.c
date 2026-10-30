@@ -122,6 +122,20 @@ static const char asm_test_segmented_movq[] =
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
     "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
+// Every mask move's five operand forms, in both syntaxes. Include k0, k7, extended GPRs, SIB addresses and the
+// exact displacement main.c's naked semantics harness uses. GNU as supplies the independent encoding oracle.
+static const char asm_test_kmov[] =
+    ".intel_syntax noprefix\nmask_moves:\n"
+    "kmovb k0,k7\nkmovb k1,byte ptr [r12+r9*4-129]\nkmovb byte ptr [r13],k2\nkmovb k3,r8d\nkmovb r9d,k4\n"
+    "kmovw k5,k6\nkmovw k7,word ptr [rdi+2]\nkmovw word ptr [rsp+8],k0\nkmovw k1,eax\nkmovw r15d,k2\n"
+    "kmovd k3,k4\nkmovd k5,dword ptr [rdi+4]\nkmovd dword ptr [r12],k6\nkmovd k7,r10d\nkmovd eax,k0\n"
+    "kmovq k1,k2\nkmovq k0,qword ptr [rdi+2240]\nkmovq qword ptr [rdi+2240],k0\nkmovq k3,r11\nkmovq r14,k7\n"
+    ".att_syntax prefix\n"
+    "kmovb %k7,%k0\nkmovb -129(%r12,%r9,4),%k1\nkmovb %k2,(%r13)\nkmovb %r8d,%k3\nkmovb %k4,%r9d\n"
+    "kmovw %k6,%k5\nkmovw 2(%rdi),%k7\nkmovw %k0,8(%rsp)\nkmovw %eax,%k1\nkmovw %k2,%r15d\n"
+    "kmovd %k4,%k3\nkmovd 4(%rdi),%k5\nkmovd %k6,(%r12)\nkmovd %r10d,%k7\nkmovd %k0,%eax\n"
+    "kmovq %k2,%k1\nkmovq 2240(%rdi),%k0\nkmovq %k0,2240(%rdi)\nkmovq %r11,%k3\nkmovq %k7,%r14\n";
+
 static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
 {
     // GAS appends relaxed branch relocations after ones made during parsing. ELF permits that order; the shared
@@ -729,6 +743,8 @@ static void asm_test_targets(AsmTest* test)
     {
         const bool avx2 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX2)) != 0 : architecture >= X86_ARCH_V3;
         const bool avx512 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0 : architecture >= X86_ARCH_V4;
+        const uint64_t mask_features = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
+        const bool masks = architecture == X86_ARCH_NATIVE ? (native.features & mask_features) == mask_features : architecture >= X86_ARCH_V4;
         const bool rdtscp = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(RDTSCP)) != 0 : architecture >= X86_ARCH_ZNVER5;
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
         asm_test_pair(test, BUSTER_S8("pause\nlfence\nmfence\nsfence\nrdtsc\n"), 1, architecture);
@@ -736,6 +752,7 @@ static void asm_test_targets(AsmTest* test)
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvmovdqa32 zmm0,[rax]\nvpsubd zmm0,zmm1,zmm2\n"), avx512, architecture);
+        asm_test_pair(test, (String8){.pointer = (char*)asm_test_kmov, .length = sizeof(asm_test_kmov) - 1}, masks, architecture);
         for (uint32_t i = 0; i < test->index->begin[BUSTER_X86_MATCH_BUCKETS]; i += 1)
         {
             asm_test_check(test, x86_target_form_allowed(test->index->allowed, test->index->forms[i]), "all indexed records eligible", 0);
@@ -895,6 +912,8 @@ static void asm_test_code(AsmTest* test)
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
     asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
+    // asm_assemble_code has no section or label directives; the same instruction corpus remains valid as a template.
+    asm_test_code_pair(test, asm_test_kmov, 40, "inline code: every mask move form in both syntaxes");
     const AsmCode intel = asm_test_code_pair(test, ".intel_syntax noprefix\nvmovdqu64 zmm0, zmmword ptr [rdi + 192]\nvmovdqa64 zmmword ptr [rdi], zmm15\n"
                                                    "push qword ptr [rdi + 128]\npop qword ptr [rdi + 128]\njmp qword ptr [rip + target]\nrep movsb\n.att_syntax prefix\n",
                                              6, "inline code: naked functions' Intel instructions");
@@ -1273,6 +1292,22 @@ static int run_assembler_tests(int count, char** arguments)
         {
             asm_test_pair(&test, (String8){.pointer = (char*)good[i], .length = strlen(good[i])}, 1, X86_ARCH_V4);
         }
+        // Use an eligible target for malformed mask operands, so a missing ISA cannot hide a grammar/width defect.
+        static const char* const bad_masks[] =
+        {
+            ".intel_syntax noprefix\nkmovq k8,rax\n",
+            ".intel_syntax noprefix\nkmovq k01,rax\n",
+            ".intel_syntax noprefix\nkmovq k0,eax\n",
+            ".intel_syntax noprefix\nkmovw k0,ax\n",
+            ".intel_syntax noprefix\nkmovq k0,dword ptr [rax]\n",
+            ".intel_syntax noprefix\nkmovb k0,rax\n",
+            ".intel_syntax noprefix\nkmovd k0,word ptr [rax]\n",
+            "kmovq %k8,%rax\n",
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bad_masks); i += 1)
+        {
+            asm_test_pair(&test, (String8){.pointer = (char*)bad_masks[i], .length = strlen(bad_masks[i])}, 0, X86_ARCH_V4);
+        }
         static const char* const bad[] =
             {
                 "!",
@@ -1441,6 +1476,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "vmovdqa64 zmm1,zmmword ptr [rax]\nvmovdqa64 zmmword ptr [rsp],zmm2\nvmovdqu64 zmm3,zmm4\npush qword ptr [rdi+128]\n"
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
+                asm_test_oracle(&test, asm_test_kmov, directory, X86_ARCH_V4);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);

@@ -335,6 +335,13 @@ designs and the compilers already built this way.
   each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
+  its naked mask-save fixture uses all eight `kmovq` registers at the real
+  semantics harness's offsets, executing where AVX-512BW is available and
+  compiling/linking everywhere. `test-assembler --cross-check` compares all
+  five operand forms of `kmovb/w/d/q` in both syntaxes with GNU as; eligible
+  targets also check malformed register and memory widths.
+  `test-checker --program-asm` runs the inline-assembly source fixtures alone;
+  the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
   call of `puts` by the direct path. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
