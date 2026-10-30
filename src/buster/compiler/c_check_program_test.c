@@ -807,6 +807,21 @@ static const char check_test_program_harness[] =
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
     "struct external_cx c;__real__ c.z=a;__imag__ c.z=b;return c;}long double external_complex_apply("
     "struct external_cx(*f)(long double,long double),long double a){struct external_cx c=f(a,-a);return __real__ c.z*4+__imag__ c.z;}\n"
+    // Complex binary16's two parts share one SSE eightbyte. Transport their bits in both directions, including the
+    // ninth and tenth arguments on the stack and va_arg's, without an arithmetic conversion quieting a NaN.
+    "typedef _Float16 _Complex ExternalHC;"
+    "static unsigned external_hc_bits(ExternalHC z){unsigned b;__builtin_memcpy(&b,&z,4);return b;}"
+    "static ExternalHC external_hc_value(unsigned b){ExternalHC z;__builtin_memcpy(&z,&b,4);return z;}"
+    "ExternalHC external_hc(ExternalHC z,unsigned mask){return external_hc_value(external_hc_bits(z)^mask);}"
+    "unsigned external_hc_apply(ExternalHC(*f)(ExternalHC,unsigned),unsigned bits){return external_hc_bits(f(external_hc_value(bits),0x80000001u));}"
+    "unsigned external_hc_many(ExternalHC a,ExternalHC b,ExternalHC c,ExternalHC d,ExternalHC e,ExternalHC f,ExternalHC g,ExternalHC h,ExternalHC i,ExternalHC j){"
+    "ExternalHC z[]={a,b,c,d,e,f,g,h,i,j};unsigned r=2166136261u;for(int k=0;k<10;k++)r=(r^external_hc_bits(z[k]))*16777619u;return r;}"
+    "unsigned external_hc_many_apply(unsigned(*f)(ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC,ExternalHC),"
+    "unsigned bits){ExternalHC a=external_hc_value(bits),b=external_hc_value(bits^0x80008000u);return f(a,b,a,b,a,b,a,b,a,b);}"
+    "unsigned external_hc_variadic(int count,...){va_list ap;va_start(ap,count);unsigned h=2166136261u;"
+    "for(int i=0;i<count;i++){ExternalHC z=va_arg(ap,ExternalHC);h=(h^external_hc_bits(z))*16777619u;}va_end(ap);return h;}"
+    "unsigned external_hc_variadic_apply(unsigned(*f)(int,...),unsigned bits){ExternalHC a=external_hc_value(bits),b=external_hc_value(bits^0x80008000u);"
+    "return f(10,a,b,a,b,a,b,a,b,a,b);}\n"
     // Mixed Clang/Buster atomic-vector calls use the declared atomic ABI, with underlying vector value bytes.
     "#if defined(__AVX512F__) && defined(__AVX512VL__)\n"
     "typedef int ExternalAtomic4 __attribute__((vector_size(16)));"
@@ -1540,23 +1555,26 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
+    PredefinesOptions predefines = check_test_program_predefines();
+    predefines.char_unsigned = char_unsigned;
     const PPOptions pp_options = {
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = !check_test_program_includes,
-        .predefines.char_unsigned = char_unsigned,
+        .predefines = predefines,
         .target = target != NULL ? *target : (X86Target){ 0 },
     };
-    const PredefinesOptions predefines = check_test_program_predefines();
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
     check_test_expect(test, preprocessed, "executable source preprocessing");
     for (uint32_t path = 0; preprocessed && path < 2; path += 1)
     {
         CheckTestTypes types = { 0 };
-        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
-        Arena output = arena_reserve(UINT64_C(1) << 26);
+        // The complete immintrin.h before selection needs more checked-node storage than header-free fixtures.
+        const uint64_t plan_room = UINT64_C(1) << (check_test_program_includes ? 28 : 26);
+        Arena input_arena = arena_reserve(plan_room);
+        Arena output = arena_reserve(plan_room);
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
-        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(plan_room);
         const ParseOptions parse_options = { .scalar = path == 0 };
         const CheckOptions options = { .scalar = path == 0 };
         bool ready = input_arena.base != 0 && output.base != 0 && bytes.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
@@ -1613,8 +1631,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         }
         if (!ready)
         {
-            fprintf(stderr, "test-checker: program source input=%u stream=%u init=%u data=%u program=%u token=%u\n",
-                    input.report_count, stream.report_count, initializers.status, data.status, program.status, program.token);
+            fprintf(stderr, "test-checker: program source parser=%u input=%u resource=%u stream=%u init=%u data=%u program=%u token=%u\n",
+                    parser.errors, input.report_count, input.resource, stream.report_count, initializers.status, data.status, program.status, program.token);
         }
         CheckProgramLowered lower[2] = { 0 };
         bool lowered = ready && check_program_lower(lower, &program, true, &output, &scratch) && check_program_lower(lower + 1, &program, false, &output, &scratch);
@@ -4440,8 +4458,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
     // GNU's complex integer types of __int128 and the complex _BitInts, which the usual arithmetic conversions make, and
-    // _Complex __float128 (#137) are lowered; the complex types check_lower_complex doesn't take are refused by what they
-    // need: complex types of the floating types other than float, double, long double and __float128 (clang 23 has no
+    // _Complex __float128 (#137) are lowered; complex _Float16's storage and conversions are lowered too. The complex
+    // types check_lower_complex doesn't take are refused by what they need (clang 23 has no
     // _Float128 in C; __float128 is its spelling).
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;return __real__ z>1;}", "complex-int", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex int z=n;__int128 w=n;__typeof__(z+w) v=z+w;return __real__ v>1;}", "complex-int128", true, true, 0, 3);
@@ -4463,8 +4481,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary_reason(test, "int tested(int n){__float128 x=n;x++;return x>1;}", "float128-increment", true, false, 0, 1,
                                        "increments of __float128 values");
     check_test_program_boundary(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, true, 0, 1);
-    check_test_program_boundary_reason(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, false, 0, 1,
-                                       "complex types other than _Complex float, double, long double and __float128");
+    check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, but the overflow
     // builtins of a _BitInt of 65 to 127 bits, and a bit-field of them spread over more than 8 bytes, or past 128 bits.
     check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
