@@ -1,0 +1,554 @@
+name: Prepare intrinsic-filter PR
+on:
+  push:
+    branches: [chatgpt/performance-preparation-20261030]
+    paths: [.github/workflows/chatgpt-893-preparation.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: e693d878309ed3c3be05f2f550574d59217deceb
+      - name: Build and qualify the independent filter change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/replace.c" <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          static char* read_text(const char* path)
+          {
+              FILE* file = fopen(path, "rb");
+              char* text = NULL;
+              if (file != NULL)
+              {
+                  if (fseek(file, 0, SEEK_END) == 0)
+                  {
+                      const long size = ftell(file);
+                      if (size >= 0 && size < 16000000 && fseek(file, 0, SEEK_SET) == 0)
+                      {
+                          text = malloc((size_t)size + 1);
+                          if (text != NULL && fread(text, 1, (size_t)size, file) == (size_t)size)
+                          {
+                              text[size] = 0;
+                          }
+                          else
+                          {
+                              free(text);
+                              text = NULL;
+                          }
+                      }
+                  }
+                  fclose(file);
+              }
+              return text;
+          }
+          int main(int argc, char** argv)
+          {
+              int result = 1;
+              if (argc == 4)
+              {
+                  char* text = read_text(argv[1]);
+                  char* old = read_text(argv[2]);
+                  char* replacement = read_text(argv[3]);
+                  if (text != NULL && old != NULL && replacement != NULL && old[0] != 0)
+                  {
+                      char* at = strstr(text, old);
+                      if (at != NULL && strstr(at + strlen(old), old) == NULL)
+                      {
+                          FILE* file = fopen(argv[1], "wb");
+                          if (file != NULL)
+                          {
+                              const size_t prefix = (size_t)(at - text);
+                              const size_t size = strlen(replacement);
+                              const char* tail = at + strlen(old);
+                              const size_t suffix = strlen(tail);
+                              const int wrote = fwrite(text, 1, prefix, file) == prefix && fwrite(replacement, 1, size, file) == size && fwrite(tail, 1, suffix, file) == suffix;
+                              result = fclose(file) == 0 && wrote ? 0 : 1;
+                          }
+                      }
+                  }
+                  free(replacement);
+                  free(old);
+                  free(text);
+              }
+              if (result != 0)
+              {
+                  fprintf(stderr, "exact replacement failed\n");
+              }
+              return result;
+          }
+          EOF
+          cc -std=c17 -O2 -Wall -Wextra -Werror "$RUNNER_TEMP/replace.c" -o "$RUNNER_TEMP/replace"
+          cat > src/buster/compiler/c_builtin_intrinsic_filter_hash.h <<'EOF'
+          // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+          // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+          //
+          // Shared by the catalog's immutable negative filter and its C generator. The first/last four logical
+          // bytes and length form a bounded fingerprint, not an identity: middle-only changes deliberately collide.
+          // Only the exact catalog lookup can accept a name. Host and generator use the Linux/x86 little-endian ABI.
+          #ifndef BUSTER_C_BUILTIN_INTRINSIC_FILTER_HASH_INCLUDED
+          #define BUSTER_C_BUILTIN_INTRINSIC_FILTER_HASH_INCLUDED
+          #include <stdint.h>
+          #include <string.h>
+
+          #define BUSTER_BUILTIN_INTRINSIC_FILTER_BITS 65536u
+          #define BUSTER_BUILTIN_INTRINSIC_FILTER_WORDS (BUSTER_BUILTIN_INTRINSIC_FILTER_BITS / 64u)
+
+          // Nonnull, nonempty, bounded name; no termination or readable padding. Short names use byte loads.
+          static uint32_t builtin_intrinsic_filter_key(const char* name, uint32_t length)
+          {
+              uint32_t first = 0;
+              uint32_t last = 0;
+              if (length >= sizeof(first))
+              {
+                  memcpy(&first, name, sizeof(first));
+                  memcpy(&last, name + length - sizeof(last), sizeof(last));
+              }
+              else
+              {
+                  for (uint32_t i = 0; i < length; i += 1)
+                  {
+                      first |= (uint32_t)(uint8_t)name[i] << (8 * i);
+                  }
+                  last = first;
+              }
+              const uint32_t key = first ^ ((last << 13) | (last >> 19)) ^ (length * UINT32_C(0x9e3779b9));
+              return key;
+          }
+
+          static uint32_t builtin_intrinsic_filter_hash(uint32_t key)
+          {
+              const uint32_t mixed = (key ^ (key >> 16)) * UINT32_C(0x7feb352d);
+              const uint32_t result = (mixed ^ (mixed >> 15)) & (BUSTER_BUILTIN_INTRINSIC_FILTER_BITS - 1u);
+              return result;
+          }
+          #endif
+          EOF
+          cat > tools/generate_builtin_intrinsic_filter.c <<'EOF'
+          // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+          // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+          //
+          // Original deterministic projection of the already reviewed Clang 23.1.1 catalog. No installed compiler
+          // extraction or new upstream input is needed. The output retains that catalog's separate LLVM provenance.
+          // Write stdout to a temporary file and replace the checked-in include only after successful completion.
+          #include <inttypes.h>
+          #include <stdio.h>
+          #include "../src/buster/compiler/c_builtin_intrinsic_filter_hash.h"
+
+          typedef struct IntrinsicFilterName IntrinsicFilterName;
+          struct IntrinsicFilterName
+          {
+              const char* name;
+              uint32_t length;
+          };
+          #define BUSTER_BUILTIN_METADATA(n, t, a, f, h, l, s, line, ordinal, custom, evaluable, kind, constraints) { n, sizeof(n) - 1 },
+          static const IntrinsicFilterName intrinsic_filter_names[] =
+          {
+          #include "../src/buster/compiler/generated/clang_builtin_metadata_23_1_1.inc"
+          };
+          #undef BUSTER_BUILTIN_METADATA
+
+          int main(void)
+          {
+              uint64_t bits[BUSTER_BUILTIN_INTRINSIC_FILTER_WORDS] = { 0 };
+              const uint32_t count = sizeof(intrinsic_filter_names) / sizeof(intrinsic_filter_names[0]);
+              for (uint32_t i = 0; i < count; i += 1)
+              {
+                  const IntrinsicFilterName* name = intrinsic_filter_names + i;
+                  const uint32_t hash = builtin_intrinsic_filter_hash(builtin_intrinsic_filter_key(name->name, name->length));
+                  bits[hash / 64] |= UINT64_C(1) << (hash % 64);
+              }
+              puts("// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception");
+              puts("// Generated by tools/generate_builtin_intrinsic_filter.c; do not edit.");
+              puts("// Derived LLVM name facts from clang_builtin_metadata_23_1_1.inc, llvmorg-23.1.1.");
+              puts("// Retains that input's LLVM license/provenance; see LICENSES/LLVM.txt and");
+              puts("// docs/builtin-metadata/clang-23.1.1-inputs.json. No capability is inferred.");
+              printf("#define BUSTER_BUILTIN_INTRINSIC_FILTER_COUNT %uu\n", count);
+              for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_FILTER_WORDS; i += 1)
+              {
+                  printf("    UINT64_C(0x%016" PRIx64 "),%s", bits[i], i % 4 == 3 ? "\n" : " ");
+              }
+              const int result = fflush(stdout) == 0 && !ferror(stdout) ? 0 : 1;
+              return result;
+          }
+          EOF
+          clang -std=c17 -O2 -Wall -Wextra -Werror tools/generate_builtin_intrinsic_filter.c -o "$RUNNER_TEMP/generate-filter"
+          "$RUNNER_TEMP/generate-filter" > src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc
+          "$RUNNER_TEMP/generate-filter" > "$RUNNER_TEMP/filter-again.inc"
+          cmp src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc "$RUNNER_TEMP/filter-again.inc"
+          cat > src/buster/compiler/c_builtin_intrinsic_filter.c <<'EOF'
+          // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+          // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+          //
+          // Negative-only filter for the existing eight-name catalog search (#893). Include after
+          // BuiltinIntrinsicName. Immutable 8 KiB state has no startup or per-unit construction/allocation cost.
+          // Irregular bounded loads supply eight keys; the mixing is SIMD and the bit probes are scalar loads,
+          // avoiding gathers. False positives always proceed to the existing exact comparison/search.
+          #ifndef BUSTER_C_BUILTIN_INTRINSIC_FILTER_INCLUDED
+          #define BUSTER_C_BUILTIN_INTRINSIC_FILTER_INCLUDED
+          #include "c_builtin_intrinsic_filter_hash.h"
+
+          static const uint64_t builtin_intrinsic_filter_bits[BUSTER_BUILTIN_INTRINSIC_FILTER_WORDS] =
+          {
+          #include "generated/clang_builtin_intrinsic_filter_23_1_1.inc"
+          };
+          _Static_assert(BUSTER_BUILTIN_INTRINSIC_FILTER_COUNT == BUSTER_BUILTIN_INTRINSIC_COUNT, "regenerate the intrinsic filter after catalog changes");
+
+          // At most eight input records, count zero permits null. Never read inactive records or a null/empty name.
+          // The scalar mixing is an exact twin of the vector mixing; the public scalar catalog lookup stays
+          // completely unfiltered and independently checks that filtering cannot hide a real catalog hit.
+          static uint32_t builtin_intrinsic_filter_candidates(const BuiltinIntrinsicName* inputs, uint32_t count, bool scalar)
+          {
+              (void)scalar;
+              uint32_t keys[8] = { 0 };
+              uint32_t hashes[8] = { 0 };
+              uint32_t valid = 0;
+              for (uint32_t lane = 0; lane < count; lane += 1)
+              {
+                  if (inputs[lane].name != NULL && inputs[lane].length != 0)
+                  {
+                      keys[lane] = builtin_intrinsic_filter_key(inputs[lane].name, inputs[lane].length);
+                      valid |= 1u << lane;
+                  }
+              }
+              if (BUSTER_SCALAR_PATH(scalar))
+              {
+                  for (uint32_t lane = 0; lane < count; lane += 1)
+                  {
+                      hashes[lane] = builtin_intrinsic_filter_hash(keys[lane]);
+                  }
+              }
+              else
+              {
+                  const __m256i key = _mm256_loadu_si256((const __m256i*)keys);
+                  const __m256i mixed = _mm256_mullo_epi32(_mm256_xor_si256(key, _mm256_srli_epi32(key, 16)), _mm256_set1_epi32(0x7feb352d));
+                  const __m256i hash = _mm256_and_si256(_mm256_xor_si256(mixed, _mm256_srli_epi32(mixed, 15)), _mm256_set1_epi32(BUSTER_BUILTIN_INTRINSIC_FILTER_BITS - 1u));
+                  _mm256_storeu_si256((__m256i*)hashes, hash);
+              }
+              uint32_t result = 0;
+              for (uint32_t lane = 0; lane < count; lane += 1)
+              {
+                  if ((valid & (1u << lane)) != 0)
+                  {
+                      const uint32_t hash = hashes[lane];
+                      const uint32_t present = (uint32_t)((builtin_intrinsic_filter_bits[hash / 64] >> (hash % 64)) & 1u);
+                      result |= present << lane;
+                  }
+              }
+              return result;
+          }
+          #endif
+          EOF
+          cat > "$RUNNER_TEMP/old" <<'EOF'
+          struct BuiltinIntrinsicName
+          {
+              const char* name;
+              uint32_t length;
+          };
+          EOF
+          cat > "$RUNNER_TEMP/new" <<'EOF'
+          struct BuiltinIntrinsicName
+          {
+              const char* name;
+              uint32_t length;
+          };
+
+          #include "c_builtin_intrinsic_filter.c"
+          EOF
+          "$RUNNER_TEMP/replace" src/buster/compiler/c_builtin_intrinsic_catalog.c "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          cat > "$RUNNER_TEMP/old" <<'EOF'
+                      int32_t upper_lanes[8] = { 0 };
+          EOF
+          cat > "$RUNNER_TEMP/new" <<'EOF'
+                      int32_t upper_lanes[8] = { 0 };
+                      const uint32_t candidates = builtin_intrinsic_filter_candidates(inputs + base, lanes, false);
+          EOF
+          "$RUNNER_TEMP/replace" src/buster/compiler/c_builtin_intrinsic_catalog.c "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          cat > "$RUNNER_TEMP/old" <<'EOF'
+                          upper_lanes[lane] = inputs[base + lane].name != 0 && inputs[base + lane].length != 0 ? BUSTER_BUILTIN_INTRINSIC_COUNT : 0;
+          EOF
+          cat > "$RUNNER_TEMP/new" <<'EOF'
+                          upper_lanes[lane] = (candidates & (1u << lane)) != 0 ? BUSTER_BUILTIN_INTRINSIC_COUNT : 0;
+          EOF
+          "$RUNNER_TEMP/replace" src/buster/compiler/c_builtin_intrinsic_catalog.c "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          cat > src/buster/compiler/c_builtin_intrinsic_filter_test.c <<'EOF'
+          // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+          // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+          //
+          // Original negative-filter fixtures, included after the catalog test's expectation helper. The unfiltered
+          // scalar lookup and direct inventory identities remain independent acceptance oracles. Reconstruct the
+          // complete generated bitmap, exercise every real name and deliberate collisions, and protect name tails.
+          static void builtin_intrinsic_catalog_test_filter(BuiltinIntrinsicCatalogTest* test)
+          {
+              uint64_t expected[BUSTER_BUILTIN_INTRINSIC_FILTER_WORDS] = { 0 };
+              uint32_t collisions = 0;
+              for (uint32_t base = 0; base < BUSTER_BUILTIN_INTRINSIC_COUNT; base += 8)
+              {
+                  const uint32_t count = BUSTER_BUILTIN_INTRINSIC_COUNT - base < 8 ? BUSTER_BUILTIN_INTRINSIC_COUNT - base : 8;
+                  BuiltinIntrinsicName names[8];
+                  const BuiltinIntrinsicInfo* outputs[8];
+                  for (uint32_t i = 0; i < count; i += 1)
+                  {
+                      const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + base + i;
+                      names[i] = (BuiltinIntrinsicName){ info->name, info->name_length };
+                      const uint32_t hash = builtin_intrinsic_filter_hash(builtin_intrinsic_filter_key(info->name, info->name_length));
+                      expected[hash / 64] |= UINT64_C(1) << (hash % 64);
+                  }
+                  const uint32_t mask = (1u << count) - 1u;
+                  builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_filter_candidates(names, count, true) == mask &&
+                      builtin_intrinsic_filter_candidates(names, count, false) == mask, "every catalog name survives both filter twins, including plain libc names");
+                  builtin_intrinsic_lookup_batch(names, outputs, count, false);
+                  for (uint32_t i = 0; i < count; i += 1)
+                  {
+                      builtin_intrinsic_catalog_test_expect(test, outputs[i] == builtin_intrinsic_infos + base + i,
+                          "filtered lookup returns the original exact row for every catalog hit");
+                  }
+              }
+              builtin_intrinsic_catalog_test_expect(test, memcmp(expected, builtin_intrinsic_filter_bits, sizeof(expected)) == 0,
+                  "checked-in filter is the exact deterministic projection of the current catalog");
+              builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_filter_candidates(NULL, 0, true) == 0 &&
+                  builtin_intrinsic_filter_candidates(NULL, 0, false) == 0, "zero-sized filter input permits null");
+              builtin_intrinsic_lookup_batch(NULL, NULL, 0, false);
+              for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+              {
+                  const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+                  char changed[128];
+                  if (info->name_length > 8 && info->name_length <= sizeof(changed))
+                  {
+                      memcpy(changed, info->name, info->name_length);
+                      changed[4] = (char)((uint8_t)changed[4] ^ 0x80u);
+                      const BuiltinIntrinsicName name = { changed, info->name_length };
+                      const BuiltinIntrinsicInfo* result = info;
+                      const BuiltinIntrinsicInfo* oracle = builtin_intrinsic_lookup(name.name, name.length);
+                      builtin_intrinsic_lookup_batch(&name, &result, 1, false);
+                      builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_filter_candidates(&name, 1, false) == 1 && result == oracle,
+                          "middle-byte fingerprint collisions still undergo exact bounded-name lookup");
+                      collisions += oracle == NULL;
+                  }
+              }
+              builtin_intrinsic_catalog_test_expect(test, collisions != 0, "deliberate false-positive inputs reach exact rejection");
+
+              uint32_t rejections = 0;
+              for (uint32_t base = 0; base < 4096; base += 8)
+              {
+                  char spellings[8][48];
+                  BuiltinIntrinsicName names[8];
+                  const BuiltinIntrinsicInfo* outputs[8];
+                  for (uint32_t i = 0; i < 8; i += 1)
+                  {
+                      const int length = snprintf(spellings[i], sizeof(spellings[i]), "buster_filter_miss_%08x", base + i);
+                      names[i] = (BuiltinIntrinsicName){ spellings[i], (uint32_t)length };
+                  }
+                  for (uint32_t count = 1; count <= 8; count += 1)
+                  {
+                      const uint32_t scalar = builtin_intrinsic_filter_candidates(names, count, true);
+                      const uint32_t vector = builtin_intrinsic_filter_candidates(names, count, false);
+                      builtin_intrinsic_catalog_test_expect(test, scalar == vector && (vector >> count) == 0,
+                          "filter masks agree for every partial batch with no inactive bits");
+                      builtin_intrinsic_lookup_batch(names, outputs, count, false);
+                      for (uint32_t i = 0; i < count; i += 1)
+                      {
+                          builtin_intrinsic_catalog_test_expect(test, outputs[i] == builtin_intrinsic_lookup(names[i].name, names[i].length),
+                              "ordinary misses retain exact scalar/vector lookup identity");
+                          rejections += (vector & (1u << i)) == 0;
+                      }
+                  }
+              }
+              builtin_intrinsic_catalog_test_expect(test, rejections != 0, "ordinary names exercise negative rejection rather than an all-positive filter");
+
+              const long page_size = sysconf(_SC_PAGESIZE);
+              builtin_intrinsic_catalog_test_expect(test, page_size > 0, "query page size for guarded filter names");
+              if (page_size > 0)
+              {
+                  const size_t page = (size_t)page_size;
+                  uint8_t* memory = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  const bool mapped = memory != MAP_FAILED;
+                  const bool guarded = mapped && mprotect(memory + page, page, PROT_NONE) == 0;
+                  builtin_intrinsic_catalog_test_expect(test, guarded, "map protected logical tails for filter names");
+                  if (guarded)
+                  {
+                      for (uint32_t length = 0; length <= 32; length += 1)
+                      {
+                          char* name = (char*)memory + page - length;
+                          if (length != 0)
+                          {
+                              memset(name, 'x', length);
+                          }
+                          BuiltinIntrinsicName inputs[8] = {
+                              { name, length },
+                              { NULL, UINT32_MAX },
+                              { (const char*)memory + page, 0 },
+                              { "memcpy", 6 },
+                              { "__builtin_bswap32", 17 },
+                          };
+                          // Derive the builtin's length rather than granting the name literal readable padding.
+                          inputs[4].length = sizeof("__builtin_bswap32") - 1;
+                          for (uint32_t count = 1; count <= 8; count += 1)
+                          {
+                              const BuiltinIntrinsicInfo* outputs[8];
+                              builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_filter_candidates(inputs, count, true) ==
+                                  builtin_intrinsic_filter_candidates(inputs, count, false), "bounded short names, empty protected slices and null names agree");
+                              builtin_intrinsic_lookup_batch(inputs, outputs, count, false);
+                              for (uint32_t i = 0; i < count; i += 1)
+                              {
+                                  builtin_intrinsic_catalog_test_expect(test, outputs[i] == builtin_intrinsic_lookup(inputs[i].name, inputs[i].length),
+                                      "guarded mixed hit/miss batch equals the unfiltered oracle");
+                              }
+                          }
+                      }
+                  }
+                  if (mapped)
+                  {
+                      munmap(memory, page * 2);
+                  }
+              }
+          }
+          EOF
+          cat > "$RUNNER_TEMP/old" <<'EOF'
+          static void builtin_intrinsic_catalog_test_inventory(BuiltinIntrinsicCatalogTest* test)
+          {
+          EOF
+          cat > "$RUNNER_TEMP/new" <<'EOF'
+          #include "c_builtin_intrinsic_filter_test.c"
+
+          static void builtin_intrinsic_catalog_test_inventory(BuiltinIntrinsicCatalogTest* test)
+          {
+              builtin_intrinsic_catalog_test_filter(test);
+          EOF
+          "$RUNNER_TEMP/replace" src/buster/compiler/c_builtin_intrinsic_catalog_test.c "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          cat > docs/builtin-intrinsic-filter.md <<'EOF'
+          # Intrinsic catalog negative filter
+
+          The vector path of `builtin_intrinsic_lookup_batch` rejects definite misses
+          before the existing exact binary search (#893). The public scalar lookup
+          deliberately remains unfiltered: it is the independent semantic oracle.
+          No catalog row, name, descriptor, scope rule or capability changes.
+
+          ## Producer, handoff and consumer
+
+          `tools/generate_builtin_intrinsic_filter.c` projects every name in the checked-in
+          `generated/clang_builtin_metadata_23_1_1.inc` into a 65,536-bit immutable bitmap.
+          There is no runtime initialization, allocation or per-translation-unit pass.
+          The producer reads the existing reviewed LLVM metadata, not a new installation
+          or a name-prefix heuristic. Plain libc names are included too.
+
+          `builtin_intrinsic_filter_key` samples the first and last four logical bytes
+          and the length. Lengths below four use only their available bytes. This is
+          intentionally a bounded-cost fingerprint, not a full-name identity or a
+          cryptographic hash. Middle-only changes can collide by construction. The
+          eight-lane hash mixing has an exact scalar twin; scalar bit probes avoid
+          hardware gathers. The consumer seeds the existing binary-search intervals
+          only for positive bits. Every positive still needs an exact bounded comparison.
+
+          Input records and output records retain the catalog's disjoint counted-slice
+          contract. The internal candidate kernel accepts zero to eight records; zero
+          permits null. Null or empty names miss, inactive records are never read, and
+          names need neither NUL termination nor readable padding. No new mutable state
+          or lifetime crosses the handoff. The filter occupies 8 KiB of read-only data.
+
+          ## Reproduction and regression coverage
+
+          Compile and regenerate from the repository root (replace the checked-in include
+          only after the generator exits successfully):
+
+          ```sh
+          clang -std=c17 -O2 -Wall -Wextra -Werror tools/generate_builtin_intrinsic_filter.c -o /tmp/buster-intrinsic-filter
+          /tmp/buster-intrinsic-filter > /tmp/buster-intrinsic-filter.inc
+          cmp /tmp/buster-intrinsic-filter.inc src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc
+          ```
+
+          The generated row-count assertion detects changed catalog cardinality. The
+          existing `test-builtin-intrinsic-catalog` command additionally reconstructs
+          the whole bitmap, checks every hit against its original row identity, forces
+          fingerprint collisions through the exact search, compares mixed batches with
+          the unfiltered scalar lookup, varies all one-to-eight-lane tails, and places
+          short, empty and null slices beside protected pages. The existing catalog
+          partition/input/output guard tests also exercise the integrated filter.
+
+          ## Provenance and acceptance
+
+          The generator, fingerprint kernels and tests are original project code under
+          Apache-2.0 WITH LLVM-exception. The generated bitmap is a projection of the
+          existing LLVM name facts and retains their separately recorded provenance and
+          license, not an assertion of first-party ownership. The initial input is the
+          metadata blob `1d5cb30be9261cadb98ab80fc288de1749ea3d2d` at repository commit
+          `e693d878309ed3c3be05f2f550574d59217deceb`; the underlying package hashes and
+          llvmorg-23.1.1 references remain in
+          `docs/builtin-metadata/clang-23.1.1-inputs.json` and `LICENSES/LLVM.txt`.
+
+          Correct rejection is not a throughput claim. Acceptance still needs locked
+          9700X assembly inspection and A/B whole-compilation and intrinsic-setup
+          measurements on SQLite and small inputs, including filter loads, hashing,
+          collisions and remaining binary searches. Compare scalar and vector output,
+          retain generated-program quality, and store raw performance evidence in
+          buster-performance rather than this repository. The original issue remains
+          open until that acceptance is established.
+          EOF
+          cat > "$RUNNER_TEMP/old" <<'EOF'
+          ## Path and portion inventory
+          EOF
+          cat > "$RUNNER_TEMP/new" <<'EOF'
+          ## Path and portion inventory
+
+          `c_builtin_intrinsic_filter.c`, `c_builtin_intrinsic_filter_hash.h`,
+          `c_builtin_intrinsic_filter_test.c` and `tools/generate_builtin_intrinsic_filter.c`
+          (#893) are original project code under the default terms. The generated
+          `generated/clang_builtin_intrinsic_filter_23_1_1.inc` is a projection of the
+          existing reviewed Clang metadata's LLVM name facts and retains its
+          Apache-2.0 WITH LLVM-exception terms and provenance. No external implementation
+          is imported. Exact initial input and reproduction are recorded in
+          `docs/builtin-intrinsic-filter.md`; the underlying LLVM notices remain applicable.
+          EOF
+          "$RUNNER_TEMP/replace" THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"
+          cat > "$RUNNER_TEMP/filter-test.c" <<'EOF'
+          #define _GNU_SOURCE
+          #include <stdio.h>
+          #include <sys/mman.h>
+          #include <unistd.h>
+          #include "src/buster/compiler/c_builtin_intrinsic_catalog.c"
+          typedef struct BuiltinIntrinsicCatalogTest BuiltinIntrinsicCatalogTest;
+          struct BuiltinIntrinsicCatalogTest
+          {
+              uint64_t checks;
+              uint64_t failures;
+          };
+          static void builtin_intrinsic_catalog_test_expect(BuiltinIntrinsicCatalogTest* test, bool condition, const char* description)
+          {
+              test->checks += 1;
+              if (!condition)
+              {
+                  test->failures += 1;
+                  fprintf(stderr, "%s\n", description);
+              }
+          }
+          #include "src/buster/compiler/c_builtin_intrinsic_filter_test.c"
+          int main(void)
+          {
+              BuiltinIntrinsicCatalogTest test = { 0 };
+              builtin_intrinsic_catalog_test_filter(&test);
+              printf("filter: %llu checks, %llu failures; vector host=%d\n", (unsigned long long)test.checks, (unsigned long long)test.failures, BUSTER_HOST_VECTOR);
+              const int result = test.failures != 0;
+              return result;
+          }
+          EOF
+          clang --version
+          clang -std=gnu17 -O2 -Wall -Wextra -Werror -Wno-unused-function -I. -march=x86-64 "$RUNNER_TEMP/filter-test.c" -o "$RUNNER_TEMP/filter-test"
+          "$RUNNER_TEMP/filter-test"
+          clang -std=gnu17 -O2 -Wall -Wextra -Werror -Wno-unused-function -I. -march=native "$RUNNER_TEMP/filter-test.c" -o "$RUNNER_TEMP/filter-test-native"
+          "$RUNNER_TEMP/filter-test-native"
+          clang -std=gnu17 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -I. -march=native "$RUNNER_TEMP/filter-test.c" -o "$RUNNER_TEMP/filter-test-sanitized"
+          "$RUNNER_TEMP/filter-test-sanitized"
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/compiler/c_builtin_intrinsic_filter_hash.h src/buster/compiler/c_builtin_intrinsic_filter.c src/buster/compiler/c_builtin_intrinsic_filter_test.c src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc src/buster/compiler/c_builtin_intrinsic_catalog.c src/buster/compiler/c_builtin_intrinsic_catalog_test.c tools/generate_builtin_intrinsic_filter.c docs/builtin-intrinsic-filter.md THIRD_PARTY_NOTICES.md
+          git commit -m 'perf(builtins): filter definite intrinsic catalog misses before batch search'
+          git push origin HEAD:refs/heads/chatgpt/perf-893-intrinsic-filter
+          git rev-parse HEAD
