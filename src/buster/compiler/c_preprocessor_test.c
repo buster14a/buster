@@ -7392,8 +7392,10 @@ static bool pp_test_implemented_features(const char* directory)
         for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(standards); mode += 1)
         {
             const PPOptions defaults = { .language = { .standard = standards[mode], .gnu = true } };
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == inventory[i].source;
-            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == inventory[i].constant;
+            // clang makes __builtin_c23_va_start a builtin in C23 alone (#148).
+            const bool language = inventory[i].id != CBUILTIN_C23_VA_START || standards[mode] >= 2023;
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)name, length) == (inventory[i].source && language);
+            result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, (const uint8_t*)name, length) == (inventory[i].constant && language);
         }
     }
     static const char* const own[] =
@@ -7467,8 +7469,10 @@ static bool pp_test_implemented_features(const char* directory)
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD) == inventory[i].fold;
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_SOURCE) == inventory[i].source;
                 result &= cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) == inventory[i].constant;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == inventory[i].source;
-                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == inventory[i].constant;
+                // In gnu17, where __builtin_c23_va_start is no builtin (#148).
+                const bool language = inventory[i].id != CBUILTIN_C23_VA_START;
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_BUILTIN, name, length) == (inventory[i].source && language);
+                result &= pp_feature(&defaults, PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, name, length) == (inventory[i].constant && language);
                 name[0] = '!';
                 result &= cbuiltin_resolve((const char*)name, length) == CBUILTIN_NONE;
                 result &= !cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_FOLD);
@@ -7878,6 +7882,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
             passed_all &= pp_test_option_features(directory);
+            passed_all &= pp_test_builtin_targets(directory);
         }
         if (fuzz.count != 0)
         {

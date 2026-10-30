@@ -515,12 +515,15 @@ static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, 
     return guarded ? base + pages - bytes : 0;
 }
 
+#include "c_check_runtime_scan_test.c"
+
 // #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
 // PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
 // ones, the declarations with initializers (#592's check_init_declarations), and the needed objects' count and
 // numbering (object 0 never a symbol), at every density.
 static void check_test_program_declaring(CheckTest* test)
 {
+    check_test_runtime_scan(test);
     static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
     uint64_t checked = 0;
     bool all = true;

@@ -2765,7 +2765,8 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tstage-system-boundary\tresource-marks\n",
                                            "\ntime-process\tstage-system-accuracy\tunqualified\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
-                                           "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t" };
+                                           "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
+                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
     bool valid = check_clock_read(text, stages, phases, &total, NULL);
@@ -2911,19 +2912,24 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     text = NULL;
     const int two_status = debug_made ? check_test_driver_spawn(compile_two, &text) : -1;
     const bool two_report = two_status == 0 && check_test_driver_time_report(text, stages);
-    if (!two_report)
+    // Its session's lanes (#905): the two it asked for, and ran on.
+    const bool two_counted = two_report && strstr(text, "\ntime-process\tlanes-asked\t2\n") != NULL && strstr(text, "\ntime-process\tlanes\t2\n") != NULL;
+    if (!two_counted)
     {
         printf("  --time-stages --lanes 2: status %d: %s\n", two_status, text != NULL ? text : "");
     }
     free(text);
     text = NULL;
-    check_test_expect(test, one_status == 0 && two_report && stages[CHECK_STAGE_LANES] > 0 && stages[CHECK_STAGE_ENCODE] == 0 &&
+    check_test_expect(test, one_status == 0 && two_counted && stages[CHECK_STAGE_LANES] > 0 && stages[CHECK_STAGE_ENCODE] == 0 &&
                                 check_test_driver_same_files(one_lane, two_lanes),
-                      "--time-stages with the functions on two lanes charges their run to the lanes' stage, and writes one lane's object");
+                      "--time-stages with the functions on two lanes charges their run to the lanes' stage, reports the two lanes, and writes one "
+                      "lane's object");
     memset(stages, 0, sizeof(stages));
     const int syntax_status = made ? check_test_driver_spawn(syntax, &text) : -1;
-    check_test_expect(test, syntax_status == 0 && check_test_driver_time_report(text, stages) && stages[CHECK_STAGE_PARSE] > 0 && stages[CHECK_STAGE_LOWER] == 0,
-                      "--time-stages -fsyntax-only reports the stages it ran");
+    // A source's -fsyntax-only, which has no wide part, asks for one lane (#905).
+    check_test_expect(test, syntax_status == 0 && check_test_driver_time_report(text, stages) && stages[CHECK_STAGE_PARSE] > 0 && stages[CHECK_STAGE_LOWER] == 0 &&
+                                strstr(text, "\ntime-process\tlanes-asked\t1\n") != NULL && strstr(text, "\ntime-process\tlanes\t1\n") != NULL,
+                      "--time-stages -fsyntax-only reports the stages it ran, on one lane");
     free(text);
     text = NULL;
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.

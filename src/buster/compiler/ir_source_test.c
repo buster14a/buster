@@ -31,14 +31,18 @@
 
 // The functions -c compiles of one file, as ir_source_prepare leaves them: each one's typed stream (in the caller's
 // `lowered` arena), its semantic result type, its symbol bound (Tier0Function.symbol_count, the emission's link's
-// symbols) and its name, and the file's tokens (the parser's: those that reach it after preprocessing).
+// symbols), its name and symbol, and the file's tokens (the parser's: those that reach it after preprocessing). With
+// the program kept (ir_source_prepare's `keep_program`), also the symbols of its labels whose addresses the program
+// takes, in the order of its Tier0Function.label_entries (and so of the IR's IrFunction.labels), or null for none.
 typedef struct IrSourceFunction IrSourceFunction;
 struct IrSourceFunction
 {
     const Tier0Function* function;
     const uint8_t* name;
+    const SymbolId* labels;
     uint32_t name_length;
     uint32_t symbol_count;
+    SymbolId symbol;
     IrType result_type;
 };
 
@@ -55,6 +59,12 @@ typedef struct IrSourceFile IrSourceFile;
 struct IrSourceFile
 {
     IrSourceFunction* functions;
+    // With the program kept, for a run of it (#134's test-ssa-source): the emission's link, its columns and names in
+    // `lowered` as the emission left them, and its atoms' bytes copied there from the arenas the file's end releases;
+    // and each of its symbols' sizes as the program declares them (0 for a function, an incomplete type, or a symbol
+    // that is the emission's own), by which an object the program takes from a library is known.
+    Link* link;
+    uint64_t* sizes;
     uint32_t count;
     uint64_t tokens;
     IrSourceStatus status;
@@ -84,8 +94,10 @@ static IrType ir_source_result(const Tier0Function* function, const CheckProgram
 
 // Checks, selects and emits `file` read with `options` as benchmark-backend-source does (backend_source_file), into
 // `*result`: its functions' streams in `lowered`, their table and names in `arena`. Both arenas keep what they hold
-// for the caller; everything else the file needed is released.
-BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena)
+// for the caller; everything else the file needed is released. With `keep_program`, the program is kept for a run of
+// it too: the emission's link and its symbols' sizes (IrSourceFile.link and .sizes), and its functions' labels
+// (IrSourceFunction.labels).
+BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena, bool keep_program)
 {
     memset(result, 0, sizeof(*result));
     // The file's own state, on an arena of its own that the file's end releases: an entry point, which main.c's other
@@ -159,10 +171,71 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
                 .name = spelling,
                 .name_length = length,
                 .symbol_count = function->symbol_count != 0 ? function->symbol_count : code.link.symbols.count,
+                .symbol = symbol,
                 .result_type = ir_source_result(function, &selected.program, b, naked),
             };
         }
     }
+    // The program, for a run of it: its static data published into the link as the driver publishes it after the
+    // emission (check_data_publish), the link's atoms' bytes, which the emission and the data left in arenas the file's
+    // end releases, copied beside the link's columns, which the emission made in `lowered`; and each function's labels'
+    // symbols, the emission's (CheckProgramLowered.label_symbols), each function's after the last's.
+    bool kept = true;
+    if (keep_program && named)
+    {
+        CheckDataResult published = { 0 };
+        kept = check_data_publish(&selected.data, &path.types, selected.program.stream, selected.program.object_symbols, selected.program.object_count, &code.link, 0,
+                                  &bytes, &path.scratch, &published);
+        Link* link = kept ? BUSTER_ARENA_PUSH_ARRAY(arena, Link, 1) : 0;
+        const uint32_t label_count = code.lowered.label_symbol_count;
+        SymbolId* labels = kept && label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, label_count) : 0;
+        uint64_t* sizes = kept ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, code.link.symbols.count) : 0;
+        kept = link != 0 && (label_count == 0 || labels != 0) && sizes != 0;
+        if (kept)
+        {
+            *link = code.link;
+            if (label_count != 0)
+            {
+                memcpy(labels, code.lowered.label_symbols, (uint64_t)label_count * sizeof(SymbolId));
+            }
+            // The program's symbols come first in the link, symbol s + 1 its symbol s's (check_program_emit).
+            memset(sizes, 0, (uint64_t)code.link.symbols.count * sizeof(uint64_t));
+            const CheckProgram* checked = &selected.program;
+            for (uint32_t s = 0; s < checked->symbol_count && s + 1 < code.link.symbols.count; s += 1)
+            {
+                const uint32_t declaration = checked->object_declarations[checked->symbol_objects[s]];
+                if (declaration != BUSTER_CHECK_NONE && checked->input->declaration_kinds[declaration] != C_BINDING_FUNCTION)
+                {
+                    sizes[s + 1] = type_size(checked->types, checked->input->declared_types[declaration]);
+                }
+            }
+            result->sizes = sizes;
+        }
+        for (AtomId atom = 1; kept && atom < link->atoms.count; atom += 1)
+        {
+            const uint64_t size = link->atoms.size[atom];
+            if (link->atoms.bytes[atom] != 0 && size != 0)
+            {
+                uint8_t* copy = arena_push(lowered, size, (uint64_t)1 << link->atoms.alignment_log2[atom]);
+                kept = copy != 0;
+                if (kept)
+                {
+                    link->atoms.bytes[atom] = memcpy(copy, link->atoms.bytes[atom], size);
+                }
+            }
+        }
+        uint32_t first = 0;
+        for (uint32_t b = 0; kept && b < count; b += 1)
+        {
+            const uint32_t taken = result->functions[b].function->label_count;
+            kept = taken <= label_count - first;
+            result->functions[b].labels = kept && taken != 0 ? labels + first : 0;
+            first += kept ? taken : 0;
+        }
+        kept = kept && first == label_count;
+        result->link = kept ? link : 0;
+    }
+    named = named && kept;
     result->count = named ? count : 0;
     result->tokens = accepted ? parser->tokens.count : 0;
     const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
@@ -203,7 +276,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     }
     else if (!named)
     {
-        snprintf(result->reason, sizeof(result->reason), "memory ran out for its functions' names");
+        snprintf(result->reason, sizeof(result->reason), "%s", kept ? "memory ran out for its functions' names" : "its program couldn't be kept for a run");
     }
     arena_release(&bytes);
     check_corpus_close(&path);
@@ -353,7 +426,7 @@ static bool ir_source_exhausted(const char* file, char** options, uint32_t optio
         IrSourceFile prepared = { 0 };
         if (limited)
         {
-            ir_source_prepare(&prepared, file, options, option_count, lowered, arena);
+            ir_source_prepare(&prepared, file, options, option_count, lowered, arena, false);
         }
         _exit(limited && prepared.status == IR_SOURCE_FAILED && strstr(prepared.reason, "memory") != 0 ? 0 : 1);
     }
@@ -413,7 +486,7 @@ static int run_ir_source_tests(int count, char** arguments)
     for (uint32_t i = 0; valid && i < file_count; i += 1)
     {
         IrSourceFile file;
-        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena);
+        ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
             ir_source_check(&totals, &file, files[i], print, &output, &twin_output, &promoted, &scratch);

@@ -147,7 +147,11 @@ The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
 but refused GNU atomic variants and elementwise bit reversal remain zero.
 `test-preprocessor` checks the exact catalog and the advertised list, including
-raw macro names, unknown bounded names and guarded input boundaries.
+raw macro names, unknown bounded names and guarded input boundaries. An
+advertised name also needs clang's own conditions for the unit, as clang's
+`__has_builtin` has them: its row's language modes and required target
+features (the preprocessor guide's "feature queries"; `CBuiltinSourceScope`
+keeps each scoped intrinsic's, and `cbuiltin_languages` the catalog's).
 
 ## Varargs contracts
 
