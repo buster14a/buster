@@ -97,11 +97,12 @@ static void check_test_builtin_vector_added_sources(CheckTest* test, const char*
           "(void)__builtin_elementwise_minimum(e,a);(void)__builtin_elementwise_maxnum(d,d);(void)__builtin_elementwise_minnum(x,x);"
           "(void)__builtin_elementwise_maximumnum(a,a);(void)__builtin_elementwise_minimumnum(l,l);}\n",
           false },
-        { "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_sin((vf){0})),vf),\"vector\");"
+        // The results' types, from parameters: the checker refuses a compound literal inside __typeof__ (a gap of its own).
+        { "void f(vf a,vd d,vi i){_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_sin(a)),vf),\"vector\");"
           "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_pow(1.0f,2.0f)),float),\"scalar\");"
-          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_ldexp((vd){0},(vi){0})),vd),\"ldexp\");"
-          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_reduce_maximum((vd){0})),double),\"reduce\");"
-          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_reduce_assoc_fadd((vf){0},2.0)),float),\"start\");\n",
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_ldexp(d,i)),vd),\"ldexp\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_reduce_maximum(d)),double),\"reduce\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_reduce_assoc_fadd(a,2.0)),float),\"start\");}\n",
           false },
         { "void f(int n){(void)__builtin_elementwise_sin(n);}\n", true },
         { "void f(vi a){(void)__builtin_elementwise_floor(a);}\n", true },
