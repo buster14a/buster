@@ -106,7 +106,12 @@ static uint32_t tier0_test_vector_type_bytes(uint32_t type)
 #define BUSTER_TIER0_TEST_VECTOR_IN_8 25
 #define BUSTER_TIER0_TEST_VECTOR_OUT_8 26
 #define BUSTER_TIER0_TEST_VECTOR_OUT_4 27
-#define BUSTER_TIER0_TEST_VECTOR_KINDS 28
+#define BUSTER_TIER0_TEST_VECTOR_SHUFFLE_PD 28
+#define BUSTER_TIER0_TEST_VECTOR_BLEND_W 29
+#define BUSTER_TIER0_TEST_VECTOR_SHUFFLE_D 30
+#define BUSTER_TIER0_TEST_VECTOR_PERMUTE_Q 31
+#define BUSTER_TIER0_TEST_VECTOR_ALIGN_B 32
+#define BUSTER_TIER0_TEST_VECTOR_KINDS 33
 
 // A row's shape, as this file has it apart from the row: its operands' and result's types, one past the highest VECTOR
 // register its VEX forms name (which the placement fixtures' expectations take), and whether random programs use it
@@ -156,6 +161,11 @@ static const Tier0TestVectorKind tier0_test_vector_kinds[BUSTER_TIER0_TEST_VECTO
     BUSTER_TIER0_TEST_VECTOR_KIND("vmovq xmm, r64", U64, NONE, NONE, NONE, 1, V8, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vmovq r64, xmm", V8, NONE, NONE, NONE, 1, U64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vmovd r32, xmm, 4 bytes", V4, NONE, NONE, NONE, 1, U32, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vshufpd xmm (VEX)", V16, V16, NONE, NONE, 2, V16, 2, false),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpblendw xmm (VEX)", V16, V16, NONE, NONE, 2, V16, 2, false),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpshufd ymm (VEX)", V32, NONE, NONE, NONE, 1, V32, 1, false),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpermq ymm (VEX)", V32, NONE, NONE, NONE, 1, V32, 1, false),
+    BUSTER_TIER0_TEST_VECTOR_KIND("vpalignr ymm (VEX)", V32, V32, NONE, NONE, 2, V32, 2, false),
 };
 #undef BUSTER_TIER0_TEST_VECTOR_KIND
 
@@ -247,6 +257,26 @@ static Tier0Operation tier0_test_vector_row(uint32_t k)
     case BUSTER_TIER0_TEST_VECTOR_IN_8: r[0] = tier0_test_vector_record(X86_FORM_VMOVQ_X_RM64_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER(0)); break;
     case BUSTER_TIER0_TEST_VECTOR_OUT_8: r[0] = tier0_test_vector_record(X86_FORM_VMOVQ_RM64_X_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT); break;
     case BUSTER_TIER0_TEST_VECTOR_OUT_4: r[0] = tier0_test_vector_record(X86_FORM_VMOVD_RM32_X_EVEX, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT); break;
+    case BUSTER_TIER0_TEST_VECTOR_SHUFFLE_PD:
+        r[0] = tier0_test_vector_record(X86_FORM_VSHUFPD_X_X_XM128_IMM8, v0, v0, v1);
+        r[0].immediate = 1;
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_BLEND_W:
+        r[0] = tier0_test_vector_record(X86_FORM_VPBLENDW_X_X_XM128_IMM8, v0, v0, v1);
+        r[0].immediate = 0xa5;
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_SHUFFLE_D:
+        r[0] = tier0_test_vector_record(X86_FORM_VPSHUFD_Y_YM256_IMM8, v0, 0, v0);
+        r[0].immediate = 0x1b;
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_PERMUTE_Q:
+        r[0] = tier0_test_vector_record(X86_FORM_VPERMQ_Y_YM256_IMM8, v0, 0, v0);
+        r[0].immediate = 0x1b;
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_ALIGN_B:
+        r[0] = tier0_test_vector_record(X86_FORM_VPALIGNR_Y_Y_YM256_IMM8, v0, v0, v1);
+        r[0].immediate = 7;
+        break;
     default: r[0] = tier0_test_vector_record(X86_FORM_VPSUBQ_X_X_XM128_EVEX, v0, v0, v1); break;
     }
     (void)v3;
@@ -473,6 +503,37 @@ static Tier0TestVectorValue tier0_test_vector_model(uint32_t k, const Tier0TestV
     case BUSTER_TIER0_TEST_VECTOR_IN_8: memcpy(result.bytes, a->bytes, 8); break;
     case BUSTER_TIER0_TEST_VECTOR_OUT_8: result = tier0_test_vector_integer(BUSTER_TYPED_CLASS_U64, tier0_test_vector_bits(a)); break;
     case BUSTER_TIER0_TEST_VECTOR_OUT_4: result = tier0_test_vector_integer(BUSTER_TYPED_CLASS_U32, tier0_test_vector_dword(a, 0)); break;
+    case BUSTER_TIER0_TEST_VECTOR_SHUFFLE_PD:
+        memcpy(result.bytes, a->bytes + 8, 8);
+        memcpy(result.bytes + 8, b->bytes, 8);
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_BLEND_W:
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            const Tier0TestVectorValue* source = (0xa5u >> i & 1) != 0 ? b : a;
+            memcpy(result.bytes + 2 * i, source->bytes + 2 * i, 2);
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_SHUFFLE_D:
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            tier0_test_vector_set_dword(&result, i, tier0_test_vector_dword(a, (i & 4) + 3 - (i & 3)));
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_PERMUTE_Q:
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            memcpy(result.bytes + 8 * i, a->bytes + 8 * (3 - i), 8);
+        }
+        break;
+    case BUSTER_TIER0_TEST_VECTOR_ALIGN_B:
+        for (uint32_t i = 0; i < 32; i += 1)
+        {
+            const uint32_t lane = i & ~15u;
+            const uint32_t byte = (i & 15) + 7;
+            result.bytes[i] = byte < 16 ? b->bytes[lane + byte] : a->bytes[lane + byte - 16];
+        }
+        break;
     default:
         // SUB_Q's differences, and ADD_Q8's sums (its operands' second qwords, past their 8 bytes, are zero).
         for (uint32_t i = 0; i < 2; i += 1)
@@ -933,7 +994,7 @@ typedef struct Tier0TestVectorReach Tier0TestVectorReach;
 struct Tier0TestVectorReach
 {
     uint64_t kinds[BUSTER_TIER0_TEST_VECTOR_OBJECTS];
-    uint32_t rows;
+    uint64_t rows;
     uint8_t arms;
     uint8_t constants;
 };
@@ -1096,7 +1157,7 @@ static bool tier0_test_vector_interpret(const Tier0Function* function, const uin
                 stack[s][depths[s]] = result;
                 depths[s] += 1;
             }
-            reach->rows |= 1u << value;
+            reach->rows |= 1ull << value;
         }
         else if (kind == BUSTER_TYPED_BRANCH_FALSE)
         {
@@ -1313,10 +1374,10 @@ static void tier0_test_vector_programs(Tier0TestTally* tally, uint64_t seed, uin
     const uint64_t wanted[BUSTER_TIER0_TEST_VECTOR_OBJECTS] = {
         valued | 1ull << BUSTER_TYPED_DUP | 1ull << BUSTER_TYPED_DISCARD | 1ull << BUSTER_TYPED_JUMP_VALUE, valued, valued, valued, valued,
     };
-    uint32_t wanted_rows = 0;
+    uint64_t wanted_rows = 0;
     for (uint32_t k = 0; k < BUSTER_TIER0_TEST_VECTOR_KINDS; k += 1)
     {
-        wanted_rows |= tier0_test_vector_kinds[k].random || k == BUSTER_TIER0_TEST_VECTOR_MASK_STORE ? 1u << k : 0;
+        wanted_rows |= tier0_test_vector_kinds[k].random || k == BUSTER_TIER0_TEST_VECTOR_MASK_STORE ? 1ull << k : 0;
     }
     for (uint32_t w = 0; w < BUSTER_TIER0_TEST_VECTOR_OBJECTS; w += 1)
     {
@@ -1325,7 +1386,7 @@ static void tier0_test_vector_programs(Tier0TestTally* tally, uint64_t seed, uin
                           wanted[w] & ~reached.kinds[w]);
     }
     tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || ((wanted_rows & ~reached.rows) == 0 && reached.arms == 3 && reached.constants == 3), "vectors",
-                      "the checked programs' interpreter runs don't reach every row (missing %#x), both arms (%#x) and both kinds of constants (%#x)", wanted_rows & ~reached.rows,
+                      "the checked programs' interpreter runs don't reach every row (missing %#" PRIx64 "), both arms (%#x) and both kinds of constants (%#x)", wanted_rows & ~reached.rows,
                       reached.arms, reached.constants);
     arena_release(&arena);
     free(image);
@@ -1449,6 +1510,49 @@ static uint32_t tier0_test_vector_floating_operands(const Tier0TestVectorKind* k
     return count;
 }
 
+// #799's five immediate rows must reach the VEX edge and the deep fallback, rather than merely compile a nested
+// source expression. Inspect the X86 entry's own records: at the edge it uses the last encodable registers; beyond it
+// all live floating homes are spilled before the row, which runs at VECTOR(0), and restored after it. The native
+// placement run also consumes the live floats after the row and checks their sum and the result's independent model.
+static void tier0_test_vector_immediate_placement(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint32_t k, uint32_t floats)
+{
+    Tier0Function mapped = *function;
+    mapped.entry_records = true;
+    const Tier0Code code = tier0_compile_scalar(&mapped, arena);
+    const Tier0TestVectorKind* kind = &tier0_test_vector_kinds[k];
+    const bool deep = floats + kind->vex_reach > BUSTER_TIER0_FLOATING_DEPTHS;
+    const uint32_t base = deep ? 0 : floats;
+    uint32_t found = 0;
+    uint32_t spills = 0;
+    uint32_t fills = 0;
+    for (uint32_t i = 0; code.error == TIER0_OK && code.entry_records != 0 && i < function->count; i += 1)
+    {
+        if (function->kinds[i] == BUSTER_TYPED_X86 && function->values[i] == k)
+        {
+            for (uint32_t r = code.entry_records[i]; r < code.entry_records[i + 1]; r += 1)
+            {
+                const X86Instruction record = code.records[r];
+                if (record.form == tier0_test_vector_rows[k].records[0].form)
+                {
+                    found += 1;
+                    const bool binary = kind->operand_count == 2;
+                    tier0_test_expect(tally, record.reg == base && record.rm == base + (binary ? 1 : 0) && record.vvvv == (binary ? base : 0),
+                                      "vectors", "%s: immediate row did not use the expected VEX registers at base %u", name, base);
+                }
+                if (deep && record.reg < floats)
+                {
+                    spills |= record.form == X86_FORM_MOVSD_XM64_X && found == 0 ? 1u << record.reg : 0;
+                    fills |= record.form == X86_FORM_MOVSD_X_XM64 && found == 1 ? 1u << record.reg : 0;
+                }
+            }
+        }
+    }
+    tier0_test_expect(tally, code.error == TIER0_OK && found == 1, "vectors", "%s: the immediate row's entry records are missing", name);
+    const uint32_t live = (1u << floats) - 1;
+    tier0_test_expect(tally, !deep || (code.deep != 0 && spills == live && fills == live), "vectors",
+                      "%s: deep row did not spill and restore every live float (spills %#x, fills %#x, wanted %#x)", name, spills, fills, live);
+}
+
 // Each kind at placements whose outcome this file works out apart from Tier 0: under no live values and under 8 floats
 // and 3 integers (which every kind fits); under 15 floats, the most a stream keeps live across an entry of another class
 // (their consumer's DUP, before it, takes the 16th: tier0_test_vector_adjacent), for the kinds without a VEX form, whose
@@ -1498,6 +1602,10 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
             Tier0Error error = TIER0_OK;
             const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
             tier0_test_expect(tally, error == TIER0_OK, "vectors", "%s: must compile (error %d)", name, error);
+            if (k >= BUSTER_TIER0_TEST_VECTOR_SHUFFLE_PD)
+            {
+                tier0_test_vector_immediate_placement(tally, name, &function, &arena, k, floats[c]);
+            }
             if (length != 0)
             {
                 tier0_test_vector_inputs(shared, &state);
