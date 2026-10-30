@@ -300,6 +300,74 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+// Exercise the whole pass, not a time threshold: a long thin frontier must stop sweeping, a wide one must
+// keep its vector completion, and a phi-dependent chain must remain variant. The old 64-sweep policy fails
+// the thin/mixed work bounds even though its output is identical.
+static void ir_licm_test_progress(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(16ull << 20);
+    Arena vector = arena_reserve(16ull << 20);
+    Arena scalar = arena_reserve(16ull << 20);
+    Arena scratch = arena_reserve(32ull << 20);
+    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0;
+    ir_optimize_test_expect(test, ready, "LICM progress fixture arenas");
+    const uint32_t lengths[] = {
+        255,
+        256,
+        257,
+        4096,
+    };
+    for (uint32_t size = 0; ready && size < sizeof(lengths) / sizeof(lengths[0]); size += 1)
+    {
+        const uint32_t length = lengths[size];
+        for (uint32_t shape = 0; shape < 4; shape += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_licm_test_chain(&input, &f, test, length);
+            ir_optimize_test_expect(test, created, "LICM long readiness fixture allocation");
+            if (created)
+            {
+                for (uint32_t i = 0; i < length; i += 1)
+                {
+                    // Independent values, an independent half followed by a chain, or a loop-variant root.
+                    if (shape == 1 || (shape == 2 && i < length / 2))
+                    {
+                        f.a[9 + i] = 0;
+                    }
+                }
+                if (shape == 3)
+                {
+                    f.a[9] = 5;
+                }
+                IrLicmOptions options = ir_licm_options();
+                IrLicmResult a = { 0 };
+                IrLicmResult b = { 0 };
+                const IrCheck ac = ir_optimize_licm(&f, &vector, &scratch, options, &a);
+                options.scalar = true;
+                const IrCheck bc = ir_optimize_licm(&f, &scalar, &scratch, options, &b);
+                ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch.length == 0, "LICM progress cases restore scratch");
+                if (ac.error == IR_OK && bc.error == IR_OK)
+                {
+                    const uint32_t moved = shape == 3 ? 0 : length;
+                    ir_optimize_test_expect(test, a.moved == moved && b.moved == moved && ir_optimize_test_equal(&a.function, &b.function), "LICM adaptive completion preserves exact worklist motion and output");
+                    const uint64_t sweeps = shape == 1 || shape == 2 ? 2 : 1;
+                    const bool fallback = shape == 0 || shape == 2;
+                    ir_optimize_test_expect(test, a.sweeps == sweeps && a.fallback == fallback && a.visits <= (sweeps + 1) * f.instruction_count, "LICM thin frontiers stop promptly and wide or stalled frontiers do not fall back");
+                    ir_optimize_test_expect(test, b.sweeps == 0 && !b.fallback, "LICM scalar oracle stays an independent worklist");
+                }
+            }
+            arena_pop_to(&scratch, 0);
+            arena_pop_to(&scalar, 0);
+            arena_pop_to(&vector, 0);
+            arena_pop_to(&input, 0);
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&scalar);
+    arena_release(&vector);
+    arena_release(&input);
+}
+
 static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -323,6 +391,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
     {
         ir_licm_test_guards(&test);
         ir_licm_test_ir(&test);
+        ir_licm_test_progress(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

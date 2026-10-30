@@ -124,9 +124,8 @@ states. There is no prepare-plus-scalar timing path, so the prepare result does
 not establish a whole-planner improvement over scalar selection.
 
 These measurements describe the planner, not backend lowering or a complete
-compiler. The required SQLite/libc/c-testsuite emission comparison and
-`main.c` counts and time saved require the source producer and downstream
-lowering path described above.
+compiler. The source path below compares emitted symbols on the fixtures and
+corpora, and measures `main.c`'s counts and time saved.
 
 [The qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the exact compiler revision, host and binary identities, raw test
@@ -296,8 +295,16 @@ none of its subset's programs makes a name twice in clang's objects.
   (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
   `multibyte`: 354 files the backend lowers, 351 before it lowered inline
   assembly (#147), and every explained difference of musl's) with
-  `--symbols-minimum 354`; `sqlite3.c`, which the backend refuses, compares
-  none.
+  `--symbols-minimum 354`. `sqlite3.c`, which the backend once refused,
+  compares too: at `d12fd583`, with one difference, inlined.
+- **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
+  `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every
+  correctness run (`tools/ci/correctness.tests`) compiles it by `-c` and by
+  `--lower-all`, each with `--verify`, the scalar path's `--lower-all` object
+  byte for byte the vector path's, and compares its checking, by both paths,
+  and its `-c` object with clang's (`test-checker-corpus --symbols-minimum 1`).
+  At `d12fd583` its 12,016 differences are all explained: 7 folded, 11,845
+  dropped and 164 inlined.
 
 On corpora, clang -O0 decides four things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
@@ -313,6 +320,18 @@ checked program, never from a name, and fails on any other:
 The model doesn't name string literals, which have no symbols, and a constant
 `if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214
 and 00215): the corpora compare no strings.
+
+The harness finds the definitions that may explain a difference by binary
+searches (`check_corpus_symbol_index`): once per file it sorts the selections'
+symbols, data entries and bodies by the names they are compared by, then by the
+order in which a pass over the selection would meet them, which is the order in
+which the reasons take them. On the 9700X, a pass per difference made
+`main.c`'s comparison take 13.7 s, its 12,016 differences against a selection
+of 10,105 functions and 125,262 objects at `d12fd583`; with the index it takes
+8.8 s, and musl's eight directories take 6.3 s either way
+([the record](https://github.com/buster14a/buster-performance/tree/bcb44f9de7a071a502e4c81ebf9afe52d085c3b5/docs/measurements/main-c-ci-gates-129-2026-10-30)).
+Both give the same counts there, and on the Zen 4 laptop on `sqlite3.c` and
+c-testsuite too.
 
 Results on the Zen 4 laptop, with clang 23.1.3 (`--target`'s configuration of
 each corpus as `test-checker-corpus` runs it):
@@ -410,6 +429,10 @@ with unwind generation disabled, rather than whole-compilation savings.
 Separate actual `-c --verify` and `-c --verify --lower-all` gates both succeed
 with unwind generation enabled. Strict Clang-O0 symbol comparison of `main.c`
 also succeeds, with zero unexplained differences, unsupported files or failures.
+Every correctness run repeats these gates since (the `main.c` item of "Against
+clang -O0's objects"). At `d12fd583` they pass with 15,496 functions defined,
+10,105 lowered by `-c` and 15,438 by `--lower-all`, and 161,406 objects, 125,262
+of them lowered by `-c`.
 Instruction/configuration oracles and native memory/ABI checks cover AMX,
 XOP, AVX512-BMM and AVX512-FP16; this does not claim execution of those
 instructions on the Ryzen host. The

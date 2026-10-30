@@ -2487,7 +2487,7 @@ static void check_driver_flow(void* argument)
 }
 
 // Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
-// (one per CPU it may run on, or --lanes N, at most --worker-budget N), but one for one source file without code to emit
+// (at most its allowed CPUs, --lanes N and --worker-budget N), but one for one source file without code to emit
 // (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`) leaves
 // its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
 // (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's alone. Returns the
@@ -2497,6 +2497,8 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     const CheckDriverCommand* command = run->command;
     const uint32_t cap = run->lanes->budget != NULL && run->lanes->budget->maximum != 0 ? run->lanes->budget->maximum : UINT32_MAX;
     uint32_t capacity = run->lanes->lanes < cap ? run->lanes->lanes : cap;
+    const uint32_t cpus = check_driver_cpus();
+    capacity = capacity < cpus ? capacity : cpus;
     capacity = capacity == 0 || (run->input_count <= 1 && !command->emit_object && !command->link) ? 1 : capacity;
     run->capacity = capacity;
     // The options are the setup's; the session's start, or the flow's dispatch, is lanes-start's (check_driver_flow).

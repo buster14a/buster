@@ -10022,6 +10022,38 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
     *lowered = (CheckProgramLowered){ .status = status, .token = token, .backend_node = backend_node, .reason = reason };
 }
 
+// `declaring` is check_program_declaring's source-ordered list, including initializer-only tokens. Its logical
+// length is declaring_count; no padding is read here and the original declaration/linkage predicates still apply.
+// The normal path reuses that already-built compact list; the scalar oracle retains the independent full-token
+// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared.
+static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers, SymbolId* symbols, bool scalar)
+{
+    const CheckInput* input = program->input;
+    const uint32_t* declarations = input->declarations;
+    const uint32_t* objects = input->objects;
+    const IdentId* names = program->parser->tokens.names;
+    const uint8_t* linkage = input->linkage;
+    const SymbolId* object_symbols = program->object_symbols;
+    const uint32_t object_count = program->object_count;
+    const uint32_t count = scalar ? input->token_count : declaring_count;
+    for (uint32_t d = 0; d < count; d += 1)
+    {
+        const uint32_t declaration = scalar ? d : declaring[d];
+        const uint32_t object = objects[declaration];
+        const IdentId name = names[declaration];
+        if (name != 0 && declarations[declaration] == declaration && linkage[declaration] == 2 && object != 0 && object < object_count)
+        {
+            for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; r < CHECK_LOWER_RUNTIMES; r += 1)
+            {
+                if (identifiers[r] == name && symbols[r] == 0)
+                {
+                    symbols[r] = object_symbols[object];
+                }
+            }
+        }
+    }
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // Returns false with `lowered`'s failure (its status, or OK for a resource's), and leaves the arenas' pushes to the
@@ -10254,8 +10286,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         memset(shared->local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        const uint32_t declaring_count = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar));
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
-        for (uint32_t d = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)); d-- > 0;)
+        for (uint32_t d = declaring_count; d-- > 0;)
         {
             const uint32_t token = declaring[d];
             if (input->initializer_nodes[token] < nodes)
@@ -10282,20 +10315,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             identifiers[r] = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
             spelled |= identifiers[r] != 0;
         }
-        for (uint32_t declaration = 0; spelled && declaration < input->token_count; declaration += 1)
+        if (spelled)
         {
-            const uint32_t object = input->objects[declaration];
-            const uint32_t name = program->parser->tokens.names[declaration];
-            if (name != 0 && input->declarations[declaration] == declaration && input->linkage[declaration] == 2 && object != 0 && object < program->object_count)
-            {
-                for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; r < CHECK_LOWER_RUNTIMES; r += 1)
-                {
-                    if (identifiers[r] == name && shared->declared_runtimes[r] == 0)
-                    {
-                        shared->declared_runtimes[r] = program->object_symbols[object];
-                    }
-                }
-            }
+            check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, shared->declared_runtimes, BUSTER_SCALAR_PATH(scalar));
         }
     }
     return valid;

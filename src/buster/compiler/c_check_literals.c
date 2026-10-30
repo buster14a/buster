@@ -21,7 +21,13 @@ struct CheckLiteral
     // the reader refuses by name; UINT32_MAX is a value past 128 bits.
     uint32_t bit_width;
     uint64_t integer;
-    long double floating;
+    // Integer storage comes first so omitted payloads in aggregate initializers are zeroed without x87.
+    // The floating view preserves the existing format, alignment and all arithmetic consumers.
+    union
+    {
+        uint64_t floating_storage[2];
+        long double floating;
+    };
     bool real;
     bool imaginary;
     bool valid;
@@ -423,6 +429,13 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
 
 static CheckValue check_literal_value(CheckLiteral literal)
 {
+    // Only the x87 representation's ten meaningful bytes are read. Its six padding bytes need not be
+    // initialized after a floating assignment. Integer copies also preserve signed zero and NaN payloads
+    // without asking x87 to load/store (or evaluate) a value on this otherwise integer-only handoff.
+    uint64_t significand;
+    uint16_t sign_exponent;
+    memcpy(&significand, &literal.floating, sizeof(significand));
+    memcpy(&sign_exponent, (const uint8_t*)&literal.floating + sizeof(significand), sizeof(sign_exponent));
     const CheckValue value = {
         .type = literal.type,
         .category = CHECK_RVALUE,
@@ -430,8 +443,14 @@ static CheckValue check_literal_value(CheckLiteral literal)
         .constant_kind = literal.imaginary ? CHECK_CONSTANT_COMPLEX : literal.real ? CHECK_CONSTANT_FLOATING :
                          literal.type == BUSTER_TYPE_NULLPTR ? CHECK_CONSTANT_ADDRESS : CHECK_CONSTANT_INTEGER,
         .integer = literal.imaginary ? (unsigned __int128)literal.integer << 64 : (unsigned __int128)literal.high << 64 | literal.integer,
-        .floating = literal.imaginary ? 0 : literal.floating,
-        .imaginary = literal.imaginary ? literal.floating : 0,
+        .floating_storage = {
+            literal.imaginary ? 0 : significand,
+            literal.imaginary ? 0 : sign_exponent,
+        },
+        .imaginary_storage = {
+            literal.imaginary ? significand : 0,
+            literal.imaginary ? sign_exponent : 0,
+        },
     };
     return value;
 }
