@@ -1440,6 +1440,19 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
         const bool second = mode != 1 || (found > 1 && needed[1] != 0 && strcmp(needed[1], "libfdriver_unused.so") == 0);
         foreign_test_expect(tally, image.valid && found == expected && first && second, "driver preserves library search mode and as-needed scope", name);
     }
+    {
+        char* arguments[] = {
+            (char*)"-pie", (char*)"-dynamic-linker", interpreter.pointer, files->objects[FOREIGN_DRIVER_TEST_CALL],
+            (char*)"-L", (char*)directory, (char*)"--as-needed", (char*)"-Bdynamic", (char*)"--push-state",
+            (char*)"-Bstatic", (char*)"--no-as-needed", (char*)"--push-state", (char*)"-Bdynamic",
+            (char*)"--pop-state", (char*)"-lfdriver_pick", (char*)"--pop-state", (char*)"-lfdriver_unused",
+        };
+        const String8 bytes = foreign_driver_test_invoke(tally, directory, "nested_state", "-o", arguments, BUSTER_ARRAY_LENGTH(arguments), true, 42, arena);
+        const DynamicTestImage image = dynamic_test_image(bytes);
+        const char* needed[2] = { 0 };
+        foreign_test_expect(tally, image.valid && dynamic_test_needed(&image, needed, BUSTER_ARRAY_LENGTH(needed)) == 0,
+                            "nested state restores static library selection and as-needed", 0);
+    }
     foreign_test_expect(tally, system->found, "find explicit system CRT inputs", 0);
     if (system->found)
     {
@@ -1458,14 +1471,16 @@ static void foreign_driver_test_dynamic(ForeignTestTally* tally, const char* dir
             arguments[count++] = system->directories[i];
         }
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         arguments[count++] = (char*)"-lc";
         arguments[count++] = (char*)"-lgcc";
+        arguments[count++] = (char*)"--push-state";
         arguments[count++] = (char*)"--as-needed";
         arguments[count++] = (char*)"-lgcc_s";
-        arguments[count++] = (char*)"--no-as-needed";
+        arguments[count++] = (char*)"--pop-state";
         for (uint32_t i = RUNTIME_OBJECT_END; i < RUNTIME_OBJECTS; i += 1)
         {
             arguments[count++] = system->objects[i];
