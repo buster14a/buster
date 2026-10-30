@@ -400,9 +400,16 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
     check_test_program_selection_run(test,
         "extern int other __attribute__((weak));int tested(int n){return &other?n:7;}",
         "active-weak-object-truth-emits-weak-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
-    check_test_program_selection_run(test,
-        "static int kept __attribute__((retain))=3;int tested(int n){return n;}",
-        "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+    // retain keeps an emitted definition's section without emitting it (#147): clang emits no unreferenced static with it
+    // alone, and with used, or referenced, keeps the definition in a section of its own (check_program_sections).
+    check_test_program_selection_case(test,
+        "static int kept __attribute__((retain))=3;static int unused(void) __attribute__((retain));static int unused(void){return 1;}"
+        "int tested(int n){return n;}",
+        "retain-alone-roots-nothing", 1, 0, clang, true);
+    check_test_program_selection_case(test,
+        "static int kept __attribute__((retain, used))=3;static int referenced(int n) __attribute__((retain));static int referenced(int n){return n+kept;}"
+        "int tested(int n){return referenced(n);}",
+        "retained-definitions-emit-where-used-or-referenced", 2, 1, clang, true);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
         "hidden-symbol-visibility-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);

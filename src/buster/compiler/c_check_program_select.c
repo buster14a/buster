@@ -40,6 +40,9 @@ struct CheckProgramSelection
     CheckProgramStatus status;
 };
 
+// The roots a declaration's `attributes` make its definition: used (but not retain, which keeps the section of a
+// definition that is emitted without making it one: clang 23 emits no unreferenced static with retain alone, #147),
+// constructor and destructor.
 static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
 {
     uint32_t flags = 0;
@@ -48,7 +51,7 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
         const CheckInputAttribute* attribute = attributes->records + i;
         if (!attribute->ignored)
         {
-            flags |= attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_RETAIN ? BUSTER_C_LOWERING_USED : 0;
+            flags |= attribute->kind == CHECK_ATTRIBUTE_USED ? BUSTER_C_LOWERING_USED : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
             flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
             *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;

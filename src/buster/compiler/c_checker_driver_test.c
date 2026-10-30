@@ -5456,6 +5456,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_aliases(&test, clang, executable, directory);
+            check_test_driver_retained(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_late_attributes(&test, clang, executable, directory);

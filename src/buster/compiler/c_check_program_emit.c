@@ -45,6 +45,11 @@ struct CheckProgramCode
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
+    // GNU's retain attribute (#147): the symbols of the program whose declarations have one before their definitions, in
+    // symbol order, whose definitions -c's object puts in sections of their own with SHF_GNU_RETAIN
+    // (check_program_sections); none in a unit without one.
+    SymbolId* retained_symbols;
+    uint32_t retained_count;
     CheckProgramStatus status;
     Tier0Error backend_error;
     uint32_t token;
@@ -1398,9 +1403,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t* structors = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
     uint32_t* structor_tokens = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
     // Each symbol's alias, ifunc or weakref (#147), its entry plus one: an alias's or ifunc's own symbol, and a weakref's
-    // own one (a weak reference to its name); none in a unit without them.
+    // own one (a weak reference to its name); none in a unit without them. And whether a retain attribute (#147) keeps
+    // its definition's section.
     uint32_t* symbol_aliases = valid && program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
-    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0);
+    uint8_t* retained = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    bool retaining = false;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0 && (program->alias_count == 0 || symbol_aliases != 0) && retained != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
@@ -1412,6 +1420,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(weak, 0, (uint64_t)program->symbol_count + 1);
+        memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain obligations as well as static declarations'.
@@ -1482,13 +1491,17 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         structors[structor] = (uint32_t)(priority < 65535 ? priority : 65535) + 1;
                         structor_tokens[structor] = token;
                     }
-                    if (!attribute->ignored && symbol != 0 && (kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_COMMON))
+                    // A retain attribute keeps an emitted definition's section (the reader ignores one after the
+                    // definition), and makes it one of its own (check_program_sections).
+                    retained[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_RETAIN;
+                    retaining |= retained[symbol];
+                    if (!attribute->ignored && symbol != 0 && kind == CHECK_ATTRIBUTE_COMMON)
                     {
-                        // The typed source contract retains these obligations. Until retained sections and common
-                        // symbols are published, refusing code emission is required. A dropped definition has no
-                        // object-format obligation of its own.
+                        // The typed source contract retains this obligation. Until common symbols (SHN_COMMON), which
+                        // neither the link representation nor the object writer has, are published, refusing code
+                        // emission is required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (retain or common)";
+                        result->reason = "this attribute (common)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
@@ -1548,6 +1561,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, attributes_mark);
+    // The retained symbols (#147), for check_program_sections, in symbol order; none in the usual unit, which has no
+    // retain attribute for the counting pass to look for.
+    uint32_t retained_count = 0;
+    for (uint32_t s = 1; valid && retaining && s <= program->symbol_count; s += 1)
+    {
+        retained_count += retained[s];
+    }
+    result->retained_symbols = valid && retained_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, retained_count) : 0;
+    valid = valid && (retained_count == 0 || result->retained_symbols != 0);
+    for (uint32_t s = 1; valid && retained_count != 0 && s <= program->symbol_count; s += 1)
+    {
+        if (retained[s])
+        {
+            result->retained_symbols[result->retained_count++] = s;
+        }
+    }
     // Symbols already carry the checker's selected object identities. Assign each overload's ABI name once, after
     // asm labels (which override mangling), before external binding, static-local naming and object publication.
     CheckMangleSource mangling = {
@@ -2337,7 +2366,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -2436,6 +2465,32 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                     }
                 }
                 descriptors[atom] = descriptor;
+            }
+        }
+        // A retained definition (#147) keeps its section, SHF_GNU_RETAIN: its named section's, or one of its own, its
+        // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
+        // getELFSectionNameForGlobal), of its class's type and flags.
+        for (uint32_t r = 0; valid && refused == BUSTER_CHECK_NONE && r < code->retained_count; r += 1)
+        {
+            const SymbolId symbol = code->retained_symbols[r];
+            const AtomId atom = link->symbols.atom[symbol];
+            const NameId name = link->symbols.name[symbol];
+            const ObjectSectionFormat* format = atom != 0 ? &object_class_sections[link->atoms.class[atom]] : NULL;
+            const uint64_t prefix = format != NULL ? strlen(format->name) : 0;
+            char* spelled = format != NULL && descriptors[atom].name.length == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, char, prefix + 1 + link->names.length[name]) : 0;
+            valid = format == NULL || descriptors[atom].name.length != 0 || spelled != 0;
+            code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+            if (valid && spelled != 0)
+            {
+                memcpy(spelled, format->name, prefix);
+                spelled[prefix] = '.';
+                memcpy(spelled + prefix + 1, link->names.bytes[name], link->names.length[name]);
+                descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = spelled, .length = prefix + 1 + link->names.length[name] }, .type = format->type,
+                                                         .flags = format->flags, .entry_size = format->entry_size };
+            }
+            if (valid && format != NULL)
+            {
+                descriptors[atom].flags |= SHF_GNU_RETAIN;
             }
         }
         if (valid && refused != BUSTER_CHECK_NONE)

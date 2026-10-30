@@ -7,8 +7,11 @@
 // linked by cc with a unit that defines a name only a weakref and an ordinary reference refer to, alone and with
 // another object's strong definitions of a weak alias's name and of names only weakrefs refer to, and the direct path's
 // executables of both paths (the same bytes), which must print what clang's build prints. Then the errors clang's code
-// generation reports at -c (and Sema's at -fsyntax-only), each line of ours (place, message and notes) clang's. Include
-// after c_check_symbol_driver_test.c and the driver test's ELF readers.
+// generation reports at -c (and Sema's at -fsyntax-only), each line of ours (place, message and notes) clang's. And GNU's
+// retain attribute: each retained definition in clang's section (check_test_driver_same_sections: its name, type,
+// SHF_GNU_RETAIN among its flags, and alignment), the object ELFOSABI_GNU as clang's is, what retain alone doesn't emit
+// left out as clang leaves it, and the programs run alike. Include after c_check_symbol_driver_test.c and the driver
+// test's ELF readers (check_test_driver_same_sections).
 
 // A symbol of an object as its Elf64_Sym has it.
 typedef struct CheckTestAliasSymbol CheckTestAliasSymbol;
@@ -73,6 +76,16 @@ static bool check_test_alias_symbol(const char* path, const char* name, CheckTes
     }
     free(bytes);
     return valid && found;
+}
+
+// The EI_OSABI of the object at `path`, or 0xff where it can't be read.
+static uint8_t check_test_alias_abi(const char* path)
+{
+    uint64_t length = 0;
+    uint8_t* bytes = check_test_driver_read_aligned(path, &length);
+    const uint8_t result = bytes != NULL && length >= EI_NIDENT && memcmp(bytes, ELFMAG, SELFMAG) == 0 ? bytes[EI_OSABI] : 0xff;
+    free(bytes);
+    return result;
 }
 
 // The lines of `text` that are errors or notes (": error: ", ": note: "), each followed by a newline, into `lines`.
@@ -370,4 +383,94 @@ static void check_test_driver_aliases(CheckTest* test, const char* clang, const 
                             "weakref declaration of 'wf' must also have an alias attribute", true);
     check_test_alias_errors(test, clang, executable, directory, "typedef weakref", "typedef int wt __attribute__((weakref(\"x\")));\n",
                             "'weakref' attribute only applies to variables and functions", true);
+}
+
+static void check_test_driver_retained(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source[] =
+        "#include <stdio.h>\n"
+        "__attribute__((retain, used)) static int kept = 5;\n"
+        "__attribute__((retain)) int global = 6;\n"
+        "__attribute__((retain)) int zeroed;\n"
+        "__attribute__((retain)) static const int unreferenced_constant = 7;\n"
+        "__attribute__((retain)) _Thread_local int thread_value = 8;\n"
+        "__attribute__((retain)) _Thread_local int thread_zeroed;\n"
+        "__attribute__((retain, section(\"retained_custom\"))) int placed = 9;\n"
+        "__attribute__((retain)) static int local_function(void) { return 1; }\n"
+        "__attribute__((retain)) int global_function(void) { return 2; }\n"
+        "__attribute__((retain)) static int unreferenced_static = 3;\n"
+        "__attribute__((retain)) static int unreferenced_function(void) { return 4; }\n"
+        "static int plain = 10;\n__attribute__((used)) static int used_only = 11;\n"
+        "int later = 12;\nint later __attribute__((retain));\n"
+        "const char* const pointer __attribute__((retain)) = \"x\";\n"
+        "static int table[3] __attribute__((retain, used)) = { 1, 2, 3 };\n"
+        "static int counter(void) { static int local __attribute__((retain, used)) = 4; return local++; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    printf(\"%d %d %d %d %d %d %d %d %d %d %s %d %d\\n\", kept, global, zeroed, thread_value, thread_zeroed, placed, local_function(), global_function(),\n"
+        "           plain, later, pointer, counter(), counter());\n"
+        "    return 0;\n"
+        "}\n";
+    char path[512];
+    char objects[3][512];
+    char programs[3][512];
+    char direct[2][512];
+    snprintf(path, sizeof(path), "%s/retained.c", directory);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1);
+    char captured[3][256] = { { 0 } };
+    char* text = NULL;
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        snprintf(objects[p], sizeof(objects[p]), "%s/retained-%u.o", directory, p);
+        snprintf(programs[p], sizeof(programs[p]), "%s/retained-%u", directory, p);
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        free(text);
+        check_test_expect(test, compiled, "retained definitions compile through clang and both checker paths");
+        char difference[1024] = { 0 };
+        const bool same = compiled && (p == 0 || check_test_driver_same_sections(objects[p], objects[0], ".data.kept", false, difference, sizeof(difference)));
+        char description[1280];
+        snprintf(description, sizeof(description), "each retained definition is in clang's section by the %s path (%s)", p == 1 ? "vector" : "scalar", difference);
+        check_test_expect(test, p == 0 || same, description);
+        // SHF_GNU_RETAIN makes the object ELFOSABI_GNU, as LLVM marks clang's.
+        const uint8_t abi = compiled ? check_test_alias_abi(objects[p]) : 0xff;
+        snprintf(description, sizeof(description), "the retained definitions' object is ELFOSABI_GNU by %s (EI_OSABI %u)",
+                 p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path", abi);
+        check_test_expect(test, abi == ELFOSABI_GNU, description);
+        char* const link[] = { (char*)clang, objects[p], "-o", programs[p], NULL };
+        const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "the retained definitions' objects link and run");
+    }
+    check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "retained definitions' scalar and vector objects match byte for byte");
+    for (uint32_t p = 1; written && p < 3; p += 1)
+    {
+        char description[640];
+        snprintf(description, sizeof(description), "the %s path's retained definitions run as clang's: %s against %s", p == 1 ? "vector" : "scalar", captured[p],
+                 captured[0]);
+        check_test_expect(test, captured[0][0] != 0 && strcmp(captured[p], captured[0]) == 0, description);
+    }
+    for (uint32_t p = 0; written && p < 2; p += 1)
+    {
+        snprintf(direct[p], sizeof(direct[p]), "%s/retained-direct-%u", directory, p);
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", path, "-o", direct[p], p == 1 ? "--scalar" : NULL, NULL };
+        const bool built = check_test_driver_spawn(arguments, &text) == 0;
+        free(text);
+        char ran[256] = { 0 };
+        char description[640];
+        const bool running = built && check_test_driver_capture(direct[p], ran, sizeof(ran));
+        snprintf(description, sizeof(description), "the direct path's retained definitions run as clang's build, by the %s path: %s against %s",
+                 p == 0 ? "vector" : "scalar", ran, captured[0]);
+        check_test_expect(test, running && strcmp(ran, captured[0]) == 0, description);
+    }
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        unlink(objects[p]);
+        unlink(programs[p]);
+    }
+    for (uint32_t p = 0; written && p < 2; p += 1)
+    {
+        unlink(direct[p]);
+    }
+    unlink(path);
 }

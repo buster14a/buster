@@ -11,17 +11,17 @@ static bool pp_test_source_feature_matrix(void)
     };
     static const char* const attributes[] = {
         "alias", "aligned", "cleanup", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "ifunc", "mode", "naked",
-        "overloadable", "packed", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
+        "overloadable", "packed", "retain", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
     };
     static const char* const refused[] = {
-        "retain", "common",
+        "common",
         "always_inline", "noinline", "format", "unused", "noreturn", "nodiscard", "maybe_unused", "deprecated", "not_an_attribute",
     };
     static const struct { const char* name; uint32_t value; } c_attributes[] = {
         { "fallthrough", 201910 }, { "gnu::aligned", 1 }, { "gnu::packed", 1 }, { "gnu::vector_size", 1 },
         { "gnu::section", 1 }, { "gnu::visibility", 1 }, { "clang::ext_vector_type", 1 },
         { "gnu::cleanup", 1 }, { "gnu::constructor", 1 }, { "gnu::destructor", 1 }, { "gnu::weak", 1 }, { "clang::overloadable", 1 },
-        { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 },
+        { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 },
         { "nodiscard", 0 }, { "maybe_unused", 0 }, { "deprecated", 0 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };

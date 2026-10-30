@@ -2512,6 +2512,22 @@ What the lowering covers past scalars (#145's programs):
   PIE's own IFUNCs through its stubs), as clang's build runs; and compares
   every error and note of the errors above with clang's, at `-c` and at
   `-fsyntax-only`, an alias and an ifunc of themselves among them.
+- **GNU's `retain` attribute** (#147). A definition with one before it (the
+  reader drops one after it) that the unit emits keeps its section: its named
+  section's (a section attribute's), or a section of its own, its class's
+  section's name and its symbol's (`.data.kept`, `.text.f`, `.bss.z`,
+  `.tbss.t`, `.data.function.local`, as LLVM names a retained global's unique
+  section), with `SHF_GNU_RETAIN` (`check_program_sections`, from the
+  emission's `CheckProgramCode.retained_symbols`), which makes `-c`'s object
+  `ELFOSABI_GNU`, as clang's is. Retain alone emits nothing: clang 23 emits
+  no unreferenced static with it, so the selection doesn't take it as a root
+  (`used` is one). `__has_attribute(retain)` and
+  `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
+  each retained definition's section (name, type, flags and alignment) and
+  the object's OS/ABI with clang's object's, and runs the programs, linked
+  from `-c`'s objects and by the direct path. `common` stays refused by name:
+  its symbols are `SHN_COMMON`'s, which neither the link representation nor
+  the object writer has.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
