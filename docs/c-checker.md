@@ -798,9 +798,10 @@ call heads remain intact, so declarations in later or sibling scopes cannot
 change an earlier call. Declaration-only scaling is measured separately from
 call-site overload resolution (#612).
 
-Function and object declarations after a definition do not add `used`, `retain`, `gnu_inline`, `weak`, constructor,
-destructor, or standard `noreturn` to that definition. The checker warns at a newly added attribute and notes the
-definition. A `gnu_inline` declaration without `inline` instead gets clang's ignored-attribute warning without that
+Function and object declarations after a definition do not add `used`, `retain`, `gnu_inline`, constructor, destructor,
+or standard `noreturn` to that definition; `weak` is also dropped when the entity has external linkage. The checker
+warns at a newly added attribute and notes the definition. A late `weak` declaration of an internal-linkage entity is
+still refused by the earlier linkage check. A `gnu_inline` declaration without `inline` instead gets clang's ignored-attribute warning without that
 note. The checker builds the inherited-attribute mask on the first such declaration and updates it in source order. A
 deferred body containing one of these attributes conservatively falls back to source-order checking, so its declaration
 state cannot race another body's token columns. `test-checker-deferred` compares the fallback with the scalar and vector
