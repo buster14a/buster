@@ -177,15 +177,25 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
         }
     }
     // The program, for a run of it: its static data published into the link as the driver publishes it after the
-    // emission (check_data_publish), the link's atoms' bytes, which the emission and the data left in arenas the file's
-    // end releases, copied beside the link's columns, which the emission made in `lowered`; and each function's labels'
-    // symbols, the emission's (CheckProgramLowered.label_symbols), each function's after the last's.
+    // emission (check_data_publish), and its aliases' symbols defined at their definitions' (#147,
+    // check_program_define_aliases), as every caller that publishes the data defines them; the link's atoms' bytes,
+    // which the emission and the data left in arenas the file's end releases, copied beside the link's columns, which
+    // the emission made in `lowered`; and each function's labels' symbols, the emission's
+    // (CheckProgramLowered.label_symbols), each function's after the last's. An ifunc, whose resolver a run would have
+    // to call where its symbol is called, which the IR's interpreter doesn't, leaves the file out.
+    bool ifunc = false;
+    for (uint32_t k = 0; keep_program && named && k < selected.program.alias_count; k += 1)
+    {
+        ifunc |= selected.program.aliases[k].kind == CHECK_PROGRAM_IFUNC;
+    }
+    named = named && !ifunc;
     bool kept = true;
     if (keep_program && named)
     {
         CheckDataResult published = { 0 };
         kept = check_data_publish(&selected.data, &path.types, selected.program.stream, selected.program.object_symbols, selected.program.object_count, &code.link, 0,
-                                  &bytes, &path.scratch, &published);
+                                  &bytes, &path.scratch, &published) &&
+               check_program_define_aliases(&code, &selected.program);
         Link* link = kept ? BUSTER_ARENA_PUSH_ARRAY(arena, Link, 1) : 0;
         const uint32_t label_count = code.lowered.label_symbol_count;
         SymbolId* labels = kept && label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, label_count) : 0;
@@ -239,7 +249,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     result->count = named ? count : 0;
     result->tokens = accepted ? parser->tokens.count : 0;
     const bool failed = !valid || !preprocessed || exhausted || (accepted && !prepared && !unsupported) || (prepared && !chosen) ||
-                        (chosen && !emitted && !refused) || (emitted && !named);
+                        (chosen && !emitted && !refused) || (emitted && !named && !ifunc);
     result->status = failed ? IR_SOURCE_FAILED : named ? IR_SOURCE_PREPARED : IR_SOURCE_LEFT_OUT;
     if (!allocated)
     {
@@ -273,6 +283,10 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     else if (!emitted)
     {
         snprintf(result->reason, sizeof(result->reason), "%s: %s", refused ? "unsupported" : "its emission failed", code.reason != NULL ? code.reason : "this C type or operation");
+    }
+    else if (ifunc)
+    {
+        snprintf(result->reason, sizeof(result->reason), "unsupported: an ifunc in a program to run, whose resolver the IR's interpreter doesn't call");
     }
     else if (!named)
     {

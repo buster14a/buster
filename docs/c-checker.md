@@ -2486,6 +2486,11 @@ What the lowering covers past scalars (#145's programs):
   But an alias or ifunc that names itself stops clang's code generation at
   its declaration, which reports its cycle at once, emits no later one and
   checks no alias: the first such one's error is then the unit's only one.
+  `test-ir-source` and `test-ssa-source` define the aliases' symbols too
+  (`ir_source_prepare`), and a run in the shared IR's interpreter reaches an
+  alias's function through its symbol as through the function's own
+  (`ssa_source_child`); an ifunc, whose resolver the interpreter doesn't call,
+  leaves a program to run out.
   Sema's, at `-fsyntax-only` too (`check_input_attribute_definition`): a
   definition (a body, an initializer, an external tentative definition, or an
   earlier alias or ifunc of the declaration) that is also an alias or ifunc,
