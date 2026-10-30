@@ -1579,7 +1579,8 @@ What the lowering covers past scalars (#145's programs):
   with `FENV_ACCESS` none folds, as none of
   clang's constrained conversions does, and a float rounds to a `__bf16` by
   libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
-  unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
+  unit's target has AVX10.2's, arithmetic and comparisons of `_Complex
+  _Float16`, `_Atomic` ones ("values of
   this type"), an `_Atomic` integer's update by one ("this operation on
   half-precision values": clang's code adds the operand converted to an
   unsigned integer there, not as the usual arithmetic conversions compute), a
@@ -2017,7 +2018,9 @@ What the lowering covers past scalars (#145's programs):
   vector of 4 or 8 bytes and an integer, a float or a double of its bytes, a
   move between their registers (VMOVD, VMOVQ); and between an integer and a
   float or a double they go through a frame temporary, as clang -O0's go through
-  memory. The other floating elementwise functions and conversions (between
+  memory. A `_Complex _Float16` bit cast reads or writes its four bytes through
+  its frame object, keeping both binary16 parts' representations, including
+  signed zeros and NaN payloads; a result gets an object of its own. The other floating elementwise functions and conversions (between
   8-bit integers and half-precision elements, between 8- and 16-bit integers and
   bf16 elements, to bf16 elements, and between half-precision elements and other
   types than floats without AVX512-FP16), the bf16 elements' other elementwise
@@ -2095,11 +2098,15 @@ What the lowering covers past scalars (#145's programs):
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: the
-  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
-  bits"), and the complex types of the other floating types, `_Complex
-  _Float16` ("complex types other than _Complex float, double, long double
-  and __float128"). A
+  `_Complex _Float16` uses the same aggregate representation, with two
+  binary16 parts in four bytes and one SSE eightbyte for arguments and results.
+  Copies, calls, returns, `va_arg`, constants, component access, truth and
+  conversions take the parts' half-precision storage and conversion rules.
+  Arithmetic and comparisons of this type are refused by name: their native
+  FP16 and excess-precision rules and complex runtime calls are not lowered.
+  `test-checker`'s half-precision fixtures check all pairs of special binary16
+  representations and Clang/Buster calls in both directions, including stack
+  arguments and variadic register-save and overflow areas. A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".
