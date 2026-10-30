@@ -26,6 +26,15 @@ Apache-2.0 WITH LLVM-exception terms and provenance. No external implementation
 is imported. Exact initial input and reproduction are recorded in
 `docs/builtin-intrinsic-filter.md`; the underlying LLVM notices remain applicable.
 
+The AMX value transport, per-unit instruction leaves and original oracle fixtures
+in `c_builtin_amx_helpers.c`, `c_builtin_amx_leaves.inc`,
+`c_check_program_amx_test.c` and their lowering/target integration (#126, #136,
+#148) use the project default terms. Installed Clang 23 resource headers and
+Clang 23's generated code supply interface, packed-layout and instruction/ABI
+facts; Clang runs externally as the code-generation oracle. No upstream
+implementation or header fixture is imported. The emitted leaves are original
+project support code under Apache-2.0 WITH LLVM-exception.
+
 The fortified libc builtin adapter and lowering in `c_builtin_fortify.c`,
 `c_check_program_fortify.c`, their integration changes and original fixtures in
 `c_check_fortify_driver_test.c` (#803) use the project default terms. The existing

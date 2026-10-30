@@ -335,6 +335,13 @@ designs and the compilers already built this way.
   each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
+  its naked mask-save fixture uses all eight `kmovq` registers at the real
+  semantics harness's offsets, executing where AVX-512BW is available and
+  compiling/linking everywhere. `test-assembler --cross-check` compares all
+  five operand forms of `kmovb/w/d/q` in both syntaxes with GNU as; eligible
+  targets also check malformed register and memory widths.
+  `test-checker --program-asm` runs the inline-assembly source fixtures alone;
+  the full `test-checker` command continues to include them.
   `test-checker-driver` links and runs naked functions' labels and a template's
   call of `puts` by the direct path. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
@@ -1004,6 +1011,10 @@ designs and the compilers already built this way.
   bf16's arithmetic in a unit whose target has AVX10.2 (`--march diamondrapids
   --option -mno-apxf --cases tests/x86-intrinsics/avx10.2-units.txt`). The
   checker guide's "Intrinsics no host runs" has the details.
+  Its AVX512-BMM byte-bit-reversal cases cover all three widths, unmasked,
+  merged and zeroed. Byte product reductions in the native vector fixtures
+  cover 4, 8, 16, 32 and 64 bytes against an independent modulo-256 loop and
+  clang; they widen to packed words and split only between complete halvings.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
   clang's record layout (one record at a time, and 16 at once in vectors), each
@@ -1049,6 +1060,8 @@ designs and the compilers already built this way.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
+  Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
+  XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -5328,13 +5341,15 @@ on fixtures of each kind of definition (functions, objects and string literals),
 --symbols` on any corpus. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced
 definitions saves against `--lower-all`, after checking, with each file's
-functions and objects defined, lowered and skipped. A file the checker rejects,
+functions and objects defined, lowered and skipped. It times warm selection,
+lowering and object construction in memory, with unwind generation and
+verification disabled; it excludes checking and file writing. A file the checker rejects,
 or that is refused by name (`CHECK_PROGRAM_UNSUPPORTED`,
 `CHECK_DATA_UNSUPPORTED`), is left out; any other failure, a timed run that
 lowers other than its warm-up, and a run that measures no file fail the command
 (`test-checker` checks each, `c_lowering_source_benchmark_test.c`). Run it under
 the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
-contract, the comparisons' results and what `main.c`'s measurement waits on.
+contract, the comparisons' results and the completed `main.c` measurement.
 
 ## Type tests
 

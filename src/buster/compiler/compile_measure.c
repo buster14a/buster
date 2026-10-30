@@ -157,6 +157,7 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
 {
     printf("memory: wait4 peaks include pre-exec memory and waited descendants; executable-only peaks are not measured by wait4\n");
     printf("memory: --time-stages peak growth is approximate post-exec RSS; -1 means unavailable, not zero\n");
+    printf("stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks; do not subtract them from stage elapsed time or rank stages by them\n");
     const uint32_t compiles = m->reference != NULL ? 3 : 2;
     ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, (uint64_t)m->runs * BUSTER_MEASURE_COMPILES);
     double* rows = BUSTER_ARENA_PUSH_ARRAY(arena, double, (uint64_t)m->runs * BUSTER_MEASURE_ROW);

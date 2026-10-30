@@ -198,6 +198,18 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
     builtin_intrinsic_catalog_test_expect(test, outside_info != NULL && strcmp(outside_info->shard, "x86") == 0 &&
         builtin_intrinsic_own_main_lookup(outside, sizeof(outside) - 1) == NULL && !builtin_intrinsic_own_main_x86_in_scope(outside, sizeof(outside) - 1),
         "valid full-catalog lfence target is rejected because it is absent from the frozen workload");
+    static const char* const immediate_names[] = { "__builtin_ia32_palignr256", "__builtin_ia32_pblendw128", "__builtin_ia32_permdi256",
+                                                  "__builtin_ia32_pshufd256", "__builtin_ia32_shufpd" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediate_names); i += 1)
+    {
+        const char* name = immediate_names[i];
+        const uint32_t length = strlen(name);
+        builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_lookup(name, length) != NULL &&
+            builtin_intrinsic_immediate_in_scope(name, length) && builtin_intrinsic_own_main_prototype_in_scope(name, length) &&
+            !builtin_intrinsic_immediate_in_scope(name, length - 1), "extra immediate scope admits only each complete catalogued name");
+    }
+    builtin_intrinsic_catalog_test_expect(test, !builtin_intrinsic_immediate_in_scope(NULL, 1) &&
+        !builtin_intrinsic_immediate_in_scope(outside, sizeof(outside) - 1), "extra immediate scope rejects unrelated and null names");
     builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_own_main_lookup(suffix, sizeof(positive) - 1) == positive_info &&
         builtin_intrinsic_own_main_x86_in_scope(suffix, sizeof(positive) - 1) &&
         builtin_intrinsic_own_main_lookup(prefix + 1, sizeof(positive) - 1) == positive_info,

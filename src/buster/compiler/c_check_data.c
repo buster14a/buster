@@ -251,7 +251,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                 {
                     status = CHECK_DATA_UNSUPPORTED;
                 }
-                else if (check_action_float_supported(types, element))
+                else if (check_action_float_supported(types, element) || check_action_half_format(element) != CHECK_HALF_NONE)
                 {
                     const long double real = check_action_round_float(element, value->floating);
                     const long double imaginary = check_action_round_float(element, value->imaginary);

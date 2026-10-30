@@ -408,6 +408,19 @@ static __attribute__((noinline)) void check_test_program_fp16(CheckTest* test, c
         check_test_program_build_release();
         check_test_program_march = "-march=znver5";
         check_test_program_fp16_sources(test, clang, &target, run_native);
+        // The headers' complex-half splats reinterpret the four-byte parameter as float before broadcasting it.
+        // Compile the actual intrinsics and compare each lane's representation, including signed zeros and NaNs.
+        check_test_program_includes = true;
+        check_test_program_source_native_limits(test,
+            "#include <immintrin.h>\n"
+            "__attribute__((target(\"avx512fp16\"))) int tested(int n){"
+            "static const unsigned bits[]={0u,0x80000000u,0x00008000u,0x80008000u,0x7d017e55u,0xfd01fe55u,0x00010001u,0x3c00bc00u};"
+            "unsigned b=bits[(unsigned)(n+3)&7u];_Float16 _Complex z;__builtin_memcpy(&z,&b,4);"
+            "__m128h a=_mm_set1_pch(z);__m256h c=_mm256_set1_pch(z);__m512h d=_mm512_set1_pch(z);"
+            "unsigned x[4],y[8],w[16];__builtin_memcpy(x,&a,16);__builtin_memcpy(y,&c,32);__builtin_memcpy(w,&d,64);"
+            "for(int i=0;i<4;i++)if(x[i]!=b)return 1;for(int i=0;i<8;i++)if(y[i]!=b)return 2;for(int i=0;i<16;i++)if(w[i]!=b)return 3;return 0;}",
+            "x86-fp16-complex-half-splats", clang, false, -1, 0, &target, run_native);
+        check_test_program_includes = false;
         check_test_program_build_release();
         check_test_program_fp16_refusals(test, &target);
         check_test_program_march = "-march=x86-64";

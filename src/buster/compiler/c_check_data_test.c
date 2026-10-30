@@ -1377,7 +1377,8 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
     const TypeId complex_double = type_complex(types, BUSTER_TYPE_DOUBLE);
     const TypeId complex_long = type_complex(types, BUSTER_TYPE_LONG_DOUBLE);
     const TypeId complex_int = type_complex(types, BUSTER_TYPE_INT);
-    for (uint32_t failure = 0; failure < 15; failure += 1)
+    const TypeId complex_half = type_complex(types, BUSTER_TYPE_FLOAT16);
+    for (uint32_t failure = 0; failure < 17; failure += 1)
     {
         CheckDataTestLink fixture;
         const bool initialized = check_data_test_open(&fixture, 2);
@@ -1466,6 +1467,12 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
                     stream.status = CHECK_STATUS_INVALID_GRAPH;
                     expected = CHECK_DATA_CHECK_FAILED;
                     break;
+                case 15:
+                case 16:
+                    values[1].type = objects[1].type = complex_half;
+                    values[1].floating = failure == 15 ? 1.0L + 0x1p-12L : 1.0L;
+                    values[1].imaginary = failure == 16 ? 1.0L + 0x1p-12L : 1.0L;
+                    break;
             }
             uint8_t tables[4096];
             const bool fits = fixture.tables.length <= sizeof(tables);
@@ -1528,6 +1535,43 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
                           "both x87 complex components serialize ten meaningful bytes and six zero padding bytes despite poisoned host storage");
     }
     check_data_test_close(&fixture);
+    static const long double real[5] = { 1.5L, -0.0L, 0x1p-24L, INFINITY, NAN };
+    static const long double imaginary[5] = { -2.0L, 0.0L, -0x1p-24L, -INFINITY, -NAN };
+    static const uint8_t expected_half[5][4] = {
+        { 0x00, 0x3e, 0x00, 0xc0 },
+        { 0x00, 0x80, 0x00, 0x00 },
+        { 0x01, 0x00, 0x01, 0x80 },
+        { 0x00, 0x7c, 0x00, 0xfc },
+        { 0x00, 0x7e, 0x00, 0xfe },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(real); i += 1)
+    {
+        const bool half_ready = check_data_test_open(&fixture, 1);
+        check_test_expect(test, half_ready, "complex binary16 static-data fixture initializes");
+        if (half_ready)
+        {
+            SymbolId map[2] = { 0 };
+            map[1] = check_data_test_symbol(&fixture.link, "complex_half", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            CheckValue value = {
+                .type = complex_half,
+                .category = CHECK_RVALUE,
+                .constant_kind = CHECK_CONSTANT_COMPLEX,
+                .floating = real[i],
+                .imaginary = imaginary[i],
+            };
+            CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
+            const CheckStream stream = { .values = &value, .diagnostics = &diagnostic, .count = 1 };
+            const CheckDataObject object = { .type = complex_half, .object = 1, .initializer = 0 };
+            CheckDataResult result = { 0 };
+            const bool emitted = check_data_emit(types, &stream, &object, 1, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                                 &fixture.bytes, &fixture.scratch, &result);
+            const AtomId atom = fixture.link.symbols.atom[map[1]];
+            check_test_expect(test, emitted && atom != 0 && fixture.link.atoms.size[atom] == 4 &&
+                                   memcmp(fixture.link.atoms.bytes[atom], expected_half[i], 4) == 0 && link_check(&fixture.link) == LINK_ERROR_NONE,
+                              "complex binary16 constants serialize both parts' exact bytes, including signed zero, subnormals, infinities and canonical NaNs");
+        }
+        check_data_test_close(&fixture);
+    }
 }
 
 static void check_data_test_zero_bits(CheckTest* test)

@@ -44,7 +44,7 @@
 #define CHECK_SECTION_EVENT_DEFINITION 0x02u
 #define CHECK_SECTION_EVENT_TENTATIVE 0x04u
 #define CHECK_SECTION_EVENT_CONSTANT 0x08u
-// A definition of its object came before it (CheckInputReader.definition_seen).
+// A definition of its object came before it (CheckInputReader.definition_origins).
 #define CHECK_SECTION_EVENT_DEFINED_BEFORE 0x10u
 #define CHECK_SECTION_EVENT_NAMED 0x20u
 
@@ -665,12 +665,12 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                 }
             }
             // A tentative definition's attribute at the unit's end, where its last one stands for the definition, if
-            // the unit has none (before the events, CheckInputReader.definition_seen says).
+            // the unit has none (before the events, CheckInputReader.definition_origins says).
             for (uint32_t e = 0; complete && e < events && !input->resource; e += 1)
             {
                 const uint32_t object = reader->objects[reader->section_events[e].token];
                 const uint32_t last = object != 0 && tentative_first[object] == e ? tentative_last[object] : BUSTER_CHECK_NONE;
-                if (last != BUSTER_CHECK_NONE && defined[object] == 0 && !reader->definition_seen[reader->section_events[last].token] &&
+                if (last != BUSTER_CHECK_NONE && defined[object] == 0 && !reader->definition_origins[reader->section_events[last].token] &&
                     tentative_attributed[object] != BUSTER_CHECK_NONE)
                 {
                     const uint8_t flags = (reader->section_events[last].flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ :

@@ -96,7 +96,7 @@ _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
 // AVX-NE-CONVERT for its VCVTNEPS2BF16 and AVX10.2 for its native __bf16 arithmetic (c_check_program_half.c) and both
 // for their builtins' rows, and XOP, SHA512, SM3, SM4, MOVRS, AVX512-BMM and the system instructions' (RAO-INT,
 // CLDEMOTE, SERIALIZE, UINTR, PTWRITE, WAITPKG, LWP, RTM, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR) for
-// their builtins' rows, with WAITPKG's and RTM's and Key Locker's (KL and WIDEKL) for their builtins' leaves
+// their builtins' rows, with WAITPKG's, RTM's, Key Locker's (KL and WIDEKL) and the AMX value operations' for their leaves
 // (c_builtin_x86_helpers.c). X86Target.extensions, from the target options as clang resolves them and from a function's
 // target attribute (c_predefines.c's predefines_target and predefines_function_target), by clang's names
 // (predefines_x86_extensions).
@@ -120,6 +120,13 @@ _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
     X(RTM) \
     X(TSXLDTRK) \
     X(AMXTILE) \
+    X(AMXINT8) \
+    X(AMXBF16) \
+    X(AMXFP16) \
+    X(AMXCOMPLEX) \
+    X(AMXFP8) \
+    X(AMXAVX512) \
+    X(AMXMOVRS) \
     X(ENQCMD) \
     X(USERMSR) \
     X(KL) \

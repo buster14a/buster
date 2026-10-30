@@ -13,6 +13,8 @@ struct CheckDriverFixture
     bool rejected;
     uint32_t warnings;
     bool quiet;
+    const char* message;
+    uint32_t column;
 };
 
 // Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
@@ -2759,6 +2761,10 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
 static bool check_test_driver_time_report(const char* text, double* stages)
 {
     static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
+                                           "\ntime-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n",
+                                           "\ntime-process\tstage-system-boundary\tresource-marks\n",
+                                           "\ntime-process\tstage-system-accuracy\tunqualified\n",
+                                           "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
@@ -2923,12 +2929,14 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
     char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
-    const int measured_status = made ? check_test_driver_spawn(measured, &text) : -1;
+    const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
+    const bool qualified = text != NULL && strstr(text, "stage system time: unqualified getrusage(RUSAGE_SELF) deltas between resource marks") != NULL;
     free(text);
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
+    check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
@@ -4271,6 +4279,98 @@ static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name
     return result;
 }
 
+// Late attributes are diagnosed at each attribute, with a note at the definition rather than an intervening
+// declaration. Compare exact source coordinates and wording with clang for both checker paths.
+static void check_test_driver_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "static int f(void) __attribute__((used));\n"
+        "static int f(void){return 1;}\n"
+        "static int f(void) __attribute__((used, constructor(100)));\n"
+        "static int f(void) __attribute__((constructor(200),used));\n";
+    static const char* const messages[] = {
+        ":3:41: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":4:35: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":2:12: note: previous definition is here",
+    };
+    char source[256], object[256];
+    snprintf(source, sizeof(source), "%s/late-attributes.c", directory);
+    snprintf(object, sizeof(object), "%s/late-attributes.o", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
+                              "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        bool match = status == 0 && text != NULL;
+        for (uint32_t i = 0; match && i < BUSTER_ARRAY_LENGTH(messages); i += 1)
+        {
+            match &= strstr(text, messages[i]) != NULL;
+        }
+        const char* first_note = match ? strstr(text, messages[2]) : NULL;
+        match &= first_note != NULL && strstr(first_note + strlen(messages[2]), messages[2]) != NULL;
+        check_test_expect(test, match, route == 0 ? "clang late attribute diagnostic locations" : route == 1 ?
+                          "scalar late attribute diagnostic locations" : "vector late attribute diagnostic locations");
+        free(text);
+    }
+    unlink(object);
+    unlink(source);
+}
+
+// Syntax-only: alias symbol emission is separate. Literal note coordinates distinguish the alias/body definitions
+// from every intervening prototype, across repeated ignored attributes and independent linked entities.
+static void check_test_driver_alias_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "int g(void){return 1;}\n"
+        "int h(void) __attribute__((alias(\"g\")));\n"
+        "int h(void);\n"
+        "int h(void);\n"
+        "int h(void) __attribute__((used));\n"
+        "int h(void);\n"
+        "int h(void) __attribute__((used));\n"
+        "int body(void){return 2;}\n"
+        "int body(void);\n"
+        "int body(void) __attribute__((used));\n";
+    static const char* const messages[] = {
+        ":5:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":7:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":10:31: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":2:5: note: previous definition is here",
+        ":8:5: note: previous definition is here",
+        ": note: previous definition is here",
+    };
+    static const uint32_t counts[] = { 1, 1, 1, 2, 1, 3 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(messages) == BUSTER_ARRAY_LENGTH(counts), "every diagnostic has an expected count");
+    char source[256];
+    snprintf(source, sizeof(source), "%s/alias-late-attributes.c", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
+                              "-fsyntax-only", source, NULL };
+        char* text = NULL;
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        bool match = status == 0 && text != NULL;
+        for (uint32_t i = 0; match && i < BUSTER_ARRAY_LENGTH(messages); i += 1)
+        {
+            uint32_t found = 0;
+            const char* occurrence = text;
+            while ((occurrence = strstr(occurrence, messages[i])) != NULL)
+            {
+                found += 1;
+                occurrence += strlen(messages[i]);
+            }
+            match = found == counts[i];
+        }
+        check_test_expect(test, match, route == 0 ? "clang alias and body definition note origins" : route == 1 ?
+                          "scalar alias and body definition note origins" : "vector alias and body definition note origins");
+        free(text);
+    }
+    unlink(source);
+}
+
 // Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
 static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -4283,8 +4383,12 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
         "extern __inline__ __attribute__((gnu_inline)) int attraft(int x){return x+8;} __inline__ int attraft(int);"
         "extern __inline__ int block(int x){return x+9;}"
         "static __inline__ int local(int x){return x+6;}"
+        "static int late_used(void){return 1;} static int late_used(void) __attribute__((used,retain,constructor,destructor));"
+        "static int late_weak(void){return 1;} static int late_weak(void) __attribute__((weak));"
+        "static int early_used(void) __attribute__((used)); static int early_used(void){return 1;} static int early_used(void) __attribute__((used));"
+        "__inline__ int late_gnu(int x){return x;} __inline__ int late_gnu(int x) __attribute__((gnu_inline));"
         "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
-    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "use" };
+    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "late_used", "late_weak", "early_used", "late_gnu", "use" };
     static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
         { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
         { "-std=c89", "-fgnu89-inline", "-w" }, { "-std=c17", "-fgnu89-inline", "-w" },
@@ -4815,6 +4919,20 @@ static int run_checker_driver_tests(int argc, char** argv)
     const CheckDriverFixture fixtures[] =
     {
         {
+            .name = "alias on a function definition is rejected at the attribute",
+            .source = "int g(void) { return 0; }\n__attribute__((alias(\"g\"))) int h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "function definition cannot also be an alias",
+            .column = 16,
+        },
+        {
+            .name = "a function body after an alias is a redefinition",
+            .source = "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
+            .rejected = true,
+            .message = "conflicting declaration",
+            .column = 5,
+        },
+        {
             .name = "K&R definition emits its deprecated-non-prototype warning",
             .source = "int f(a)float a;{return (int)a;}\n",
             .warnings = 1,
@@ -5162,6 +5280,47 @@ static int run_checker_driver_tests(int argc, char** argv)
             .rejected = true,
         },
         {
+            .name = "late weak on static function and object warns",
+            .source = "static int f(void){return 1;}\nint f(void) __attribute__((weak));\n"
+                      "static int x=1;\nextern int x __attribute__((weak));\n",
+            .warnings = 2,
+        },
+        {
+            .name = "late weak on static function respects promoted warning policy",
+            .source = "#pragma clang diagnostic error \"-Wignored-attributes\"\nstatic int f(void){return 1;}\n"
+                      "static int f(void) __attribute__((weak));\n",
+            .rejected = true,
+        },
+        {
+            .name = "weak before static function definition remains an error",
+            .source = "static int f(void);\nstatic int f(void) __attribute__((weak));\nstatic int f(void){return 1;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "late function attributes warn at the attributes",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((used,retain,constructor,destructor));\n",
+            .warnings = 4,
+        },
+        {
+            .name = "repeated attribute already on a prior declaration does not warn",
+            .source = "static int f(void) __attribute__((used));\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+        },
+        {
+            .name = "GNU noreturn does not suppress a later standard noreturn warning",
+            .source = "__attribute__((noreturn)) void f(void);\nvoid f(void){for(;;){}}\n[[noreturn]] void f(void);\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late gnu_inline requires inline on its declaration",
+            .source = "inline int f(void){return 1;}\nint f(void) __attribute__((gnu_inline));\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late function attribute respects promoted warning policy",
+            .source = "#pragma clang diagnostic error \"-Wignored-attributes\"\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+            .rejected = true,
+        },
+        {
             .name = "late assembler label retains its ignored attribute warning",
             .source = "int object=1;\nextern int object asm(\"renamed\");\n",
             .warnings = 1,
@@ -5232,6 +5391,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
+            if (fixtures[i].message != NULL)
+            {
+                snprintf(description, sizeof(description), "%s, %s %s%s: diagnostic and attribute column", fixtures[i].name,
+                         external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "");
+                check_test_expect(&test, ready && checked.column == fixtures[i].column && checked.column == oracle.column &&
+                                  strcmp(checked.message, fixtures[i].message) == 0, description);
+            }
             snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
             check_test_expect(&test, warnings == fixtures[i].warnings, description);
@@ -5290,6 +5456,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
+            check_test_driver_late_attributes(&test, clang, executable, directory);
+            check_test_driver_alias_late_attributes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_fortify(&test, clang, executable, directory);

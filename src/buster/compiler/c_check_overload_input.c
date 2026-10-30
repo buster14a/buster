@@ -68,6 +68,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         const uint32_t scope = reader->scope_count != 0 ? reader->scope_openings[reader->scope_count - 1] + 1 : 0;
         uint32_t head = old != 0 ? input->overload_heads[reader->bindings.declaration[old - 1]] : 0;
         head = head != 0 && reader->overload_candidates[head - 1].scope == scope ? head - 1 : BUSTER_CHECK_NONE;
+        uint32_t definition_origin = reader->definition_origins[token];
         CheckOverloadCandidate candidate = {
             .type = reader->declared_types[token],
             .declaration = token,
@@ -141,6 +142,10 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
                         candidate.canonical = prior->canonical;
                         candidate.object = prior->object;
                         candidate.flags |= prior->flags;
+                        if (definition_origin == 0 && (prior->flags & BUSTER_CHECK_OVERLOAD_DEFINED) != 0)
+                        {
+                            definition_origin = reader->definition_origins[prior->declaration];
+                        }
                         const TypeAnswer same = index->checked[linked] ? type_same_canonical(reader->types, prior->type, candidate.type) : TYPE_ANSWER_NO;
                         declared.status = same == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_OK;
                         complete = same == TYPE_ANSWER_YES;
@@ -164,7 +169,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             reader->overload_candidates[current] = candidate;
             input->overload_heads[token] = current + 1;
             reader->objects[token] = candidate.object;
-            reader->definition_seen[token] |= (candidate.flags & BUSTER_CHECK_OVERLOAD_DEFINED) != 0;
+            reader->definition_origins[token] = definition_origin;
             index->lexical_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, lexical_head, index->lexical_next) : lexical_head;
             index->linked_next[current] = active ? check_overload_index_previous(reader->overload_candidates, candidate.type, linked_head, index->linked_next) : linked_head;
             index->checked[current] = active;

@@ -236,13 +236,18 @@ and SSE2's `pcmpeqd`, which `main.c`'s statements use, and the `bswap` of
 `<linux/swab.h>`'s helpers. For `main.c`'s naked functions it also admits
 `pushfq`, `popfq`, SSE2's `movq`, the x87's `fld` and `fstp` of every width, the
 string instructions with their prefixes (`rep movsb`) and AVX-512F's
-`vmovdqa64` and `vmovdqu64`. Its other families are in
+`vmovdqa64` and `vmovdqu64`, and VEX's `kmovb/kmovw/kmovd/kmovq` with `k0`
+through `k7` as ordinary operands. The mask moves retain each form's target
+requirements. Its other families are in
 [the assembler's guide](assembler.md).
 The operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc` and `rdtscp`
 are also available (#798), with register outputs and CPU support chosen by the
 template's author.
-`test-assembler --cross-check` compares them with GNU as. An `xchg` takes its
-memory operand first in Intel order, as the catalogue has it: `xchgl %ecx,(%rdi)`,
+`test-assembler --cross-check` compares them with GNU as. The native
+inline-assembly fixtures also run alone with `test-checker --program-asm`,
+including the eight mask saves and restores at the semantics harness's offsets.
+An `xchg` takes its memory operand first in Intel order, as the catalogue has
+it: `xchgl %ecx,(%rdi)`,
 not `xchgl (%rdi),%ecx`. The matcher's operand grammar has no accumulator role:
 `fnstsw` takes memory, not `%ax`, and an `xchg` of the accumulator with another
 register takes the two-byte form, where GNU as takes the one-byte one.

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 217 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 222 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -229,8 +229,12 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_kshiftlidi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 823 },
     { "__builtin_ia32_kshiftlihi", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 821 },
     { "__builtin_ia32_palignr128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 840 },
+    { "__builtin_ia32_palignr256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 841 },
+    { "__builtin_ia32_pblendw128", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 836 },
+    { "__builtin_ia32_permdi256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 744 },
     { "__builtin_ia32_prold512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 787 },
     { "__builtin_ia32_pshufd", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 751 },
+    { "__builtin_ia32_pshufd256", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 752 },
     { "__builtin_ia32_pshufhw", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 754 },
     { "__builtin_ia32_pshuflw", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 757 },
     { "__builtin_ia32_psrldqi128_byteshift", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 817 },
@@ -239,6 +243,7 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_scattersiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 414 },
     { "__builtin_ia32_shuf_i32x4", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 853 },
     { "__builtin_ia32_shufps", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 856 },
+    { "__builtin_ia32_shufpd", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 616 },
     { "__builtin_ia32_ucmpb128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 652 },
     { "__builtin_ia32_ucmpb256_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 656 },
     { "__builtin_ia32_ucmpd128_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 654 },
@@ -314,7 +319,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 217, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 222, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];
@@ -642,7 +647,7 @@ static bool check_builtin_x86_test_clang_one(const char* clang, const char* path
     return ready;
 }
 
-#define BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef char C16 __attribute__((vector_size(16))); typedef double D2 __attribute__((vector_size(16))); typedef double D8 __attribute__((vector_size(64))); typedef float F16 __attribute__((vector_size(64))); typedef int I8 __attribute__((vector_size(32))); typedef int I16 __attribute__((vector_size(64)));\n"
+#define BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef char C16 __attribute__((vector_size(16))); typedef char C32 __attribute__((vector_size(32))); typedef long long Q4 __attribute__((vector_size(32))); typedef double D2 __attribute__((vector_size(16))); typedef double D8 __attribute__((vector_size(64))); typedef float F16 __attribute__((vector_size(64))); typedef int I8 __attribute__((vector_size(32))); typedef int I16 __attribute__((vector_size(64)));\n"
 #define BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "__attribute__((target(\"avx512f,avx512bw,avx512vl\"))) "
 // The 128-bit vectors of #148's SSE builtins, then the target.
 #define BUSTER_CHECK_BUILTIN_X86_TEST_SSE BUSTER_CHECK_BUILTIN_X86_TEST_TYPES \
@@ -709,6 +714,22 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
         { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "short f(S8 a){return __builtin_ia32_vec_ext_v8hi(a,8);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,short v){return __builtin_ia32_vec_set_v8hi(a,v,7);}\n", 0, false, NULL, NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,short v){return __builtin_ia32_vec_set_v8hi(a,v,8);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
+        // #799's separately attested immediate forms: top of range, first out-of-range, and a nonconstant.
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "D2 f(D2 a,D2 b){return __builtin_ia32_shufpd(a,b,3);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "D2 f(D2 a,D2 b){return __builtin_ia32_shufpd(a,b,4);}\n", 0, true, "error: argument value 4 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "D2 f(D2 a,D2 b,int i){return __builtin_ia32_shufpd(a,b,i);}\n", 0, true, "must be a constant integer", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,S8 b){return __builtin_ia32_pblendw128(a,b,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,S8 b){return __builtin_ia32_pblendw128(a,b,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "S8 f(S8 a,S8 b,int i){return __builtin_ia32_pblendw128(a,b,i);}\n", 0, true, "must be a constant integer", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "I8 f(I8 a){return __builtin_ia32_pshufd256(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "I8 f(I8 a){return __builtin_ia32_pshufd256(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "I8 f(I8 a,int i){return __builtin_ia32_pshufd256(a,i);}\n", 0, true, "must be a constant integer", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "Q4 f(Q4 a){return __builtin_ia32_permdi256(a,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "Q4 f(Q4 a){return __builtin_ia32_permdi256(a,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "Q4 f(Q4 a,int i){return __builtin_ia32_permdi256(a,i);}\n", 0, true, "must be a constant integer", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C32 f(C32 a,C32 b){return __builtin_ia32_palignr256(a,b,255);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C32 f(C32 a,C32 b){return __builtin_ia32_palignr256(a,b,256);}\n", 0, true, "error: argument value 256 is outside the valid range", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_SSE "C32 f(C32 a,C32 b,int i){return __builtin_ia32_palignr256(a,b,i);}\n", 0, true, "must be a constant integer", NULL },
     };
     char directory[] = "/tmp/buster-check-x86-XXXXXX";
     const bool ready = mkdtemp(directory) != NULL;

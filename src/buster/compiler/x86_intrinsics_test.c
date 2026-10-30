@@ -89,6 +89,9 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_V(_mm_mask_store_sbh)
     BUSTER_X86_INTRINSIC_X(buster_intrinsic_sub_ab)
     BUSTER_X86_INTRINSIC_X(buster_intrinsic_sub_ba)
+    BUSTER_X86_INTRINSIC_X(buster_intrinsic_fshl_bytes)
+    BUSTER_X86_INTRINSIC_X(buster_intrinsic_fshr_bytes)
+    BUSTER_X86_INTRINSIC_X(_mm_rot_epi8)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_ps)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_pd)
     BUSTER_X86_INTRINSIC_X(_mm_frcz_ss)
@@ -472,6 +475,15 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi64)
     BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi8)
     BUSTER_X86_INTRINSIC_Z(_mm512_bmacor16x16x16)
+    BUSTER_X86_INTRINSIC_X(_mm128_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_X(_mm128_mask_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_X(_mm128_maskz_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_bitrev_epi8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_bitrev_epi8)
     BUSTER_X86_INTRINSIC_Z(_mm512_bmacxor16x16x16)
     BUSTER_X86_INTRINSIC_Y(_mm256_bmacor16x16x16)
     BUSTER_X86_INTRINSIC_Y(_mm256_bmacxor16x16x16)
@@ -567,9 +579,14 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 #undef BUSTER_X86_INTRINSIC_V
 #undef BUSTER_X86_INTRINSIC_INVERTED_B
 
-// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order.
+// The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, and
+// byte funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves.
 static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_sub_ab(__m128i a, __m128i b) { return _mm_sub_epi32(a, b); }\n"
-                                                    "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n";
+                                                    "__m128i buster_intrinsic_sub_ba(__m128i a, __m128i b) { return _mm_sub_epi32(b, a); }\n"
+                                                    "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshl_bytes(__m128i a,__m128i b,__m128i c)"
+                                                    "{return (__m128i)__builtin_elementwise_fshl((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n"
+                                                    "__attribute__((target(\"xop\"))) __m128i buster_intrinsic_fshr_bytes(__m128i a,__m128i b,__m128i c)"
+                                                    "{return (__m128i)__builtin_elementwise_fshr((__v16qu)a,(__v16qu)b,(__v16qu)c);}\n";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The objects
@@ -2182,6 +2199,17 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
             trace->flags_boolean = 0;
         }
     }
+    else if ((number == X86_FORM_VPCMPEQD_X_X_XM128 || number == X86_FORM_VPCMPEQD_Y_Y_YM256) && written >= 0 &&
+             instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->vvvv == instruction->rm)
+    {
+        // An integer equality compare with itself gives all ones, independent of the register's previous value.
+        // Clang materializes fshl's byte -1 count this way; the compiler loads the same repeated-byte constant.
+        uint8_t ones[32];
+        memset(ones, 255, sizeof(ones));
+        const uint32_t count = operands[written].bytes;
+        x86_intrinsic_fill(bytes, count, x86_intrinsic_constant(trace, ones, count));
+        x86_intrinsic_write(trace, &operands[written], bytes, count, BUSTER_X86_REST_ZERO, false);
+    }
     else if (select)
     {
         // A masked move's source, or a blend's rm, where the mask's bits are set, and elsewhere the destination's old
@@ -3068,7 +3096,7 @@ static bool x86_intrinsic_test_node_text(void)
     bool valid = end != 0;
     if (valid)
     {
-        X86IntrinsicNode nodes[8] = { 0 };
+        X86IntrinsicNode nodes[32] = { 0 };
         X86IntrinsicTrace trace = { .nodes = nodes, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT };
         memcpy(end - 10, "v0:16v0:16", 10);
         nodes[0] = (X86IntrinsicNode){ .text = BUSTER_X86_INTRINSIC_TEXT - 10, .length = 5 };
@@ -3106,6 +3134,31 @@ static bool x86_intrinsic_test_node_text(void)
                 valid = action == X86_INTRINSIC_NEXT && !trace.failed && result > BUSTER_X86_INTRINSIC_ZERO && result < trace.node_count &&
                         nodes[result].length == sizeof(expected) - 1 &&
                         memcmp(trace.text + nodes[result].text, expected, sizeof(expected) - 1) == 0 && valid;
+            }
+        }
+        // Both VEX widths' all-ones idiom, and a nonidentical-source control that must remain an expression.
+        for (uint32_t wide = 0; wide < 2; wide += 1)
+        {
+            for (uint32_t same = 0; same < 2; same += 1)
+            {
+                memset(nodes, 0, sizeof(nodes));
+                trace = (X86IntrinsicTrace){ .nodes = nodes, .text = (char*)end - BUSTER_X86_INTRINSIC_TEXT };
+                const uint32_t a = x86_intrinsic_named(&trace, X86_INTRINSIC_ARGUMENT, 64, "v0");
+                const uint32_t b = x86_intrinsic_named(&trace, X86_INTRINSIC_ARGUMENT, 64, "v1");
+                x86_intrinsic_fill(trace.vector[0], 64, a);
+                x86_intrinsic_fill(trace.vector[1], 64, b);
+                const X86Decoded equal = { .instruction = { .form = wide != 0 ? X86_FORM_VPCMPEQD_Y_Y_YM256 : X86_FORM_VPCMPEQD_X_X_XM128,
+                                                            .reg = 2, .vvvv = 0, .rm = same != 0 ? 0 : 1, .mode = BUSTER_X86_REGISTER_DIRECT } };
+                uint64_t target = 0;
+                const X86IntrinsicAction action = x86_intrinsic_step(&trace, &equal, (X86IntrinsicPlaceInCode){ 0 }, &target);
+                const uint32_t count = wide != 0 ? 32 : 16;
+                valid = action == X86_INTRINSIC_NEXT && !trace.failed && valid;
+                for (uint32_t j = 0; j < 64; j += 1)
+                {
+                    uint8_t byte = 0;
+                    const bool constant = x86_intrinsic_constant_byte(&trace, trace.vector[2][j], &byte);
+                    valid = (j >= count ? constant && byte == 0 : same != 0 ? constant && byte == 255 : !constant) && valid;
+                }
             }
         }
         munmap(end + (uint64_t)page_size - mapped, mapped);
