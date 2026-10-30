@@ -105,6 +105,7 @@ struct SsaSourceRun
     char* output;
     uint64_t length;
     int status;
+    bool record_valid;
     bool recorded;
     InterpreterResult result;
 };
@@ -208,6 +209,18 @@ static uint32_t ssa_source_native_flags(const char* name)
     return flags;
 }
 
+// An internal child/setup/output failure must not look like a program's native exit(255). SIGKILL is neither
+// replaceable by a handler nor ignorable. If the self-kill unexpectedly returns, never manufacture a normal exit;
+// wait for termination under the surrounding command's deadline rather than accepting an ambiguous status.
+static __attribute__((noreturn)) void ssa_source_child_failure(void)
+{
+    for (;;)
+    {
+        kill(getpid(), SIGKILL);
+        pause();
+    }
+}
+
 // The child of a run: the program of `file` in one form, `functions`, run from function `entry` (main) by the shared IR's
 // interpreter, in `directory`, its standard input from /dev/null, its standard output and errors into the file `output`
 // (fully buffered, as a program's are into a file) and its interpreter's result into the file `record`, killed by an
@@ -222,12 +235,17 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
     const int input = open("/dev/null", O_RDONLY);
     const int capture = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     const int result_file = open(record, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    bool ready = input >= 0 && capture >= 0 && result_file >= 0 && chdir(directory) == 0 && dup2(input, 0) == 0 && dup2(capture, 1) == 1 && dup2(capture, 2) == 2;
-    if (ready)
+    // The record must not occupy a standard descriptor that the capture's dup2 calls overwrite.
+    bool ready = input >= 0 && capture >= 0 && result_file > STDERR_FILENO && chdir(directory) == 0 && dup2(input, 0) == 0 && dup2(capture, 1) == 1 && dup2(capture, 2) == 2;
+    if (!ready)
     {
-        setvbuf(stdout, 0, _IOFBF, BUFSIZ);
-        alarm(timeout);
+        ssa_source_child_failure();
     }
+    if (setvbuf(stdout, 0, _IOFBF, BUFSIZ) != 0)
+    {
+        ssa_source_child_failure();
+    }
+    alarm(timeout);
     const Link* original = file->link;
     const uint32_t count = file->count;
     Arena arena = arena_reserve(UINT64_C(1) << 32);
@@ -363,10 +381,14 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
                 name != 0 ? (int)original->names.length[name] : 0, name != 0 ? (const char*)original->names.bytes[name] : "", materialized.atom, materialized.fixup);
         result.status = INTERPRETER_SYMBOL;
     }
-    fflush(stdout);
-    fflush(stderr);
+    const bool output_written = fflush(stdout) == 0;
+    const bool errors_written = fflush(stderr) == 0;
     const bool written = result_file >= 0 && write(result_file, &result, sizeof(result)) == (ssize_t)sizeof(result);
-    _exit(written && result.status == INTERPRETER_OK ? (int)(result.value.low & 0xff) : 255);
+    if (!output_written || !errors_written || !written)
+    {
+        ssa_source_child_failure();
+    }
+    _exit(result.status == INTERPRETER_OK ? (int)(result.value.low & 0xff) : 255);
 }
 
 // Starts `file`'s program in one form (its functions `functions`, main the function `entry`) in a child of its own, whose
@@ -407,7 +429,10 @@ static void ssa_source_finish_form(SsaSourceRun* run, const char* directory)
     run->output = c_testsuite_read(output, &run->length);
     uint64_t length = 0;
     char* result = c_testsuite_read(record, &length);
-    run->recorded = result != 0 && length == sizeof(InterpreterResult);
+    // A native exit leaves an existing empty record. Missing/unreadable files and partial records are harness
+    // failures, not the same absence of an interpreter return.
+    run->record_valid = result != 0 && (length == 0 || length == sizeof(InterpreterResult));
+    run->recorded = run->record_valid && length == sizeof(InterpreterResult);
     if (run->recorded)
     {
         memcpy(&run->result, result, sizeof(InterpreterResult));
@@ -427,6 +452,10 @@ static void ssa_source_describe(const SsaSourceRun* run, char* text, uint64_t ca
     else if (run->status == -1)
     {
         snprintf(text, capacity, "no process");
+    }
+    else if (!run->record_valid)
+    {
+        snprintf(text, capacity, "interpreter record missing, unreadable or malformed (wait status %d)", run->status);
     }
     else if (WIFSIGNALED(run->status))
     {
@@ -486,7 +515,7 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
     // interpreter record; keep it, but reject every signaled/unwaited form and every recorded interpreter failure.
     for (uint32_t form = 0; passed && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
     {
-        if (runs[form].status == -1 || !WIFEXITED(runs[form].status) || (runs[form].recorded && runs[form].result.status != INTERPRETER_OK))
+        if (runs[form].status == -1 || !WIFEXITED(runs[form].status) || !runs[form].record_valid || (runs[form].recorded && runs[form].result.status != INTERPRETER_OK))
         {
             ssa_source_describe(&runs[form], text, sizeof(text));
             printf("test-ssa-source: file=%s the %s form's run didn't finish: %s (%s)\n", name, ssa_source_forms[form], text, directory);
@@ -771,6 +800,19 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             .exit_status = 255,
             .recorded = true,
             .result = INTERPRETER_STEP_LIMIT,
+        },
+        {
+            .name = "record-write-failure",
+            .source = "extern int close(int); int main(void) { for (int fd = 3; fd < 4096; ++fd) close(fd); return 7; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .signal = SIGKILL,
+        },
+        {
+            .name = "native-exit-255",
+            .source = "extern void exit(int); int main(void) { exit(255); return 0; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 255,
+            .passed = true,
         },
     };
     bool passed = true;

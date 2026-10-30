@@ -315,15 +315,22 @@ finish fails, however its forms agree: every form must exit normally, so a
 matching timeout or other signal is not a pass. An interpreter resource or
 step-limit result also fails. A program that calls a native `exit` may finish
 normally without an interpreter record; those exits remain supported.
+The empty record must still be readable; a missing, unreadable or partial
+record fails. Child setup, output-flush or record-write failure terminates the
+child with uncatchable `SIGKILL`, rather than aliasing a normal `exit(255)`.
 Where `FILE.expected` exists
 (c-testsuite's convention), the program must exit with status 0 having written
 its bytes.
 
-`test-ssa-source --self-test` checks this boundary on four tiny C fixtures,
+`test-ssa-source --self-test` checks this boundary on six tiny C fixtures,
 through the real preparation, promotions and three child processes, without
 expected-output sidecars: a normal nonzero return and a native `exit` must pass;
 three identical wall-timeout signals and three interpreter step limits must
 fail. The controls check every process status and retained interpreter record.
+An admitted program that closes descriptors3–4095 invalidates the child's
+record descriptor while leaving captured stdout/stderr open; the resulting
+record-write failure must fail all three forms, with their empty records kept.
+A separate native `exit(255)` must still pass without an interpreter record.
 Unexpected failures retain their work directory; `--keep` retains every run.
 
 The interpreter's program is the emission's link, which `ir_source_prepare`
