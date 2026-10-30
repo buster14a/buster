@@ -784,7 +784,9 @@ designs and the compilers already built this way.
   consumer that does not repeat generic instruction validation), or reads them
   from the frame Tier 0 published, with no pass over the body
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
-  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks);
+  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks;
+  `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
+  each remembered and restored around its jump);
   `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch. `check_program_emit` writes the C driver's unwind tables so, one
