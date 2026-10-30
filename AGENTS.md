@@ -5341,13 +5341,15 @@ on fixtures of each kind of definition (functions, objects and string literals),
 --symbols` on any corpus. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced
 definitions saves against `--lower-all`, after checking, with each file's
-functions and objects defined, lowered and skipped. A file the checker rejects,
+functions and objects defined, lowered and skipped. It times warm selection,
+lowering and object construction in memory, with unwind generation and
+verification disabled; it excludes checking and file writing. A file the checker rejects,
 or that is refused by name (`CHECK_PROGRAM_UNSUPPORTED`,
 `CHECK_DATA_UNSUPPORTED`), is left out; any other failure, a timed run that
 lowers other than its warm-up, and a run that measures no file fail the command
 (`test-checker` checks each, `c_lowering_source_benchmark_test.c`). Run it under
 the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
-contract, the comparisons' results and what `main.c`'s measurement waits on.
+contract, the comparisons' results and the completed `main.c` measurement.
 
 ## Type tests
 
