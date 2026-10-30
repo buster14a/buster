@@ -259,6 +259,10 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
     }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
+    fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
+    fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
+    fprintf(stream, "time-process\tstage-system-accuracy\tunqualified\n");
+    fprintf(stream, "time-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n");
     fprintf(stream, "time-process\tpeak-rss-source\tproc-self-status-vmhwm\n");
     fprintf(stream, "time-process\tpeak-rss-scope\tpost-exec-through-last-mark\n");
     fprintf(stream, "time-process\tpeak-rss-precision\tapproximate\n");

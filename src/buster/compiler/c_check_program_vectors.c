@@ -5,9 +5,10 @@
 // operator at a vector's element type and bytes, as clang -O0's code computes it, an instruction per element type where
 // AVX-512 has one. Each row's forms are EVEX ones of AVX-512F and AVX-512VL, which the lowering requires of a function with
 // vectors (check_lower_vector_target), and AVX-512BW's or AVX-512DQ's where the row names them, and AVX512-FP16's for
-// half-precision elements' arithmetic and compares (its extension: X86Target.extensions); an operator AVX-512 has no
-// instruction for (integer division and remainder, 8-bit multiplication and shifts) is refused by name, which clang
-// computes an element at a time. Included by c_check_program_lower.c after its class helpers.
+// half-precision elements' arithmetic and compares (its extension: X86Target.extensions); bf16 elements' arithmetic is
+// AVX10.2's, or float's around AVX512-BF16's rounding where clang computes it so (check_vector_lower_brain_rows); an
+// operator AVX-512 has no instruction for (integer division and remainder, 8-bit multiplication and shifts) is refused
+// by name, which clang computes an element at a time. Included by c_check_program_lower.c after its class helpers.
 
 // What a row computes: one of C's operators on vectors (CHECK_OP_ADD ... CHECK_OP_NOT_EQUAL, and the unary
 // CHECK_OP_NEGATIVE and CHECK_OP_BIT_NOT), or a splat of a scalar operand into every element.
@@ -314,6 +315,181 @@ static const char* check_vector_lower_row(const TypeTable* types, const X86Targe
     if (reason == NULL && half && op != CHECK_OP_NEGATIVE && op != BUSTER_CHECK_VECTOR_SPLAT && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0)
     {
         reason = "vector operations on half-precision elements without AVX512-FP16";
+    }
+    return reason;
+}
+
+// Whether a vector type's elements are __bf16's (bfloat16), whose operators are check_vector_lower_brain_rows'.
+static bool check_vector_lower_brain(const TypeTable* types, TypeId vector)
+{
+    const TypeId element = type_unqualified(type_strip_aligned(types, type_element(types, type_unqualified(type_strip_aligned(types, vector)))));
+    return element == BUSTER_TYPE_BF16;
+}
+
+// The rows of an operator on vectors of `bytes` bytes of __bf16 elements: +, -, * and /, negation, and a scalar's splat
+// (its bits in every element, as a half-precision one's, from an integer operand of `scalar_class`). Where the unit's
+// target has AVX10.2 (`excess` false), an operator is AVX10.2's instruction (VADDBF16 to VDIVBF16, which round to
+// nearest even, flush subnormals and report nothing), which the function's target must have, and a negation flips the
+// sign bits. Where it hasn't, clang's bfloat16 excess precision computes them in float, as its -O0 code does: each
+// operand widened to floats (VPMOVZXWD, then VPSLLD by 16: a bf16 is a float's high half), the floats' operation
+// (VADDPS to VDIVPS at the current rounding; a negation XORs their sign bits), and the floats rounded back by
+// AVX512-BF16's VCVTNEPS2BF16 (to nearest even, subnormals flushed, nothing reported), which the function's target must
+// have; a vector of 4 bytes divides its two elements alone, under a mask of them, as a float vector of 4 or 8 bytes
+// does. A row takes its operands as VECTOR(0) and VECTOR(1) and leaves its result in VECTOR(0) (`*count` 1), but a
+// vector of 64 bytes under excess precision, whose operands' floats take 128 bytes each, past a row's 8 records: its
+// three rows are its halves' (rows 0 and 1, which read the operands' bytes 0 to 31 and 32 to 63 through their
+// addresses, integer operands of U64, the frame temporaries' that check_lower_vector_brain stores them into, and leave
+// their halves' 32 bytes) and row 2, which joins the halves (VINSERTF64X4), as clang's code reads each operand's halves
+// from its frame slot. Compares and the other operators are refused by name.
+static const char* check_vector_lower_brain_rows(const X86Target* target, bool excess, uint32_t op, uint32_t bytes, uint8_t scalar_class, Tier0Operation* rows,
+                                                 uint32_t* count)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t s0 = BUSTER_TIER0_ROLE_SCRATCH(0);
+    const uint32_t width = bytes <= 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool binary = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE;
+    const bool halves = excess && bytes == 64;
+    const uint32_t operands = binary ? 2 : 1;
+    const char* reason = NULL;
+    uint64_t needed = 0;
+    uint64_t extensions = 0;
+    memset(rows, 0, 3 * sizeof(*rows));
+    *count = 1;
+    rows[0].result_class = BUSTER_TYPED_CLASS_VECTOR;
+    rows[0].result_bytes = (uint8_t)bytes;
+    if (op == BUSTER_CHECK_VECTOR_SPLAT)
+    {
+        const CheckVectorForms forms = BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTW_X_R32, VPBROADCASTW_Y_R32, VPBROADCASTW_Z_R32);
+        rows[0].records[0] = check_vector_lower_record(forms.forms[width], v0, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+        rows[0].record_count = 1;
+        rows[0].operand_count = 1;
+        rows[0].operand_classes[0] = scalar_class;
+        needed = BUSTER_X86_FEATURE(AVX512BW);
+    }
+    else if (!binary && op != CHECK_OP_NEGATIVE)
+    {
+        reason = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL ? "vector compares of bf16 elements" : "this operator on bf16 vectors";
+    }
+    else if (!excess && binary)
+    {
+        const CheckVectorForms forms = op == CHECK_OP_ADD      ? BUSTER_CHECK_VECTOR_PACKED(VADDBF16) :
+                                       op == CHECK_OP_SUBTRACT ? BUSTER_CHECK_VECTOR_PACKED(VSUBBF16) :
+                                       op == CHECK_OP_MULTIPLY ? BUSTER_CHECK_VECTOR_PACKED(VMULBF16) :
+                                                                 BUSTER_CHECK_VECTOR_PACKED(VDIVBF16);
+        rows[0].records[0] = check_vector_lower_record(forms.forms[width], v0, v0, v1);
+        rows[0].record_count = 1;
+        extensions = BUSTER_X86_EXTENSION(AVX10_2);
+    }
+    else if (!excess)
+    {
+        // The sign bit, 0x8000, in every element, XORed in.
+        rows[0].records[0] = check_vector_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, s0);
+        rows[0].records[0].immediate = 0x8000;
+        rows[0].records[1] = check_vector_lower_record(BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTW_X_R32, VPBROADCASTW_Y_R32, VPBROADCASTW_Z_R32).forms[width], v1, 0, s0);
+        rows[0].records[2] = check_vector_lower_record(BUSTER_CHECK_VECTOR_PACKED(VPXORQ).forms[width], v0, v0, v1);
+        rows[0].record_count = 3;
+        needed = BUSTER_X86_FEATURE(AVX512BW);
+        extensions = BUSTER_X86_EXTENSION(AVX10_2);
+    }
+    else
+    {
+        // The floats' width: an XMM register's for 4 and 8 bytes, a YMM one's for 16 and a ZMM one's for 32 and for each
+        // half of 64.
+        const uint32_t f = bytes <= 8 ? 0 : bytes == 16 ? 1 : 2;
+        static const uint16_t widen[3] = { X86_FORM_VPMOVZXWD_X_XM64_EVEX, X86_FORM_VPMOVZXWD_Y_XM128_EVEX, X86_FORM_VPMOVZXWD_Z_YM256 };
+        static const uint16_t shift[3] = { X86_FORM_VPSLLD_X_XM128_IMM8, X86_FORM_VPSLLD_Y_YM256_IMM8, X86_FORM_VPSLLD_Z_ZM512_IMM8 };
+        static const uint16_t narrow[3] = { X86_FORM_VCVTNEPS2BF16_X_XM128_EVEX, X86_FORM_VCVTNEPS2BF16_X_YM256_EVEX, X86_FORM_VCVTNEPS2BF16_Y_ZM512 };
+        const CheckVectorForms floats = op == CHECK_OP_ADD      ? BUSTER_CHECK_VECTOR_EVEX(VADDPS) :
+                                        op == CHECK_OP_SUBTRACT ? BUSTER_CHECK_VECTOR_EVEX(VSUBPS) :
+                                        op == CHECK_OP_MULTIPLY ? BUSTER_CHECK_VECTOR_EVEX(VMULPS) :
+                                                                  BUSTER_CHECK_VECTOR_EVEX(VDIVPS);
+        for (uint32_t h = 0; h < (halves ? 2u : 1u); h += 1)
+        {
+            Tier0Operation* row = rows + h;
+            X86Instruction* records = row->records;
+            uint32_t r = 0;
+            // Each operand's floats, from its register into VECTOR(2 + j), or from its half at its address into VECTOR(j).
+            for (uint32_t j = 0; j < operands; j += 1)
+            {
+                const uint8_t into = (uint8_t)BUSTER_TIER0_ROLE_VECTOR(halves ? j : 2 + j);
+                records[r] = halves ? (X86Instruction){ .form = widen[f], .reg = into, .rm = (uint8_t)BUSTER_TIER0_ROLE_INTEGER(j), .mode = BUSTER_X86_MEMORY_BASE,
+                                                        .displacement = (int32_t)(32 * h) } :
+                                      check_vector_lower_record(widen[f], into, 0, (uint8_t)BUSTER_TIER0_ROLE_VECTOR(j));
+                records[r + 1] = check_vector_lower_record(shift[f], 0, into, into);
+                records[r + 1].immediate = 16;
+                r += 2;
+            }
+            const uint8_t a = halves ? v0 : BUSTER_TIER0_ROLE_VECTOR(2);
+            const uint8_t b = halves ? v1 : BUSTER_TIER0_ROLE_VECTOR(3);
+            if (op == CHECK_OP_NEGATIVE)
+            {
+                // The floats' sign bit in every element, XORed in.
+                records[r] = check_vector_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, s0);
+                records[r].immediate = (int32_t)0x80000000u;
+                records[r + 1] = check_vector_lower_record(BUSTER_CHECK_VECTOR_FORMS(VPBROADCASTD_X_R32, VPBROADCASTD_Y_R32, VPBROADCASTD_Z_R32).forms[f], b, 0, s0);
+                records[r + 2] = check_vector_lower_record(BUSTER_CHECK_VECTOR_PACKED(VPXORD).forms[f], a, a, b);
+                r += 3;
+            }
+            else if (op == CHECK_OP_DIVIDE && bytes == 4)
+            {
+                // The two elements' floats alone, under k1, the others zeroed: their 0/0 would raise FE_INVALID.
+                records[r] = check_vector_lower_record(X86_FORM_MOV_R32_IMM32, 0, 0, s0);
+                records[r].immediate = 3;
+                records[r + 1] = check_vector_lower_record(X86_FORM_KMOVW_K_R32, 1, 0, s0);
+                records[r + 2] = check_vector_lower_record(floats.forms[f], a, a, b);
+                records[r + 2].decorations = 1 | BUSTER_X86_DECORATION_ZEROING;
+                r += 3;
+            }
+            else
+            {
+                records[r] = check_vector_lower_record(floats.forms[f], a, a, b);
+                r += 1;
+            }
+            records[r] = check_vector_lower_record(narrow[f], v0, 0, a);
+            row->record_count = (uint8_t)(r + 1);
+            row->operand_count = (uint8_t)operands;
+            for (uint32_t j = 0; j < operands; j += 1)
+            {
+                row->operand_classes[j] = halves ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VECTOR;
+                row->operand_bytes[j] = halves ? 0 : (uint8_t)bytes;
+            }
+            row->result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row->result_bytes = (uint8_t)(halves ? 32 : bytes);
+        }
+        if (halves)
+        {
+            rows[2].records[0] = check_vector_lower_record(X86_FORM_VINSERTF64X4_Z_Z_YM256_IMM8, v0, v0, v1);
+            rows[2].records[0].immediate = 1;
+            rows[2].record_count = 1;
+            rows[2].operand_count = 2;
+            rows[2].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            rows[2].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            rows[2].operand_bytes[0] = 32;
+            rows[2].operand_bytes[1] = 32;
+            rows[2].result_class = BUSTER_TYPED_CLASS_VECTOR;
+            rows[2].result_bytes = 64;
+            *count = 3;
+        }
+        needed = BUSTER_X86_FEATURE(AVX512BF16);
+    }
+    if (reason == NULL && !excess && op != BUSTER_CHECK_VECTOR_SPLAT)
+    {
+        rows[0].operand_count = (uint8_t)operands;
+        for (uint32_t j = 0; j < operands; j += 1)
+        {
+            rows[0].operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+            rows[0].operand_bytes[j] = (uint8_t)bytes;
+        }
+    }
+    if (reason == NULL && (target->features & needed) != needed)
+    {
+        reason = (needed & BUSTER_X86_FEATURE(AVX512BF16)) != 0 ? "vector arithmetic of bf16 elements without AVX512-BF16" :
+                                                                  "vector operations on 8- and 16-bit elements without AVX-512BW";
+    }
+    if (reason == NULL && (target->extensions & extensions) != extensions)
+    {
+        reason = "vector arithmetic of bf16 elements without AVX10.2";
     }
     return reason;
 }

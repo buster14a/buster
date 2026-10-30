@@ -145,6 +145,12 @@ with a count of 0 they are kept, which `x86_flags_substitutable` respects.
   `X87_CONTROL`: fldcw writes the control word too;
 - `ZERO_UPPER`: vzeroupper zeroes the bits above 127 of ZMM0 to ZMM15 and keeps
   their low 128, so it reads and writes all 16 (ZMM16 to ZMM31 keep theirs);
+- `IMPLICIT_VECTORS`: Key Locker's forms read and write XMM registers that no
+  role names, whose sets `x86_implicit_vectors` gives (LLVM's `X86InstrKL.td`
+  has the same): `aesencwide128kl` to `aesdecwide256kl` read and write XMM0 to
+  XMM7, their 8 blocks; `encodekey128` reads its key from XMM0 and writes its
+  handle to XMM0 to XMM2 and zeros to XMM4 to XMM6, `encodekey256` its key from
+  XMM0 and XMM1 and its handle to XMM0 to XMM3; `loadiwkey` reads XMM0;
 - `KEEP_UPPER`, above.
 
 **Control**: none, jump, conditional branch, call, return or trap.
@@ -410,9 +416,10 @@ input, every bit of the context too.
   the merging destinations' reads. The two entry points inline one body
   (`x86_instructions_effects_lanes`, `always_inline`) with the column's pointer
   null and not, so that the first has none of the column's instructions;
-- the rare records are the scalar twin's: an x87 form's, vzeroupper's and
+- the rare records are the scalar twin's: an x87 form's, vzeroupper's,
   `BUSTER_X86_EFFECT_RARE`'s (an /is4 operand, a VSIB one's vector index, and
-  vp2intersect's pair of opmask registers). A masked `vpternlogq` ORs the effects
+  vp2intersect's pair of opmask registers) and `IMPLICIT_VECTORS`' (Key
+  Locker's XMM registers). A masked `vpternlogq` ORs the effects
   records' properties into a register, one `vptestmq` of it after the loop says
   whether any lane was rare, and then `x86_instruction_resolve` overwrites the
   rare lanes after the stores. A count in a general register cost more
@@ -687,8 +694,9 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vpshufb, vpshufd, vpshuflw, vpshufhw, vshufps, vpalignr, valignd, valignq,
     vshufi32x4, vshufi64x2, the broadcasts
     (vbroadcastss, vbroadcastsd, vpbroadcast in b, w, d and q, from a general
-    register too), the inserts and extracts (vinserti32x4, vinserti64x4, f32x4,
-    f64x4, i32x4, i64x4, vpinsr and vpextr in b, w, d, q), the packs (vpacksswb,
+    register too), the inserts and extracts (vinserti32x4, vinserti64x4,
+    vinsertf64x4, vextract in f32x4, f64x4, i32x4 and i64x4, vpinsr and vpextr
+    in b, w, d, q), the packs (vpacksswb,
     vpackssdw, vpackuswb, vpackusdw), the narrowing moves (vpmov, vpmovs and
     vpmovus from d and q to b, w and d, and from w to b) and the widening ones
     (vpmovzx and vpmovsx from b, w and d), and the compresses
@@ -720,7 +728,43 @@ Mutations of the tables, each built and run once, are caught. Among them:
     AVX-512VNNI's;
   - SHA512's vsha512msg1, vsha512msg2 and vsha512rnds2 and SM3's vsm3msg1 and
     vsm3msg2, which modify their first operand, and AVX10.2's EVEX forms of
-    SM4's vsm4key4 and vsm4rnds4 of 64 bytes.
+    SM4's vsm4key4 and vsm4rnds4 of 64 bytes;
+  - AVX10.2's saturating conversions with truncation (vcvttps2dqs to
+    vcvttpd2uqqs), as the AVX-512 ones they saturate; its bf16 operations
+    (vscalefbf16, vgetexpbf16, vrcpbf16, vrsqrtbf16, vmaxbf16 and vminbf16)
+    and arithmetic (vaddbf16 to vdivbf16, vsqrtbf16, and the fused
+    multiply-adds' 213 forms, vfmadd213bf16 to vfnmsub213bf16, which the
+    lowering's rows take), without MXCSR or exceptions, as vcvtneps2bf16's, and
+    vcomisbf16, as
+    vcomiss; its conversions to and from 8-bit floats (vcvtph2bf8 to
+    vcvt2ph2hf8s and vcvthf82ph), without MXCSR or exceptions; and vcvt2ps2phx
+    and vdpphps, which read MXCSR;
+  - MOVRS's vector loads (vmovrsb to vmovrsq), as vmovdqu8's, and AVX512-BMM's
+    vbmacor16x16x16 and vbmacxor16x16x16, which modify their accumulator;
+  - the extensions' system instructions the x86 rows take: RAO-INT's aadd, aand,
+    aor and axor, as the locked arithmetic, atomic but leaving the flags;
+    cldemote and prefetchrst2, as the prefetches; serialize, a fence; MOVRS's
+    integer loads, as mov; and a SYSTEM operation of its own for those whose
+    effects are on state the table doesn't model, a transaction's (xend, a fence
+    too, xtest, xsusldtrk and xresldtrk), the user interrupts' (clui, stui,
+    testui and senduipi), the tiles' configuration (ldtilecfg and sttilecfg, of
+    64 bytes of memory, and tilerelease), a monitor's address (umonitor), LWP's
+    control block (llwpcb, slwpcb), trace packets (ptwrite), enqueued commands
+    (enqcmd and enqcmds) and MSRs (urdmsr, uwrmsr), each but ptwrite and xtest
+    with FAULT, since the processor's or the system's state may fault them, and
+    xtest's, testui's and enqcmd's flags;
+  - the leaves' (`c_builtin_x86_helpers.c`): Key Locker's aesenc128kl to
+    aesdec256kl as crypto operations of their register and the handle's memory
+    (48 bytes, or 64, the row's width, which the form table doesn't give), and
+    their wide forms with `IMPLICIT_VECTORS`, each defining every status flag (ZF
+    says whether the handle was valid) and keeping the bits above 127 of what it
+    writes (legacy encodings); encodekey128 and encodekey256 (a register's
+    information, the handle in XMM0 to XMM3) and loadiwkey (EAX and XMM0
+    implicit) as SYSTEM, with FAULT; tpause and umwait as SYSTEM, reading EDX:EAX
+    and defining the status flags (CF says whether the OS's time limit ended the
+    wait), with FAULT; and xbegin's rel32 form as SYSTEM with a conditional
+    branch's control, a fence, and RAX read and written under a condition (the
+    abort status, where the transaction aborts to its fallback).
 
 The other VEX and EVEX forms are uncovered, and so are mulx (whose rdx the rows
 can't name, as Tier 0's rows refuse it), v4fmaddps (a register block), APX's
@@ -733,8 +777,9 @@ AVX512-FP16's forms, an extension the table doesn't classify, nor the VEX forms
 of AVX-IFMA and AVX-NE-CONVERT (vpmadd52luq's and vcvtneps2bf16's), features it
 has no bit for. Their rows follow their EVEX and single-precision twins' by
 rule, unexecuted. AVX512VP2INTERSECT's and AVX-VNNI's run on the 9700X alone.
-XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's and SM4's run on no host
-the tests have (Zen 5 has none of them), nor does the table classify them:
+XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and
+AVX512-BMM's run on no host the tests have (Zen 5 has none of them), nor does
+the table classify them, nor the system instructions' and the leaves':
 `test-x86-intrinsics` compares the compiler's code of their intrinsics with
 clang's instead (`x86_intrinsics_test.c`).
 
@@ -956,7 +1001,8 @@ the table compares the second ones. The instructions and cycles are one
   writes, the cache flushes, WBINVD, INVPCID), so a record of them reads and
   writes everything; the deterministic user-mode ones (CRC32, SHA, the
   non-temporal and direct stores, EXTRQ and INSERTQ) can get rows the harness
-  runs.
+  runs. The extensions' system instructions have rows no harness runs, whose
+  code `test-x86-intrinsics` compares with clang's.
 - **A consumer of the opmask column:** a scheduler of records with opmask
   registers takes `x86_instructions_effects_opmasks`; Tier 1 has none yet
   (#748 brings its vector masks).

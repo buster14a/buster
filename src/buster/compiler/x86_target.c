@@ -92,11 +92,14 @@ _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
 #define BUSTER_X86_FEATURE(name) (UINT64_C(1) << X86_FEATURE_##name)
 
 // The features past those that the generated code may use, which form eligibility doesn't classify and only the
-// lowering reads: AVX512-FP16 for its x86 rows (c_check_program_x86.c) and its vector and scalar half precision, AVX-NE-
-// CONVERT for its VCVTNEPS2BF16 and AVX10.2 for its native __bf16 arithmetic (c_check_program_half.c) and both for their
-// builtins' rows, and XOP, SHA512, SM3 and SM4 for their builtins' rows. X86Target.extensions, from the target options as
-// clang resolves them and from a function's target attribute (c_predefines.c's predefines_target and
-// predefines_function_target), by clang's names (predefines_x86_extensions).
+// lowering reads: AVX512-FP16 for its x86 rows (c_check_program_x86.c) and its vector and scalar half precision,
+// AVX-NE-CONVERT for its VCVTNEPS2BF16 and AVX10.2 for its native __bf16 arithmetic (c_check_program_half.c) and both
+// for their builtins' rows, and XOP, SHA512, SM3, SM4, MOVRS, AVX512-BMM and the system instructions' (RAO-INT,
+// CLDEMOTE, SERIALIZE, UINTR, PTWRITE, WAITPKG, LWP, RTM, TSXLDTRK, AMX-TILE's configuration, ENQCMD and USER_MSR) for
+// their builtins' rows, with WAITPKG's and RTM's and Key Locker's (KL and WIDEKL) for their builtins' leaves
+// (c_builtin_x86_helpers.c). X86Target.extensions, from the target options as clang resolves them and from a function's
+// target attribute (c_predefines.c's predefines_target and predefines_function_target), by clang's names
+// (predefines_x86_extensions).
 #define BUSTER_X86_TARGET_EXTENSIONS(X) \
     X(AVX512FP16) \
     X(AVXNECONVERT) \
@@ -104,7 +107,23 @@ _Static_assert(X86_FEATURE_COUNT < 63, "leave a bit for unsupported forms");
     X(XOP) \
     X(SHA512) \
     X(SM3) \
-    X(SM4)
+    X(SM4) \
+    X(MOVRS) \
+    X(AVX512BMM) \
+    X(RAOINT) \
+    X(CLDEMOTE) \
+    X(SERIALIZE) \
+    X(UINTR) \
+    X(PTWRITE) \
+    X(WAITPKG) \
+    X(LWP) \
+    X(RTM) \
+    X(TSXLDTRK) \
+    X(AMXTILE) \
+    X(ENQCMD) \
+    X(USERMSR) \
+    X(KL) \
+    X(WIDEKL)
 
 #define BUSTER_X86_TARGET_EXTENSION_ENUM(name) X86_EXTENSION_##name,
 typedef enum X86Extension

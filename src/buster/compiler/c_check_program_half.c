@@ -19,11 +19,11 @@
 //   - a float rounded to one: VCVTPS2PH (after a VMOVD into the register has zeroed the other lanes, so that they raise
 //     nothing), AVX512-BF16's or AVX-NE-CONVERT's VCVTNEPS2BF16, or libgcc's __truncsfhf2 and __truncsfbf2, as LLVM
 //     selects them; a double and a long double are libgcc's __truncdfhf2, __truncdfbf2, __truncxfhf2 and __truncxfbf2,
-//     as clang calls them (with AVX512-FP16, LLVM's VCVTSD2SH rounds the same), a constant's at run time too;
+//     as clang calls them (with AVX512-FP16, LLVM's VCVTSD2SH rounds the same);
 //   - an integer through float, as LLVM converts one: a binary16's from an integer's float is the integer's own
 //     rounding (every integer below 65520 is a float's), and a bfloat16's is LLVM's double rounding; but a 128-bit
-//     integer and binary16 through libgcc's __floattihf ... __fixunshfti, as clang's are; and a constant rounded once,
-//     as clang folds it (check_lower_half_constant).
+//     integer and binary16 through libgcc's __floattihf ... __fixunshfti, as clang's are;
+//   - and a constant (an integer, a float or a double) rounded once, as clang folds it (check_lower_half_constant).
 // In a function with FENV_ACCESS anywhere, clang's floating operations are all constrained intrinsics, which its -O0
 // code folds none of and rounds a float to bfloat16 by __truncsfbf2: so are the lowering's (check_lower_half_strict).
 // Arithmetic is clang's excess precision (-ffloat16-excess-precision and -fbfloat16-excess-precision, standard), where the
@@ -286,11 +286,12 @@ static void check_lower_half_truncate(CheckLowerWriter* writer, uint8_t from, Ch
     check_lower_half_move(writer, false);
 }
 
-// Whether the value on top of the stack, of `class` (I8 to U64), is a constant that clang's -O0 code converts to `format`
-// as it compiles: the entry before is its CONST, which no branch joins (a conditional's value is clang's at run time too),
-// in a function without FENV_ACCESS (check_lower_half_strict); its bits in `bits`, the value rounded once
-// (check_action_half_round), as clang rounds it, where a conversion at run time rounds it to float first. A bfloat16's
-// two roundings can differ from one; a binary16's can't (every integer past float's 24 bits overflows it).
+// Whether the value on top of the stack, of `class` (I8 to U64, F32 or F64), is a constant that clang's -O0 code converts
+// to `format` as it compiles: the entry before is its CONST, which no branch joins (a conditional's value is clang's at run
+// time too), in a function without FENV_ACCESS (check_lower_half_strict); its bits in `bits`, the value rounded once
+// (check_action_half_round and check_action_half_bits), as clang rounds it, where a conversion at run time rounds an
+// integer to float first. A bfloat16's two roundings can differ from one; a binary16's can't (every integer past float's
+// 24 bits overflows it). A float's and a double's rounding is the conversion's at run time, but for the flags it raises.
 static bool check_lower_half_constant(CheckLowerWriter* writer, uint8_t class, CheckHalf format, uint16_t* bits)
 {
     const uint32_t count = writer->count;
@@ -301,18 +302,35 @@ static bool check_lower_half_constant(CheckLowerWriter* writer, uint8_t class, C
     }
     if (constant)
     {
-        // A CONST's value is its class's bits, sign-extended for a signed class (check_lower_constant's).
+        // A CONST's value is its class's bits, sign-extended for a signed class (check_lower_constant's), a float's and a
+        // double's their IEEE bits (check_lower_float_bits').
         const uint64_t value = writer->values[count - 1];
         const bool negative = (class & 1) != 0 && (int64_t)value < 0;
-        *bits = check_action_half_round(format, negative, negative ? 0 - value : value, 0);
+        if (class == BUSTER_TYPED_CLASS_F32)
+        {
+            const uint32_t small = (uint32_t)value;
+            float number;
+            memcpy(&number, &small, sizeof(number));
+            *bits = check_action_half_bits(format, number);
+        }
+        else if (class == BUSTER_TYPED_CLASS_F64)
+        {
+            double number;
+            memcpy(&number, &value, sizeof(number));
+            *bits = check_action_half_bits(format, number);
+        }
+        else
+        {
+            *bits = check_action_half_round(format, negative, negative ? 0 - value : value, 0);
+        }
     }
     return constant;
 }
 
 // A conversion of the value on top of the stack from `from` to `to`, one of them half-precision (check_lower_scalar_
 // conversion's): to void, a DISCARD; between two formats, through float (one of them's the same format: nothing); from
-// one, its float's conversion; to one, a double's and a long double's rounding, an integer constant's rounding as clang
-// folds it (check_lower_half_constant: its CONST discarded for the bits'), and any other real value's through its float. A
+// one, its float's conversion; to one, a constant's rounding as clang folds it (check_lower_half_constant: its CONST
+// discarded for the bits'), a double's and a long double's rounding, and any other real value's through its float. A
 // complex value, a vector or an aggregate is refused by name.
 static void check_lower_half_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
@@ -365,6 +383,11 @@ static void check_lower_half_conversion(CheckLowerWriter* writer, TypeId from, T
         {
             check_lower_append(writer, BUSTER_TYPED_CONVERT, to_class, 0);
         }
+    }
+    else if ((from_class == BUSTER_TYPED_CLASS_F32 || from_class == BUSTER_TYPED_CLASS_F64) && check_lower_half_constant(writer, from_class, target, &bits))
+    {
+        check_lower_append(writer, BUSTER_TYPED_DISCARD, from_class, 0);
+        check_lower_append(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U16, bits);
     }
     else if (from_class == BUSTER_TYPED_CLASS_F64 || from_class == BUSTER_TYPED_CLASS_F80)
     {

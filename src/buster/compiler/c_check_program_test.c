@@ -2136,6 +2136,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_transparent_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
+#include "c_check_program_bf16_test.c"
 #include "c_check_program_parameters_test.c"
 #include "c_check_program_half_test.c"
 
@@ -2900,6 +2901,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_transparent(test, clang);
     check_test_program_vector_builtins(test, clang);
     check_test_program_fp16(test, clang);
+    check_test_program_bf16(test, clang);
     check_test_program_halves(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"

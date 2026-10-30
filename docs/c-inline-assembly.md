@@ -240,6 +240,9 @@ string instructions with their prefixes (`rep movsb`) and AVX-512F's
 through `k7` as ordinary operands. The mask moves retain each form's target
 requirements. Its other families are in
 [the assembler's guide](assembler.md).
+The operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc` and `rdtscp`
+are also available (#798), with register outputs and CPU support chosen by the
+template's author.
 `test-assembler --cross-check` compares them with GNU as. The native
 inline-assembly fixtures also run alone with `test-checker --program-asm`,
 including the eight mask saves and restores at the semantics harness's offsets.

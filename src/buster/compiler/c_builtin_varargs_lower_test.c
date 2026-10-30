@@ -471,6 +471,8 @@ static __attribute__((noinline, no_sanitize("function"))) void cbuiltin_va_lower
                                : shape == 1 ? (i < 10 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64) : (i < 10 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_F64);
     }
     AbiVaList copied;
+    // Generated stores do not update MSan shadow; a nonmatching fill still exposes missing field writes.
+    memset(&copied, 0xa5, sizeof(copied));
     uint64_t (*copy)(void*, void*) = (uint64_t (*)(void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_COPY].bytes;
     copy(&copied, generated);
     cbuiltin_va_lower_test_expect(tally, cbuiltin_va_lower_test_same_list(&copied, generated), "va_copy fields", shape);
@@ -713,6 +715,8 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_va_lower_test_synt
     for (uint32_t spelling = 0; spelling < 2; spelling += 1)
     {
         AbiVaList list;
+        // Define the shadow before generated va_start, without supplying any expected field value.
+        memset(&list, 0xa5, sizeof(list));
         uint64_t (*start)(void*, void*, void*) = (uint64_t (*)(void*, void*, void*))(void*)native->programs[path][BUSTER_CBUILTIN_VA_TEST_START + spelling].bytes;
         start(&list, save, overflow);
         const AbiVaList expected =

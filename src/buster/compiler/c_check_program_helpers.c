@@ -71,8 +71,8 @@ struct CheckProgramHelpers
     const char* reason;
 };
 
-// Whether a type is a 16-byte vector of elements other than bool, as a vector leaf's parameters and result are
-// (CBuiltinX86HelperInfo.vector): a value Tier 0 passes in an XMM register.
+// Whether a type is a 16-byte vector of elements other than bool, as a leaf's vector parameters and result are
+// (CBuiltinX86HelperInfo.vectors): a value Tier 0 passes in an XMM register.
 static bool check_program_helper_vector(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_conversion_operand(types, type);
@@ -465,30 +465,34 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                 bool folded = false;
                 if (leaf != CBUILTIN_X86_HELPER_NONE)
                 {
-                    // Its arguments as unsigned longs, its result one or none; a vector leaf's, its builtin's 16-byte
-                    // vectors, the arguments' types at the builtin's prototype's (one for every use).
+                    // Its arguments as unsigned longs, its result one or none, but its builtin's 16-byte vectors where
+                    // the leaf takes or gives them (CBuiltinX86HelperInfo.vectors), the arguments' types at the
+                    // builtin's prototype's (one for every use).
                     const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + leaf;
-                    if (graph->argument_counts == 0 || graph->argument_counts[node] != info->parameter_count)
+                    if (graph->argument_counts == 0 || graph->argument_counts[node] != info->parameter_count ||
+                        info->parameter_count > BUSTER_ARRAY_LENGTH(helper.parameter_types))
                     {
                         result->status = CHECK_PROGRAM_INVALID;
                     }
                     else
                     {
                         const uint32_t first = graph->argument_offsets[node];
+                        const bool vector_result = (info->vectors & BUSTER_CBUILTIN_X86_VECTOR_RESULT) != 0;
                         helper = (CheckProgramHelper){
                             .id = id,
                             .parameter_count = info->parameter_count,
-                            .result_type = info->vector ? stream->values[node].type : info->result ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
+                            .result_type = vector_result ? stream->values[node].type : info->result ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID,
                             .compiler_barrier = true,
                             .x86 = leaf,
                         };
-                        bool vectors = !info->vector || check_program_helper_vector(program->types, helper.result_type);
-                        for (uint32_t a = 0; a < 3; a += 1)
+                        bool vectors = !vector_result || check_program_helper_vector(program->types, helper.result_type);
+                        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(helper.parameter_types); a += 1)
                         {
                             const bool parameter = a < info->parameter_count;
-                            const TypeId type = !parameter ? BUSTER_TYPE_VOID : info->vector ? stream->argument_conversions[first + a].type : BUSTER_TYPE_ULONG;
+                            const bool vector = (info->vectors >> a & 1) != 0;
+                            const TypeId type = !parameter ? BUSTER_TYPE_VOID : vector ? stream->argument_conversions[first + a].type : BUSTER_TYPE_ULONG;
                             helper.parameter_types[a] = type;
-                            vectors &= !parameter || !info->vector || check_program_helper_vector(program->types, type);
+                            vectors &= !parameter || !vector || check_program_helper_vector(program->types, type);
                         }
                         result->status = vectors ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
                     }
