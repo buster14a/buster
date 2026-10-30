@@ -167,7 +167,9 @@ typedef enum CheckX86LowerLayout
     // memory at p (CLWB, FXSAVE); (void* p, a) a stored at p (MOVNTI, MOVDIRI); (a, void* p) the same (WRSS); (void* p,
     // const void* q) p's register, q's memory (MOVDIR64B); (unsigned a, void* p) a zero-extended into a 64-bit register, p's
     // memory (INVPCID); (a) -> a's register's (RDSSP, which keeps it without a shadow stack); (a, b) -> a's, then the
-    // form's of it and b (CRC32).
+    // form's of it and b (CRC32); () -> the form's flags' condition (the rule's `fixed`), an int (XTEST, TESTUI); (void* p,
+    // const void* q) the same of POINTERS' (ENQCMD); (const void* p) -> the integer of the rule's bytes at p, a narrower
+    // one's zero-extended (MOVRS); (a) -> the form's register of a's (URDMSR); (a, b) a's register and b's (UWRMSR).
     CHECK_X86_LAYOUT_NONE,
     CHECK_X86_LAYOUT_READ,
     CHECK_X86_LAYOUT_WRITE,
@@ -178,6 +180,11 @@ typedef enum CheckX86LowerLayout
     CHECK_X86_LAYOUT_WIDENED,
     CHECK_X86_LAYOUT_MODIFY,
     CHECK_X86_LAYOUT_ACCUMULATE,
+    CHECK_X86_LAYOUT_CONDITION,
+    CHECK_X86_LAYOUT_POINTERS_CONDITION,
+    CHECK_X86_LAYOUT_LOAD_INTEGER,
+    CHECK_X86_LAYOUT_FROM,
+    CHECK_X86_LAYOUT_REGISTERS,
     // VECTOR_MEMORY's: (const void* p, vector m) -> the elements at p where m's are negative, zeros elsewhere (VMASKMOV's
     // load); (void* p, vector m, vector a) a's elements stored where m's are negative; (const void* p) -> the vector at p
     // (VLDDQU); (void* p, vector a) a's first element stored at p (MOVNTSD); (vector a, vector m, void* p) a's bytes
@@ -1123,6 +1130,42 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
                 row->operand_count = 1;
                 row->operand_classes[0] = integer;
                 row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_CONDITION:
+            case CHECK_X86_LAYOUT_POINTERS_CONDITION:
+            {
+                const bool pointers = rule->other == CHECK_X86_LAYOUT_POINTERS_CONDITION;
+                row->records[0] = pointers ? check_x86_lower_memory(form, i0, i1) : (X86Instruction){ .form = form };
+                row->record_count = (uint8_t)check_x86_lower_condition(row, 1, rule->fixed, 0);
+                row->operand_count = pointers ? 2 : 0;
+                row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+                row->operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+                row->result_class = BUSTER_TYPED_CLASS_I32;
+                break;
+            }
+            case CHECK_X86_LAYOUT_LOAD_INTEGER:
+                // A narrower integer through a scratch register's low bytes, the result's field 32 bits at least.
+                row->records[0] = check_x86_lower_memory(form, rule->bytes >= 4 ? result : BUSTER_TIER0_ROLE_SCRATCH(0), i0);
+                row->records[1] = check_x86_lower_record(rule->bytes == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, result, 0,
+                                                         BUSTER_TIER0_ROLE_SCRATCH(0));
+                row->record_count = rule->bytes >= 4 ? 1 : 2;
+                row->operand_count = 1;
+                row->operand_classes[0] = BUSTER_TYPED_CLASS_U64;
+                row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_FROM:
+                row->records[0] = check_x86_lower_record(form, i0, 0, result);
+                row->record_count = 1;
+                row->operand_count = 1;
+                row->operand_classes[0] = integer;
+                row->result_class = integer;
+                break;
+            case CHECK_X86_LAYOUT_REGISTERS:
+                row->records[0] = check_x86_lower_record(form, i0, 0, i1);
+                row->record_count = 1;
+                row->operand_count = 2;
+                row->operand_classes[0] = integer;
+                row->operand_classes[1] = integer;
                 break;
             default:
                 // ACCUMULATE: CRC32 of the value into the accumulator.

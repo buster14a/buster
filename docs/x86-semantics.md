@@ -729,7 +729,19 @@ Mutations of the tables, each built and run once, are caught. Among them:
     vcvt2ph2hf8s and vcvthf82ph), without MXCSR or exceptions; and vcvt2ps2phx
     and vdpphps, which read MXCSR;
   - MOVRS's vector loads (vmovrsb to vmovrsq), as vmovdqu8's, and AVX512-BMM's
-    vbmacor16x16x16 and vbmacxor16x16x16, which modify their accumulator.
+    vbmacor16x16x16 and vbmacxor16x16x16, which modify their accumulator;
+  - the extensions' system instructions the x86 rows take: RAO-INT's aadd, aand,
+    aor and axor, as the locked arithmetic, atomic but leaving the flags;
+    cldemote and prefetchrst2, as the prefetches; serialize, a fence; MOVRS's
+    integer loads, as mov; and a SYSTEM operation of its own for those whose
+    effects are on state the table doesn't model, a transaction's (xend, a fence
+    too, xtest, xsusldtrk and xresldtrk), the user interrupts' (clui, stui,
+    testui and senduipi), the tiles' configuration (ldtilecfg and sttilecfg, of
+    64 bytes of memory, and tilerelease), a monitor's address (umonitor), LWP's
+    control block (llwpcb, slwpcb), trace packets (ptwrite), enqueued commands
+    (enqcmd and enqcmds) and MSRs (urdmsr, uwrmsr), each but ptwrite and xtest
+    with FAULT, since the processor's or the system's state may fault them, and
+    xtest's, testui's and enqcmd's flags.
 
 The other VEX and EVEX forms are uncovered, and so are mulx (whose rdx the rows
 can't name, as Tier 0's rows refuse it), v4fmaddps (a register block), APX's
@@ -744,7 +756,7 @@ has no bit for. Their rows follow their EVEX and single-precision twins' by
 rule, unexecuted. AVX512VP2INTERSECT's and AVX-VNNI's run on the 9700X alone.
 XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's, SM4's, MOVRS's and
 AVX512-BMM's run on no host the tests have (Zen 5 has none of them), nor does
-the table classify them:
+the table classify them, nor the system instructions':
 `test-x86-intrinsics` compares the compiler's code of their intrinsics with
 clang's instead (`x86_intrinsics_test.c`).
 
@@ -966,7 +978,8 @@ the table compares the second ones. The instructions and cycles are one
   writes, the cache flushes, WBINVD, INVPCID), so a record of them reads and
   writes everything; the deterministic user-mode ones (CRC32, SHA, the
   non-temporal and direct stores, EXTRQ and INSERTQ) can get rows the harness
-  runs.
+  runs. The extensions' system instructions have rows no harness runs, whose
+  code `test-x86-intrinsics` compares with clang's.
 - **A consumer of the opmask column:** a scheduler of records with opmask
   registers takes `x86_instructions_effects_opmasks`; Tier 1 has none yet
   (#748 brings its vector masks).

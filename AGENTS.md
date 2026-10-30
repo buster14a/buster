@@ -984,12 +984,14 @@ designs and the compilers already built this way.
 - `src/buster/compiler/x86_intrinsics_test.c` is `test-x86-intrinsics` (#136):
   the compiler's code of the headers' x86 intrinsics whose instructions no
   host of the tests runs (XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's,
-  SM4's, MOVRS's, AVX512-BMM's) against clang -O0's. A source takes each
-  case's address, both compilers compile it (this one by both paths into the
-  same bytes), and each case's function is decoded (`x86_64_disassembler.c`)
-  and followed through `x86_semantics.c`'s effects, every register's and stack
-  byte's value an expression of the arguments: its result and stores must be
-  the same expressions in both objects, controls that run natively must agree
+  SM4's, MOVRS's, AVX512-BMM's and the extensions' system instructions')
+  against clang -O0's. A source takes each case's address, both compilers
+  compile it (this one by both paths into the same bytes), and each case's
+  function is decoded (`x86_64_disassembler.c`) and followed through
+  `x86_semantics.c`'s effects, every register's and stack byte's value an
+  expression of the arguments: its result, stores and effects (an instruction
+  that writes no register, memory or flag; a prefetch's address) must be the
+  same expressions in both objects, controls that run natively must agree
   too, and an intrinsic's two orders of operands must differ. `--cases FILE`
   takes other cases and `--print NAME` prints a case's traces; the checker
   guide's "Intrinsics no host runs" has the details.

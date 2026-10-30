@@ -3187,6 +3187,18 @@ static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
     [X86_EXTENSION_SM4] = "sm4",
     [X86_EXTENSION_MOVRS] = "movrs",
     [X86_EXTENSION_AVX512BMM] = "avx512bmm",
+    [X86_EXTENSION_RAOINT] = "raoint",
+    [X86_EXTENSION_CLDEMOTE] = "cldemote",
+    [X86_EXTENSION_SERIALIZE] = "serialize",
+    [X86_EXTENSION_UINTR] = "uintr",
+    [X86_EXTENSION_PTWRITE] = "ptwrite",
+    [X86_EXTENSION_WAITPKG] = "waitpkg",
+    [X86_EXTENSION_LWP] = "lwp",
+    [X86_EXTENSION_RTM] = "rtm",
+    [X86_EXTENSION_TSXLDTRK] = "tsxldtrk",
+    [X86_EXTENSION_AMXTILE] = "amx-tile",
+    [X86_EXTENSION_ENQCMD] = "enqcmd",
+    [X86_EXTENSION_USERMSR] = "usermsr",
 };
 
 // Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and
