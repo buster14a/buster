@@ -4271,6 +4271,45 @@ static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name
     return result;
 }
 
+// Late attributes are diagnosed at each attribute, with a note at the definition rather than an intervening
+// declaration. Compare exact source coordinates and wording with clang for both checker paths.
+static void check_test_driver_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "static int f(void) __attribute__((used));\n"
+        "static int f(void){return 1;}\n"
+        "static int f(void) __attribute__((used, constructor(100)));\n"
+        "static int f(void) __attribute__((constructor(200),used));\n";
+    static const char* const messages[] = {
+        ":3:41: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":4:35: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":2:12: note: previous definition is here",
+    };
+    char source[256], object[256];
+    snprintf(source, sizeof(source), "%s/late-attributes.c", directory);
+    snprintf(object, sizeof(object), "%s/late-attributes.o", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
+                              "-c", "-o", object, source, NULL };
+        char* text = NULL;
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        bool match = status == 0 && text != NULL;
+        for (uint32_t i = 0; match && i < BUSTER_ARRAY_LENGTH(messages); i += 1)
+        {
+            match &= strstr(text, messages[i]) != NULL;
+        }
+        const char* first_note = match ? strstr(text, messages[2]) : NULL;
+        match &= first_note != NULL && strstr(first_note + strlen(messages[2]), messages[2]) != NULL;
+        check_test_expect(test, match, route == 0 ? "clang late attribute diagnostic locations" : route == 1 ?
+                          "scalar late attribute diagnostic locations" : "vector late attribute diagnostic locations");
+        free(text);
+    }
+    unlink(object);
+    unlink(source);
+}
+
 // Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
 static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -4283,8 +4322,11 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
         "extern __inline__ __attribute__((gnu_inline)) int attraft(int x){return x+8;} __inline__ int attraft(int);"
         "extern __inline__ int block(int x){return x+9;}"
         "static __inline__ int local(int x){return x+6;}"
+        "static int late_used(void){return 1;} static int late_used(void) __attribute__((used,retain,constructor,destructor));"
+        "static int early_used(void) __attribute__((used)); static int early_used(void){return 1;} static int early_used(void) __attribute__((used));"
+        "__inline__ int late_gnu(int x){return x;} __inline__ int late_gnu(int x) __attribute__((gnu_inline));"
         "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
-    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "use" };
+    static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "late_used", "early_used", "late_gnu", "use" };
     static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
         { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
         { "-std=c89", "-fgnu89-inline", "-w" }, { "-std=c17", "-fgnu89-inline", "-w" },
@@ -5162,6 +5204,30 @@ static int run_checker_driver_tests(int argc, char** argv)
             .rejected = true,
         },
         {
+            .name = "late function attributes warn at the attributes",
+            .source = "static int f(void){return 1;}\nstatic int f(void) __attribute__((used,retain,constructor,destructor));\n",
+            .warnings = 4,
+        },
+        {
+            .name = "repeated attribute already on a prior declaration does not warn",
+            .source = "static int f(void) __attribute__((used));\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+        },
+        {
+            .name = "GNU noreturn does not suppress a later standard noreturn warning",
+            .source = "__attribute__((noreturn)) void f(void);\nvoid f(void){for(;;){}}\n[[noreturn]] void f(void);\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late gnu_inline requires inline on its declaration",
+            .source = "inline int f(void){return 1;}\nint f(void) __attribute__((gnu_inline));\n",
+            .warnings = 1,
+        },
+        {
+            .name = "late function attribute respects promoted warning policy",
+            .source = "#pragma clang diagnostic error \"-Wignored-attributes\"\nstatic int f(void){return 1;}\nstatic int f(void) __attribute__((used));\n",
+            .rejected = true,
+        },
+        {
             .name = "late assembler label retains its ignored attribute warning",
             .source = "int object=1;\nextern int object asm(\"renamed\");\n",
             .warnings = 1,
@@ -5290,6 +5356,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_symbols(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
+            check_test_driver_late_attributes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_fortify(&test, clang, executable, directory);

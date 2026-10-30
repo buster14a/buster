@@ -809,7 +809,41 @@ static bool check_input_attribute_late_kind(const CheckInputAttribute* attribute
     const CheckInputAttributeKind kind = attribute->kind;
     const bool standard_noreturn = kind == CHECK_ATTRIBUTE_NORETURN && attribute->standard && !attribute->keyword &&
                                   attribute->first == attribute->name_token;
-    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR || standard_noreturn;
+    return kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
+           kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_GNU_INLINE || standard_noreturn;
+}
+
+// One bit per late attribute class. Standard and GNU noreturn are different classes.
+static uint8_t check_input_attribute_late_bit(const CheckInputAttribute* attribute)
+{
+    uint8_t bit = 0;
+    if (check_input_attribute_late_kind(attribute))
+    {
+        switch (attribute->kind)
+        {
+            case CHECK_ATTRIBUTE_WEAK: bit = 1u << 0; break;
+            case CHECK_ATTRIBUTE_CONSTRUCTOR: bit = 1u << 1; break;
+            case CHECK_ATTRIBUTE_DESTRUCTOR: bit = 1u << 2; break;
+            case CHECK_ATTRIBUTE_USED: bit = 1u << 3; break;
+            case CHECK_ATTRIBUTE_RETAIN: bit = 1u << 4; break;
+            case CHECK_ATTRIBUTE_GNU_INLINE: bit = 1u << 5; break;
+            case CHECK_ATTRIBUTE_NORETURN: bit = 1u << 6; break;
+            default: break;
+        }
+    }
+    return bit;
+}
+
+static uint8_t check_input_attribute_late_mask(const CheckInputAttributes* attributes, uint8_t function_flags)
+{
+    uint8_t mask = 0;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE && (function_flags & CHECK_INPUT_FUNCTION_INLINE) == 0;
+        mask |= !attribute->ignored && !missing_inline ? check_input_attribute_late_bit(attribute) : 0;
+    }
+    return mask;
 }
 
 static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t* cursor, uint32_t end, bool standard)
@@ -867,7 +901,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.schema = rule->schema;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
             reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
-            reader->late_attributes |= check_input_attribute_late_kind(&attribute);
+            const bool late_kind = check_input_attribute_late_kind(&attribute);
+            reader->late_attributes |= late_kind;
+            // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
+            check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)
@@ -1309,12 +1346,10 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
 }
 
 // The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
-// declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
-// weak, constructor and destructor, which then make no symbol weak or array entry (#147), and unscoped standard
-// noreturn, which must not stop code generation's target-feature walk (#775). An earlier accepted noreturn remains in
-// that earlier declaration's records. A specifier's list is each declarator's: one declarator's is copied before its
-// records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous)
+// declaration must precede the definition (Sema's checkNewAttributesAfterDef): weak, constructor, destructor, used,
+// retain, gnu_inline and unscoped standard noreturn. Earlier accepted attributes remain in their declaration records.
+// A specifier's list is each declarator's: one declarator's is copied before its records are marked.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
     const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
     const bool after = attributes != 0 && reader->definition_seen[previous] && !reader->defined[token];
@@ -1326,9 +1361,66 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
     CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
     const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
     reader->output->resource |= late && !copied;
-    for (uint32_t i = 0; copied && i < copy->count; i += 1)
+    // Deferred bodies replay in source order for these attributes. In particular, do not inspect token columns
+    // owned by other lanes. Build an object-indexed mask once on the serial path, then update it as declarations bind.
+    if (late && reader->lane)
     {
-        copy->records[i].ignored |= check_input_attribute_late_kind(&copy->records[i]);
+        check_input_lane_refuse(reader, true, "a body declares a late attribute");
+    }
+    if (copied && !reader->lane && reader->late_attribute_masks == NULL)
+    {
+        const uint32_t count = reader->parser->tokens.count;
+        reader->late_attribute_masks = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)count + 1);
+        reader->output->resource |= reader->late_attribute_masks == NULL;
+        if (reader->late_attribute_masks != NULL)
+        {
+            memset(reader->late_attribute_masks, 0, (uint64_t)count + 1);
+            for (uint32_t first = 0; first < token; first += 8)
+            {
+                const uint32_t lanes = BUSTER_SCALAR_PATH(reader->parser->options.scalar) ?
+                    (uint32_t)check_input_scan_all(first, token) & 0xff :
+                    check_input_scan_pointers((const void* const*)reader->output->attributes, first, token);
+                for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+                {
+                    const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
+                    const uint32_t object = reader->objects[d];
+                    if (object != 0 && object <= count)
+                    {
+                        reader->late_attribute_masks[object] |= check_input_attribute_late_mask(reader->output->attributes[d], reader->output->function_flags[d]);
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; copied && !reader->lane && reader->late_attribute_masks != NULL && i < copy->count; i += 1)
+    {
+        CheckInputAttribute* attribute = copy->records + i;
+        if (!attribute->ignored && check_input_attribute_late_kind(attribute))
+        {
+            const bool inherited = (reader->late_attribute_masks[reader->objects[previous]] & check_input_attribute_late_bit(attribute)) != 0;
+            attribute->ignored = true;
+            const bool missing_inline = attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE &&
+                                        (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_INLINE) == 0;
+            if (!inherited || missing_inline)
+            {
+                const CheckWarningEvent event = {
+                    .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                    .kind = missing_inline ? CHECK_WARNING_EVENT_GNU_INLINE_WITHOUT_INLINE : CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+                    .token = attribute->name_token,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = point,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                const CheckWarningNote note = {
+                    .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                    .token = previous,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, missing_inline ? NULL : &note, missing_inline ? 0 : 1);
+            }
+        }
     }
     if (copied)
     {

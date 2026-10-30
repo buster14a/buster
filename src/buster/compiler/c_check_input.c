@@ -779,6 +779,8 @@ struct CheckInputReader
     bool cleanup_attributes;
     bool weak_attributes;
     bool late_attributes;
+    // Allocated only after the first late attribute: accepted attribute kinds indexed by linked object.
+    uint8_t* late_attribute_masks;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -4232,7 +4234,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
-                check_input_attribute_late(reader, token, previous);
+                check_input_attribute_late(reader, token, previous, point);
                 reader->definition_seen[token] |= reader->definition_seen[previous];
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);
@@ -4261,6 +4263,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;
+        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0)
+        {
+            reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(reader->output->attributes[token], reader->output->function_flags[token]);
+        }
         if (reader->deferred != 0)
         {
             check_deferred_linked(reader, name, token);
