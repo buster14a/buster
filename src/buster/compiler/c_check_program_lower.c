@@ -1996,22 +1996,74 @@ static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier
     return index;
 }
 
-// An X86 entry of an operator's row at a vector type (check_vector_lower_row), or its refusal: its operands are the
-// stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
-// (check_lower_vector_half_chain).
-static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
+// The entries of an operator at a vector type of bf16 elements (check_vector_lower_brain_rows), or its refusal, which
+// clang's bfloat16 excess precision computes in float where the unit's target hasn't AVX10.2: its row's X86 entry, its
+// operands the stack's when it runs; or a 64-byte vector's three rows under excess precision, its operands set into frame
+// temporaries of its bytes (the last operand first), each half's row after the temporaries' addresses, then the join's.
+static __attribute__((noinline)) void check_lower_vector_brain(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
-    Tier0Operation row;
-    const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
-    const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, op, vector, scalar_class, &row);
+    Tier0Operation rows[3];
+    uint32_t count = 0;
+    const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) == 0;
+    const uint32_t bytes = check_lower_vector_bytes(writer->program->types, vector);
+    const char* reason = check_vector_lower_brain_rows(&writer->target, excess, op, bytes, scalar_class, rows, &count);
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
     }
+    else if (count == 1)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows));
+    }
     else
     {
-        const uint32_t index = check_lower_operation_index(writer, &row);
-        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
+        // Pushed last first: the join, each half's row and the addresses before it, then the stores, the last operand's
+        // first.
+        const uint32_t operands = rows[0].operand_count;
+        uint32_t temporaries[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t j = 0; j < operands; j += 1)
+        {
+            temporaries[j] = check_lower_temporary_of(writer, vector);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows + 2));
+        for (uint32_t h = 2; h-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows + h));
+            for (uint32_t j = operands; j-- > 0;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, temporaries[j]);
+            }
+        }
+        for (uint32_t j = 0; j < operands; j += 1)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, temporaries[j]);
+        }
+    }
+}
+
+// An X86 entry of an operator's row at a vector type (check_vector_lower_row), or its refusal: its operands are the
+// stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
+// (check_lower_vector_half_chain), and bf16 elements' operators are check_lower_vector_brain's.
+static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
+{
+    Tier0Operation row;
+    if (check_vector_lower_brain(writer->program->types, vector))
+    {
+        check_lower_vector_brain(writer, op, vector, scalar_class);
+    }
+    else
+    {
+        const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
+        const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, op, vector, scalar_class, &row);
+        if (reason != NULL)
+        {
+            check_lower_unsupported(writer, reason);
+        }
+        else
+        {
+            const uint32_t index = check_lower_operation_index(writer, &row);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
+        }
     }
 }
 
@@ -2022,13 +2074,16 @@ static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId
 // are at least twice half's 11 and 2 more, so its two roundings round as once, NaNs propagating alike), and a negation's
 // quiets the signaling NaNs as clang's float conversions do (check_vector_lower_row's `excess`). A chain's doesn't: an
 // operator (`op`, one of those) whose operand `a` or `b` (or BUSTER_CHECK_NONE) is of half-precision elements and itself
-// one of them, or a unary plus, is refused.
+// one of them, or a unary plus, is refused. So is bf16 elements' where the unit's target hasn't AVX10.2, whose one
+// operator check_vector_lower_brain_rows computes in float as clang does.
 static void check_lower_vector_half_chain(CheckLowerWriter* writer, TypeId vector, uint32_t op, uint32_t a, uint32_t b)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckVectorElement element = check_vector_lower_element(program->types, vector);
-    const bool excess = element.floating && element.bytes == 2 && (program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
+    const bool brain = check_vector_lower_brain(program->types, vector);
+    const bool excess = (element.floating && element.bytes == 2 && (program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0) ||
+                        (brain && (program->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) == 0);
     const bool arithmetic = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_DIVIDE || op == CHECK_OP_NEGATIVE;
     bool chained = false;
     for (uint32_t i = 0; excess && arithmetic && i < 2; i += 1)
@@ -2037,12 +2092,14 @@ static void check_lower_vector_half_chain(CheckLowerWriter* writer, TypeId vecto
         const CheckOp kind = operand != BUSTER_CHECK_NONE ? graph->ops[operand] : CHECK_OP_VALUE;
         const bool link = kind == CHECK_OP_ADD || kind == CHECK_OP_SUBTRACT || kind == CHECK_OP_MULTIPLY || kind == CHECK_OP_DIVIDE || kind == CHECK_OP_NEGATIVE ||
                           kind == CHECK_OP_POSITIVE;
-        const CheckVectorElement linked = link ? check_vector_lower_element(program->types, program->stream->values[operand].type) : (CheckVectorElement){ 0 };
-        chained |= linked.floating && linked.bytes == 2;
+        const TypeId type = link ? program->stream->values[operand].type : 0;
+        const CheckVectorElement linked = link ? check_vector_lower_element(program->types, type) : (CheckVectorElement){ 0 };
+        chained |= brain ? link && check_vector_lower_brain(program->types, type) : linked.floating && linked.bytes == 2;
     }
     if (chained)
     {
-        check_lower_unsupported(writer, "chained arithmetic of half-precision vectors, which clang computes in float without AVX512-FP16");
+        check_lower_unsupported(writer, brain ? "chained arithmetic of bf16 vectors, which clang computes in float without AVX10.2" :
+                                                "chained arithmetic of half-precision vectors, which clang computes in float without AVX512-FP16");
     }
 }
 
@@ -7491,6 +7548,29 @@ static bool check_lower_constant_bytes(const CheckLowerWriter* writer, uint32_t 
     return result;
 }
 
+// The arguments of a fused multiply-add of bf16 vectors (the call's three, from `first`) that are negations of bf16
+// vectors of `vector`'s bytes, a bit each (check_vector_elementwise_row's `negated`): their negations fold into the row's
+// form, as clang's instruction selection folds them, where the negation alone would round through float under excess
+// precision (check_vector_lower_brain_rows).
+static uint32_t check_lower_brain_negations(const CheckProgram* program, uint32_t first, TypeId vector)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const uint32_t bytes = check_lower_vector_bytes(types, vector);
+    uint32_t negated = 0;
+    for (uint32_t a = 0; a < 3; a += 1)
+    {
+        const uint32_t argument = graph->argument_nodes[first + a];
+        const bool negation = argument < stream->count && graph->ops[argument] == CHECK_OP_NEGATIVE;
+        const TypeId operand = negation && graph->operand0[argument] < stream->count ? stream->values[graph->operand0[argument]].type : 0;
+        const bool folds = negation && operand != 0 && check_vector_lower_brain(types, stream->values[argument].type) && check_vector_lower_brain(types, operand) &&
+                           check_lower_vector_bytes(types, operand) == bytes;
+        negated |= folds ? 1u << a : 0;
+    }
+    return negated;
+}
+
 // The generic vector builtins' X86 entries (c_check_program_vector_builtins.c), or their refusal by name. A row's
 // operands are the builtin's vector arguments at their types, whose tasks run before its entry's (the tasks run in the
 // reverse of their pushes):
@@ -7649,7 +7729,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             vectors = vectors && check_lower_vector_of(writer, argument) == check_lower_vector_of(writer, result);
             scalars = scalars && check_lower_class(writer, argument) == scalar;
         }
-        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, rows) :
+        const uint32_t negated = vectors && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && check_vector_lower_brain(types, result) ?
+                                     check_lower_brain_negations(program, first, result) :
+                                     0;
+        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                            "elementwise builtins of scalars";
         if (reason == NULL)
@@ -7657,7 +7740,9 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
             for (uint32_t a = arguments; a-- > 0;)
             {
-                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+                // A negated operand's negation is the row's form's: its operand in its place.
+                const bool folded = (negated >> a & 1) != 0;
+                check_lower_operand(writer, folded ? graph->argument_nodes[first + a] : node, folded ? 0 : a + 3, false, stream->argument_conversions[first + a].type);
             }
             writer->vectors = true;
         }

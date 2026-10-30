@@ -999,8 +999,11 @@ designs and the compilers already built this way.
   with clang's conditions negated: clang's code stores them the other way from
   Intel's manual, its own header and GCC's code), controls that run natively
   must agree too, and an intrinsic's two orders of operands must differ.
-  `--cases FILE` takes other cases and `--print NAME` prints a case's traces;
-  the checker guide's "Intrinsics no host runs" has the details.
+  `--cases FILE` takes other cases, `--option FLAG` adds a flag to every
+  compile and `--print NAME` prints a case's traces; a second run compares
+  bf16's arithmetic in a unit whose target has AVX10.2 (`--march diamondrapids
+  --option -mno-apxf --cases tests/x86-intrinsics/avx10.2-units.txt`). The
+  checker guide's "Intrinsics no host runs" has the details.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
   clang's record layout (one record at a time, and 16 at once in vectors), each

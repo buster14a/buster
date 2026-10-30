@@ -71,7 +71,12 @@ struct X86IntrinsicCase
 // leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
 // TPAUSE, and RTM's XBEGIN, whose paths the traces follow. clang's code of the aesenc and aesdec ones stores the result
 // where ZF is 1 and zeros where it is 0, the other way from Intel's manual, clang's own keylockerintrin.h and GCC's
-// code, which the compiler follows: their cases compare clang's paths with their conditions negated (inverted).
+// code, which the compiler follows: their cases compare clang's paths with their conditions negated (inverted). Last,
+// AVX10.2's bf16 arithmetic, square roots and fused multiply-adds, and some of their masked forms: in a unit whose target
+// hasn't AVX10.2, znver5's, clang computes the arithmetic in float, its excess precision, and folds a negated operand of
+// a multiply-add into the form. tools/ci/correctness.tests runs the command again with --march diamondrapids, whose
+// target has AVX10.2, and --option -mno-apxf, on tests/x86-intrinsics/avx10.2-units.txt's cases, whose arithmetic is then
+// AVX10.2's own.
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -519,6 +524,37 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_B(_umwait)
     BUSTER_X86_INTRINSIC_B(_tpause)
     BUSTER_X86_INTRINSIC_I(_xbegin)
+    BUSTER_X86_INTRINSIC_X(_mm_add_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_sub_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mul_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_div_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_sqrt_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_fmadd_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_fmsub_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_fnmadd_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_fnmsub_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_add_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_sub_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mul_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_div_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_sqrt_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_fmadd_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_fmsub_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_fnmadd_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_fnmsub_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_add_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_sub_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mul_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_div_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_sqrt_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_fmadd_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_fmsub_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_fnmadd_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_fnmsub_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_add_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_div_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mask3_fmsub_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_fnmadd_pbh)
 };
 
 #undef BUSTER_X86_INTRINSIC_X
@@ -1047,8 +1083,15 @@ static X86IntrinsicByte* x86_intrinsic_stack(X86IntrinsicTrace* trace, uint64_t 
 
 // Each form's canonical number: the first form of its mnemonic, operands, immediate, syntax, vector length, broadcast,
 // rounding and relative bytes, so that a VEX and an EVEX encoding of one instruction (vpaddd of XMM registers, whose
-// EVEX form clang's code doesn't use where no opmask, broadcast or register past XMM15 needs it) are one node.
+// EVEX form clang's code doesn't use where no opmask, broadcast or register past XMM15 needs it) are one node. A ModRM.rm
+// operand of a register or memory compares as its register's (x86_intrinsic_rm_kind): VEX's shifts by an immediate take
+// a register alone, and EVEX's either.
 static uint16_t x86_intrinsic_canonical[X86_FORM_COUNT];
+
+static uint64_t x86_intrinsic_rm_kind(uint16_t rm)
+{
+    return (rm & BUSTER_X86_OPERAND_REGISTER) != 0 ? (uint64_t)(rm & ~BUSTER_X86_OPERAND_MEMORY) : rm;
+}
 
 // The order of two forms by what makes them one instruction (their mnemonic first), 0 where they are one.
 static int x86_intrinsic_instruction_order(uint32_t a, uint32_t b)
@@ -1056,8 +1099,10 @@ static int x86_intrinsic_instruction_order(uint32_t a, uint32_t b)
     const X86FormDescription* x = &x86_form_descriptions[a];
     const X86FormDescription* y = &x86_form_descriptions[b];
     const uint32_t flags = BUSTER_X86_EVEX_BROADCAST | BUSTER_X86_EVEX_ROUNDING | BUSTER_X86_EVEX_SAE;
-    const uint64_t first = (uint64_t)x->reg << 48 | (uint64_t)x->rm << 32 | (uint64_t)x->vvvv << 16 | (uint64_t)x->operand_bytes << 8 | x->immediate_bytes;
-    const uint64_t second = (uint64_t)y->reg << 48 | (uint64_t)y->rm << 32 | (uint64_t)y->vvvv << 16 | (uint64_t)y->operand_bytes << 8 | y->immediate_bytes;
+    const uint64_t first = (uint64_t)x->reg << 48 | x86_intrinsic_rm_kind(x->rm) << 32 | (uint64_t)x->vvvv << 16 | (uint64_t)x->operand_bytes << 8 |
+                           x->immediate_bytes;
+    const uint64_t second = (uint64_t)y->reg << 48 | x86_intrinsic_rm_kind(y->rm) << 32 | (uint64_t)y->vvvv << 16 | (uint64_t)y->operand_bytes << 8 |
+                            y->immediate_bytes;
     const uint64_t third = (uint64_t)x->syntax << 32 | (uint64_t)x->vector_length << 24 | (uint64_t)(x->evex & flags) << 8 | x->relative_bytes;
     const uint64_t fourth = (uint64_t)y->syntax << 32 | (uint64_t)y->vector_length << 24 | (uint64_t)(y->evex & flags) << 8 | y->relative_bytes;
     const int named = strcmp(x->mnemonic, y->mnemonic);
@@ -3075,6 +3120,10 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     const char* march = "znver5";
     const char* print = 0;
     const char* listed = 0;
+    // The options every compile takes after -march (--option), as -mno-apxf, which keeps diamondrapids' prologues free of
+    // APX's prefixes, which the disassembler doesn't decode.
+    char* options[4] = { 0 };
+    uint32_t option_count = 0;
     bool keep = false;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
@@ -3099,6 +3148,10 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
         {
             listed = argv[++i];
         }
+        else if (strcmp(argv[i], "--option") == 0 && i + 1 < argc && option_count < BUSTER_ARRAY_LENGTH(options))
+        {
+            options[option_count++] = argv[++i];
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -3110,7 +3163,8 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "test-x86-intrinsics [--executable PATH] [--clang PATH] [--march CPU] [--cases FILE] [--print NAME] [--keep]: invalid arguments\n");
+        fprintf(stderr, "test-x86-intrinsics [--executable PATH] [--clang PATH] [--march CPU] [--option FLAG]... [--cases FILE] [--print NAME] [--keep]: invalid "
+                        "arguments\n");
     }
     // The cases: the table's, or a file's lines, each a result's letter (X, Y and Z for vectors of 16, 32 and 64 bytes,
     // I and L for integers of 4 and 8, V for none) and an intrinsic's name.
@@ -3178,11 +3232,24 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     }
     char march_option[64];
     snprintf(march_option, sizeof(march_option), "-march=%s", march);
-    char* const compiles[3][9] = {
-        { (char*)clang, "-O0", march_option, "-c", "-o", objects[0], source, 0 },
-        { (char*)executable, march_option, "-c", "-o", objects[1], source, 0 },
-        { (char*)executable, "--scalar", march_option, "-c", "-o", objects[2], source, 0 },
+    char* compiles[3][16] = {
+        { (char*)clang, "-O0", march_option },
+        { (char*)executable, march_option },
+        { (char*)executable, "--scalar", march_option },
     };
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        uint32_t count = i == 1 ? 2 : 3;
+        for (uint32_t k = 0; k < option_count; k += 1)
+        {
+            compiles[i][count++] = options[k];
+        }
+        compiles[i][count++] = "-c";
+        compiles[i][count++] = "-o";
+        compiles[i][count++] = objects[i];
+        compiles[i][count++] = source;
+        compiles[i][count] = 0;
+    }
     uint64_t checks = 0;
     uint64_t failures = 0;
     const bool bounded_text = valid && x86_intrinsic_test_node_text();

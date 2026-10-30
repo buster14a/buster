@@ -489,7 +489,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "void tested(v8bf* p,v4ss* q){*q=__builtin_convertvector(__builtin_shufflevector(*p,*p,0,1,2,3),v4ss);}",
           "vector conversions to bf16 elements, or of bf16 ones to types other than float", 0 },
         { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of half-precision elements without AVX512-FP16", 0 },
-        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements", 0 },
+        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sqrt(*p);}", "elementwise vector builtins of bf16 elements without AVX10.2", 0 },
         { "znver5", "void tested(v4sfu* p){v4sf v={1};__builtin_nontemporal_store(v,p);}", "nontemporal vector builtins at underaligned addresses", 1 },
         { "znver5", "void tested(int* p,int v){__builtin_nontemporal_store(v,p);}", "nontemporal builtins of scalars", 0 },
         { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },

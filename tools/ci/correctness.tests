@@ -384,8 +384,10 @@ corpus=$BUSTER_CORPUS
 # SM3's, SM4's, MOVRS's, AVX512-BMM's, the extensions' system instructions' and the leaves' of Key Locker, WAITPKG and
 # RTM), and controls that run, by clang -O0 and by both paths of this compiler, decoded and followed through
 # x86_semantics.c's effects, both paths of a branch: each case's result, stores and effects must be the same
-# expressions of its arguments, path by path.
+# expressions of its arguments, path by path. Then bf16's arithmetic in a unit whose target has AVX10.2, which clang
+# computes in bf16 rather than in float.
 ./build/compiler test-x86-intrinsics
+./build/compiler test-x86-intrinsics --march diamondrapids --option -mno-apxf --cases tests/x86-intrinsics/avx10.2-units.txt
 == Test Tier 1 frame planning and slot coloring
 ./build/compiler test-tier1-frame
 ./build/compiler test-tier1-frame-execution
