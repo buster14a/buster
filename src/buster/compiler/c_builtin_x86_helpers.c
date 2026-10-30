@@ -34,11 +34,27 @@
 // - __builtin_ia32_clzero (rax's line), monitor (rax, ecx and edx), mwait (eax and ecx), vzeroall and vzeroupper, whose
 //   registers no value of the caller keeps across the call;
 // - __builtin_ia32_sha256rnds2(a, b, k): sha256rnds2 of a's state and b's, whose third operand, the round keys k, is
-//   xmm0. Its vectors come and go as a function's of __v4si do (CBuiltinX86HelperInfo.vector): a, b and k in xmm0, xmm1
-//   and xmm2, the result in xmm0.
+//   xmm0. Its vectors come and go as a function's of __v4si do (CBuiltinX86HelperInfo.vectors): a, b and k in xmm0,
+//   xmm1 and xmm2, the result in xmm0;
+// - Key Locker's __builtin_ia32_aesenc128kl_u8, aesdec128kl, aesenc256kl and aesdec256kl (odata, idata, h): the rounds
+//   of idata (a vector, in xmm0) with the key of the handle at h, stored at odata where ZF says the handle was valid
+//   (0), and zeros otherwise; ZF the result. That is how Intel's manual and clang's own header (keylockerintrin.h)
+//   describe them and how GCC compiles them; clang's code (23, and LLVM's main) stores the result where ZF is 1 and
+//   zeros where it is 0, which test-x86-intrinsics compares with clang's conditions negated. The leaf's jne over the
+//   zeroing is its branch (CBuiltinX86HelperInfo.branch), which branch sizing sizes;
+// - their wide forms, __builtin_ia32_aesencwide128kl_u8 to aesdecwide256kl (odata, idata, h): the same of the 8 blocks
+//   at idata, in xmm0 to xmm7;
+// - __builtin_ia32_encodekey128_u32 and encodekey256 (htype, key, h) and (htype, key_lo, key_hi, h): the handle of the
+//   key in xmm0 (and xmm1), wrapped as htype says, stored at h from xmm0 to xmm2 (or xmm3); its information the result;
+// - __builtin_ia32_loadiwkey (intkey, enkey_lo, enkey_hi, ctl): the internal wrapping key from xmm0 to xmm2, as ctl
+//   (eax) says;
+// - __builtin_ia32_umwait and tpause (control, hi, lo): the wait control (ecx) asks for, until the TSC passes hi:lo
+//   (edx:eax); CF, which says whether the OS's time limit ended it, the result;
+// - __builtin_ia32_xbegin: a transaction's start, its fallback the next instruction (xbegin's displacement 0), the
+//   leaf's ret: eax is -1 where the transaction runs, and its abort status where it aborts.
 //
-// Output owns exactly the leaf's records; invalid kinds, malformed arenas and exhaustion leave the arena as it was.
-// Include after tier0.c.
+// Output owns exactly the leaf's records and its branch columns; invalid kinds, malformed arenas and exhaustion leave
+// the arena as it was. Include after tier0.c.
 #ifndef BUSTER_C_BUILTIN_X86_HELPERS_INCLUDED
 #define BUSTER_C_BUILTIN_X86_HELPERS_INCLUDED
 
@@ -90,6 +106,20 @@ typedef enum CBuiltinX86HelperKind
     CBUILTIN_X86_HELPER_VZEROALL,
     CBUILTIN_X86_HELPER_VZEROUPPER,
     CBUILTIN_X86_HELPER_SHA256RNDS2,
+    CBUILTIN_X86_HELPER_AESENC128KL,
+    CBUILTIN_X86_HELPER_AESDEC128KL,
+    CBUILTIN_X86_HELPER_AESENC256KL,
+    CBUILTIN_X86_HELPER_AESDEC256KL,
+    CBUILTIN_X86_HELPER_AESENCWIDE128KL,
+    CBUILTIN_X86_HELPER_AESDECWIDE128KL,
+    CBUILTIN_X86_HELPER_AESENCWIDE256KL,
+    CBUILTIN_X86_HELPER_AESDECWIDE256KL,
+    CBUILTIN_X86_HELPER_ENCODEKEY128,
+    CBUILTIN_X86_HELPER_ENCODEKEY256,
+    CBUILTIN_X86_HELPER_LOADIWKEY,
+    CBUILTIN_X86_HELPER_UMWAIT,
+    CBUILTIN_X86_HELPER_TPAUSE,
+    CBUILTIN_X86_HELPER_XBEGIN,
     CBUILTIN_X86_HELPER_COUNT,
 } CBuiltinX86HelperKind;
 
@@ -98,7 +128,7 @@ struct CBuiltinX86Helper
 {
     Tier0Code code;
     uint32_t parameter_count;
-    // U64, VECTOR for a vector leaf's (CBuiltinX86HelperInfo.vector), or VOID for a leaf of no result.
+    // U64, VECTOR for a vector result's (CBuiltinX86HelperInfo.vectors), or VOID for a leaf of no result.
     uint32_t result_class;
 };
 
@@ -323,10 +353,121 @@ static const X86Instruction cbuiltin_x86_helper_sha256rnds2[] = {
     { .form = X86_FORM_RET },
 };
 
+// A Key Locker leaf: the rounds of idata (xmm0) with the handle at h (rsi), and where ZF is 1 (the handle isn't valid)
+// zeros (the jne at record 1 skips them, to record 3); ZF's boolean in eax, and the block stored at odata (rdi).
+#define BUSTER_CBUILTIN_X86_KEY_LOCKER(name, instruction) \
+    static const X86Instruction name[] = { \
+        { .reg = 0, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .form = instruction }, \
+        { .form = X86_FORM_JNE_REL8 }, \
+        { .reg = 0, .rm = 0, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .rm = X86_REGISTER_RAX, .form = X86_FORM_SETE_RM8 }, \
+        { .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOVZX_R32_RM8 }, \
+        { .form = X86_FORM_RET }, \
+    };
+BUSTER_CBUILTIN_X86_KEY_LOCKER(cbuiltin_x86_helper_aesenc128kl, X86_FORM_AESENC128KL_X_M384)
+BUSTER_CBUILTIN_X86_KEY_LOCKER(cbuiltin_x86_helper_aesdec128kl, X86_FORM_AESDEC128KL_X_M384)
+BUSTER_CBUILTIN_X86_KEY_LOCKER(cbuiltin_x86_helper_aesenc256kl, X86_FORM_AESENC256KL_X_M512)
+BUSTER_CBUILTIN_X86_KEY_LOCKER(cbuiltin_x86_helper_aesdec256kl, X86_FORM_AESDEC256KL_X_M512)
+#undef BUSTER_CBUILTIN_X86_KEY_LOCKER
+
+// A wide Key Locker leaf: the 8 blocks at idata (rsi) into xmm0 to xmm7, their rounds with the handle at h (rdx), zeros
+// where ZF is 1 (the jne at record 9 skips them, to record 18), ZF's boolean in eax, and the blocks stored at odata
+// (rdi).
+#define BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE(name, instruction) \
+    static const X86Instruction name[] = { \
+        { .reg = 0, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 1, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 32, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 3, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 48, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 4, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 5, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 80, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 6, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 96, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .reg = 7, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 112, .form = X86_FORM_MOVDQU_X_XM }, \
+        { .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_BASE, .form = instruction }, \
+        { .form = X86_FORM_JNE_REL8 }, \
+        { .reg = 0, .rm = 0, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 1, .rm = 1, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 2, .rm = 2, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 3, .rm = 3, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 4, .rm = 4, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 5, .rm = 5, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 6, .rm = 6, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .reg = 7, .rm = 7, .form = X86_FORM_PXOR_X_XM128 }, \
+        { .rm = X86_REGISTER_RAX, .form = X86_FORM_SETE_RM8 }, \
+        { .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 1, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 2, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 32, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 3, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 48, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 4, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 5, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 80, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 6, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 96, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = 7, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 112, .form = X86_FORM_MOVDQU_XM_X }, \
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOVZX_R32_RM8 }, \
+        { .form = X86_FORM_RET }, \
+    };
+BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE(cbuiltin_x86_helper_aesencwide128kl, X86_FORM_AESENCWIDE128KL_M384)
+BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE(cbuiltin_x86_helper_aesdecwide128kl, X86_FORM_AESDECWIDE128KL_M384)
+BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE(cbuiltin_x86_helper_aesencwide256kl, X86_FORM_AESENCWIDE256KL_M512)
+BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE(cbuiltin_x86_helper_aesdecwide256kl, X86_FORM_AESDECWIDE256KL_M512)
+#undef BUSTER_CBUILTIN_X86_KEY_LOCKER_WIDE
+
+// htype (edi) wrapped with the key in xmm0 (and xmm1) into a handle in xmm0 to xmm2 (or xmm3), stored at h (rsi); the
+// handle's information in eax.
+static const X86Instruction cbuiltin_x86_helper_encodekey128[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .form = X86_FORM_ENCODEKEY128_R32_R32 },
+    { .reg = 0, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOVDQU_XM_X },
+    { .reg = 1, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOVDQU_XM_X },
+    { .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 32, .form = X86_FORM_MOVDQU_XM_X },
+    { .form = X86_FORM_RET },
+};
+
+static const X86Instruction cbuiltin_x86_helper_encodekey256[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .form = X86_FORM_ENCODEKEY256_R32_R32 },
+    { .reg = 0, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOVDQU_XM_X },
+    { .reg = 1, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOVDQU_XM_X },
+    { .reg = 2, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 32, .form = X86_FORM_MOVDQU_XM_X },
+    { .reg = 3, .rm = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 48, .form = X86_FORM_MOVDQU_XM_X },
+    { .form = X86_FORM_RET },
+};
+
+// The integrity key in xmm0, the encryption key's halves in xmm1 and xmm2, and ctl (edi) in eax.
+static const X86Instruction cbuiltin_x86_helper_loadiwkey[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOV_R32_RM32 },
+    { .reg = 1, .rm = 2, .form = X86_FORM_LOADIWKEY_X_X },
+    { .form = X86_FORM_RET },
+};
+
+// The wait's leaf: control (edi) in ecx and the deadline's halves, hi (esi) and lo (edx), in edx:eax, lo first; CF's
+// boolean in eax.
+#define BUSTER_CBUILTIN_X86_WAIT(name, instruction) \
+    static const X86Instruction name[] = { \
+        { .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDI, .form = X86_FORM_MOV_R32_RM32 }, \
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDX, .form = X86_FORM_MOV_R32_RM32 }, \
+        { .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RSI, .form = X86_FORM_MOV_R32_RM32 }, \
+        { .rm = X86_REGISTER_RCX, .form = instruction }, \
+        { .rm = X86_REGISTER_RAX, .form = X86_FORM_SETB_RM8 }, \
+        { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOVZX_R32_RM8 }, \
+        { .form = X86_FORM_RET }, \
+    };
+BUSTER_CBUILTIN_X86_WAIT(cbuiltin_x86_helper_umwait, X86_FORM_UMWAIT_R32)
+BUSTER_CBUILTIN_X86_WAIT(cbuiltin_x86_helper_tpause, X86_FORM_TPAUSE_R32)
+#undef BUSTER_CBUILTIN_X86_WAIT
+
+// -1 in eax, then xbegin, whose fallback is the ret after it: where the transaction aborts, the processor puts its
+// status in eax and goes on there.
+static const X86Instruction cbuiltin_x86_helper_xbegin[] = {
+    { .immediate = -1, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
+    { .form = X86_FORM_XBEGIN_REL32 },
+    { .form = X86_FORM_RET },
+};
+
 // Each kind's builtin's name, its parameters, whether it has a result, its records, the target's features it takes and
 // the refusal on a target without them, its frame (the callee-saved registers it pushes, Tier0Frame.saved's, and whether
-// it keeps rbp's frame), and whether its parameters and result are its builtin's 16-byte vectors, which a call passes in
-// the XMM registers and returns in xmm0, rather than unsigned longs.
+// it keeps rbp's frame), which of its parameters and whether its result are its builtin's 16-byte vectors, which a call
+// passes in the XMM registers and returns in xmm0, rather than unsigned longs, the target's extensions it takes
+// (X86Target.extensions), and its branch, a Jcc_REL8's record and its target's, where it has one (branch sizing's
+// columns).
 typedef struct CBuiltinX86HelperInfo CBuiltinX86HelperInfo;
 struct CBuiltinX86HelperInfo
 {
@@ -340,11 +481,21 @@ struct CBuiltinX86HelperInfo
     const char* refusal;
     uint32_t saved;
     bool pointer;
-    bool vector;
+    // Bit a for parameter a, and BUSTER_CBUILTIN_X86_VECTOR_RESULT for the result.
+    uint8_t vectors;
+    uint64_t extensions;
+    uint32_t branch_count;
+    uint32_t branch;
+    uint32_t target;
 };
+#define BUSTER_CBUILTIN_X86_VECTOR_RESULT 0x80u
 
 #define BUSTER_CBUILTIN_X86_HELPER(name, parameters, result, records, features) \
-    { name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false, false }
+    { name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), features, "x86 builtins whose instructions the target hasn't", 0, false, 0 }
+// A leaf of an extension's instructions, with its vectors and its branch.
+#define BUSTER_CBUILTIN_X86_EXTENSION_HELPER(name, parameters, result, records, extensions, vectors, branch_count, branch, target) \
+    { name, sizeof(name) - 1, parameters, result, records, BUSTER_ARRAY_LENGTH(records), 0, "x86 builtins whose instructions the target hasn't", 0, false, \
+      vectors, extensions, branch_count, branch, target }
 
 static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER_COUNT] = {
     [CBUILTIN_X86_HELPER_RDTSC] = BUSTER_CBUILTIN_X86_HELPER("__rdtsc", 0, true, cbuiltin_x86_helper_rdtsc, 0),
@@ -400,7 +551,34 @@ static const CBuiltinX86HelperInfo cbuiltin_x86_helper_infos[CBUILTIN_X86_HELPER
     [CBUILTIN_X86_HELPER_VZEROUPPER] = BUSTER_CBUILTIN_X86_HELPER("__builtin_ia32_vzeroupper", 0, false, cbuiltin_x86_helper_vzeroupper, BUSTER_X86_FEATURE(AVX)),
     [CBUILTIN_X86_HELPER_SHA256RNDS2] = { "__builtin_ia32_sha256rnds2", sizeof("__builtin_ia32_sha256rnds2") - 1, 3, true, cbuiltin_x86_helper_sha256rnds2,
                                           BUSTER_ARRAY_LENGTH(cbuiltin_x86_helper_sha256rnds2), BUSTER_X86_FEATURE(SHA), "x86 builtins whose instructions the target hasn't", 0, false,
-                                          true },
+                                          0x07 | BUSTER_CBUILTIN_X86_VECTOR_RESULT },
+    [CBUILTIN_X86_HELPER_AESENC128KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesenc128kl_u8", 3, true, cbuiltin_x86_helper_aesenc128kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3),
+    [CBUILTIN_X86_HELPER_AESDEC128KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdec128kl_u8", 3, true, cbuiltin_x86_helper_aesdec128kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3),
+    [CBUILTIN_X86_HELPER_AESENC256KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesenc256kl_u8", 3, true, cbuiltin_x86_helper_aesenc256kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3),
+    [CBUILTIN_X86_HELPER_AESDEC256KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdec256kl_u8", 3, true, cbuiltin_x86_helper_aesdec256kl,
+                                                                            BUSTER_X86_EXTENSION(KL), 0x02, 1, 1, 3),
+    [CBUILTIN_X86_HELPER_AESENCWIDE128KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesencwide128kl_u8", 3, true, cbuiltin_x86_helper_aesencwide128kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18),
+    [CBUILTIN_X86_HELPER_AESDECWIDE128KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdecwide128kl_u8", 3, true, cbuiltin_x86_helper_aesdecwide128kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18),
+    [CBUILTIN_X86_HELPER_AESENCWIDE256KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesencwide256kl_u8", 3, true, cbuiltin_x86_helper_aesencwide256kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18),
+    [CBUILTIN_X86_HELPER_AESDECWIDE256KL] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_aesdecwide256kl_u8", 3, true, cbuiltin_x86_helper_aesdecwide256kl,
+                                                                                BUSTER_X86_EXTENSION(KL) | BUSTER_X86_EXTENSION(WIDEKL), 0, 1, 9, 18),
+    [CBUILTIN_X86_HELPER_ENCODEKEY128] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_encodekey128_u32", 3, true, cbuiltin_x86_helper_encodekey128,
+                                                                             BUSTER_X86_EXTENSION(KL), 0x02, 0, 0, 0),
+    [CBUILTIN_X86_HELPER_ENCODEKEY256] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_encodekey256_u32", 4, true, cbuiltin_x86_helper_encodekey256,
+                                                                             BUSTER_X86_EXTENSION(KL), 0x06, 0, 0, 0),
+    [CBUILTIN_X86_HELPER_LOADIWKEY] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_loadiwkey", 4, false, cbuiltin_x86_helper_loadiwkey, BUSTER_X86_EXTENSION(KL),
+                                                                          0x07, 0, 0, 0),
+    [CBUILTIN_X86_HELPER_UMWAIT] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_umwait", 3, true, cbuiltin_x86_helper_umwait, BUSTER_X86_EXTENSION(WAITPKG), 0, 0, 0,
+                                                                       0),
+    [CBUILTIN_X86_HELPER_TPAUSE] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_tpause", 3, true, cbuiltin_x86_helper_tpause, BUSTER_X86_EXTENSION(WAITPKG), 0, 0, 0,
+                                                                       0),
+    [CBUILTIN_X86_HELPER_XBEGIN] = BUSTER_CBUILTIN_X86_EXTENSION_HELPER("__builtin_ia32_xbegin", 0, true, cbuiltin_x86_helper_xbegin, BUSTER_X86_EXTENSION(RTM), 0, 0, 0, 0),
 };
 
 // The kind of a builtin's name, CBUILTIN_X86_HELPER_NONE for a builtin no leaf computes.
@@ -429,9 +607,13 @@ static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* 
     else
     {
         const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + kind;
+        const uint64_t length = output->length;
         X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, info->record_count);
-        if (records == NULL)
+        // The branch's columns: its record, then its target's.
+        uint32_t* columns = records != NULL && info->branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2) : NULL;
+        if (records == NULL || (info->branch_count != 0 && columns == NULL))
         {
+            output->length = length;
             result.code.error = TIER0_ERROR_MEMORY;
         }
         else
@@ -439,10 +621,18 @@ static CBuiltinX86Helper cbuiltin_x86_helper(CBuiltinX86HelperKind kind, Arena* 
             memcpy(records, info->records, (uint64_t)info->record_count * sizeof(*records));
             result.code.records = records;
             result.code.count = info->record_count;
+            if (columns != NULL)
+            {
+                columns[0] = info->branch;
+                columns[1] = info->target;
+                result.code.branches = columns;
+                result.code.targets = columns + 1;
+                result.code.branch_count = info->branch_count;
+            }
             result.code.frame_saved = info->saved;
             result.code.frame_pointer = info->pointer;
             result.parameter_count = info->parameter_count;
-            result.result_class = info->vector ? BUSTER_TYPED_CLASS_VECTOR : info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
+            result.result_class = (info->vectors & BUSTER_CBUILTIN_X86_VECTOR_RESULT) ? BUSTER_TYPED_CLASS_VECTOR : info->result ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID;
         }
     }
     return result;

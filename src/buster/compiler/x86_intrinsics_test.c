@@ -41,6 +41,9 @@ struct X86IntrinsicCase
 {
     const char* name;
     uint8_t result;
+    // Whether clang's code branches the other way from what the intrinsic's documentation says, so that its paths'
+    // conditions compare negated (x86_intrinsic_trace's `invert`): Key Locker's aesenc and aesdec intrinsics.
+    bool inverted;
 };
 
 #define BUSTER_X86_INTRINSIC_X(name) { #name, X86_INTRINSIC_RETURN_VECTOR16 },
@@ -51,6 +54,7 @@ struct X86IntrinsicCase
 #define BUSTER_X86_INTRINSIC_H(name) { #name, X86_INTRINSIC_RETURN_INTEGER2 },
 #define BUSTER_X86_INTRINSIC_L(name) { #name, X86_INTRINSIC_RETURN_INTEGER8 },
 #define BUSTER_X86_INTRINSIC_V(name) { #name, X86_INTRINSIC_RETURN_NONE },
+#define BUSTER_X86_INTRINSIC_INVERTED_B(name) { #name, X86_INTRINSIC_RETURN_INTEGER1, true },
 
 // The controls: intrinsics whose builtins the native programs check already, unmasked, merged and zeroed, which must
 // agree with clang's code as the cases do; and the probe's own pair of functions of one intrinsic with its operands
@@ -63,7 +67,11 @@ struct X86IntrinsicCase
 // system instructions of extensions no host of the tests has, or whose effects are on the machine's state (a
 // transaction's, the user interrupts', the tiles' configuration, MSRs): RAO-INT's, CLDEMOTE, SERIALIZE, UINTR's,
 // PTWRITE, UMONITOR, LWP's, MOVRS's integer loads and prefetch, RTM's XEND and XTEST, TSXLDTRK's, AMX-TILE's
-// configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores.
+// configuration's, ENQCMD's and USER_MSR's, whose effects the traces compare in order with their stores; and the
+// leaves' (c_builtin_x86_helpers.c): Key Locker's, whose aesenc and aesdec ones branch on ZF, WAITPKG's UMWAIT and
+// TPAUSE, and RTM's XBEGIN, whose paths the traces follow. clang's code of the aesenc and aesdec ones stores the result
+// where ZF is 1 and zeros where it is 0, the other way from Intel's manual, clang's own keylockerintrin.h and GCC's
+// code, which the compiler follows: their cases compare clang's paths with their conditions negated (inverted).
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -497,6 +505,20 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_I(_enqcmds)
     BUSTER_X86_INTRINSIC_L(_urdmsr)
     BUSTER_X86_INTRINSIC_V(_uwrmsr)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesenc128kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesdec128kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesenc256kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesdec256kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesencwide128kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesdecwide128kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesencwide256kl_u8)
+    BUSTER_X86_INTRINSIC_INVERTED_B(_mm_aesdecwide256kl_u8)
+    BUSTER_X86_INTRINSIC_I(_mm_encodekey128_u32)
+    BUSTER_X86_INTRINSIC_I(_mm_encodekey256_u32)
+    BUSTER_X86_INTRINSIC_V(_mm_loadiwkey)
+    BUSTER_X86_INTRINSIC_B(_umwait)
+    BUSTER_X86_INTRINSIC_B(_tpause)
+    BUSTER_X86_INTRINSIC_I(_xbegin)
 };
 
 #undef BUSTER_X86_INTRINSIC_X
@@ -507,6 +529,7 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 #undef BUSTER_X86_INTRINSIC_H
 #undef BUSTER_X86_INTRINSIC_L
 #undef BUSTER_X86_INTRINSIC_V
+#undef BUSTER_X86_INTRINSIC_INVERTED_B
 
 // The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order.
 static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_sub_ab(__m128i a, __m128i b) { return _mm_sub_epi32(a, b); }\n"
@@ -680,6 +703,10 @@ typedef enum X86IntrinsicKind
 #define BUSTER_X86_INTRINSIC_STACK_SIZE (BUSTER_X86_INTRINSIC_BELOW + BUSTER_X86_INTRINSIC_ABOVE)
 #define BUSTER_X86_INTRINSIC_CALLS 8u
 #define BUSTER_X86_INTRINSIC_STEPS 8192u
+// The paths a trace follows (x86_intrinsic_trace), the conditions of one, and the functions it decodes.
+#define BUSTER_X86_INTRINSIC_PATHS 8u
+#define BUSTER_X86_INTRINSIC_CONDITIONS 4u
+#define BUSTER_X86_INTRINSIC_FUNCTIONS 16u
 
 typedef struct X86IntrinsicByte X86IntrinsicByte;
 struct X86IntrinsicByte
@@ -702,6 +729,9 @@ struct X86IntrinsicNode
     uint32_t narrow[3];
     // A byte that is 0 or 1: a condition's (set<cc>), or an and or an or of them.
     bool boolean;
+    // A condition's: its condition code plus one (0 for any other node) and the flags it tests (x86_intrinsic_set_of).
+    uint8_t condition;
+    uint32_t tested;
 };
 
 typedef struct X86IntrinsicTrace X86IntrinsicTrace;
@@ -716,10 +746,21 @@ struct X86IntrinsicTrace
     X86IntrinsicByte vector[32][64];
     X86IntrinsicByte opmask[8][8];
     uint32_t flags;
+    // The boolean that a test with 1 or with itself, or a compare with 0, gave the flags of (ZF its negation), or 0.
+    uint32_t flags_boolean;
     X86IntrinsicByte* stack;
     // The stores through pointers, one text after another, and the next store's number.
     char* stores;
     uint32_t stores_length;
+    // The path's conditions so far (x86_intrinsic_branch's): each a condition's node and whether it holds.
+    uint32_t conditions[BUSTER_X86_INTRINSIC_CONDITIONS];
+    bool holds[BUSTER_X86_INTRINSIC_CONDITIONS];
+    uint32_t condition_count;
+    // A branch's (x86_intrinsic_step's X86_INTRINSIC_BRANCH): its condition's node, whether it holds where the branch
+    // is taken, and whether it is xbegin's, whose taken path (its fallback) has the abort status in EAX.
+    uint32_t branch_condition;
+    bool branch_holds;
+    bool branch_abort;
     // Why the trace stopped, where it did: 0 while it goes on.
     char failure[512];
     bool failed;
@@ -1427,6 +1468,8 @@ typedef enum X86IntrinsicAction
     X86_INTRINSIC_NEXT,
     X86_INTRINSIC_CALL,
     X86_INTRINSIC_JUMP,
+    // A conditional branch or xbegin, whose two paths the walk follows (X86IntrinsicTrace.branch_condition).
+    X86_INTRINSIC_BRANCH,
     X86_INTRINSIC_RETURN,
 } X86IntrinsicAction;
 
@@ -1737,8 +1780,8 @@ static int32_t x86_intrinsic_condition(const char* name)
     return result;
 }
 
-// The boolean of condition `condition` of the flags: set<cc>(flags).
-static uint32_t x86_intrinsic_set(X86IntrinsicTrace* trace, int32_t condition)
+// The boolean of condition `condition` of the flags `flags`: set<cc>(flags).
+static uint32_t x86_intrinsic_set_of(X86IntrinsicTrace* trace, int32_t condition, uint32_t flags)
 {
     static const char* const names[16] = { "o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g" };
     static X86IntrinsicPiece piece;
@@ -1747,11 +1790,22 @@ static uint32_t x86_intrinsic_set(X86IntrinsicTrace* trace, int32_t condition)
     x86_intrinsic_append(&piece, "set", 3);
     x86_intrinsic_append(&piece, names[condition & 15], (uint32_t)strlen(names[condition & 15]));
     x86_intrinsic_append(&piece, "(", 1);
-    x86_intrinsic_append_node(&piece, trace, trace->flags);
+    x86_intrinsic_append_node(&piece, trace, flags);
     x86_intrinsic_append(&piece, ")", 1);
     const uint32_t node = x86_intrinsic_node(trace, X86_INTRINSIC_VALUE, 1, &piece);
-    trace->nodes[node].boolean = true;
+    if (!trace->failed)
+    {
+        trace->nodes[node].boolean = true;
+        trace->nodes[node].condition = (uint8_t)((condition & 15) + 1);
+        trace->nodes[node].tested = flags;
+    }
     return node;
+}
+
+// The same of the trace's flags.
+static uint32_t x86_intrinsic_set(X86IntrinsicTrace* trace, int32_t condition)
+{
+    return x86_intrinsic_set_of(trace, condition, trace->flags);
 }
 
 // Whether `count` bytes are a boolean's, zero-extended, and its node.
@@ -1833,8 +1887,66 @@ static bool x86_intrinsic_cmov_boolean(X86IntrinsicTrace* trace, const X86Decode
     return result;
 }
 
+// The bytes of an implicit general register a form reads: UMWAIT's, TPAUSE's and LOADIWKEY's EDX:EAX and EAX are 32-bit
+// halves, whose upper bits a compiler's code may leave as anything; every other form's, the whole register.
+static uint32_t x86_intrinsic_implicit_bytes(uint32_t number)
+{
+    return number == X86_FORM_UMWAIT_R32 || number == X86_FORM_TPAUSE_R32 || number == X86_FORM_LOADIWKEY_X_X ? 4 : 8;
+}
+
+// The boolean whose negation a test or a compare gives ZF: a general register's or the accumulator's boolean (a
+// condition's set<cc>, zero-extended), tested with 1 or with itself, or compared with 0 (clang's sete, then test $1,
+// before its branch), or 0.
+static uint32_t x86_intrinsic_tested(X86IntrinsicTrace* trace, const X86Decoded* decoded, const X86FormDescription* form, const X86Effects* effects,
+                                     const X86IntrinsicOperand* operands)
+{
+    const X86Instruction* instruction = &decoded->instruction;
+    const uint32_t number = instruction->form & BUSTER_X86_FORM_NUMBER;
+    const X86IntrinsicOperand* rm = &operands[BUSTER_X86_ROLE_RM];
+    const bool accumulator = rm->place == X86_INTRINSIC_PLACE_NONE && (effects->implicit_reads & BUSTER_X86_GPR(RAX)) != 0;
+    const X86IntrinsicByte* bytes = rm->place == X86_INTRINSIC_PLACE_GPR ? x86_intrinsic_register_bytes(trace, rm) : accumulator ? trace->gpr[X86_REGISTER_RAX] : 0;
+    const uint32_t width = rm->place == X86_INTRINSIC_PLACE_GPR ? rm->bytes : form->operand_bytes;
+    const uint64_t immediate = form->immediate_bytes != 0 ? x86_immediate_value(number, instruction->immediate, instruction->displacement) : 0;
+    const bool itself = effects->operation == X86_OPERATION_TEST && form->immediate_bytes == 0 && operands[BUSTER_X86_ROLE_REG].place == X86_INTRINSIC_PLACE_GPR &&
+                        rm->place == X86_INTRINSIC_PLACE_GPR && instruction->reg == instruction->rm;
+    const bool one = effects->operation == X86_OPERATION_TEST && form->immediate_bytes != 0 && immediate == 1;
+    const bool zero = effects->operation == X86_OPERATION_CMP && form->immediate_bytes != 0 && immediate == 0;
+    uint32_t boolean = 0;
+    const bool found = bytes != 0 && width != 0 && width <= 8 && (itself || one || zero) && x86_intrinsic_boolean(trace, bytes, width, &boolean);
+    return found ? boolean : 0;
+}
+
+// A conditional jump's condition (cc on the flags), as X86IntrinsicTrace.branch_condition and branch_holds give it for
+// the jump's taken path: the node set<c>(flags) of the condition c of the pair (the even one: e for e and ne), which
+// holds on the taken path where cc is c. Where the flags are a boolean's test (flags_boolean), ZF is the boolean's
+// negation, and a jump on e or ne the boolean's own condition, as its node gives it.
+static void x86_intrinsic_branch_condition(X86IntrinsicTrace* trace, int32_t condition)
+{
+    const X86IntrinsicNode* boolean = trace->flags_boolean != 0 ? &trace->nodes[trace->flags_boolean] : 0;
+    const bool zero_flag = condition == 4 || condition == 5;
+    if (boolean != 0 && zero_flag && boolean->condition != 0)
+    {
+        // Taken on e where the boolean is 0, on ne where it is 1; the boolean set<b>(F) is 1 where its pair's even
+        // condition is b's own (b even) and 0 where it is b's negation (b odd).
+        const int32_t tested = boolean->condition - 1;
+        const bool boolean_taken = condition == 5;
+        trace->branch_condition = x86_intrinsic_set_of(trace, tested & ~1, boolean->tested);
+        trace->branch_holds = boolean_taken == ((tested & 1) == 0);
+    }
+    else if (boolean != 0 && zero_flag)
+    {
+        x86_intrinsic_fail(trace, "a branch on a boolean that isn't a condition's (an and or an or of them)%s", "");
+    }
+    else
+    {
+        trace->branch_condition = x86_intrinsic_set_of(trace, condition & ~1, trace->flags);
+        trace->branch_holds = (condition & 1) == 0;
+    }
+    trace->branch_abort = false;
+}
+
 // One record, at `place` in the object's code: what it does to the trace's state, and where control goes after it
-// (the next record, a call's or a jump's target, `target`, or a return).
+// (the next record, a call's or a jump's target, `target`, a branch's two paths, or a return).
 static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86Decoded* decoded, X86IntrinsicPlaceInCode place, uint64_t* target)
 {
     X86IntrinsicAction action = X86_INTRINSIC_NEXT;
@@ -1911,6 +2023,28 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
         *target = place.offset + place.length + (uint64_t)(int64_t)instruction->displacement;
         action = X86_INTRINSIC_JUMP;
     }
+    else if (control == BUSTER_X86_CONTROL_BRANCH && form->relative_bytes != 0 && operation == X86_OPERATION_JCC && x86_intrinsic_condition(form->mnemonic + 1) >= 0)
+    {
+        // A conditional jump: its two paths, and its condition (x86_intrinsic_branch_condition).
+        x86_intrinsic_branch_condition(trace, x86_intrinsic_condition(form->mnemonic + 1));
+        *target = place.offset + place.length + (uint64_t)(int64_t)instruction->displacement;
+        action = X86_INTRINSIC_BRANCH;
+    }
+    else if (control == BUSTER_X86_CONTROL_BRANCH && form->relative_bytes != 0 && number == X86_FORM_XBEGIN_REL32)
+    {
+        // xbegin: the transaction runs on, or aborts to the fallback, the branch's target, its status in EAX; its node
+        // holds where it aborts.
+        static X86IntrinsicPiece piece;
+        piece.length = 0;
+        piece.full = false;
+        x86_intrinsic_append(&piece, form->mnemonic, (uint32_t)strlen(form->mnemonic));
+        x86_intrinsic_appendf(&piece, "#%llu()", x86_intrinsic_canonical[number]);
+        trace->branch_condition = x86_intrinsic_node(trace, X86_INTRINSIC_VALUE, 0, &piece);
+        trace->branch_holds = true;
+        trace->branch_abort = true;
+        *target = place.offset + place.length + (uint64_t)(int64_t)instruction->displacement;
+        action = X86_INTRINSIC_BRANCH;
+    }
     else if (control != BUSTER_X86_CONTROL_NONE)
     {
         x86_intrinsic_fail(trace, "%s, control the trace doesn't follow (a branch, a trap or an indirect transfer)", form->mnemonic);
@@ -1986,6 +2120,7 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
         const uint64_t result = operation == X86_OPERATION_ADD ? address + value : operation == X86_OPERATION_SUB ? address - value : address & value;
         x86_intrinsic_fill(trace->gpr[operands[written].number], 8, x86_intrinsic_frame(trace, result));
         trace->flags = BUSTER_X86_INTRINSIC_UNKNOWN;
+        trace->flags_boolean = 0;
     }
     else if ((effects->properties & BUSTER_X86_EFFECT_ZERO_IDIOM) != 0 && written >= 0 && !masked &&
              ((form->family == BUSTER_X86_FAMILY_LEGACY && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg == instruction->rm) ||
@@ -1995,7 +2130,12 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
         const uint32_t count = effects->write_bytes != 0 ? effects->write_bytes : operands[written].bytes;
         x86_intrinsic_write(trace, &operands[written], bytes, count, x86_effects_role(effects, (uint32_t)written) >> BUSTER_X86_ROLE_REST_SHIFT & 3,
                             (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) != 0);
-        trace->flags = x86_intrinsic_named(trace, X86_INTRINSIC_VALUE, 0, "zero-flags");
+        // A general register's (xor eax, eax) defines the flags; a vector register's (pxor, vpxor) leaves them.
+        if (effects->flags_written != 0 || effects->flags_undefined != 0)
+        {
+            trace->flags = x86_intrinsic_named(trace, X86_INTRINSIC_VALUE, 0, "zero-flags");
+            trace->flags_boolean = 0;
+        }
     }
     else if (select)
     {
@@ -2151,6 +2291,7 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
             x86_intrinsic_write(trace, to, bytes, width, BUSTER_X86_REST_ZERO, false);
         }
         trace->flags = result;
+        trace->flags_boolean = 0;
     }
     else if (operation == X86_OPERATION_XCHG && operands[BUSTER_X86_ROLE_REG].place == X86_INTRINSIC_PLACE_GPR &&
              operands[BUSTER_X86_ROLE_RM].place == X86_INTRINSIC_PLACE_GPR)
@@ -2252,7 +2393,23 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
             if ((effects->implicit_reads >> r & 1) != 0)
             {
                 x86_intrinsic_append(&piece, count != 0 ? "," : "", count != 0 ? 1 : 0);
-                x86_intrinsic_append_node(&piece, trace, x86_intrinsic_value(trace, trace->gpr[r], 8));
+                x86_intrinsic_append_node(&piece, trace, x86_intrinsic_value(trace, trace->gpr[r], x86_intrinsic_implicit_bytes(number)));
+                count += 1;
+            }
+        }
+        // The XMM registers that Key Locker's forms read and write and no role names (x86_implicit_vectors).
+        uint32_t vector_reads = 0;
+        uint32_t vector_writes = 0;
+        if ((effects->properties & BUSTER_X86_EFFECT_IMPLICIT_VECTORS) != 0)
+        {
+            x86_implicit_vectors(number, &vector_reads, &vector_writes);
+        }
+        for (uint32_t v = 0; v < 8; v += 1)
+        {
+            if ((vector_reads >> v & 1) != 0)
+            {
+                x86_intrinsic_append(&piece, count != 0 ? "," : "", count != 0 ? 1 : 0);
+                x86_intrinsic_append_node(&piece, trace, x86_intrinsic_value(trace, trace->vector[v], 16));
                 count += 1;
             }
         }
@@ -2306,13 +2463,29 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
                 x86_intrinsic_fill(trace->gpr[r], 8, result);
             }
         }
+        for (uint32_t v = 0; v < 8 && !trace->failed; v += 1)
+        {
+            if ((vector_writes >> v & 1) != 0)
+            {
+                // Its 16 bytes are the node's part for the register, node.x<v>; a legacy form keeps the rest.
+                static X86IntrinsicPiece part;
+                part.length = 0;
+                part.full = false;
+                x86_intrinsic_append_node(&part, trace, result);
+                x86_intrinsic_appendf(&part, ".x%llu", v);
+                x86_intrinsic_fill(trace->vector[v], 16, x86_intrinsic_node(trace, X86_INTRINSIC_VALUE, 16, &part));
+            }
+        }
         if (effects->flags_written != 0 || effects->flags_undefined != 0)
         {
             trace->flags = result;
+            trace->flags_boolean = x86_intrinsic_tested(trace, decoded, form, effects, operands);
         }
-        else if (written < 0 && effects->implicit_writes == 0)
+        // An instruction that writes no register or memory, and no flag or is a system instruction (on state the trace
+        // doesn't follow): an effect (a fence's, a system instruction's).
+        if (written < 0 && effects->implicit_writes == 0 && vector_writes == 0 &&
+            (operation == X86_OPERATION_SYSTEM || (effects->flags_written == 0 && effects->flags_undefined == 0)))
         {
-            // An instruction that writes no register, memory or flag: an effect (a fence's, a system instruction's).
             x86_intrinsic_effect(trace, result);
         }
     }
@@ -2368,16 +2541,174 @@ static bool x86_intrinsic_decode(const X86IntrinsicObject* object, const Elf64_S
     return valid;
 }
 
+// A path the walk has yet to follow: the trace's state where a branch left it (its stack's and stores' copies), its
+// conditions, and the walk's calls and the record it goes on at.
+typedef struct X86IntrinsicPending X86IntrinsicPending;
+struct X86IntrinsicPending
+{
+    X86IntrinsicByte gpr[16][8];
+    X86IntrinsicByte vector[32][64];
+    X86IntrinsicByte opmask[8][8];
+    uint32_t flags;
+    uint32_t flags_boolean;
+    X86IntrinsicByte* stack;
+    char* stores;
+    uint32_t stores_length;
+    uint32_t conditions[BUSTER_X86_INTRINSIC_CONDITIONS];
+    bool holds[BUSTER_X86_INTRINSIC_CONDITIONS];
+    uint32_t condition_count;
+    uint32_t functions[BUSTER_X86_INTRINSIC_CALLS];
+    uint64_t returns[BUSTER_X86_INTRINSIC_CALLS];
+    uint32_t depth;
+    uint64_t index;
+};
+
+// A path the walk followed to the function's return: its conditions' text and its result's and stores' text.
+typedef struct X86IntrinsicPath X86IntrinsicPath;
+struct X86IntrinsicPath
+{
+    char* conditions;
+    char* text;
+};
+
+static int x86_intrinsic_path_order(const void* left, const void* right)
+{
+    return strcmp(((const X86IntrinsicPath*)left)->conditions, ((const X86IntrinsicPath*)right)->conditions);
+}
+
+// The index of the decoded function at `section` and `offset` among the walk's, decoding it first; or `capacity` where
+// it isn't a function's entry or can't be decoded (with the failure in the trace).
+static uint32_t x86_intrinsic_function(X86IntrinsicTrace* trace, X86IntrinsicFunction* functions, uint32_t* count, uint32_t capacity, uint32_t section,
+                                       uint64_t offset)
+{
+    uint32_t found = capacity;
+    for (uint32_t f = 0; f < *count; f += 1)
+    {
+        found = functions[f].section == section && functions[f].offset == offset ? f : found;
+    }
+    const Elf64_Sym* symbol = found == capacity ? x86_intrinsic_function_at(trace->object, section, offset) : 0;
+    if (found == capacity && (symbol == 0 || *count == capacity))
+    {
+        x86_intrinsic_fail(trace, symbol == 0 ? "a call of no function's entry%s" : "calls of more functions than the trace decodes%s", "");
+    }
+    else if (found == capacity && !x86_intrinsic_decode(trace->object, symbol, &functions[*count], trace->failure, sizeof(trace->failure)))
+    {
+        trace->failed = true;
+    }
+    else if (found == capacity)
+    {
+        found = *count;
+        *count += 1;
+    }
+    return found;
+}
+
+// The text of the path's conditions, each its node's text and =1 where it holds or =0, in their texts' order, joined
+// by " & "; with `invert`, each the other way (test-x86-intrinsics' cases whose clang code branches the other way).
+static void x86_intrinsic_conditions(const X86IntrinsicTrace* trace, bool invert, char* text, size_t size)
+{
+    uint32_t order[BUSTER_X86_INTRINSIC_CONDITIONS];
+    for (uint32_t c = 0; c < trace->condition_count; c += 1)
+    {
+        order[c] = c;
+    }
+    // Insertion sort of at most BUSTER_X86_INTRINSIC_CONDITIONS conditions by their nodes' texts.
+    for (uint32_t c = 1; c < trace->condition_count; c += 1)
+    {
+        const uint32_t moved = order[c];
+        uint32_t place = c;
+        while (place > 0 && x86_intrinsic_node_compare(trace, trace->conditions[order[place - 1]], trace->conditions[moved]) > 0)
+        {
+            order[place] = order[place - 1];
+            place -= 1;
+        }
+        order[place] = moved;
+    }
+    size_t length = 0;
+    text[0] = 0;
+    for (uint32_t c = 0; c < trace->condition_count && length < size; c += 1)
+    {
+        const X86IntrinsicNode* node = &trace->nodes[trace->conditions[order[c]]];
+        const int written = snprintf(text + length, size - length, "%s%.*s=%u", c != 0 ? " & " : "", (int)node->length, trace->text + node->text,
+                                     trace->holds[order[c]] != invert ? 1u : 0u);
+        length += written > 0 ? (size_t)written : 0;
+    }
+}
+
+// Saves the trace's state, the walk's calls and the record it goes on at as a pending path; false where its memory
+// can't be had.
+static bool x86_intrinsic_save(const X86IntrinsicTrace* trace, X86IntrinsicPending* pending, const uint32_t* functions, const uint64_t* returns, uint32_t depth,
+                               uint64_t index)
+{
+    memcpy(pending->gpr, trace->gpr, sizeof(trace->gpr));
+    memcpy(pending->vector, trace->vector, sizeof(trace->vector));
+    memcpy(pending->opmask, trace->opmask, sizeof(trace->opmask));
+    pending->flags = trace->flags;
+    pending->flags_boolean = trace->flags_boolean;
+    pending->stack = malloc(BUSTER_X86_INTRINSIC_STACK_SIZE * sizeof(X86IntrinsicByte));
+    pending->stores = malloc(trace->stores_length + 1u);
+    const bool saved = pending->stack != 0 && pending->stores != 0;
+    if (saved)
+    {
+        memcpy(pending->stack, trace->stack, BUSTER_X86_INTRINSIC_STACK_SIZE * sizeof(X86IntrinsicByte));
+        memcpy(pending->stores, trace->stores, trace->stores_length);
+        pending->stores_length = trace->stores_length;
+        memcpy(pending->conditions, trace->conditions, sizeof(trace->conditions));
+        memcpy(pending->holds, trace->holds, sizeof(trace->holds));
+        pending->condition_count = trace->condition_count;
+        memcpy(pending->functions, functions, sizeof(pending->functions));
+        memcpy(pending->returns, returns, sizeof(pending->returns));
+        pending->depth = depth;
+        pending->index = index;
+    }
+    else
+    {
+        free(pending->stack);
+        free(pending->stores);
+        pending->stack = 0;
+        pending->stores = 0;
+    }
+    return saved;
+}
+
+// The pending path's state into the trace and the walk's calls, its copies freed.
+static void x86_intrinsic_restore(X86IntrinsicTrace* trace, X86IntrinsicPending* pending, uint32_t* functions, uint64_t* returns, uint32_t* depth, uint64_t* index)
+{
+    memcpy(trace->gpr, pending->gpr, sizeof(trace->gpr));
+    memcpy(trace->vector, pending->vector, sizeof(trace->vector));
+    memcpy(trace->opmask, pending->opmask, sizeof(trace->opmask));
+    trace->flags = pending->flags;
+    trace->flags_boolean = pending->flags_boolean;
+    memcpy(trace->stack, pending->stack, BUSTER_X86_INTRINSIC_STACK_SIZE * sizeof(X86IntrinsicByte));
+    memcpy(trace->stores, pending->stores, pending->stores_length);
+    trace->stores_length = pending->stores_length;
+    memcpy(trace->conditions, pending->conditions, sizeof(trace->conditions));
+    memcpy(trace->holds, pending->holds, sizeof(trace->holds));
+    trace->condition_count = pending->condition_count;
+    memcpy(functions, pending->functions, sizeof(pending->functions));
+    memcpy(returns, pending->returns, sizeof(pending->returns));
+    *depth = pending->depth;
+    *index = pending->index;
+    free(pending->stack);
+    free(pending->stores);
+    pending->stack = 0;
+    pending->stores = 0;
+}
+
 // The trace of the function `name` of the object from its entry, with the arguments' registers and the stack's slots
 // as the nodes x86_intrinsic_trace names them, its result's text (the return register's `result` bytes, then each
-// store) written into `output`; or why it couldn't follow it. With `listing`, each record it followed, in Intel syntax,
-// with the node its result is.
-static bool x86_intrinsic_trace(X86IntrinsicTrace* trace, const char* name, uint8_t result, char* output, size_t output_size, FILE* listing)
+// store) written into `output`; or why it couldn't follow it. At a conditional branch or xbegin it follows both paths,
+// up to BUSTER_X86_INTRINSIC_PATHS: then each path's text follows a line of its conditions (path ...), the paths in
+// those lines' order, as x86_intrinsic_conditions writes them (with `invert`, each condition the other way). With
+// `listing`, each record it followed, in Intel syntax, with the node its result is.
+static bool x86_intrinsic_trace(X86IntrinsicTrace* trace, const char* name, uint8_t result, bool invert, char* output, size_t output_size, FILE* listing)
 {
     const X86IntrinsicObject* object = trace->object;
     trace->node_count = 0;
     trace->text_length = 0;
     trace->stores_length = 0;
+    trace->condition_count = 0;
+    trace->flags_boolean = 0;
     trace->failed = false;
     trace->failure[0] = 0;
     x86_intrinsic_named(trace, X86_INTRINSIC_UNKNOWN, 0, "?");
@@ -2423,37 +2754,46 @@ static bool x86_intrinsic_trace(X86IntrinsicTrace* trace, const char* name, uint
     }
     x86_intrinsic_set_rsp(trace, BUSTER_X86_INTRINSIC_ENTRY);
     const Elf64_Sym* entry = x86_intrinsic_function_named(object, name);
-    X86IntrinsicFunction functions[BUSTER_X86_INTRINSIC_CALLS] = { 0 };
+    // The functions the walk decoded, kept until it ends (a pending path may return into one), and its calls: each
+    // depth's function and the record its return goes on at.
+    X86IntrinsicFunction decoded[BUSTER_X86_INTRINSIC_FUNCTIONS] = { 0 };
+    uint32_t decoded_count = 0;
+    uint32_t functions[BUSTER_X86_INTRINSIC_CALLS] = { 0 };
     uint64_t returns[BUSTER_X86_INTRINSIC_CALLS] = { 0 };
+    static X86IntrinsicPending pending[BUSTER_X86_INTRINSIC_PATHS];
+    uint32_t pending_count = 0;
+    X86IntrinsicPath paths[BUSTER_X86_INTRINSIC_PATHS] = { 0 };
+    uint32_t path_count = 0;
     uint32_t depth = 0;
     uint64_t index = 0;
-    bool done = false;
+    bool walking = false;
     if (entry == 0)
     {
         x86_intrinsic_fail(trace, "%s isn't a function of the object", name);
     }
-    else if (!x86_intrinsic_decode(object, entry, &functions[0], trace->failure, sizeof(trace->failure)))
+    else
     {
-        trace->failed = true;
+        functions[0] = x86_intrinsic_function(trace, decoded, &decoded_count, BUSTER_X86_INTRINSIC_FUNCTIONS, entry->st_shndx, entry->st_value);
+        walking = !trace->failed;
     }
-    for (uint32_t steps = 0; !done && !trace->failed; steps += 1)
+    for (uint32_t steps = 0; walking && !trace->failed; steps += 1)
     {
-        X86IntrinsicFunction* function = &functions[depth];
+        const X86IntrinsicFunction* function = &decoded[functions[depth]];
         if (steps == BUSTER_X86_INTRINSIC_STEPS || index >= function->count)
         {
             x86_intrinsic_fail(trace, steps == BUSTER_X86_INTRINSIC_STEPS ? "%s: more steps than the trace takes" : "%s: past the function's end", name);
         }
         else
         {
-            const X86Decoded* decoded = &function->records[index];
-            const X86IntrinsicPlaceInCode place = { .section = function->section, .offset = function->offset + decoded->offset, .length = decoded->length };
+            const X86Decoded* record = &function->records[index];
+            const X86IntrinsicPlaceInCode place = { .section = function->section, .offset = function->offset + record->offset, .length = record->length };
             uint64_t target = 0;
             const uint32_t before = trace->node_count;
-            const X86IntrinsicAction action = x86_intrinsic_step(trace, decoded, place, &target);
+            const X86IntrinsicAction action = x86_intrinsic_step(trace, record, place, &target);
             if (listing != 0)
             {
                 char text[256];
-                if (x86_disassembly_format(decoded, text, sizeof(text)) < 0)
+                if (x86_disassembly_format(record, text, sizeof(text)) < 0)
                 {
                     snprintf(text, sizeof(text), "?");
                 }
@@ -2465,48 +2805,112 @@ static bool x86_intrinsic_trace(X86IntrinsicTrace* trace, const char* name, uint
                 }
                 fprintf(listing, "\n");
             }
+            // A jump's or a branch's target: the record at that offset of the function.
+            uint64_t found = function->count;
+            for (uint64_t i = 0; (action == X86_INTRINSIC_JUMP || action == X86_INTRINSIC_BRANCH) && i < function->count; i += 1)
+            {
+                found = function->offset + function->records[i].offset == target ? i : found;
+            }
             if (trace->failed)
             {
             }
+            else if (action == X86_INTRINSIC_CALL && depth + 1 == BUSTER_X86_INTRINSIC_CALLS)
+            {
+                x86_intrinsic_fail(trace, "%s: calls deeper than the trace follows", name);
+            }
             else if (action == X86_INTRINSIC_CALL)
             {
-                const Elf64_Sym* callee = x86_intrinsic_function_at(object, function->section, target);
-                if (callee == 0 || depth + 1 == BUSTER_X86_INTRINSIC_CALLS)
-                {
-                    x86_intrinsic_fail(trace, callee == 0 ? "%s: a call of no function's entry" : "%s: calls deeper than the trace follows", name);
-                }
-                else if (!x86_intrinsic_decode(object, callee, &functions[depth + 1], trace->failure, sizeof(trace->failure)))
-                {
-                    trace->failed = true;
-                }
-                else
+                const uint32_t callee = x86_intrinsic_function(trace, decoded, &decoded_count, BUSTER_X86_INTRINSIC_FUNCTIONS, function->section, target);
+                if (!trace->failed)
                 {
                     returns[depth] = index + 1;
                     depth += 1;
+                    functions[depth] = callee;
                     index = 0;
                 }
             }
+            else if ((action == X86_INTRINSIC_JUMP || action == X86_INTRINSIC_BRANCH) && found == function->count)
+            {
+                x86_intrinsic_fail(trace, "%s: a jump to no record of its function", name);
+            }
             else if (action == X86_INTRINSIC_JUMP)
             {
-                uint64_t found = function->count;
-                for (uint64_t i = 0; i < function->count; i += 1)
-                {
-                    found = function->offset + function->records[i].offset == target ? i : found;
-                }
-                if (found == function->count)
-                {
-                    x86_intrinsic_fail(trace, "%s: a jump to no record of its function", name);
-                }
                 index = found;
+            }
+            else if (action == X86_INTRINSIC_BRANCH && (pending_count + path_count + 1 >= BUSTER_X86_INTRINSIC_PATHS ||
+                                                        trace->condition_count == BUSTER_X86_INTRINSIC_CONDITIONS))
+            {
+                x86_intrinsic_fail(trace, "%s: more paths or conditions than the trace follows", name);
+            }
+            else if (action == X86_INTRINSIC_BRANCH)
+            {
+                // The taken path waits, its condition holding as the branch says (and xbegin's abort status in EAX);
+                // the walk goes on with the other.
+                trace->conditions[trace->condition_count] = trace->branch_condition;
+                trace->holds[trace->condition_count] = trace->branch_holds;
+                trace->condition_count += 1;
+                X86IntrinsicPending* taken = &pending[pending_count];
+                if (!x86_intrinsic_save(trace, taken, functions, returns, depth, found))
+                {
+                    x86_intrinsic_fail(trace, "%s: no memory for a branch's path", name);
+                }
+                else
+                {
+                    pending_count += 1;
+                    if (trace->branch_abort)
+                    {
+                        static X86IntrinsicPiece piece;
+                        piece.length = 0;
+                        piece.full = false;
+                        x86_intrinsic_append(&piece, "status(", 7);
+                        x86_intrinsic_append_node(&piece, trace, trace->branch_condition);
+                        x86_intrinsic_append(&piece, ")", 1);
+                        x86_intrinsic_fill(taken->gpr[X86_REGISTER_RAX], 4, x86_intrinsic_node(trace, X86_INTRINSIC_VALUE, 4, &piece));
+                        x86_intrinsic_zero(&taken->gpr[X86_REGISTER_RAX][4], 4);
+                    }
+                    trace->holds[trace->condition_count - 1] = !trace->branch_holds;
+                    index += 1;
+                }
             }
             else if (action == X86_INTRINSIC_RETURN && depth == 0)
             {
-                done = true;
+                // The path's end: its conditions and its result's and stores' text, then the next pending path.
+                static const uint8_t sizes[] = { 16, 32, 64, 1, 2, 4, 8, 0 };
+                const uint32_t size = sizes[result];
+                const uint32_t node = size == 0 ? BUSTER_X86_INTRINSIC_UNKNOWN
+                                      : result <= X86_INTRINSIC_RETURN_VECTOR64 ? x86_intrinsic_value(trace, trace->vector[0], size)
+                                                                                : x86_intrinsic_value(trace, trace->gpr[X86_REGISTER_RAX], size);
+                const X86IntrinsicNode* value = &trace->nodes[node];
+                X86IntrinsicPath* path = &paths[path_count];
+                path->conditions = malloc(4096);
+                path->text = malloc(output_size);
+                if (path->conditions == 0 || path->text == 0)
+                {
+                    free(path->conditions);
+                    free(path->text);
+                    *path = (X86IntrinsicPath){ 0 };
+                    x86_intrinsic_fail(trace, "%s: no memory for a path's text", name);
+                }
+                else
+                {
+                    x86_intrinsic_conditions(trace, invert, path->conditions, 4096);
+                    snprintf(path->text, output_size, "return %.*s\n%.*s", size == 0 ? 4 : (int)value->length, size == 0 ? "none" : trace->text + value->text,
+                             (int)trace->stores_length, trace->stores);
+                    path_count += 1;
+                }
+                walking = pending_count != 0;
+                if (walking && !trace->failed)
+                {
+                    pending_count -= 1;
+                    x86_intrinsic_restore(trace, &pending[pending_count], functions, returns, &depth, &index);
+                    if (listing != 0)
+                    {
+                        fprintf(listing, "  (the other path of a branch)\n");
+                    }
+                }
             }
             else if (action == X86_INTRINSIC_RETURN)
             {
-                free(functions[depth].records);
-                functions[depth].records = 0;
                 depth -= 1;
                 index = returns[depth];
             }
@@ -2516,22 +2920,39 @@ static bool x86_intrinsic_trace(X86IntrinsicTrace* trace, const char* name, uint
             }
         }
     }
-    for (uint32_t d = 0; d < BUSTER_X86_INTRINSIC_CALLS; d += 1)
-    {
-        free(functions[d].records);
-    }
+    const bool done = !walking && !trace->failed && path_count != 0;
     if (done)
     {
-        static const uint8_t sizes[] = { 16, 32, 64, 1, 2, 4, 8, 0 };
-        const uint32_t size = sizes[result];
-        const uint32_t node = size == 0 ? BUSTER_X86_INTRINSIC_UNKNOWN
-                              : result <= X86_INTRINSIC_RETURN_VECTOR64 ? x86_intrinsic_value(trace, trace->vector[0], size)
-                                                                        : x86_intrinsic_value(trace, trace->gpr[X86_REGISTER_RAX], size);
-        const X86IntrinsicNode* value = &trace->nodes[node];
-        snprintf(output, output_size, "return %.*s\n%.*s", size == 0 ? 4 : (int)value->length, size == 0 ? "none" : trace->text + value->text,
-                 (int)trace->stores_length, trace->stores);
+        // One path without conditions is the text alone; paths are each their conditions' line and their text, in the
+        // lines' order.
+        qsort(paths, path_count, sizeof(*paths), x86_intrinsic_path_order);
+        size_t length = 0;
+        output[0] = 0;
+        for (uint32_t p = 0; p < path_count && length < output_size; p += 1)
+        {
+            const bool alone = path_count == 1 && paths[p].conditions[0] == 0;
+            const int written = alone ? snprintf(output + length, output_size - length, "%s", paths[p].text)
+                                      : snprintf(output + length, output_size - length, "path %s\n%s", paths[p].conditions, paths[p].text);
+            length += written > 0 ? (size_t)written : 0;
+        }
     }
-    return done && !trace->failed;
+    for (uint32_t p = 0; p < pending_count; p += 1)
+    {
+        free(pending[p].stack);
+        free(pending[p].stores);
+        pending[p].stack = 0;
+        pending[p].stores = 0;
+    }
+    for (uint32_t p = 0; p < path_count; p += 1)
+    {
+        free(paths[p].conditions);
+        free(paths[p].text);
+    }
+    for (uint32_t f = 0; f < decoded_count; f += 1)
+    {
+        free(decoded[f].records);
+    }
+    return done;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2814,7 +3235,7 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
             {
                 printf("%s, %s's code:\n", entry->name, t == 0 ? "clang" : "the compiler");
             }
-            traced[t] = x86_intrinsic_trace(&traces[t], entry->name, entry->result, results[t], sizeof(results[t]), printed ? stdout : 0);
+            traced[t] = x86_intrinsic_trace(&traces[t], entry->name, entry->result, entry->inverted && t == 0, results[t], sizeof(results[t]), printed ? stdout : 0);
         }
         const bool agree = traced[0] && traced[1] && strcmp(results[0], results[1]) == 0;
         checks += 1;
@@ -2830,8 +3251,8 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
     bool swapped = valid;
     for (uint32_t t = 0; valid && t < 2; t += 1)
     {
-        swapped = x86_intrinsic_trace(&traces[t], "buster_intrinsic_sub_ab", X86_INTRINSIC_RETURN_VECTOR16, results[0], sizeof(results[0]), 0) &&
-                  x86_intrinsic_trace(&traces[t], "buster_intrinsic_sub_ba", X86_INTRINSIC_RETURN_VECTOR16, results[1], sizeof(results[1]), 0) &&
+        swapped = x86_intrinsic_trace(&traces[t], "buster_intrinsic_sub_ab", X86_INTRINSIC_RETURN_VECTOR16, false, results[0], sizeof(results[0]), 0) &&
+                  x86_intrinsic_trace(&traces[t], "buster_intrinsic_sub_ba", X86_INTRINSIC_RETURN_VECTOR16, false, results[1], sizeof(results[1]), 0) &&
                   strcmp(results[0], results[1]) != 0 && swapped;
     }
     checks += valid;

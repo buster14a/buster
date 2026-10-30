@@ -7358,10 +7358,11 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     }
     else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
-        // The leaf's instructions' features (c_builtin_x86_helpers.c), which the target must have.
+        // The leaf's instructions' features and extensions (c_builtin_x86_helpers.c), which the target must have.
         const CBuiltinX86HelperKind leaf = info != NULL ? cbuiltin_x86_helper_kind(info->name, info->name_length) : CBUILTIN_X86_HELPER_NONE;
         const uint64_t needed = cbuiltin_x86_helper_infos[leaf].features;
-        if ((writer->target.features & needed) != needed)
+        const uint64_t extensions = cbuiltin_x86_helper_infos[leaf].extensions;
+        if ((writer->target.features & needed) != needed || (writer->target.extensions & extensions) != extensions)
         {
             check_lower_unsupported(writer, cbuiltin_x86_helper_infos[leaf].refusal);
         }
