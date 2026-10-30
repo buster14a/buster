@@ -2034,8 +2034,12 @@ What the lowering covers past scalars (#145's programs):
     to a power of two) first gets its operation's identity in the lanes past
     them, as LLVM's widening gives them before clang's code reduces it: a row
     of VPTERNLOGD 0xEA, (v & keep) | fill, by two constants
-    (`check_vector_reduce_fill_row`), for the floating reductions too; the
-    halvings once reduced whatever those lanes held;
+    (`check_vector_reduce_fill_row`), for the floating sums too; the
+    halvings once reduced whatever those lanes held. A floating maximum or
+    minimum of such a vector is refused by name: LLVM reduces it in an order
+    its width decides (an element at a time once halved to 16 bytes, three
+    floats' over their elements alone), which picks the operand a NaN result
+    takes its sign and payload from, where the halvings take another;
   - byte bit reversal uses AVX512-BMM's VBITREVB at 16, 32 or 64 bytes. Its
     masked intrinsics use the existing masked byte selection. The opcode and
     result/effect traces are compared with clang by `test-x86-intrinsics`;

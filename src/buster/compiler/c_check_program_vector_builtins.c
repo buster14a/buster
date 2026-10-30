@@ -1326,6 +1326,13 @@ static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBu
     {
         reason = "vector reductions of half-precision or bf16 elements";
     }
+    else if (builtin != CBUILTIN_REDUCE_ASSOC_FADD && shape.lanes * shape.element < shape.bytes)
+    {
+        // A vector its elements don't fill: LLVM reduces its maximum or minimum in an order its width decides (an element
+        // at a time after halving to 16 bytes, and three floats' over the elements alone), which picks the operand a NaN
+        // result takes its sign and payload from, where these halvings take another. Its sum halves as these do.
+        reason = "floating maximum and minimum reductions of vectors their elements don't fill";
+    }
     else
     {
         const bool d = shape.element == 8;

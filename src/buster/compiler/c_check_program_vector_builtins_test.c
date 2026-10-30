@@ -524,7 +524,8 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         {
             // Reductions of vectors their elements don't fill (ext_vector_type's of 3, 5, 6, 7, 10 and 12 elements, padded
             // to a power of two), every byte of them written first, the padding's too: those lanes take no part, as
-            // clang's code gives them the operation's identity.
+            // clang's code gives them the operation's identity. The integer ones and the floating sums: a floating maximum
+            // or minimum of such a vector is refused by name (check_test_program_vector_builtin_refusals).
             "vector-padded-reductions",
             BUSTER_CHECK_TEST_FLOATING_TYPES
             BUSTER_CHECK_TEST_FLOATING_SPECIALS
@@ -537,13 +538,13 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "typedef double e5 __attribute__((ext_vector_type(5)));\n"
             "#define R(f,v) {__typeof__(v[0]) r=__builtin_reduce_##f(v);FOLD(r);}\n"
             "#define INT(v) R(add,v)R(mul,v)R(and,v)R(or,v)R(xor,v)R(min,v)R(max,v)\n"
-            "#define FLT(v) R(maximum,v)R(minimum,v)R(assoc_fadd,v){__typeof__(v[0]) r=__builtin_reduce_assoc_fadd(v,1.5f);FOLD(r);}\n"
+            "#define SUM(v) R(assoc_fadd,v){__typeof__(v[0]) r=__builtin_reduce_assoc_fadd(v,1.5f);FOLD(r);}\n"
             "int tested(int n){unsigned h=2166136261u;c3 a;u10 b;s6 c;w7 d;i3 e;u5 f;l3 g;q5 k;f3 x;f7 y;f12 z;e3 p;e5 q;"
             "fill(&a,sizeof a,n);fill(&b,sizeof b,n+1);fill(&c,sizeof c,n+2);fill(&d,sizeof d,n+3);fill(&e,sizeof e,n+4);fill(&f,sizeof f,n+5);"
             "fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);INT(a)INT(b)INT(c)INT(d)INT(e)INT(f)INT(g)INT(k)"
             "for(int round=0;round<2;round++){if(round){modest(&x,sizeof x/4,n+8,0,0);modest(&y,sizeof y/4,n+9,0,0);modest(&z,sizeof z/4,n+10,0,0);"
             "modest(&p,sizeof p/8,n+11,1,0);modest(&q,sizeof q/8,n+12,1,0);}else{specials(&x,sizeof x/4,n+8,0);specials(&y,sizeof y/4,n+9,0);"
-            "specials(&z,sizeof z/4,n+10,0);specials(&p,sizeof p/8,n+11,1);specials(&q,sizeof q/8,n+12,1);}FLT(x)FLT(y)FLT(z)FLT(p)FLT(q)}"
+            "specials(&z,sizeof z/4,n+10,0);specials(&p,sizeof p/8,n+11,1);specials(&q,sizeof q/8,n+12,1);}SUM(x)SUM(y)SUM(z)SUM(p)SUM(q)}"
             "return (int)h;}",
         },
         {
@@ -762,6 +763,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
                     "void tested(b4* m,float* p,e4* v){__builtin_masked_scatter(*m,(v4ss){0,1,2,3},*v,p);}",
           "masked vector memory builtins, whose masks are vectors of bools", 0 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
+        // A floating maximum or minimum of a vector its elements don't fill, which LLVM reduces in an order of its width's.
+        { "znver5", "typedef float f7 __attribute__((ext_vector_type(7)));int tested(int n){f7 a={(float)n};float c=__builtin_reduce_minimum(a);return (int)c;}",
+          "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
+        { "znver5", "typedef double e3 __attribute__((ext_vector_type(3)));int tested(int n){e3 a={(double)n};double c=__builtin_reduce_maximum(a);return (int)c;}",
+          "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements without XOP", 3 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshr(a,b,b);return c[0];}",
