@@ -48,6 +48,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CLEANUP_ARGUMENTS,
     // GNU's weak attribute on a declaration without external linkage.
     CHECK_INPUT_WEAK_LINKAGE,
+    // A function definition cannot also define an alias.
+    CHECK_INPUT_ALIAS_DEFINITION,
     // Labels' errors, at the label's name (check_input_controls_mode): a use of one no definition has, or a local
     // label's declaration without one; a second definition in the label's scope; a name a block's `__label__` lists
     // declare twice.
@@ -99,6 +101,7 @@ static const char* const check_input_messages[] =
     "'cleanup' function's parameter has a type incompatible with the variable's address",
     "'cleanup' attribute takes one argument",
     "weak declaration cannot have internal linkage",
+    "function definition cannot also be an alias",
     "use of undeclared label",
     "redefinition of label",
     "ambiguous reference to a label",
