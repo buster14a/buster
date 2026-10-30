@@ -145,7 +145,10 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused GNU atomic variants and elementwise bit reversal remain zero.
+but refused GNU atomic variants and elementwise bit reversal remain zero, and
+the vector builtins the checker checks but no lowering takes yet (clang 23's
+past the 23 observed spellings, from 0x320 on) have
+`BUSTER_CBUILTIN_CAP_CHECKER` alone, so `__has_builtin` answers 0 for them.
 `test-preprocessor` checks the exact catalog and the advertised list, including
 raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
@@ -849,7 +852,39 @@ exercise both driver schedules, nested selections, dead statements, unevaluated
 contexts and pragma/`-w` policy; storage tests cover every allocation cut.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
-shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
+shuffle, conversion, nondeterministic and nontemporal spellings, and the 52
+other generic vector builtins of clang 23 (#148), at catalog identities from
+0x320 on (`cbuiltin_vector`):
+
+- the floating elementwise functions of one operand (acos ... tanh, the
+  roundings and canonicalize) take sqrt's rule, a floating scalar or a vector
+  of floating elements, and those of two (atan2, fmod, pow, copysign and the
+  maximum and minimum functions) the min/max rule restricted to floating ones:
+  operands of one element type and lanes, a GNU vector and an
+  `ext_vector_type` one alike, but in copysign, which compares its operands'
+  types whole as clang's does;
+- ldexp takes a floating value and an integer exponent of its lanes, a scalar
+  one with the integer promotions, a vector one of any element size;
+- ctzg takes clzg's rule, and clmul, pdep and pext two integer operands of one
+  element type and lanes;
+- reduce_xor takes a vector of integers, reduce_maximum and _minimum one of
+  floating elements, and reduce_assoc_fadd (with an optional start value) and
+  _in_order_fadd (with a required one) a vector of floating elements and a
+  floating scalar start, converted to the element type as by assignment;
+- the masked builtins take a mask of bools (an `ext_vector_type`'s), a pointer
+  to a scalar, neither volatile nor atomic nor, for a store, const, and a load's
+  passthru of exactly its result type, the `ext_vector_type` of the pointer's
+  type and the mask's lanes; clang's vectors of pointers, structs, arrays,
+  functions and void here are refused as unsupported, the type table having
+  none;
+- the matrix builtins are an error at every call, as clang's are without
+  `-fenable-matrix`, which buster hasn't: no unit has a matrix type.
+
+`test-checker` compares each family's valid calls and one error each with
+clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
+and `test-check-builtins-vector` their type relations with independent
+expectations that clang confirms. No lowering takes them yet: `-c` and the
+direct path refuse each call by name. The module's exact
 type relations are separate from #147's ordinary vector operators. Shuffle
 indices use the full bounded source slice; conversion carries a separate type
 operand. Nondeterministic values inspect their argument's type without

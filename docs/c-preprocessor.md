@@ -1340,10 +1340,12 @@ implemented diagnostic consumer; reporting their C23 date codes would falsely
 advertise that consumer. Unpublished alias/ifunc/weakref/common/retention effects
 also remain zero. Generic GNU atomic load/store/exchange/compare-exchange,
 GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
-unadvertised; scalar GNU atomics and implemented C11 atomics are advertised.
+unadvertised, and so do the vector builtins the checker checks but no lowering
+takes yet (clang 23's past the 23 observed spellings); scalar GNU atomics and
+implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 
-`test-preprocessor` checks an independent 181-name generic builtin inventory,
+`test-preprocessor` checks an independent 233-name generic builtin inventory,
 the fourteen fortified names and their source/constexpr/refusal boundaries, old and
 new language modes, scoped/underscore/macro spellings, oracle isolation and
 protected input tails. `test-checker` compares intrinsic answers against the

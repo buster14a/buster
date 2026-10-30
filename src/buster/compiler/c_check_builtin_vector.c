@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original #148 semantic actions for the 23 observed generic vector builtin spellings. Include after
-// c_check_builtin_atomic.c: its ordinary scalar initialization conversions supply pointer diagnostics here,
+// Original #148 semantic actions for clang 23's generic vector builtins: the 23 observed spellings, then the floating
+// elementwise functions (acos ... tanh, the roundings, canonicalize, atan2, fmod, pow, copysign, the maximum and minimum
+// functions and ldexp), the integer ones (ctzg, clmul, pdep and pext), the xor, floating maximum and minimum and floating
+// sum reductions, the masked memory builtins and the matrix ones, which no unit has a type for (clang's matrix types
+// need -fenable-matrix, an option buster hasn't): every call of those is an error, as clang's is without the option.
+// Include after c_check_builtin_atomic.c: its ordinary scalar initialization conversions supply pointer diagnostics here,
 // never atomic object/order/alignment constraints. This file does not implement #147's ordinary vector operators.
 // Each action borrows bounded arguments and immutable source-position tag history. The caller owns all storage;
 // actions, results, arguments and mutable type storage must be disjoint and naturally aligned. No padding is read.
@@ -18,6 +22,8 @@
 // The source producer owns GNU-extension diagnostics; witness storage is borrowed, immutable and unpadded.
 // evaluated_argument_count describes a prefix: two shuffle vectors, one convert operand, ordinary arity otherwise.
 // nondeterministic_value uses its operand TYPE only, so its prefix is zero and no operand effects/faults survive.
+// A floating sum reduction's start value converts to the vector's element type, as by assignment; ldexp's scalar
+// exponent takes the integer promotions (clang's usual unary conversions), a vector one none.
 //
 // No vector constant payload is represented by CheckValue. These actions publish exact source type relations and
 // explicit constant_evaluation_unmodeled, never a fabricated constant or catalog/source/runtime capability.
@@ -92,12 +98,15 @@ struct CheckBuiltinVectorAction
     bool allow_gnu_index_ice;
 };
 
+// The most arguments a vector builtin takes: __builtin_masked_scatter's and __builtin_matrix_column_major_load's four.
+#define BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS 4u
+
 typedef struct CheckBuiltinVectorResult CheckBuiltinVectorResult;
 struct CheckBuiltinVectorResult
 {
     CheckActionResult action;
-    CheckValue converted_arguments[3];
-    CheckConversion argument_conversions[3];
+    CheckValue converted_arguments[BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS];
+    CheckConversion argument_conversions[BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS];
     TypeId element_type;
     TypeId memory_type;
     uint32_t lane_count;
@@ -260,6 +269,29 @@ static bool check_builtin_vector_signed_integer(const TypeTable* table, TypeId t
     return result;
 }
 
+// The floating elementwise functions of one operand, which take a floating scalar or a vector of floating elements as
+// __builtin_elementwise_sqrt does: sqrt, acos ... tanh, the roundings and canonicalize.
+static bool check_builtin_vector_floating_unary(CBuiltinId id)
+{
+    const bool result = id == CBUILTIN_ELEMENTWISE_SQRT || (id >= CBUILTIN_ELEMENTWISE_ACOS && id <= CBUILTIN_ELEMENTWISE_CANONICALIZE);
+    return result;
+}
+
+// Those of two operands of one floating type: atan2, fmod, pow, copysign, and the maximum and minimum functions.
+static bool check_builtin_vector_floating_binary(CBuiltinId id)
+{
+    const bool result = id >= CBUILTIN_ELEMENTWISE_ATAN2 && id <= CBUILTIN_ELEMENTWISE_MINIMUMNUM;
+    return result;
+}
+
+// The elementwise functions check_builtin_vector_math checks: their operands of one type, the result's.
+static bool check_builtin_vector_elementwise(CBuiltinId id)
+{
+    const bool result = (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_ELEMENTWISE_SUB_SAT) ||
+                        (id >= CBUILTIN_ELEMENTWISE_ACOS && id <= CBUILTIN_ELEMENTWISE_PEXT && id != CBUILTIN_ELEMENTWISE_LDEXP);
+    return result;
+}
+
 static bool check_builtin_vector_math_element(const TypeTable* table, CBuiltinId id, TypeId type)
 {
     const TypeId element = check_builtin_vector_element(table, type);
@@ -269,7 +301,7 @@ static bool check_builtin_vector_math_element(const TypeTable* table, CBuiltinId
     {
         result = check_builtin_vector_signed_integer(table, element) || kind == BUSTER_TYPE_KIND_FLOATING;
     }
-    else if (id == CBUILTIN_ELEMENTWISE_FMA || id == CBUILTIN_ELEMENTWISE_SQRT)
+    else if (id == CBUILTIN_ELEMENTWISE_FMA || check_builtin_vector_floating_unary(id) || check_builtin_vector_floating_binary(id))
     {
         result = kind == BUSTER_TYPE_KIND_FLOATING;
     }
@@ -319,6 +351,13 @@ static void check_builtin_vector_math(TypeTable* table, const CheckBuiltinVector
             {
                 check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, i);
             }
+            else if (i != 0 && input->id == CBUILTIN_ELEMENTWISE_COPYSIGN &&
+                     check_builtin_vector_plain(table, output->converted_arguments[0].type) != check_builtin_vector_plain(table, type))
+            {
+                // copysign compares its operands' types whole, where the others compare their elements and lanes alone:
+                // a GNU vector and an ext_vector_type one of the same elements differ.
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, i);
+            }
         }
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE)
@@ -332,12 +371,17 @@ static void check_builtin_vector_math(TypeTable* table, const CheckBuiltinVector
     }
 }
 
+// The reductions: a vector of integers (add, and, mul, or, xor), of integers or floating elements (max, min) or of
+// floating elements (maximum, minimum and the two sums), into its element type. A sum's start value (assoc_fadd's
+// optional second operand, in_order_fadd's) is a floating scalar, converted to that type as by assignment.
 static void check_builtin_vector_reduce(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
 {
     output->converted_arguments[0] = check_builtin_vector_argument(table, input, output, 0, true);
     if (output->action.diagnostic == CHECK_DIAG_NONE)
     {
         const TypeId type = output->converted_arguments[0].type;
+        const CBuiltinId id = input->id;
+        const bool floating = id == CBUILTIN_REDUCE_MAXIMUM || id == CBUILTIN_REDUCE_MINIMUM || id == CBUILTIN_REDUCE_ASSOC_FADD || id == CBUILTIN_REDUCE_IN_ORDER_FADD;
         if (!check_builtin_vector_is_vector(table, type))
         {
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
@@ -345,7 +389,11 @@ static void check_builtin_vector_reduce(TypeTable* table, const CheckBuiltinVect
         else
         {
             const TypeId element = check_builtin_vector_element(table, type);
-            if (input->id != CBUILTIN_REDUCE_MIN && input->id != CBUILTIN_REDUCE_MAX && !check_action_is_integer(table, element))
+            if (floating && check_action_kind(table, element) != BUSTER_TYPE_KIND_FLOATING)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+            }
+            else if (!floating && id != CBUILTIN_REDUCE_MIN && id != CBUILTIN_REDUCE_MAX && !check_action_is_integer(table, element))
             {
                 check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 0);
             }
@@ -356,6 +404,182 @@ static void check_builtin_vector_reduce(TypeTable* table, const CheckBuiltinVect
                 output->lane_count = check_builtin_vector_lanes(table, type);
             }
         }
+        if (output->action.diagnostic == CHECK_DIAG_NONE && input->argument_count == 2)
+        {
+            CheckValue* start = output->converted_arguments + 1;
+            *start = check_builtin_vector_argument(table, input, output, 1, true);
+            if (output->action.diagnostic == CHECK_DIAG_NONE && check_action_kind(table, start->type) != BUSTER_TYPE_KIND_FLOATING)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+            }
+            else if (output->action.diagnostic == CHECK_DIAG_NONE && check_builtin_vector_plain(table, start->type) != check_builtin_vector_plain(table, output->element_type))
+            {
+                check_action_conversion(table, start, check_builtin_vector_plain(table, output->element_type), BUSTER_CHECK_CONVERT_ASSIGNMENT,
+                                        output->argument_conversions + 1, input->node);
+            }
+        }
+    }
+}
+
+// __builtin_elementwise_ldexp(x, e): x a floating scalar or a vector of floating elements (promoted as the other
+// floating functions' operands are), e an integer scalar (taking the integer promotions) or a vector of integers of
+// x's lanes; the result is x's type.
+static void check_builtin_vector_ldexp(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
+{
+    for (uint32_t i = 0; i < 2 && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+    {
+        if (!type_is_valid(table, input->arguments[i].type) || input->arguments[i].category > CHECK_FUNCTION)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, i);
+        }
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        output->converted_arguments[0] = check_builtin_vector_argument(table, input, output, 0, true);
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        check_builtin_vector_fp_promote(table, input, output, 0);
+        if (check_action_kind(table, check_builtin_vector_element(table, output->converted_arguments[0].type)) != BUSTER_TYPE_KIND_FLOATING)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        }
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        output->converted_arguments[1] = check_builtin_vector_argument(table, input, output, 1, true);
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        CheckValue* exponent = output->converted_arguments + 1;
+        const TypeId value = output->converted_arguments[0].type;
+        if (!check_builtin_vector_is_vector(table, exponent->type) && check_action_is_integer(table, exponent->type))
+        {
+            check_action_promote(table, exponent, output->argument_conversions + 1, input->node);
+        }
+        if (!check_action_is_integer(table, check_builtin_vector_element(table, exponent->type)))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else if (check_builtin_vector_is_vector(table, value) != check_builtin_vector_is_vector(table, exponent->type) ||
+                 check_builtin_vector_lanes(table, value) != check_builtin_vector_lanes(table, exponent->type))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else
+        {
+            output->action.value.type = value;
+        }
+    }
+}
+
+// Whether a type is a masked builtin's mask: a vector of bools, which only ext_vector_type declares.
+static bool check_builtin_vector_mask(const TypeTable* table, TypeId type)
+{
+    const bool result = check_builtin_vector_is_vector(table, type) && check_builtin_vector_plain(table, check_builtin_vector_element(table, type)) == BUSTER_TYPE_BOOL;
+    return result;
+}
+
+// The masked memory builtins, as clang checks them: load(mask, p[, passthru]), expand_load the same, store(mask, v, p),
+// compress_store the same, gather(mask, indices, p[, passthru]) and scatter(mask, indices, v, p). The mask is a vector of
+// bools; p a pointer to a scalar (no vector), neither volatile nor atomic, nor const for a store; a stored vector's
+// elements p's type, and an index vector's integers, each of the mask's lanes; a load's result the ext_vector_type of
+// p's type and the mask's lanes, which a passthru vector must be. The lowering refuses them by name: their masks are
+// vectors of bools, which it has no class for. Clang also takes a pointer to a pointer, a struct, an array, a function
+// or void here, making vectors of them, which are no types of the table: refused as unsupported.
+static void check_builtin_vector_masked(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
+{
+    const CBuiltinId id = input->id;
+    const bool store = id == CBUILTIN_MASKED_STORE || id == CBUILTIN_MASKED_COMPRESS_STORE || id == CBUILTIN_MASKED_SCATTER;
+    const bool indexed = id == CBUILTIN_MASKED_GATHER || id == CBUILTIN_MASKED_SCATTER;
+    const uint32_t pointer_index = (store ? 2u : 1u) + (indexed ? 1u : 0u);
+    for (uint32_t i = 0; i < input->argument_count && i < BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+    {
+        output->converted_arguments[i] = check_builtin_vector_argument(table, input, output, i, true);
+    }
+    const TypeId mask = output->converted_arguments[0].type;
+    const uint32_t lanes = output->action.diagnostic == CHECK_DIAG_NONE ? check_builtin_vector_lanes(table, mask) : 0;
+    if (output->action.diagnostic == CHECK_DIAG_NONE && !check_builtin_vector_mask(table, mask))
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE && indexed)
+    {
+        const TypeId indices = output->converted_arguments[1].type;
+        if (!check_builtin_vector_is_vector(table, indices) || !check_action_is_integer(table, check_builtin_vector_element(table, indices)) ||
+            check_builtin_vector_lanes(table, indices) != lanes)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+    }
+    const uint32_t value_index = pointer_index - 1;
+    if (output->action.diagnostic == CHECK_DIAG_NONE && store)
+    {
+        const TypeId value = output->converted_arguments[value_index].type;
+        if (!check_builtin_vector_is_vector(table, value) || check_builtin_vector_lanes(table, value) != lanes)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, value_index);
+        }
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        const TypeId pointer = check_builtin_vector_plain(table, output->converted_arguments[pointer_index].type);
+        const TypeId pointee = check_action_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(table, pointer) : 0;
+        const uint32_t qualifiers = pointee != 0 ? type_qualifiers(type_strip_aligned(table, pointee)) : 0;
+        const TypeId element = pointee != 0 ? check_builtin_vector_plain(table, pointee) : 0;
+        if (pointee == 0 || check_builtin_vector_is_vector(table, element) || check_action_kind(table, element) == BUSTER_TYPE_KIND_ATOMIC ||
+            (qualifiers & BUSTER_TYPE_VOLATILE) != 0 || (store && (qualifiers & BUSTER_TYPE_CONST) != 0))
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, pointer_index);
+        }
+        else if (store && check_builtin_vector_plain(table, check_builtin_vector_element(table, output->converted_arguments[value_index].type)) != element)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, value_index);
+        }
+        else if (store)
+        {
+            output->action.value.type = BUSTER_TYPE_VOID;
+            output->memory_type = element;
+            output->writes_memory = true;
+        }
+        else if (!check_action_is_arithmetic(table, element) || check_action_kind(table, element) == BUSTER_TYPE_KIND_COMPLEX)
+        {
+            // Clang makes a vector of anything here (of pointers, structs, functions, void), which no type of the table is.
+            check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, pointer_index);
+        }
+        else
+        {
+            const TypeId result = type_vector(table, element, lanes, true);
+            if (result == 0)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, pointer_index);
+            }
+            else if (input->argument_count == pointer_index + 2 && check_builtin_vector_plain(table, output->converted_arguments[pointer_index + 1].type) != result)
+            {
+                check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, pointer_index + 1);
+            }
+            else
+            {
+                output->action.value.type = result;
+                output->memory_type = element;
+                output->reads_memory = true;
+            }
+        }
+    }
+}
+
+// The matrix builtins: their operands are checked as any call's, then the call is an error, as clang's is in a unit
+// without matrix types (-fenable-matrix, which buster hasn't): transpose's operand isn't a matrix, and the column-major
+// load and store are refused outright.
+static void check_builtin_vector_matrix(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
+{
+    for (uint32_t i = 0; i < input->argument_count && i < BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+    {
+        output->converted_arguments[i] = check_builtin_vector_argument(table, input, output, i, true);
+    }
+    if (output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
     }
 }
 
@@ -650,7 +874,11 @@ static bool check_builtin_vector_floating(const TypeTable* table, TypeId type)
 
 static void check_builtin_vector_fp_effects(const TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
 {
-    bool arithmetic = input->id == CBUILTIN_ELEMENTWISE_FMA || input->id == CBUILTIN_ELEMENTWISE_SQRT;
+    // copysign moves bits alone; every other floating function rounds, compares or calls the C library's.
+    bool arithmetic = input->id == CBUILTIN_ELEMENTWISE_FMA || input->id == CBUILTIN_ELEMENTWISE_LDEXP || input->id == CBUILTIN_REDUCE_MAXIMUM ||
+                      input->id == CBUILTIN_REDUCE_MINIMUM || input->id == CBUILTIN_REDUCE_ASSOC_FADD || input->id == CBUILTIN_REDUCE_IN_ORDER_FADD ||
+                      check_builtin_vector_floating_unary(input->id) ||
+                      (check_builtin_vector_floating_binary(input->id) && input->id != CBUILTIN_ELEMENTWISE_COPYSIGN);
     if (input->id == CBUILTIN_ELEMENTWISE_MIN || input->id == CBUILTIN_ELEMENTWISE_MAX || input->id == CBUILTIN_REDUCE_MIN || input->id == CBUILTIN_REDUCE_MAX)
     {
         arithmetic = check_builtin_vector_floating(table, output->element_type);
@@ -672,22 +900,53 @@ static void check_builtin_vector_fp_effects(const TypeTable* table, const CheckB
     output->may_raise_fp_exceptions |= arithmetic;
 }
 
-static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
+// Whether a call's argument count is its builtin's: a fixed count, two or more for a shuffle, or one of two counts for
+// the builtins with an optional last operand (clzg's and ctzg's zero values, assoc_fadd's start, a masked load's and a
+// gather's passthru).
+static bool check_builtin_vector_count(const CheckBuiltinVectorAction* input)
 {
-    *output = (CheckBuiltinVectorResult){ 0 };
-    const bool recognized = input->id >= CBUILTIN_ELEMENTWISE_ABS && input->id <= CBUILTIN_NONTEMPORAL_STORE;
+    const CBuiltinId id = input->id;
+    const uint32_t count = input->argument_count;
     uint32_t arity = 1;
-    if (input->id == CBUILTIN_ELEMENTWISE_FMA || input->id == CBUILTIN_ELEMENTWISE_FSHL || input->id == CBUILTIN_ELEMENTWISE_FSHR)
+    uint32_t optional = 0;
+    if (id == CBUILTIN_ELEMENTWISE_FMA || id == CBUILTIN_ELEMENTWISE_FSHL || id == CBUILTIN_ELEMENTWISE_FSHR || id == CBUILTIN_MASKED_STORE ||
+        id == CBUILTIN_MASKED_COMPRESS_STORE || id == CBUILTIN_MATRIX_COLUMN_MAJOR_STORE)
     {
         arity = 3;
     }
-    else if (input->id == CBUILTIN_ELEMENTWISE_ADD_SAT || input->id == CBUILTIN_ELEMENTWISE_SUB_SAT ||
-             input->id == CBUILTIN_ELEMENTWISE_MIN || input->id == CBUILTIN_ELEMENTWISE_MAX || input->id == CBUILTIN_NONTEMPORAL_STORE)
+    else if (id == CBUILTIN_MASKED_SCATTER || id == CBUILTIN_MATRIX_COLUMN_MAJOR_LOAD)
+    {
+        arity = 4;
+    }
+    else if (id == CBUILTIN_ELEMENTWISE_ADD_SAT || id == CBUILTIN_ELEMENTWISE_SUB_SAT || id == CBUILTIN_ELEMENTWISE_MIN || id == CBUILTIN_ELEMENTWISE_MAX ||
+             id == CBUILTIN_NONTEMPORAL_STORE || check_builtin_vector_floating_binary(id) || id == CBUILTIN_ELEMENTWISE_LDEXP || id == CBUILTIN_ELEMENTWISE_CLMUL ||
+             id == CBUILTIN_ELEMENTWISE_PDEP || id == CBUILTIN_ELEMENTWISE_PEXT || id == CBUILTIN_REDUCE_IN_ORDER_FADD)
     {
         arity = 2;
     }
-    const bool count_ok = input->id == CBUILTIN_SHUFFLEVECTOR ? input->argument_count >= 2 :
-        input->id == CBUILTIN_ELEMENTWISE_CLZG ? input->argument_count == 1 || input->argument_count == 2 : input->argument_count == arity;
+    else if (id == CBUILTIN_ELEMENTWISE_CLZG || id == CBUILTIN_ELEMENTWISE_CTZG || id == CBUILTIN_REDUCE_ASSOC_FADD)
+    {
+        optional = 2;
+    }
+    else if (id == CBUILTIN_MASKED_LOAD || id == CBUILTIN_MASKED_EXPAND_LOAD)
+    {
+        arity = 2;
+        optional = 3;
+    }
+    else if (id == CBUILTIN_MASKED_GATHER)
+    {
+        arity = 3;
+        optional = 4;
+    }
+    const bool result = id == CBUILTIN_SHUFFLEVECTOR ? count >= 2 : count == arity || (optional != 0 && count == optional);
+    return result;
+}
+
+static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, const CheckBuiltinVectorAction* input, CheckBuiltinVectorResult* output)
+{
+    *output = (CheckBuiltinVectorResult){ 0 };
+    const bool recognized = cbuiltin_vector(input->id);
+    const bool count_ok = check_builtin_vector_count(input);
     if (!recognized)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
@@ -707,13 +966,25 @@ static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, c
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
     }
-    else if (input->id <= CBUILTIN_ELEMENTWISE_SUB_SAT)
+    else if (check_builtin_vector_elementwise(input->id))
     {
         check_builtin_vector_math(table, input, output);
     }
-    else if (input->id <= CBUILTIN_REDUCE_OR)
+    else if (input->id == CBUILTIN_ELEMENTWISE_LDEXP)
+    {
+        check_builtin_vector_ldexp(table, input, output);
+    }
+    else if ((input->id >= CBUILTIN_REDUCE_ADD && input->id <= CBUILTIN_REDUCE_OR) || (input->id >= CBUILTIN_REDUCE_XOR && input->id <= CBUILTIN_REDUCE_IN_ORDER_FADD))
     {
         check_builtin_vector_reduce(table, input, output);
+    }
+    else if (input->id >= CBUILTIN_MASKED_LOAD && input->id <= CBUILTIN_MASKED_SCATTER)
+    {
+        check_builtin_vector_masked(table, input, output);
+    }
+    else if (input->id >= CBUILTIN_MATRIX_TRANSPOSE)
+    {
+        check_builtin_vector_matrix(table, input, output);
     }
     else if (input->id == CBUILTIN_SHUFFLEVECTOR)
     {
@@ -748,7 +1019,7 @@ static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, c
     {
         output->runtime_builtin = input->id;
         output->evaluated_argument_count = output->nondeterministic ? 0 : input->id == CBUILTIN_SHUFFLEVECTOR ? 2 : input->argument_count;
-        output->constant_evaluation_unmodeled = input->id <= CBUILTIN_CONVERTVECTOR;
+        output->constant_evaluation_unmodeled = input->id <= CBUILTIN_CONVERTVECTOR || (input->id >= CBUILTIN_ELEMENTWISE_ACOS && input->id <= CBUILTIN_REDUCE_IN_ORDER_FADD);
         output->action.value.category = CHECK_RVALUE;
         output->action.value.constant_kind = CHECK_CONSTANT_NONE;
         if (output->element_type == 0)
