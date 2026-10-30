@@ -3,7 +3,7 @@
 //
 // test-x86-intrinsics (#136): the compiler's code of the headers' x86 intrinsics against clang -O0's, for the builtins
 // whose instructions neither the tests' hosts nor Zen 5 runs (XOP's, AVX-NE-CONVERT's, AVX10.2's, SHA512's, SM3's,
-// SM4's), which no native run can compare, and for controls that run. A source takes every case's address, as
+// SM4's, MOVRS's, AVX512-BMM's), which no native run can compare, and for controls that run. A source takes every case's address, as
 // --lower-all of main.c lowers the headers' definitions: clang -O0 compiles its out-of-line copy of each always_inline
 // definition, and the compiler, by both paths into the same bytes, its own. Each object's functions are decoded
 // (x86_64_disassembler.c) and followed from their entry, every register's, opmask's and stack byte's value as
@@ -52,7 +52,9 @@ struct X86IntrinsicCase
 // swapped, whose expressions must differ (run_x86_intrinsic_tests' last check). Then the cases, which no host of the
 // tests runs: XOP's own instructions (the fractions, the horizontal sums and differences, the multiply-accumulates,
 // VPPERM and the shifts by vectors of counts), AVX-NE-CONVERT's loads, AVX10.2's intrinsics of AVX-VNNI-INT8's and
-// AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), and SHA512's, SM3's and SM4's.
+// AVX-VNNI-INT16's dot products (masked, merged and zeroed, and at 64 bytes), SHA512's, SM3's and SM4's; then AVX10.2's
+// saturating conversions, bf16 operations and compares, conversions to and from 8-bit floats and of two vectors of
+// floats to halves, and dot products of halves, MOVRS's vector loads and AVX512-BMM's products of bit matrices.
 static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_add_epi32)
     BUSTER_X86_INTRINSIC_X(_mm_mask_add_epi32)
@@ -210,6 +212,247 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_sm3msg2_epi32)
     BUSTER_X86_INTRINSIC_Z(_mm512_sm4key4_epi32)
     BUSTER_X86_INTRINSIC_Z(_mm512_sm4rnds4_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_pd_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_pd_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_pd_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_pd_epu64)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_ps_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_ps_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_ps_epu32)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtts_ps_epu64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_max_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_min_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_getexp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_max_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_min_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_rcp_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_Y(_mm256_scalef_pbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comieq_sbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comige_sbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comigt_sbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comile_sbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comilt_sbh)
+    BUSTER_X86_INTRINSIC_I(_mm_comineq_sbh)
+    BUSTER_X86_INTRINSIC_X(_mm_getexp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_getexp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_rcp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_scalef_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_getexp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_rcp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_scalef_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_max_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_min_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_rcp_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_rsqrt_pbh)
+    BUSTER_X86_INTRINSIC_X(_mm_scalef_pbh)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvt2ph_bf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvt2ph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvts_2ph_bf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvts_2ph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_mask_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_mask_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm512_maskz_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_maskz_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvt2ph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvt2ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvts_2ph_bf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvts_2ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_mask_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_mask_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm256_maskz_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_maskz_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_cvt2ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvt2ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_2ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_2ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_mask_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtbiasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtbiasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvthf8_ph)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvts_biasph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvts_biasph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvts_ph_bf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvts_ph_hf8)
+    BUSTER_X86_INTRINSIC_X(_mm_maskz_cvtx2ps_ph)
+    BUSTER_X86_INTRINSIC_Z(_mm512_dpph_ps)
+    BUSTER_X86_INTRINSIC_Y(_mm256_dpph_ps)
+    BUSTER_X86_INTRINSIC_X(_mm_dpph_ps)
+    BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi16)
+    BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi32)
+    BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi64)
+    BUSTER_X86_INTRINSIC_Z(_mm512_loadrs_epi8)
+    BUSTER_X86_INTRINSIC_Y(_mm256_loadrs_epi16)
+    BUSTER_X86_INTRINSIC_Y(_mm256_loadrs_epi32)
+    BUSTER_X86_INTRINSIC_Y(_mm256_loadrs_epi64)
+    BUSTER_X86_INTRINSIC_Y(_mm256_loadrs_epi8)
+    BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi16)
+    BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi32)
+    BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi64)
+    BUSTER_X86_INTRINSIC_X(_mm_loadrs_epi8)
+    BUSTER_X86_INTRINSIC_Z(_mm512_bmacor16x16x16)
+    BUSTER_X86_INTRINSIC_Z(_mm512_bmacxor16x16x16)
+    BUSTER_X86_INTRINSIC_Y(_mm256_bmacor16x16x16)
+    BUSTER_X86_INTRINSIC_Y(_mm256_bmacxor16x16x16)
 };
 
 #undef BUSTER_X86_INTRINSIC_X
@@ -1168,7 +1411,17 @@ static uint32_t x86_intrinsic_kmov_bytes(const char* mnemonic)
 static uint32_t x86_intrinsic_element(const X86FormDescription* form)
 {
     const char* mnemonic = form->mnemonic;
-    const size_t length = strlen(mnemonic);
+    // AVX10.2's saturating conversions end in an s past their elements' letters (vcvttps2dqs, vcvtph2bf8s).
+    const size_t full = strlen(mnemonic);
+    const bool saturating = full > 3 && mnemonic[full - 1] == 's' && (mnemonic[full - 2] == 'q' || mnemonic[full - 2] == '8');
+    const size_t length = saturating ? full - 1 : full;
+    char trimmed[32];
+    if (saturating && length < sizeof(trimmed))
+    {
+        memcpy(trimmed, mnemonic, length);
+        trimmed[length] = 0;
+        mnemonic = trimmed;
+    }
     const char* lanes = strrchr(mnemonic, 'x');
     uint32_t result = 0;
     if (length < 3)
@@ -1225,12 +1478,27 @@ static uint32_t x86_intrinsic_element(const X86FormDescription* form)
     return result;
 }
 
-// The lanes of a masked form of `size` bytes' destination: one per element, or 64 where its elements are unknown; and
-// the bytes of the opmask they read, at least one.
+// The lanes of a masked form of `size` bytes' destination: one per element, or 64 where its elements are unknown, but no
+// more than a conversion's source elements (its rm operand's bytes over its broadcast's element), whose others it zeroes:
+// vcvtpd2dq's two doublewords of an XMM register's doubles, vcvtph2bf8's eight bytes of its halves (a conversion of two
+// vectors into one, vcvt2ps2phx's, has twice its rm's); and the bytes of the opmask they read, at least one.
 static uint32_t x86_intrinsic_lanes(const X86FormDescription* form, uint32_t size)
 {
     const uint32_t element = x86_intrinsic_element(form);
-    return element != 0 && size >= element ? size / element : 64;
+    uint32_t result = element != 0 && size >= element ? size / element : 64;
+    const uint8_t operation = x86_effects((uint16_t)(form - x86_form_descriptions))->operation;
+    const bool conversion = (operation == X86_OPERATION_FLOAT_TO_INT || operation == X86_OPERATION_FLOAT_TO_FLOAT || operation == X86_OPERATION_INT_TO_FLOAT) &&
+                            strncmp(form->mnemonic, "vcvt2", 5) != 0;
+    for (uint32_t row = 1; conversion && row < X86_FORM_COUNT; row += 1)
+    {
+        const X86FormDescription* other = &x86_form_descriptions[row];
+        const bool broadcast = other->family == BUSTER_X86_FAMILY_EVEX && (other->evex & BUSTER_X86_EVEX_BROADCAST) != 0;
+        if (broadcast && strcmp(other->mnemonic, form->mnemonic) == 0 && other->disp8_scale != 0 && form->operand_bytes / other->disp8_scale < result)
+        {
+            result = form->operand_bytes / other->disp8_scale;
+        }
+    }
+    return result;
 }
 
 static uint32_t x86_intrinsic_mask_bytes(uint32_t lanes)
