@@ -606,6 +606,12 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // executable, run and compared with its expected output.
 #include "buster/compiler/c_testsuite.c"
 
+// #134's test-ssa-source: every function of real and generated C promoted by both of ssa_ir.c's paths with the SSA
+// verifier's checks, and each program with a main run by the IR's interpreter in its three forms (all locals in memory,
+// and each path's SSA), against its expected output.
+#include "buster/compiler/ssa_source_generate.c"
+#include "buster/compiler/ssa_source_test.c"
+
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
 int main_unit_frontend(int argc, char** argv, bool* found);
@@ -1259,6 +1265,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-source") == 0)
+    {
+        result = run_ssa_source_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-source") == 0)
     {

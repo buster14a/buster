@@ -580,8 +580,16 @@ designs and the compilers already built this way.
   CFGs, including analysis and allocation. `docs/ssa.md` records the view's
   contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
   verifies the promoted IR; `test-ssa-ir` compares typed-stream, all-memory IR
-  and both promoted forms, with and without frame objects and copies. Complete source-corpus/Tier 1 acceptance for #134
-  still needs the checker and downstream pipeline.
+  and both promoted forms, with and without frame objects and copies.
+  `test-ssa-source [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS]
+  [--steps N] [--keep] [preprocessor options] [file...]` (`ssa_source_test.c`,
+  #134) promotes every function `-c` compiles of C files, and of random
+  programs of structured and unstructured control flow (`ssa_source_generate.c`,
+  each built by clang -O0 for its output), by both paths with `ssa_verify`'s
+  checks on each promotion (`ssa_ir_promote_verified`), then runs each program
+  with a main by the shared IR's interpreter in its three forms (every local in
+  memory, and each path's SSA), which must agree and give its expected output.
+  Tier 1's code joins that comparison once Tier 1 compiles general CFGs (#138).
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
@@ -1371,6 +1379,8 @@ git init -q --template= build/c-testsuite
 git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
 git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
+./build/compiler test-ssa-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ssa-source --generate 48
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
