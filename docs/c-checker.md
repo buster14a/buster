@@ -2003,7 +2003,14 @@ What the lowering covers past scalars (#145's programs):
   - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
     and VPSRLW) and applies its operation at each step, then moves the element
     into a general register, in two rows where that is more than a row's 8
-    records.
+    records. Byte product reductions first zero-extend to 16-bit elements and
+    use VPMULLW, keeping the final low byte. A 64-byte input widens its two
+    halves separately and multiplies them before the halvings. Row boundaries
+    always keep each shuffle and its multiplication together;
+  - byte bit reversal uses AVX512-BMM's VBITREVB at 16, 32 or 64 bytes. Its
+    masked intrinsics use the existing masked byte selection. The opcode and
+    result/effect traces are compared with clang by `test-x86-intrinsics`;
+    no runtime result is claimed on a host without AVX512-BMM.
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
@@ -2019,7 +2026,8 @@ What the lowering covers past scalars (#145's programs):
   functions and their square roots and multiply-adds without AVX10.2, the
   half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
-  bit reversal, 8-bit multiplication, the funnel shifts of 8-bit elements, the
+  bit reversal of elements wider than a byte, byte bit reversal without
+  AVX512-BMM, the funnel shifts of 8-bit elements, the
   leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
   at underaligned addresses, bit casts of other types, and the rows whose
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
