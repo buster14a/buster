@@ -8677,16 +8677,16 @@ static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier
 
 // The legacy forms a row may have (tier0_operation_form_valid), for the x86 builtins VEX and EVEX have no form of
 // (#148): ones that touch no stack, string or fixed register, and whose other effects (flags; the FS and GS bases, the
-// shadow stack, the caches, the x87's tags) aren't any value Tier 0 keeps across an entry. The flags' tests' MOV and
-// CMOVcc, ADC, SBB and NEG, CRC32, RDRAND, RDSEED and RDPID, the FS and GS bases, the non-temporal and direct
-// stores, the cache lines' flushes and prefetches, FXSAVE (not FXRSTOR, which writes the XMM registers floating values
-// live in), the shadow stack's, SHA's and SSE4A's (whose XMM registers are below 16, as VEX's: tier0_operation_reach),
-// and EMMS, WBINVD, WBNOINVD and INVPCID.
+// shadow stack, the caches, the x87's tags) aren't any value Tier 0 keeps across an entry. MOV, the flags' tests' SETcc,
+// AND and OR of bytes and MOVZX, ADC, SBB and NEG, CRC32, RDRAND, RDSEED and RDPID, the FS and GS bases, the non-temporal
+// and direct stores, the cache lines' flushes and prefetches, FXSAVE (not FXRSTOR, which writes the XMM registers floating
+// values live in), the shadow stack's, SHA's and SSE4A's (whose XMM registers are below 16, as VEX's:
+// tier0_operation_reach), and EMMS, WBINVD, WBNOINVD and INVPCID.
 static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_MOV_R32_IMM32, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64, X86_FORM_MOV_RM16_R16, X86_FORM_MOV_RM32_R32, X86_FORM_MOV_RM64_R64,
-    X86_FORM_CMOVO_R32_RM32, X86_FORM_CMOVNO_R32_RM32, X86_FORM_CMOVB_R32_RM32, X86_FORM_CMOVAE_R32_RM32, X86_FORM_CMOVE_R32_RM32, X86_FORM_CMOVNE_R32_RM32,
-    X86_FORM_CMOVBE_R32_RM32, X86_FORM_CMOVA_R32_RM32, X86_FORM_CMOVS_R32_RM32, X86_FORM_CMOVNS_R32_RM32, X86_FORM_CMOVP_R32_RM32, X86_FORM_CMOVNP_R32_RM32,
-    X86_FORM_CMOVL_R32_RM32, X86_FORM_CMOVGE_R32_RM32, X86_FORM_CMOVLE_R32_RM32, X86_FORM_CMOVG_R32_RM32, X86_FORM_NEG_RM32, X86_FORM_ADC_R32_RM32,
+    X86_FORM_SETO_RM8, X86_FORM_SETNO_RM8, X86_FORM_SETB_RM8, X86_FORM_SETAE_RM8, X86_FORM_SETE_RM8, X86_FORM_SETNE_RM8, X86_FORM_SETBE_RM8,
+    X86_FORM_SETA_RM8, X86_FORM_SETS_RM8, X86_FORM_SETNS_RM8, X86_FORM_SETP_RM8, X86_FORM_SETNP_RM8, X86_FORM_SETL_RM8, X86_FORM_SETGE_RM8,
+    X86_FORM_SETLE_RM8, X86_FORM_SETG_RM8, X86_FORM_AND_RM8_R8, X86_FORM_OR_RM8_R8, X86_FORM_MOVZX_R32_RM8, X86_FORM_NEG_RM32, X86_FORM_ADC_R32_RM32,
     X86_FORM_ADC_R64_RM64, X86_FORM_SBB_R32_RM32, X86_FORM_SBB_R64_RM64, X86_FORM_CRC32_R32_RM8, X86_FORM_CRC32_R32_RM16, X86_FORM_CRC32_R32_RM32,
     X86_FORM_CRC32_R64_RM64, X86_FORM_RDRAND_R16, X86_FORM_RDRAND_R32, X86_FORM_RDRAND_R64, X86_FORM_RDSEED_R16, X86_FORM_RDSEED_R32, X86_FORM_RDSEED_R64,
     X86_FORM_RDPID_R64, X86_FORM_RDFSBASE_R32, X86_FORM_RDFSBASE_R64, X86_FORM_RDGSBASE_R32, X86_FORM_RDGSBASE_R64, X86_FORM_WRFSBASE_R32,

@@ -17,14 +17,15 @@
 
 // The programs' helpers: the hash, half-precision values from their bits, and bits of special values (zeros,
 // infinities, a quiet and a signaling NaN, subnormals, ones, the largest finite one, the smallest normal one, and
-// others), as binary16's.
+// others), as binary16's. Construct bfloat16 specials through memory: Clang's bfloat16 return lowering can quiet
+// signaling NaNs or flush subnormals before the operation under test.
 static const char check_test_half_helpers[] =
     "static unsigned fold(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}\n"
     "#define FOLD(v) h=fold(h,&(v),sizeof(v))\n"
     "#define FOLDLD(v) do{long double t_=(v);unsigned char b_[10];__builtin_memcpy(b_,&t_,10);FOLD(b_);}while(0)\n"
     "static const unsigned short specials[]={0x0000,0x8000,0x7c00,0xfc00,0x7e00,0x7d01,0x0001,0x8001,0x3c00,0xbc00,0x7bff,0x0400,0x03ff,0x3555,0x4248,0xc8a0};\n"
     "static _Float16 hb(unsigned short b){_Float16 x;__builtin_memcpy(&x,&b,2);return x;}\n"
-    "static __bf16 bb(unsigned short b){__bf16 x;__builtin_memcpy(&x,&b,2);return x;}\n";
+    "static void bb(__bf16*x,unsigned short b){__builtin_memcpy(x,&b,2);}\n";
 
 static const char* const check_test_half_programs[][2] = {
     {
@@ -79,7 +80,7 @@ static const char* const check_test_half_programs[][2] = {
         // but a conditional's at run time, through float), bit casts, and between _Float16 and __bf16.
         "half-conversions",
         "int tested(int n){unsigned h=2166136261u;"
-        "_Float16 c=hb(specials[(unsigned)(n+3)%16u]);__bf16 cb=bb(specials[(unsigned)(n+7)%16u]);"
+        "_Float16 c=hb(specials[(unsigned)(n+3)%16u]);__bf16 cb;bb(&cb,specials[(unsigned)(n+7)%16u]);"
         "float f=c;double d=c;long double l=c;float fb=cb;double db=cb;FOLD(f);FOLD(d);FOLDLD(l);FOLD(fb);FOLD(db);"
         "const float fs[]={0.1f,-3.75f,65504.0f,65520.0f,1e-8f,6.1e-5f,(float)n/3.0f,-0.0f,3.0e38f,1.0f/3.0f};"
         "for(int i=0;i<10;i++){_Float16 x=fs[i];__bf16 y=fs[i];FOLD(x);FOLD(y);}"
@@ -177,7 +178,7 @@ static const char* const check_test_half_programs[][2] = {
         // rounds by VCVTNEPS2BF16 (flushing subnormals) or libgcc's __truncsfbf2.
         "bf16-arithmetic",
         "int tested(int n){unsigned h=2166136261u;"
-        "__bf16 a=(__bf16)n/(__bf16)4,b=(__bf16)(n*n)-(__bf16)7,c=bb(specials[(unsigned)(n+3)%16u]),d=(__bf16)1000*(__bf16)n;"
+        "__bf16 a=(__bf16)n/(__bf16)4,b=(__bf16)(n*n)-(__bf16)7,c;bb(&c,specials[(unsigned)(n+3)%16u]);__bf16 d=(__bf16)1000*(__bf16)n;"
         "__bf16 r[]={a+b,a-b,a*b,a/(b+(__bf16)0.5),a*b+d,d*d/d,(d*d-d*d)+a,-(a+b),+a,-c,+c,-(-c),a+b*d-c,c*a,(a+b)*(a-b)/(d+(__bf16)1)};FOLD(r);"
         "float f=a*2.5f;double g=b*2.5;__bf16 m=a*n+b;FOLD(f);FOLD(g);FOLD(m);"
         "int cmp=(a<b)+2*(a<=c)+4*(a==c)+8*(c!=c)+16*(a>b)+32*(a>=d)+64*(c<1.0f)+128*(a==n);FOLD(cmp);"
@@ -198,7 +199,7 @@ static const char* const check_test_half_programs[][2] = {
         "static const unsigned short bspecials[]={0x0000,0x8000,0x7f80,0xff80,0x7fc0,0x7f81,0x0001,0x8001,0x3f80,0xbf80,0x7f7f,0x0080,0x007f,0x3eab,0x4049,0xc2c8};"
         "static __attribute__((noinline)) void strict_chains(_Float16 d,_Float16*out){out[0]=-(+d);out[1]=-d;out[2]=-(-d);{\n#pragma STDC FENV_ACCESS ON\n}}"
         "int tested(int n){unsigned h=2166136261u;"
-        "__bf16 c=bb(bspecials[(unsigned)(n+3)%16u]);_Float16 d=hb(specials[(unsigned)(n+3)%16u]);"
+        "__bf16 c;bb(&c,bspecials[(unsigned)(n+3)%16u]);_Float16 d=hb(specials[(unsigned)(n+3)%16u]);"
         "__bf16 r[]={-c,+c,-(-c),-(+c),-(-(-c)),+(-c),c};_Float16 s[]={-d,+d,-(-d),-(+d),-(-(-d)),+(-d),d};FOLD(r);FOLD(s);"
         "_Float16 t[3];strict_chains(d,t);FOLD(t);"
         "return (int)h;}",

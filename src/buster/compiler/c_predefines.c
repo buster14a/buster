@@ -3185,6 +3185,8 @@ static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
     [X86_EXTENSION_SHA512] = "sha512",
     [X86_EXTENSION_SM3] = "sm3",
     [X86_EXTENSION_SM4] = "sm4",
+    [X86_EXTENSION_MOVRS] = "movrs",
+    [X86_EXTENSION_AVX512BMM] = "avx512bmm",
 };
 
 // Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and
