@@ -1,0 +1,70 @@
+name: Qualify isolated intrinsic filter SIMD kernel
+on:
+  push:
+    branches: [chatgpt/performance-preparation-20261030]
+    paths: [.github/workflows/chatgpt-avx2-filter-validation.yml]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.repository_id == '1421805693'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 6f5c0645096b01831f58cde3cec5449cbf2454ad
+          persist-credentials: false
+      - name: Install the supported compiler
+        run: bash tools/ci/setup-hosted.sh
+      - name: Run the actual AVX2 catalog and filter kernels without changing production host dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -m1 '^model name' /proc/cpuinfo
+          grep -qw avx2 /proc/cpuinfo
+          clang --version
+          git rev-parse HEAD
+          cat > "$RUNNER_TEMP/filter-test.c" <<'EOF'
+          #define _GNU_SOURCE
+          #include <stdio.h>
+          #include <sys/mman.h>
+          #include <unistd.h>
+          #include <immintrin.h>
+          // This isolated module uses only AVX2, so exercise its actual vector branch on hosted AVX2 hardware.
+          // Do not change the production compiler's complete-AVX-512 host capability gate or qualify that host here.
+          #define BUSTER_HOST_ISA_H
+          #define BUSTER_SCALAR_PATH(requested) (requested)
+          #include "src/buster/compiler/c_builtin_intrinsic_catalog.c"
+          typedef struct BuiltinIntrinsicCatalogTest BuiltinIntrinsicCatalogTest;
+          struct BuiltinIntrinsicCatalogTest
+          {
+              uint64_t checks;
+              uint64_t failures;
+          };
+          static void builtin_intrinsic_catalog_test_expect(BuiltinIntrinsicCatalogTest* test, bool condition, const char* description)
+          {
+              test->checks += 1;
+              if (!condition)
+              {
+                  test->failures += 1;
+                  fprintf(stderr, "%s\n", description);
+              }
+          }
+          #include "src/buster/compiler/c_builtin_intrinsic_filter_test.c"
+          int main(void)
+          {
+              BuiltinIntrinsicCatalogTest test = { 0 };
+              builtin_intrinsic_catalog_test_filter(&test);
+              printf("actual AVX2 filter and catalog: %llu checks, %llu failures\n", (unsigned long long)test.checks, (unsigned long long)test.failures);
+              const int result = test.failures != 0;
+              return result;
+          }
+          EOF
+          clang -std=gnu17 -O3 -mavx2 -Wall -Wextra -Werror -Wno-unused-function -I. "$RUNNER_TEMP/filter-test.c" -o "$RUNNER_TEMP/filter-test"
+          "$RUNNER_TEMP/filter-test"
+          clang -std=gnu17 -O1 -g -mavx2 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all -I. "$RUNNER_TEMP/filter-test.c" -o "$RUNNER_TEMP/filter-test-sanitized"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$RUNNER_TEMP/filter-test-sanitized"
+          clang -std=c17 -O2 -Wall -Wextra -Werror tools/generate_builtin_intrinsic_filter.c -o "$RUNNER_TEMP/generate-filter"
+          "$RUNNER_TEMP/generate-filter" > "$RUNNER_TEMP/generated.inc"
+          cmp "$RUNNER_TEMP/generated.inc" src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc
