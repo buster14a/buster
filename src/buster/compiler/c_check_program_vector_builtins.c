@@ -7,12 +7,13 @@
 // instruction per element type where AVX-512 has one. A row's forms are EVEX ones of AVX-512F and AVX-512VL, which the
 // lowering requires of a function with vectors (check_lower_vector_target), and those of the extension each row names:
 // AVX-512BW's for 8- and 16-bit elements, DQ's conversions of 64-bit integers, VBMI's byte permutes, BITALG's and
-// VPOPCNTDQ's counts, CD's leading zero counts and VBMI2's funnel shifts. Floating elements take conversions between
+// VPOPCNTDQ's counts, CD's leading zero counts, VBMI2's funnel shifts and AVX512-BMM's byte bit reversal. Byte products
+// reduce through widened words, keeping their final low byte. Floating elements take conversions between
 // floats, doubles and integers of 32 and 64 bits, from half-precision and bf16 elements to floats and from floats to
 // half-precision ones, and the square roots and fused multiply-adds of floats and doubles, vectors and scalars
 // (check_vector_scalar_row). What the rows don't take is refused by name: the other floating elementwise functions and
 // conversions, floating reductions, leading zero counts of 8- and 16-bit elements, 8-bit funnel shifts, saturating
-// arithmetic of 32- and 64-bit elements and bit reversal. Included by c_check_program_lower.c after
+// arithmetic of 32- and 64-bit elements and bit reversal of elements wider than a byte. Included by c_check_program_lower.c after
 // c_check_program_x86.c, whose record helpers it takes.
 
 // A vector type as these rows read it: its lanes and bytes, its elements' bytes (1, 2, 4 or 8, or 0 for any other
@@ -693,7 +694,16 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     }
     else if (builtin == CBUILTIN_ELEMENTWISE_BITREVERSE)
     {
-        reason = "vector bit reversal";
+        if (shape.element == 1)
+        {
+            row->records[0] = check_vector_lower_record(BUSTER_CHECK_VECTOR_UNARY_PACKED(VBITREVB).forms[width], v0, 0, v0);
+            row->record_count = 1;
+            reason = (target->extensions & BUSTER_X86_EXTENSION(AVX512BMM)) == 0 ? "vector bit reversal of bytes without AVX512-BMM" : NULL;
+        }
+        else
+        {
+            reason = "vector bit reversal";
+        }
     }
     else
     {
@@ -855,8 +865,9 @@ static void check_vector_nontemporal_row(const TypeTable* types, TypeId vector, 
 // down to one element (the high 32 bytes of 64 by VEXTRACTI64X4, the high 16 of 32 by VEXTRACTI32X4, then within 16
 // bytes the high 8 by VPSHUFD 0x4e, the high 4 by VPSHUFD 0xb1, the high 2 by VPSRLD 16 and the high byte by VPSRLW 8,
 // each beside the low part in v1), then that element in the general register (VMOVQ, VMOVD, VPEXTRW or VPEXTRB). A
-// halving is two records: past three of them (elements under 8 bytes, or under 4 of a 32-byte vector), the first row
-// takes four, its result the 16 bytes left, and the second the rest. `count` gets the rows' number.
+// halving is two records. Byte product reductions first widen to words (pairing widened halves for 64-byte inputs).
+// Where a row's eight records aren't enough, split between complete halvings and carry the low live vector bytes
+// into the second row, at least 16. `count` gets the rows' number.
 static const char* check_vector_reduce_rows(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector,
                                             Tier0Operation rows[BUSTER_CHECK_VECTOR_REDUCE_ROWS], uint32_t* count)
 {
@@ -877,12 +888,34 @@ static const char* check_vector_reduce_rows(const TypeTable* types, const X86Tar
     }
     else
     {
-        const CheckVectorForms forms = check_vector_elementwise_forms(builtin, shape, &needed);
-        // The halvings' records, two each (64 bytes of 1-byte elements take six), then the element's move.
-        X86Instruction records[2 * 6 + 1];
+        CheckVectorShape operation = shape;
+        X86Instruction records[2 * BUSTER_TIER0_OPERATION_RECORDS];
         uint32_t r = 0;
-        uint32_t span = shape.bytes;
-        while (span > shape.element && forms.forms[0] != 0)
+        if (builtin == CBUILTIN_REDUCE_MUL && shape.element == 1)
+        {
+            // The low byte of a product is unchanged by zero-extending its factors and keeping intermediate products
+            // modulo 2^16. Widen first, then reuse the packed-word reduction. A 64-byte input has two widened halves:
+            // multiply them pairwise before reducing, keeping the live vector at 64 bytes and the plan at two rows.
+            operation.element = 2;
+            operation.bytes = shape.bytes < 64 ? 2 * shape.bytes : 64;
+            if (shape.bytes == 64)
+            {
+                records[r] = check_vector_lower_record(X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8, v0, 0, v1);
+                records[r++].immediate = 1;
+            }
+            const uint32_t widen = shape.bytes <= 8 ? X86_FORM_VPMOVZXBW_X_XM64_EVEX : shape.bytes == 16 ? X86_FORM_VPMOVZXBW_Y_XM128_EVEX :
+                                                                                                    X86_FORM_VPMOVZXBW_Z_YM256;
+            records[r++] = check_vector_lower_record(widen, v0, 0, v0);
+            if (shape.bytes == 64)
+            {
+                records[r++] = check_vector_lower_record(widen, v1, 0, v1);
+                records[r++] = check_vector_lower_record(X86_FORM_VPMULLW_Z_Z_ZM512, v0, v0, v1);
+            }
+        }
+        const uint32_t prefix = r;
+        const CheckVectorForms forms = check_vector_elementwise_forms(builtin, operation, &needed);
+        uint32_t span = operation.bytes;
+        while (span > operation.element && forms.forms[0] != 0)
         {
             span /= 2;
             const uint32_t at = span >= 16 ? span : 16;
@@ -925,11 +958,12 @@ static const char* check_vector_reduce_rows(const TypeTable* types, const X86Tar
         }
         else
         {
-            // One row where the halvings fit with the move; else the first takes four halvings (8 records), its result
-            // the 16 bytes left, and the second the rest.
+            // Split only between complete halvings: the temporary in v1 is private to its row. A widening prefix can
+            // leave an odd record count; it must not move a halving's shuffle into a different row from its multiply.
             const bool single = r <= BUSTER_TIER0_OPERATION_RECORDS;
-            const uint32_t taken = single ? r : 2 * 4;
-            const uint32_t left = (shape.bytes >> 4) >= 16 ? shape.bytes >> 4 : 16;
+            const uint32_t taken = single ? r : prefix + 2 * ((BUSTER_TIER0_OPERATION_RECORDS - prefix) / 2);
+            const uint32_t reduced = operation.bytes >> ((taken - prefix) / 2);
+            const uint32_t left = reduced >= 16 ? reduced : 16;
             memcpy(rows[0].records, records, taken * sizeof(*records));
             rows[0].record_count = (uint8_t)taken;
             rows[0].operand_count = 1;
