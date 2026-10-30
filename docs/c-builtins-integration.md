@@ -145,10 +145,10 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused GNU atomic variants and elementwise bit reversal remain zero, and
-the vector builtins the checker checks but no lowering takes yet (clang 23's
-past the 23 observed spellings, from 0x320 on) have
-`BUSTER_CBUILTIN_CAP_CHECKER` alone, so `__has_builtin` answers 0 for them.
+but refused GNU atomic variants remain zero, and the vector builtins the checker
+checks but no lowering takes (`__builtin_elementwise_clmul`, the masked memory
+builtins and the matrix ones) have `BUSTER_CBUILTIN_CAP_CHECKER` alone, so
+`__has_builtin` answers 0 for them.
 `test-preprocessor` checks the exact catalog and the advertised list, including
 raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
@@ -883,8 +883,8 @@ other generic vector builtins of clang 23 (#148), at catalog identities from
 `test-checker` compares each family's valid calls and one error each with
 clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
 and `test-check-builtins-vector` their type relations with independent
-expectations that clang confirms. No lowering takes them yet: `-c` and the
-direct path refuse each call by name. The module's exact
+expectations that clang confirms. Their lowering is in the checker guide's
+"Generic vector builtins". The module's exact
 type relations are separate from #147's ordinary vector operators. Shuffle
 indices use the full bounded source slice; conversion carries a separate type
 operand. Nondeterministic values inspect their argument's type without

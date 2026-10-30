@@ -1339,9 +1339,9 @@ Accepted but unimplemented attributes remain zero, including `always_inline`,
 implemented diagnostic consumer; reporting their C23 date codes would falsely
 advertise that consumer. Unpublished alias/ifunc/weakref/common/retention effects
 also remain zero. Generic GNU atomic load/store/exchange/compare-exchange,
-GNU lock-free queries, test-and-set/clear and elementwise bit reversal remain
-unadvertised, and so do the vector builtins the checker checks but no lowering
-takes yet (clang 23's past the 23 observed spellings); scalar GNU atomics and
+GNU lock-free queries and test-and-set/clear remain unadvertised, and so do
+the vector builtins the checker checks but no lowering takes (elementwise
+clmul, the masked memory builtins and the matrix ones); scalar GNU atomics and
 implemented C11 atomics are advertised.
 The query fix does not implement these outstanding semantics.
 

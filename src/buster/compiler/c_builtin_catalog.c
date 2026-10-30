@@ -48,11 +48,12 @@
     X(MUL_OVERFLOW, "__builtin_mul_overflow")
 
 // Exact source spellings and audited source capabilities. A zero entry is recognized but has no complete native
-// source path. In particular the generic GNU atomics and vector bit reversal remain refused. CHECKER alone is a builtin
-// the checker checks as clang does but no lowering takes yet: clang 23's vector builtins past the 23 observed ones (the
-// matrix ones' every call an error: no unit has a matrix type). Availability does not promise every operand type, ISA or
-// ABI: the typed checker and lowering retain their explicit restrictions. Family ranges leave room for later additions
-// without renumbering any published identity: those vector builtins start at 0x320.
+// source path. In particular the generic GNU atomics remain refused. CHECKER alone is a builtin the checker checks as
+// clang does but no lowering takes: __builtin_elementwise_clmul (VPCLMULQDQ is no form Tier 0's rows cover), the masked
+// memory builtins (their masks are vectors of bools, which the lowering has no class for) and the matrix ones (every call
+// an error: no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
+// and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
+// published identity: clang 23's vector builtins past the 23 observed ones start at 0x320.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -192,7 +193,7 @@
     X(FROB_RETURN_ADDR, 0x1f3u, "__builtin_frob_return_addr", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_ABS, 0x300u, "__builtin_elementwise_abs", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_ADD_SAT, 0x301u, "__builtin_elementwise_add_sat", BUSTER_CBUILTIN_SOURCE) \
-    X(ELEMENTWISE_BITREVERSE, 0x302u, "__builtin_elementwise_bitreverse", 0) \
+    X(ELEMENTWISE_BITREVERSE, 0x302u, "__builtin_elementwise_bitreverse", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_CLZG, 0x303u, "__builtin_elementwise_clzg", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_FMA, 0x304u, "__builtin_elementwise_fma", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_FSHL, 0x305u, "__builtin_elementwise_fshl", BUSTER_CBUILTIN_SOURCE) \
@@ -214,49 +215,49 @@
     X(NONTEMPORAL_LOAD, 0x315u, "__builtin_nontemporal_load", BUSTER_CBUILTIN_SOURCE) \
     X(NONTEMPORAL_STORE, 0x316u, "__builtin_nontemporal_store", BUSTER_CBUILTIN_SOURCE) \
     X(BIT_CAST, 0x317u, "__builtin_bit_cast", BUSTER_CBUILTIN_SOURCE) \
-    X(ELEMENTWISE_ACOS, 0x320u, "__builtin_elementwise_acos", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_ASIN, 0x321u, "__builtin_elementwise_asin", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_ATAN, 0x322u, "__builtin_elementwise_atan", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_COS, 0x323u, "__builtin_elementwise_cos", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_COSH, 0x324u, "__builtin_elementwise_cosh", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_EXP, 0x325u, "__builtin_elementwise_exp", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_EXP10, 0x326u, "__builtin_elementwise_exp10", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_EXP2, 0x327u, "__builtin_elementwise_exp2", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_LOG, 0x328u, "__builtin_elementwise_log", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_LOG10, 0x329u, "__builtin_elementwise_log10", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_LOG2, 0x32au, "__builtin_elementwise_log2", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_SIN, 0x32bu, "__builtin_elementwise_sin", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_SINH, 0x32cu, "__builtin_elementwise_sinh", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_TAN, 0x32du, "__builtin_elementwise_tan", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_TANH, 0x32eu, "__builtin_elementwise_tanh", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_CEIL, 0x330u, "__builtin_elementwise_ceil", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_FLOOR, 0x331u, "__builtin_elementwise_floor", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_TRUNC, 0x332u, "__builtin_elementwise_trunc", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_RINT, 0x333u, "__builtin_elementwise_rint", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_NEARBYINT, 0x334u, "__builtin_elementwise_nearbyint", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_ROUNDEVEN, 0x335u, "__builtin_elementwise_roundeven", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_ROUND, 0x336u, "__builtin_elementwise_round", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_CANONICALIZE, 0x337u, "__builtin_elementwise_canonicalize", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_ATAN2, 0x338u, "__builtin_elementwise_atan2", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_FMOD, 0x339u, "__builtin_elementwise_fmod", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_POW, 0x33au, "__builtin_elementwise_pow", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_COPYSIGN, 0x33bu, "__builtin_elementwise_copysign", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MAXIMUM, 0x33cu, "__builtin_elementwise_maximum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MINIMUM, 0x33du, "__builtin_elementwise_minimum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MAXNUM, 0x33eu, "__builtin_elementwise_maxnum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MINNUM, 0x33fu, "__builtin_elementwise_minnum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MAXIMUMNUM, 0x340u, "__builtin_elementwise_maximumnum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_MINIMUMNUM, 0x341u, "__builtin_elementwise_minimumnum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_LDEXP, 0x342u, "__builtin_elementwise_ldexp", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_CTZG, 0x343u, "__builtin_elementwise_ctzg", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(ELEMENTWISE_ACOS, 0x320u, "__builtin_elementwise_acos", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_ASIN, 0x321u, "__builtin_elementwise_asin", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_ATAN, 0x322u, "__builtin_elementwise_atan", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_COS, 0x323u, "__builtin_elementwise_cos", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_COSH, 0x324u, "__builtin_elementwise_cosh", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_EXP, 0x325u, "__builtin_elementwise_exp", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_EXP10, 0x326u, "__builtin_elementwise_exp10", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_EXP2, 0x327u, "__builtin_elementwise_exp2", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_LOG, 0x328u, "__builtin_elementwise_log", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_LOG10, 0x329u, "__builtin_elementwise_log10", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_LOG2, 0x32au, "__builtin_elementwise_log2", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_SIN, 0x32bu, "__builtin_elementwise_sin", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_SINH, 0x32cu, "__builtin_elementwise_sinh", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_TAN, 0x32du, "__builtin_elementwise_tan", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_TANH, 0x32eu, "__builtin_elementwise_tanh", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_CEIL, 0x330u, "__builtin_elementwise_ceil", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_FLOOR, 0x331u, "__builtin_elementwise_floor", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_TRUNC, 0x332u, "__builtin_elementwise_trunc", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_RINT, 0x333u, "__builtin_elementwise_rint", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_NEARBYINT, 0x334u, "__builtin_elementwise_nearbyint", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_ROUNDEVEN, 0x335u, "__builtin_elementwise_roundeven", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_ROUND, 0x336u, "__builtin_elementwise_round", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_CANONICALIZE, 0x337u, "__builtin_elementwise_canonicalize", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_ATAN2, 0x338u, "__builtin_elementwise_atan2", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_FMOD, 0x339u, "__builtin_elementwise_fmod", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_POW, 0x33au, "__builtin_elementwise_pow", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_COPYSIGN, 0x33bu, "__builtin_elementwise_copysign", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MAXIMUM, 0x33cu, "__builtin_elementwise_maximum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MINIMUM, 0x33du, "__builtin_elementwise_minimum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MAXNUM, 0x33eu, "__builtin_elementwise_maxnum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MINNUM, 0x33fu, "__builtin_elementwise_minnum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MAXIMUMNUM, 0x340u, "__builtin_elementwise_maximumnum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_MINIMUMNUM, 0x341u, "__builtin_elementwise_minimumnum", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_LDEXP, 0x342u, "__builtin_elementwise_ldexp", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_CTZG, 0x343u, "__builtin_elementwise_ctzg", BUSTER_CBUILTIN_SOURCE) \
     X(ELEMENTWISE_CLMUL, 0x344u, "__builtin_elementwise_clmul", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_PDEP, 0x345u, "__builtin_elementwise_pdep", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(ELEMENTWISE_PEXT, 0x346u, "__builtin_elementwise_pext", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(REDUCE_XOR, 0x350u, "__builtin_reduce_xor", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(REDUCE_MAXIMUM, 0x351u, "__builtin_reduce_maximum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(REDUCE_MINIMUM, 0x352u, "__builtin_reduce_minimum", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(REDUCE_ASSOC_FADD, 0x353u, "__builtin_reduce_assoc_fadd", BUSTER_CBUILTIN_CAP_CHECKER) \
-    X(REDUCE_IN_ORDER_FADD, 0x354u, "__builtin_reduce_in_order_fadd", BUSTER_CBUILTIN_CAP_CHECKER) \
+    X(ELEMENTWISE_PDEP, 0x345u, "__builtin_elementwise_pdep", BUSTER_CBUILTIN_SOURCE) \
+    X(ELEMENTWISE_PEXT, 0x346u, "__builtin_elementwise_pext", BUSTER_CBUILTIN_SOURCE) \
+    X(REDUCE_XOR, 0x350u, "__builtin_reduce_xor", BUSTER_CBUILTIN_SOURCE) \
+    X(REDUCE_MAXIMUM, 0x351u, "__builtin_reduce_maximum", BUSTER_CBUILTIN_SOURCE) \
+    X(REDUCE_MINIMUM, 0x352u, "__builtin_reduce_minimum", BUSTER_CBUILTIN_SOURCE) \
+    X(REDUCE_ASSOC_FADD, 0x353u, "__builtin_reduce_assoc_fadd", BUSTER_CBUILTIN_SOURCE) \
+    X(REDUCE_IN_ORDER_FADD, 0x354u, "__builtin_reduce_in_order_fadd", BUSTER_CBUILTIN_SOURCE) \
     X(MASKED_LOAD, 0x360u, "__builtin_masked_load", BUSTER_CBUILTIN_CAP_CHECKER) \
     X(MASKED_STORE, 0x361u, "__builtin_masked_store", BUSTER_CBUILTIN_CAP_CHECKER) \
     X(MASKED_EXPAND_LOAD, 0x362u, "__builtin_masked_expand_load", BUSTER_CBUILTIN_CAP_CHECKER) \
