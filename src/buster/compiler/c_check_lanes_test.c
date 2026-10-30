@@ -55,10 +55,12 @@
 //   an executable and two sources' objects, whatever lanes their emissions take; and when its second lane fails to start
 //   (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one lane, writing --lanes 1's object.
 // - Commands in one process (#905): a session of 4 lanes whose flow runs, three times, a command that fails, one that
-//   writes an object on 4 lanes, one on 2 by --worker-budget 2 and a -fsyntax-only, every lane calling each
-//   (run_check_command's collective call): each lane the same thread throughout, the session's barrier advancing, no
-//   thread created, the failure's status and each object --lanes 1's in a process of its own. Then the same commands from
-//   lane 0 alone while the others serve its regions (a test's serial code), with the same results.
+//   writes an object on 4 lanes, one on 2 by --worker-budget 2, a -fsyntax-only, and -fsyntax-only of two sources by 3
+//   lanes and by 1, every lane calling each (run_check_command's collective call): each lane the same thread
+//   throughout, the session's barrier advancing, no thread created, the failure's status and each object --lanes 1's in
+//   a process of its own. Then the same commands from lane 0 alone while the others serve its regions (a test's serial
+//   code), with the same results, lane 0 serving the session's lanes again after each: two sources' command serves its
+//   own region's lanes.
 
 #include "worker_budget_test.c"
 
@@ -1834,7 +1836,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
 }
 
 // The commands of check_lanes_test_session_commands: their arguments (but the executable's), and what each must return.
-#define BUSTER_CHECK_LANES_SESSION_COMMANDS 4
+#define BUSTER_CHECK_LANES_SESSION_COMMANDS 6
 #define BUSTER_CHECK_LANES_SESSION_ROUNDS 3
 #define BUSTER_CHECK_LANES_SESSION_LANES 4
 typedef struct CheckLanesSession CheckLanesSession;
@@ -1890,7 +1892,8 @@ static void check_lanes_test_session_flow(void* argument)
     }
 }
 
-// The same commands from lane 0 alone while the others serve its regions, as a test's serial code calls them.
+// The same commands from lane 0 alone while the others serve its regions, as a test's serial code calls them: after each,
+// lane 0 serves the session's lanes again, though two sources' command serves its region's lanes.
 static void check_lanes_test_session_served(void* argument)
 {
     CheckLanesSession* session = argument;
@@ -1900,6 +1903,8 @@ static void check_lanes_test_session_served(void* argument)
         for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
         {
             check_lanes_test_session_result(session, c, run_check_command((int)session->counts[c], session->arguments[c], true));
+            const bool serving = lane_serving() && thread_context.served.group == &thread_context.session->group;
+            session->failures += serving && thread_context.served.count == BUSTER_CHECK_LANES_SESSION_LANES ? 0 : 1;
         }
         lane_serve_end();
     }
@@ -1915,12 +1920,14 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
     static CheckLanesSession session;
     memset(&session, 0, sizeof(session));
     char program[PATH_MAX];
+    char second[PATH_MAX];
     char broken[PATH_MAX];
     char reference[PATH_MAX];
     char four[PATH_MAX];
     char two[PATH_MAX];
     char errors[PATH_MAX];
     snprintf(program, sizeof(program), "%s/program_3.c", directory);
+    snprintf(second, sizeof(second), "%s/program_2.c", directory);
     snprintf(broken, sizeof(broken), "%s/session_broken.c", directory);
     snprintf(reference, sizeof(reference), "%s/session_reference.o", directory);
     snprintf(four, sizeof(four), "%s/session_four.o", directory);
@@ -1932,14 +1939,18 @@ static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const 
     char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
     const bool referenced = written && closed && check_lanes_test_run(reference_arguments, errors) == 0;
     check_lanes_test_expect(tally, referenced, "the session's reference object and failing source", program);
+    // Two sources' commands between the others: each serves its own lanes in the served flow, after which the next ones
+    // must find lane 0 serving the session's lanes again.
     char* commands[BUSTER_CHECK_LANES_SESSION_COMMANDS][8] = {
         { (char*)"-c", (char*)"-o", (char*)"/dev/null", broken, NULL },
+        { (char*)"--lanes", (char*)"3", (char*)"-fsyntax-only", second, program, NULL },
         { (char*)"--lanes", (char*)"4", (char*)"-c", (char*)"-o", four, program, NULL },
+        { (char*)"--lanes", (char*)"1", (char*)"-fsyntax-only", second, program, NULL },
         { (char*)"--lanes", (char*)"4", (char*)"--worker-budget", (char*)"2", (char*)"-c", (char*)"-o", two, program },
         { (char*)"-fsyntax-only", program, NULL },
     };
-    const int expected[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { 1, 0, 0, 0 };
-    const char* objects[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { NULL, four, two, NULL };
+    const int expected[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { 1, 0, 0, 0, 0, 0 };
+    const char* objects[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { NULL, NULL, four, NULL, two, NULL };
     for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
     {
         uint32_t count = 0;

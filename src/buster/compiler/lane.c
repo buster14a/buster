@@ -1649,24 +1649,28 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
 }
 
 // lane_run under a session: a region of lane 0's announced to the lanes that serve it, or an operation of a lane alone.
+// The operation may serve lanes of its own (a command of several units, run as a region of a test's served lanes), which
+// lane_serve_begin records over the caller's: the caller's serving is restored after it.
 static bool lane_session_region(LaneSession* session, uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
 {
-    const uint32_t served = thread_context.serving ? thread_context.served.count : thread_context.lane.count;
-    const uint32_t lanes = count < served ? count : served;
+    const Lane served = thread_context.served;
+    const bool serving = thread_context.serving;
+    const uint32_t room = serving ? served.count : thread_context.lane.count;
+    const uint32_t lanes = count < room ? count : room;
     bool result = count >= 1 && entry != 0 && (cpus == 0 || session->has_cpus);
     for (uint32_t i = 0; result && cpus != 0 && i < lanes; i += 1)
     {
         result = cpus[i] == session->cpus[i];
     }
     const uint64_t taken = thread_context.taken;
-    if (result && thread_context.serving && thread_context.served.count > 1)
+    if (result && serving && served.count > 1)
     {
         // The region's operation goes on the served group's line of lane_run's (each group served at its own depth has
         // its own), which only the region's lanes read, before they arrive at its end (lane_widen), which lane 0 waits
         // for before it writes the line again. The lanes the region leaves out read nothing but the announcement: lane
         // 0 doesn't wait for them, and they may still be on their way to the next announcement when it writes.
         const Lane alone = thread_context.lane;
-        thread_context.lane = thread_context.served;
+        thread_context.lane = served;
         thread_context.serving = false;
         thread_context.lane.group->entry = entry;
         thread_context.lane.group->argument = argument;
@@ -1676,14 +1680,14 @@ static bool lane_session_region(LaneSession* session, uint32_t count, void (*ent
             entry(argument);
         }
         lane_widen();
-        thread_context.serving = true;
         thread_context.lane = alone;
     }
     else if (result && thread_context.lane.count == 1)
     {
-        // A lane alone, or lane 0 serving a group of one, which is alone too.
+        // A lane alone, or lane 0 serving a group of one, which is alone too, and serves nothing in the operation.
         const Lane previous = thread_context.lane;
         thread_context.lane = (Lane){ .count = 1 };
+        thread_context.serving = false;
         thread_context.taken = 0;
         entry(argument);
         thread_context.lane = previous;
@@ -1692,6 +1696,8 @@ static bool lane_session_region(LaneSession* session, uint32_t count, void (*ent
     {
         result = false;
     }
+    thread_context.served = served;
+    thread_context.serving = serving;
     thread_context.taken = taken;
     return result;
 }
