@@ -4886,57 +4886,6 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
     unlink(source);
 }
 
-// A test command of the driver's on one session (#905): lane 0 runs it, and the driver's commands it runs in-process
-// are regions of the session's lanes, which the others serve, so that none of them creates or joins a thread; a child it
-// forks forgets the session, and that child's commands start their own. ThreadSanitizer kills a child that starts a
-// thread after a fork from several, and these tests fork children that compile on lanes of their own: under it, they run
-// on no session (0 lanes), each command they run in-process starting its own, and fork from one thread.
-#if __has_feature(thread_sanitizer)
-#define BUSTER_CHECK_TEST_SESSION_LANES 0
-#else
-#define BUSTER_CHECK_TEST_SESSION_LANES 8
-#endif
-typedef struct CheckTestSession CheckTestSession;
-struct CheckTestSession
-{
-    int (*run)(int argc, char** argv);
-    int argc;
-    char** argv;
-    int result;
-};
-
-static void check_test_session_flow(void* argument)
-{
-    CheckTestSession* test = argument;
-    if (lane_index() == 0)
-    {
-        lane_serve_begin();
-        test->result = test->run(test->argc, test->argv);
-        lane_serve_end();
-    }
-    else
-    {
-        lane_serve();
-    }
-}
-
-static int check_test_in_session(int (*run)(int argc, char** argv), int argc, char** argv)
-{
-    static LaneSession session;
-    CheckTestSession test = {
-        .run = run,
-        .argc = argc,
-        .argv = argv,
-        .result = 1,
-    };
-    if (BUSTER_CHECK_TEST_SESSION_LANES == 0 ||
-        lane_session_run(&session, BUSTER_CHECK_TEST_SESSION_LANES, NULL, check_test_session_flow, &test, BUSTER_LANE_SESSION_LAZY) == 0)
-    {
-        test.result = run(argc, argv);
-    }
-    return test.result;
-}
-
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
