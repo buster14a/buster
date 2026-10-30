@@ -1662,8 +1662,9 @@ static bool lane_session_region(LaneSession* session, uint32_t count, void (*ent
     if (result && thread_context.serving && thread_context.served.count > 1)
     {
         // The region's operation goes on the served group's line of lane_run's (each group served at its own depth has
-        // its own), which the serving lanes read before they arrive at the next announcement, the earliest lane 0
-        // writes it again.
+        // its own), which only the region's lanes read, before they arrive at its end (lane_widen), which lane 0 waits
+        // for before it writes the line again. The lanes the region leaves out read nothing but the announcement: lane
+        // 0 doesn't wait for them, and they may still be on their way to the next announcement when it writes.
         const Lane alone = thread_context.lane;
         thread_context.lane = thread_context.served;
         thread_context.serving = false;
@@ -1949,17 +1950,16 @@ static void lane_serve_end(void)
     lane_park_broadcast(0, 0);
 }
 
-// Each announcement is a region's lanes, or 0 for the end; the region's operation is on the group's lane_run line.
+// Each announcement is a region's lanes, or 0 for the end; the region's operation is on the group's lane_run line, which
+// only the region's lanes read (lane_session_region).
 static void lane_serve(void)
 {
     LaneGroup* group = thread_context.lane.group;
     for (uint64_t lanes = lane_park_broadcast(0, 0); lanes != 0; lanes = lane_park_broadcast(0, 0))
     {
-        void (*entry)(void* argument) = group->entry;
-        void* argument = group->argument;
         if (lane_narrow((uint32_t)lanes))
         {
-            entry(argument);
+            group->entry(group->argument);
         }
         lane_widen();
     }

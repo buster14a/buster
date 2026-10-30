@@ -234,7 +234,7 @@ struct CheckEmitBoard
 
 // A unit's emission in its command's flow (#905, the C driver's): lane 0 runs the unit's stages alone, and each of its
 // emissions that pays for more than one lane is a round, which lane 0 announces at the flow's rendezvous with the
-// emission's run and lanes (check_program_emit_round). Every lane of the flow runs the round's wide part
+// emission's lanes (check_program_emit_round). Every lane of the flow runs the round's wide part
 // (check_program_emit_wide), the first `lanes` of them the bodies' parts (check_program_emit_lane), and lane 0 goes on
 // alone. The others follow the rounds (check_program_emit_follow) until lane 0 announces the flow's end
 // (check_program_emit_flow_end).
@@ -243,9 +243,10 @@ struct CheckEmitFlow
 {
     // The flow's group, which lane 0 leaves to run alone (check_program_emit_flow_begin).
     Lane group;
-    // The round lane 0 announced last, which the others read before they arrive at the next announcement.
+    // The emission of the round lane 0 announced last. Only the round's lanes read it, before they arrive at the round's
+    // end, which lane 0 waits for before it writes another (lane_widen); the lanes a round leaves out read nothing but
+    // the announcement, and may still be on their way to the next one when lane 0 writes.
     struct CheckEmitRun* run;
-    uint32_t lanes;
 };
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
@@ -738,18 +739,18 @@ static void check_program_emit_flow_end(CheckEmitFlow* flow)
 }
 
 // A round's wide part, on every lane of the flow: its first `lanes` lanes take the bodies' parts.
-static void check_program_emit_wide(CheckEmitRun* run, uint32_t lanes)
+static void check_program_emit_wide(CheckEmitFlow* flow, uint32_t lanes)
 {
     if (lane_narrow(lanes))
     {
-        check_program_emit_lane(run);
+        check_program_emit_lane(flow->run);
     }
     lane_widen();
 }
 
-// Lane 0, alone in the flow: a round of the emission `run` on `lanes` of the flow's lanes, after which it goes on alone.
-// Its first round learns how the session's lanes started (lane_session_settle): false if they didn't, for the bodies
-// to go on one lane.
+// Lane 0, alone in the flow: a round of the emission `run` on `lanes` of the flow's lanes (at least 1), after which it
+// goes on alone. Its first round learns how the session's lanes started (lane_session_settle): false if they didn't, for
+// the bodies to go on one lane.
 static bool check_program_emit_round(CheckEmitFlow* flow, CheckEmitRun* run, uint32_t lanes)
 {
     const bool started = lane_session_settle() > 1;
@@ -758,20 +759,19 @@ static bool check_program_emit_round(CheckEmitFlow* flow, CheckEmitRun* run, uin
         const Lane alone = lane_alone();
         lane_restore(flow->group);
         flow->run = run;
-        flow->lanes = lanes;
-        lane_park_broadcast(1, 0);
-        check_program_emit_wide(run, lanes);
+        lane_park_broadcast(lanes, 0);
+        check_program_emit_wide(flow, lanes);
         lane_restore(alone);
     }
     return started;
 }
 
-// The flow's other lanes: each round's wide part, until lane 0 ends the flow.
+// The flow's other lanes: each round's wide part, on the lanes its announcement gives, until lane 0 ends the flow (0).
 static void check_program_emit_follow(CheckEmitFlow* flow)
 {
-    for (uint64_t round = lane_park_broadcast(0, 0); round != 0; round = lane_park_broadcast(0, 0))
+    for (uint64_t lanes = lane_park_broadcast(0, 0); lanes != 0; lanes = lane_park_broadcast(0, 0))
     {
-        check_program_emit_wide(flow->run, flow->lanes);
+        check_program_emit_wide(flow, (uint32_t)lanes);
     }
 }
 
