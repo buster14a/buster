@@ -17,6 +17,14 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
+`ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C
+`tests/ir/vector-i32.c` fixture (#732) are original project material under the
+default terms. They consume this repository's #717 producer, exact-form semantic
+decoder and existing IR/action-model contracts. The independent lane expectations
+are ordinary C arithmetic; no external implementation, fixtures or metadata are
+imported. Native Tier 0 runs are a separate gated execution oracle.
+
 `c_builtin_intrinsic_filter.c`, `c_builtin_intrinsic_filter_hash.h`,
 `c_builtin_intrinsic_filter_test.c` and `tools/generate_builtin_intrinsic_filter.c`
 (#893) are original project code under the default terms. The generated

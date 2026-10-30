@@ -202,6 +202,7 @@ rm -r "$objects"
 ./build/compiler test-ir
 ./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
+./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
 ./build/compiler test-ir-metamorphic --seed 731 --count 6

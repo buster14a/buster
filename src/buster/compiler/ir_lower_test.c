@@ -550,7 +550,7 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
 
 static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
 {
-    bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->slot_count == b->slot_count && a->constant_count == b->constant_count &&
+    bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->slot_count == b->slot_count && a->constant_count == b->constant_count && a->vector_constant_count == b->vector_constant_count &&
                  a->address_count == b->address_count && a->call_count == b->call_count && a->extra_count == b->extra_count && a->call_type_count == b->call_type_count &&
                  a->parameter_count == b->parameter_count && a->result_type == b->result_type && a->symbol_count == b->symbol_count &&
                  a->label_count == b->label_count && a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count &&
@@ -562,6 +562,10 @@ static bool ir_lower_test_equal(const IrFunction* a, const IrFunction* b)
         equal = memcmp(a->op, b->op, count) == 0 && memcmp(a->type, b->type, count) == 0 && memcmp(a->flags, b->flags, count) == 0 &&
                 memcmp(a->alignment_log2, b->alignment_log2, count) == 0 && memcmp(a->a, b->a, count * 4) == 0 && memcmp(a->b, b->b, count * 4) == 0 &&
                 memcmp(a->c, b->c, count * 4) == 0 && memcmp(a->block_offsets, b->block_offsets, ((size_t)a->block_count + 1) * 4) == 0;
+        for (uint32_t k = 0; k < a->vector_constant_count && equal; k += 1)
+        {
+            equal = memcmp(a->vector_constants + k, b->vector_constants + k, sizeof(IrSimdValue)) == 0;
+        }
         for (uint32_t k = 0; k < a->constant_count && equal; k += 1)
         {
             equal = a->constants[k].low == b->constants[k].low && a->constants[k].high == b->constants[k].high;
@@ -2776,6 +2780,8 @@ static void ir_lower_test_variadic_frames(IrLowerTestTally* tally)
     arena_release(&arena);
 }
 
+#include "ir_simd_lower_test.c"
+
 static int run_ir_lower_tests(int argc, char** argv)
 {
     uint64_t seed = 131;
@@ -2823,6 +2829,7 @@ static int run_ir_lower_tests(int argc, char** argv)
         {
             0
         };
+        ir_simd_lower_tests(&tally);
         ir_lower_test_fixtures(&tally);
         ir_lower_test_failures(&tally);
         ir_lower_test_local_roles(&tally);

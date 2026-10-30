@@ -11,6 +11,34 @@
 // Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink and count/fill replay in ir_lower_emit.c;
 // ir_lower_typed_path.
 
+// Preserve the typed validator's width-qualified stack classes. The byte classifier remains unchanged for scalar
+// entries; only VECTOR entries need this sparse metadata lookup. DUP and control-only entries inherit their stack.
+static uint32_t ir_typed_vector_bytes(const Tier0Function* input, uint32_t entry)
+{
+    const uint64_t value = input->values[entry];
+    uint32_t bytes = 0;
+    switch (input->kinds[entry])
+    {
+        case BUSTER_TYPED_CONST: bytes = input->vector_constant_bytes[value]; break;
+        case BUSTER_TYPED_LOCAL:
+        case BUSTER_TYPED_STORE_LOCAL:
+        case BUSTER_TYPED_SET_LOCAL: bytes = input->local_sizes[value]; break;
+        case BUSTER_TYPED_LOAD:
+        case BUSTER_TYPED_STORE:
+        case BUSTER_TYPED_SET: bytes = (uint32_t)value; break;
+        case BUSTER_TYPED_X86: bytes = input->operations[value].result_bytes; break;
+        default: break;
+    }
+    return bytes;
+}
+
+static uint8_t ir_typed_stack_class(const Tier0Function* input, uint32_t entry)
+{
+    const uint8_t class = input->classes[entry];
+    const uint32_t bytes = class == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, entry) : 0;
+    return bytes != 0 ? BUSTER_TIER0_STACK_VECTOR(bytes) : class;
+}
+
 typedef struct IrTypedPlan IrTypedPlan;
 struct IrTypedPlan
 {
@@ -24,8 +52,9 @@ struct IrTypedPlan
     uint64_t* stack_offsets;
     uint32_t maximum_depth;
     uint32_t maximum_spill_depth;
-    // The depth slots' bytes and alignment: 16 for a function with values of the memory classes, else 8.
+    // The depth slots' bytes and alignment: at least 8, 16 for scalar memory classes, or the widest admitted vector.
     uint32_t spill_bytes;
+    const IrSimdTypedOperation* operations;
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
     // block (the emitter's last); a jump table's goes to its table's labels from its own block.
     uint32_t indirect;
@@ -139,7 +168,8 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         plan.spill_bytes = 8;
         for (uint32_t i = 0; i < count; i += 1)
         {
-            plan.spill_bytes = tier0_class_memory(input->classes[i]) ? 16 : plan.spill_bytes;
+            const uint32_t bytes = input->classes[i] == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, i) : tier0_class_memory(input->classes[i]) ? 16 : 8;
+            plan.spill_bytes = bytes > plan.spill_bytes ? bytes : plan.spill_bytes;
         }
         for (uint32_t i = 0; i <= count && ok; i += 1)
         {
@@ -163,7 +193,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
             if (i < count && ok)
             {
                 const uint8_t kind = input->kinds[i];
-                const uint8_t class = input->classes[i];
+                const uint8_t class = ir_typed_stack_class(input, i);
                 const uint64_t value = input->values[i];
                 switch (kind)
                 {
@@ -172,8 +202,16 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_LOCAL_ADDRESS:
                 case BUSTER_TYPED_GLOBAL:
                 case BUSTER_TYPED_GLOBAL_ADDRESS:
-                case BUSTER_TYPED_DUP:
                 case BUSTER_TYPED_STACK_SAVE:
+                    stack[depth] = class;
+                    depth += 1;
+                    break;
+                case BUSTER_TYPED_DUP:
+                    stack[depth] = stack[depth - 1];
+                    depth += 1;
+                    break;
+                case BUSTER_TYPED_X86:
+                    depth -= input->operations[value].operand_count;
                     stack[depth] = class;
                     depth += 1;
                     break;
@@ -298,7 +336,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 // Classification and the two-pass emission sink
 
 // Each class's IR type: long double's F80 and the 128-bit integers' I128 and U128 are values in the IR, which Tier 0 keeps
-// in its frame slots. A vector's (VECTOR) has none: the adapter refuses vectors and X86 rows.
+// in its frame slots. VECTOR is resolved separately from its width metadata by the explicit-target entry points.
 static const uint8_t ir_typed_types[16] = {
     IR_VOID,
     IR_I8,
@@ -318,6 +356,14 @@ static const uint8_t ir_typed_types[16] = {
 
 // Which classes are signed and which floating, as byte tables both classifications read: Tier 0's own predicates leave
 // out the memory classes (I128 signed, F80 floating), which it compiles apart.
+static IrType ir_typed_stack_type(uint8_t class)
+{
+    const IrType type = class >= BUSTER_TYPED_CLASS_LIMIT ?
+                            class == BUSTER_TIER0_STACK_VECTOR(16) ? IR_V4I32 : class == BUSTER_TIER0_STACK_VECTOR(32) ? IR_V8I32 : IR_V16I32 :
+                            (IrType)ir_typed_types[class];
+    return type;
+}
+
 static const uint8_t ir_typed_signed_classes[16] = {
     [BUSTER_TYPED_CLASS_I8] = 1,
     [BUSTER_TYPED_CLASS_I16] = 1,
@@ -472,10 +518,53 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_constant(IrTypedS
     return ir_typed_wide_constant(sink, type, bits, 0);
 }
 
+// Sparse payloads are canonicalized: unused bytes in a producer's 64-byte constant row are not IR value bits.
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_constant(IrTypedSink* sink, IrType type, const uint64_t* words)
+{
+    const uint32_t constant = (uint32_t)sink->sizes.vector_constant_count;
+    if (sink->output != 0)
+    {
+        IrSimdValue value = {0};
+        memcpy(value.words, words, ir_type_bits[type] / 8);
+        sink->output->vector_constants[constant] = value;
+    }
+    sink->sizes.vector_constant_count += 1;
+    return ir_typed_emit(sink, IR_VCONST, type, constant, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+}
+
+static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(IrTypedSink* sink, const IrSimdTypedOperation* operation, IrType type, const uint32_t* operands)
+{
+    static const uint8_t ops[IR_SIMD_OPERATION_COUNT] = {
+        [IR_SIMD_ADD] = IR_ADD,
+        [IR_SIMD_SUB] = IR_SUB,
+        [IR_SIMD_MUL] = IR_MUL,
+        [IR_SIMD_AND] = IR_AND,
+        [IR_SIMD_OR] = IR_OR,
+        [IR_SIMD_XOR] = IR_XOR,
+        [IR_SIMD_NOT] = IR_NOT,
+    };
+    uint32_t value = BUSTER_IR_NONE;
+    if (operation->expand_mask)
+    {
+        const IrType mask_type = type == IR_V16I32 ? IR_M16 : IR_M8;
+        const uint32_t mask = ir_typed_emit(sink, IR_VCMP, mask_type, operands[0], operands[1], operation->predicate, 0);
+        const uint64_t zero[8] = {0};
+        const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+        const uint32_t active = ir_typed_vector_constant(sink, type, ones);
+        const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
+        value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+    }
+    else
+    {
+        value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    return value;
+}
+
 static uint8_t ir_typed_alignment(uint8_t class)
 {
-    const uint32_t bytes = tier0_class_bytes(class);
-    return bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
+    const uint32_t bytes = class >= BUSTER_TYPED_CLASS_LIMIT ? (class - BUSTER_TYPED_CLASS_LIMIT) * 4 : tier0_class_bytes(class);
+    return class >= BUSTER_TYPED_CLASS_LIMIT ? (bytes == 64 ? 6 : bytes == 32 ? 5 : 4) : bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
 }
 
 static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSink* sink, uint32_t value, uint8_t from_class, uint8_t to_class)
@@ -710,7 +799,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
 
-static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
+static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features)
 {
     (void)vector;
 
@@ -744,6 +833,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.instruction = typed.node;
         }
     }
+    IrSimdTypedOperation* operations = 0;
     for (uint32_t i = 0; check.error == IR_OK && i < input->count; i += 1)
     {
         const uint8_t kind = input->kinds[i];
@@ -760,20 +850,47 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_X86 || kind == BUSTER_TYPED_FRAME_ADDRESS)
+        else if (kind == BUSTER_TYPED_FRAME_ADDRESS)
         {
-            // A machine operation (#136) and a frame's address (#148), which this adapter doesn't lower and the plan and
-            // the emitter would take for a binary operation: no function of the corpora has one (docs/ir.md).
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
+        else if (kind == BUSTER_TYPED_X86)
+        {
+            if (operations == 0)
+            {
+                operations = BUSTER_ARENA_PUSH_ARRAY(scratch, IrSimdTypedOperation, input->operation_count);
+            }
+            const IrSimdTypedStatus status = operations != 0 ? ir_simd_typed_operation(input->operations + value, target_features, operations + value) : IR_SIMD_TYPED_INVALID;
+            if (operations == 0 || status != IR_SIMD_TYPED_OK)
+            {
+                check.error = operations == 0 ? IR_ERROR_MEMORY : IR_ERROR_UNSUPPORTED;
+                check.instruction = i;
+                check.detail = status;
+            }
+        }
         else if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
-            // Vectors (#136) have no IR type: their operations are X86 rows, which this adapter refuses too.
-            check.error = IR_ERROR_TYPE;
-            check.instruction = i;
+            const uint32_t bytes = ir_typed_vector_bytes(input, i);
+            const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | (bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0);
+            // DUP, DISCARD and JUMP_VALUE have no own width; their source has already been admitted. All real
+            // transports must be full 128/256/512-bit values. In particular, the 4/8-byte SSE carrier forms refuse.
+            const bool inherited = kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE;
+            if (!inherited && bytes != 16 && bytes != 32 && bytes != 64)
+            {
+                check.error = IR_ERROR_UNSUPPORTED;
+                check.detail = IR_SIMD_TYPED_UNSUPPORTED;
+                check.instruction = i;
+            }
+            else if (!inherited && (target_features & required) != required)
+            {
+                check.error = IR_ERROR_UNSUPPORTED;
+                check.detail = IR_SIMD_TYPED_TARGET;
+                check.instruction = i;
+            }
         }
     }
+
     IrTypedPlan plan = {0};
     uint8_t* ops = 0;
     uint8_t* types = 0;
@@ -782,6 +899,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     if (check.error == IR_OK)
     {
         plan = ir_typed_plan(input, scratch);
+        plan.operations = operations;
         if (plan.error != 0)
         {
             check.error = plan.error_code;
@@ -803,6 +921,17 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     if (check.error == IR_OK)
     {
         ir_typed_classify(input, ops, types, BUSTER_VECTOR_PATH(vector));
+        if (input->vectors)
+        {
+            for (uint32_t i = 0; i < input->count; i += 1)
+            {
+                if (input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
+                {
+                    const uint8_t class = ir_typed_stack_class(input, i);
+                    types[i] = class >= BUSTER_TYPED_CLASS_LIMIT ? ir_typed_stack_type(class) : IR_VOID;
+                }
+            }
+        }
         const IrSizes sizes = ir_typed_count_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
         check.error = ir_create(output, &sizes, &candidate);
         if (check.error == IR_OK)
@@ -824,6 +953,12 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     return check;
 }
 
+// Preserve scalar clients of the internal path as well as the public entry points.
+static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0);
+}
+
 // The legacy typed stream erases pointer categories into U64, so its i64 values
 // cross explicit ptrtoint/inttoptr instructions at memory/address boundaries.
 // result_type is mandatory semantic information; it is not inferred from the
@@ -840,11 +975,24 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 #if !BUSTER_HOST_VECTOR
     return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
 #else
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0);
 #endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0);
+}
+
+// Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
+// selected target, not borrow the compiler host's AVX-512 capabilities. IR_SIMD_TYPED_* in detail distinguishes
+// unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
+static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features);
+}
+
+static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
+{
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features);
 }
