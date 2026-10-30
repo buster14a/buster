@@ -74,7 +74,9 @@
 //     cuts, a newline, a CPU whose sibling's list doesn't parse (so that it must be skipped), siblings past the mask's
 //     words and an empty mask, against counts worked out by hand; a topology that doesn't exist, every CPU a core; and
 //     lane_core_count against /proc/cpuinfo's cores of this process's CPUs (lane_test_cpuinfo), where it lists them,
-//     then with the process's affinity set to a core's two siblings, one, and to CPUs of two cores, two.
+//     then with the process's affinity set to a core's two siblings, one, and to CPUs of two cores, two. Before them,
+//     that oracle's reader on texts of /proc/cpuinfo's shape (lane_test_cpuinfo_controls): four processors' blocks with
+//     long flags lines of names with digits, values at and past their bounds, malformed values and near-miss keys.
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -1815,20 +1817,61 @@ static uint64_t lane_test_teams(void)
 // The parts a session check's narrowed lanes take.
 #define BUSTER_LANE_TEST_SESSION_PARTS 29
 
-// What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
-// counted.
 // /proc/cpuinfo's cores (#905), an oracle of lane_cores' that doesn't read sysfs' sibling lists, for this file's tests
-// and the drivers' (test-check-lanes, test-foreign, test-parallel): each processor's physical id and core id as one
-// number, package << 32 | core, in `cores` (BUSTER_LANE_CPU_MASK_WORDS * 64 entries, UINT64_MAX for a processor it
-// doesn't list with both). Returns how many processors it lists with both.
-static uint32_t lane_test_cpuinfo(uint64_t* cores)
+// and the drivers' (test-check-lanes, test-foreign, test-parallel). A line's key is what comes before its colon, but
+// blanks, and only the processor, physical id and core id lines' values are read (#933's review: the flags line's
+// digits, read as one number, overflowed a signed one): each value is one decimal below UINT32_MAX, between blanks, so
+// that no package and core pack into the sentinel, UINT64_MAX. Whether `line` (`length` bytes) is `key`'s.
+static bool lane_test_cpuinfo_key(const char* line, size_t length, const char* key)
+{
+    const size_t key_length = strlen(key);
+    const char* colon = memchr(line, ':', length);
+    bool matches = colon != 0 && (size_t)(colon - line) >= key_length && memcmp(line, key, key_length) == 0;
+    for (const char* c = line + key_length; matches && c < colon; c += 1)
+    {
+        matches = *c == ' ' || *c == '\t';
+    }
+    return matches;
+}
+
+// The value of a line (`length` bytes) that lane_test_cpuinfo_key matched, or -1 where it isn't one decimal below
+// UINT32_MAX between blanks; the conversion stops before its value could pass the bound.
+static int64_t lane_test_cpuinfo_value(const char* line, size_t length)
+{
+    const char* end = line + length;
+    const char* colon = memchr(line, ':', length);
+    const char* c = colon != 0 ? colon + 1 : end;
+    while (c < end && (*c == ' ' || *c == '\t'))
+    {
+        c += 1;
+    }
+    uint64_t value = 0;
+    bool valid = c < end && *c >= '0' && *c <= '9';
+    while (valid && c < end && *c >= '0' && *c <= '9')
+    {
+        const uint64_t digit = (uint64_t)(*c - '0');
+        valid = value <= (UINT32_MAX - 1 - digit) / 10;
+        value = valid ? value * 10 + digit : value;
+        c += 1;
+    }
+    while (c < end && (*c == ' ' || *c == '\t' || *c == '\n'))
+    {
+        c += 1;
+    }
+    return valid && c == end ? (int64_t)value : -1;
+}
+
+// lane_test_cpuinfo's reading of `file` (null for none): each processor's physical id and core id as one number,
+// package << 32 | core, in `cores` (BUSTER_LANE_CPU_MASK_WORDS * 64 entries, UINT64_MAX for a processor it doesn't list
+// with both). A processor line starts a processor and forgets the package, and a line of one of the three keys whose
+// value doesn't read leaves its field unknown. Returns how many processors it lists with both.
+static uint32_t lane_test_cpuinfo_read(FILE* file, uint64_t* cores)
 {
     const uint32_t room = BUSTER_LANE_CPU_MASK_WORDS * 64;
     for (uint32_t cpu = 0; cpu < room; cpu += 1)
     {
         cores[cpu] = UINT64_MAX;
     }
-    FILE* file = fopen("/proc/cpuinfo", "r");
     char* line = 0;
     size_t size = 0;
     int64_t processor = -1;
@@ -1837,16 +1880,10 @@ static uint32_t lane_test_cpuinfo(uint64_t* cores)
     ssize_t length = file != 0 ? getline(&line, &size, file) : -1;
     while (length > 0)
     {
-        // The line's value: its digits after the colon.
-        const char* colon = memchr(line, ':', (size_t)length);
-        int64_t value = -1;
-        for (const char* c = colon != 0 ? colon + 1 : line + length; c < line + length; c += 1)
-        {
-            value = *c >= '0' && *c <= '9' ? (value < 0 ? 0 : value) * 10 + (*c - '0') : value;
-        }
-        const bool processor_line = strncmp(line, "processor", 9) == 0;
-        const bool package_line = strncmp(line, "physical id", 11) == 0;
-        const bool core_line = strncmp(line, "core id", 7) == 0;
+        const bool processor_line = lane_test_cpuinfo_key(line, (size_t)length, "processor");
+        const bool package_line = lane_test_cpuinfo_key(line, (size_t)length, "physical id");
+        const bool core_line = lane_test_cpuinfo_key(line, (size_t)length, "core id");
+        const int64_t value = processor_line || package_line || core_line ? lane_test_cpuinfo_value(line, (size_t)length) : -1;
         processor = processor_line ? value : processor;
         package = processor_line ? -1 : package_line ? value : package;
         if (core_line && processor >= 0 && processor < room && package >= 0 && value >= 0 && cores[processor] == UINT64_MAX)
@@ -1857,6 +1894,14 @@ static uint32_t lane_test_cpuinfo(uint64_t* cores)
         length = getline(&line, &size, file);
     }
     free(line);
+    return listed;
+}
+
+// /proc/cpuinfo's cores, by lane_test_cpuinfo_read.
+static uint32_t lane_test_cpuinfo(uint64_t* cores)
+{
+    FILE* file = fopen("/proc/cpuinfo", "r");
+    const uint32_t listed = lane_test_cpuinfo_read(file, cores);
     if (file != 0)
     {
         fclose(file);
@@ -1884,6 +1929,124 @@ static uint32_t lane_test_cpuinfo_cores(const uint64_t* cores, const uint64_t* m
         }
     }
     return distinct;
+}
+
+_Static_assert(BUSTER_LANE_CPU_MASK_WORDS * 64 == 1024, "lane_test_cpuinfo_controls' texts name the room's last processor and the next");
+
+// lane_test_cpuinfo_read on texts of /proc/cpuinfo's shape, read through fmemopen (#933's review). First four
+// processors' blocks of every line a Zen 5's has, each flags line 1,024 names with digits: two packages, processors 0
+// and 2 one core's siblings. Then texts of one processor each, which must give it its entry or none:
+//   - blanks around the colon and none, a last line without its newline, and leading zeros;
+//   - the room's last processor and the next, and the largest package and core and the next of each;
+//   - numbers past 64 bits, and values that aren't one decimal (a sign, letters, a fraction, two numbers, none);
+//   - keys that only start like the three, or that start with them, and a line without a colon;
+//   - a processor line that doesn't read, which mustn't leave its core to the processor before;
+//   - a processor without a package, a core before any processor, and a processor listed twice.
+static uint64_t lane_test_cpuinfo_controls(void)
+{
+    uint64_t failures = 0;
+    uint64_t* cores = malloc(BUSTER_LANE_CPU_MASK_WORDS * 64 * sizeof(uint64_t));
+    char* text = 0;
+    size_t text_length = 0;
+    FILE* stream = cores != 0 ? open_memstream(&text, &text_length) : 0;
+    static const char* const names[] = { "fpu", "sse4_1", "sse4_2", "x2apic", "3dnowprefetch", "avx2", "avx512f", "avx512dq",
+                                          "avx512_bf16", "avx512_vp2intersect", "avx_vnni", "f16c", "x86_64", "v_vmsave_vmload", "perfctr_core", "cpb" };
+    static const uint32_t packages[] = { 0, 0, 0, 1 };
+    static const uint32_t core_ids[] = { 0, 1, 0, 0 };
+    for (uint32_t processor = 0; stream != 0 && processor < BUSTER_ARRAY_LENGTH(packages); processor += 1)
+    {
+        fprintf(stream, "processor\t: %u\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 68\nmodel name\t: AMD Ryzen 7 9700X 8-Core Processor\n", processor);
+        fprintf(stream, "stepping\t: 0\nmicrocode\t: 0xb404023\ncpu MHz\t\t: 4950.000\ncache size\t: 1024 KB\nphysical id\t: %u\nsiblings\t: 16\n", packages[processor]);
+        fprintf(stream, "core id\t\t: %u\ncpu cores\t: 8\napicid\t\t: 15\ninitial apicid\t: 15\nfpu\t\t: yes\ncpuid level\t: 16\nflags\t\t:", core_ids[processor]);
+        for (uint32_t i = 0; i < 64 * BUSTER_ARRAY_LENGTH(names); i += 1)
+        {
+            fprintf(stream, " %s", names[i % BUSTER_ARRAY_LENGTH(names)]);
+        }
+        fprintf(stream, "\nbugs\t\t: sysret_ss_attrs spectre_v1 spectre_v2 spec_store_bypass srso\nbogomips\t: 7586.11\nTLB size\t: 3072 4K pages\n");
+        fprintf(stream, "clflush size\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management: ts ttp tm hwpstate cpb eff_freq_ro [13] [14]\n\n");
+    }
+    const bool written = stream != 0 && fclose(stream) == 0;
+    FILE* blocks = written ? fmemopen(text, text_length, "r") : 0;
+    const uint32_t blocks_listed = blocks != 0 ? lane_test_cpuinfo_read(blocks, cores) : 0;
+    const uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0x1f };
+    uint32_t unlisted = 0;
+    const uint32_t distinct = blocks != 0 ? lane_test_cpuinfo_cores(cores, mask, &unlisted) : 0;
+    failures += blocks != 0 && blocks_listed == 4 && cores[0] == 0 && cores[1] == 1 && cores[2] == 0 && cores[3] == UINT64_C(1) << 32 && cores[4] == UINT64_MAX ? 0 : 1;
+    failures += blocks != 0 && distinct == 3 && unlisted == 1 ? 0 : 1;
+    if (blocks != 0)
+    {
+        fclose(blocks);
+    }
+    free(text);
+    typedef struct LaneTestCpuinfo LaneTestCpuinfo;
+    struct LaneTestCpuinfo
+    {
+        const char* text;
+        // The processor the text names, the entry it must get (UINT64_MAX for none) and the processors it lists.
+        uint32_t processor;
+        uint64_t entry;
+        uint32_t listed;
+    };
+    static const LaneTestCpuinfo cases[] = {
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor: 3\nphysical id:1\t\ncore id   :  2 \n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 003\nphysical id\t: 01\ncore id\t\t: 0002\n", 3, UINT64_C(1) << 32 | 2, 1 },
+        { "processor\t: 1023\nphysical id\t: 4294967294\ncore id\t\t: 4294967294\n", 1023, UINT64_C(0xfffffffefffffffe), 1 },
+        { "processor\t: 1024\nphysical id\t: 0\ncore id\t\t: 0\n", 0, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 4294967295\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 4294967295\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 18446744073709551616\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 999999999999999999999999999999999999\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 99999999999999999999\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: -2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: +2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2x\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 0x2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: one\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3.5\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2 3\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t:\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: \n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore idx\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncpu core id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\n core id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\nCore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore  id\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processors\t: 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical ids\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t 3\nphysical id\t: 1\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\nprocessor\t: x\ncore id\t\t: 2\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 2\nphysical id\t: 1\ncore id\t\t: 0\nprocessor\t: 3\ncore id\t\t: 2\n", 2, UINT64_C(1) << 32, 1 },
+        { "core id\t\t: 2\nprocessor\t: 3\nphysical id\t: 1\n", 3, UINT64_MAX, 0 },
+        { "processor\t: 3\nphysical id\t: 1\ncore id\t\t: 2\nprocessor\t: 3\nphysical id\t: 0\ncore id\t\t: 0\n", 3, UINT64_C(1) << 32 | 2, 1 },
+    };
+    for (uint32_t i = 0; cores != 0 && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        char buffer[256];
+        const size_t length = strlen(cases[i].text);
+        memcpy(buffer, cases[i].text, length);
+        FILE* file = fmemopen(buffer, length, "r");
+        const uint32_t listed = file != 0 ? lane_test_cpuinfo_read(file, cores) : UINT32_MAX;
+        bool right = listed == cases[i].listed;
+        for (uint32_t cpu = 0; cpu < BUSTER_LANE_CPU_MASK_WORDS * 64; cpu += 1)
+        {
+            right = right && cores[cpu] == (cpu == cases[i].processor ? cases[i].entry : UINT64_MAX);
+        }
+        if (!right)
+        {
+            fprintf(stderr, "cpuinfo: text %u read wrong (it listed %u)\n", i, listed);
+        }
+        failures += right ? 0 : 1;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+    }
+    failures += cores != 0 ? 0 : 1;
+    free(cores);
+    printf("cpuinfo: four processors with 1,024 flags each and %u texts of one, %lu wrong\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)failures);
+    return failures;
 }
 
 // The cores of the CPUs this process may run on by /proc/cpuinfo (lane_test_cpuinfo), or 0 where it doesn't list every
@@ -2136,6 +2299,8 @@ static uint64_t lane_test_cores(void)
     return failures;
 }
 
+// What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
+// counted.
 typedef struct LaneSessionTest LaneSessionTest;
 struct LaneSessionTest
 {
@@ -2612,6 +2777,7 @@ static int run_lane_tests(int argc, char** argv)
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
         passed = lane_test_teams() == 0 && passed;
+        passed = lane_test_cpuinfo_controls() == 0 && passed;
         passed = lane_test_cores() == 0 && passed;
         passed = lane_test_sessions() == 0 && passed;
         fflush(stdout);

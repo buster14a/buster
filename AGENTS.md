@@ -2765,7 +2765,13 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   sibling's bad list must be skipped, siblings past the mask's words and an
   empty mask, against counts worked out by hand; and `lane_core_count` against
   `/proc/cpuinfo`'s cores of the process's CPUs, then on a core's two siblings
-  (one) and CPUs of two cores (two);
+  (one) and CPUs of two cores (two). That oracle (`lane_test_cpuinfo`, which
+  test-check-lanes, test-foreign and test-parallel share) reads only the
+  `processor`, `physical id` and `core id` lines, each value one bounded
+  decimal; its reader is checked first on texts of `/proc/cpuinfo`'s shape:
+  four processors' blocks whose flags lines hold 1,024 names with digits,
+  values at and past their bounds and past 64 bits, malformed values and keys
+  that only start like those three;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
