@@ -1576,6 +1576,21 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         {"fstps", "fstp", 4, 4},
         {"fstpl", "fstp", 8, 8},
         {"fstpt", "fstp", 10, 10},
+        // And of its integers: s a short's, l a long's, and ll and q a long long's (musl's llrintl stores with fistpll).
+        {"filds", "fild", 2, 2},
+        {"fildl", "fild", 4, 4},
+        {"fildll", "fild", 8, 8},
+        {"fildq", "fild", 8, 8},
+        {"fists", "fist", 2, 2},
+        {"fistl", "fist", 4, 4},
+        {"fistps", "fistp", 2, 2},
+        {"fistpl", "fistp", 4, 4},
+        {"fistpll", "fistp", 8, 8},
+        {"fistpq", "fistp", 8, 8},
+        {"fisttps", "fisttp", 2, 2},
+        {"fisttpl", "fisttp", 4, 4},
+        {"fisttpll", "fisttp", 8, 8},
+        {"fisttpq", "fisttp", 8, 8},
     };
     bool found = false;
     for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
@@ -1589,6 +1604,31 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         }
     }
     return found;
+}
+
+// A locked instruction as the catalogue spells it (`lock cmpxchg`, one mnemonic, whose forms take memory): the prefix
+// before the instruction on its line (`lock cmpxchg %ecx, (%rdx)`, two tokens), or as a statement of its own before it
+// (`lock ; cmpxchg %ecx, (%rdx)`, as musl's atomics write it), which asm_parse puts on the instruction's line, as GNU as
+// applies it to the next instruction. `name` is the mnemonic's token; a prefix takes the next token, the instruction,
+// which the parser then skips. Any other mnemonic stays as it is.
+static void asm_lock_mnemonic(AsmParser* parser, String8* name, uint32_t end)
+{
+    if (x86_match_name(*name, "lock") && parser->at < end && parser->tokens[parser->at].kind == BUSTER_ASM_WORD)
+    {
+        const String8 instruction = asm_token_text(parser, parser->at);
+        char* bytes = arena_push(parser->arena, instruction.length + 5, 1);
+        if (bytes == 0)
+        {
+            asm_fail(parser, parser->tokens[parser->at - 1].start, "arena exhausted");
+        }
+        else
+        {
+            memcpy(bytes, "lock ", 5);
+            memcpy(bytes + 5, instruction.pointer, instruction.length);
+            *name = (String8){ .pointer = bytes, .length = instruction.length + 5 };
+            parser->at += 1;
+        }
+    }
 }
 
 // A string instruction as the catalogue spells it, with its prefix (`rep movsb`, two tokens, is one mnemonic): repz and
@@ -1614,6 +1654,30 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
         *name = BUSTER_S8("pause");
         parser->at += 1;
     }
+    // lzcnt written `rep bsr` (dr_flac's `rep; bsr`, for assemblers that don't know lzcnt) and tzcnt written `rep bsf`:
+    // the same bytes (F3 0F BD and F3 0F BC), which a processor without LZCNT or BMI runs as the scans themselves. An
+    // AT&T size suffix stays on the name, as on bsr's.
+    const char suffix = instruction.length == 4 && !parser->options.intel ? instruction.pointer[3] : 0;
+    const bool scan = prefixed && (strcmp(prefix, "rep") == 0 || strcmp(prefix, "repe") == 0) && (instruction.length == 3 || suffix == 'w' || suffix == 'l' || suffix == 'q') &&
+                      (memcmp(instruction.pointer, "bsr", 3) == 0 || memcmp(instruction.pointer, "bsf", 3) == 0);
+    if (scan)
+    {
+        char* bytes = arena_push(parser->arena, instruction.length + 2, 1);
+        if (bytes == 0)
+        {
+            asm_fail(parser, parser->tokens[parser->at - 1].start, "arena exhausted");
+        }
+        else
+        {
+            memcpy(bytes, instruction.pointer[2] == 'r' ? "lzcnt" : "tzcnt", 5);
+            if (suffix != 0)
+            {
+                bytes[5] = suffix;
+            }
+            *name = (String8){ .pointer = bytes, .length = instruction.length + 2 };
+            parser->at += 1;
+        }
+    }
     uint32_t base = BUSTER_ARRAY_LENGTH(bases);
     for (uint32_t i = 0; candidate && instruction.length == 5 && i < BUSTER_ARRAY_LENGTH(bases); i += 1)
     {
@@ -1621,7 +1685,7 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
     }
     const char written = base < BUSTER_ARRAY_LENGTH(bases) ? instruction.pointer[4] : 0;
     const char size = !parser->options.intel && written == 'l' ? 'd' : written;
-    if (!rep_nop && (size == 'b' || size == 'w' || size == 'd' || size == 'q') && (prefixed || size != written))
+    if (!rep_nop && !scan && (size == 'b' || size == 'w' || size == 'd' || size == 'q') && (prefixed || size != written))
     {
         const char* spelled = prefixed && base >= 3 && strcmp(prefix, "rep") == 0 ? "repe" : prefixed ? prefix : "";
         const uint64_t prefix_length = strlen(spelled);
@@ -1670,6 +1734,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         *instruction = (AsmInstruction){.location = location};
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
         String8* name = &instruction->request.mnemonic;
+        asm_lock_mnemonic(parser, name, end);
         asm_string_mnemonic(parser, name, end);
         uint32_t width = 0;
         uint32_t source_width = 0;
@@ -2285,16 +2350,43 @@ static void asm_parse(AsmParser* parser)
         {
             end += 1;
         }
-        // GNU as permits `rep; nop` as the same spin hint. Join only these two complete statements, and only across
-        // a semicolon: labels, directives and other standalone prefixes retain their own semantics and refusals.
-        if (end == parser->at + 1 && asm_is(parser, parser->at, "rep") && end + 1 < parser->token_count &&
-            parser->source.pointer[parser->tokens[end].start] == ';' && asm_is(parser, end + 1, "nop") &&
-            (end + 2 == parser->token_count || parser->tokens[end + 2].kind == '\n'))
+        // GNU as applies a prefix written as a statement of its own to the instruction after it, past a semicolon or
+        // lines: `lock ; cmpxchg %ecx, (%rdx)` (musl's atomics), `rep; bsr` (lzcnt, as dr_flac spells it for
+        // assemblers that don't know it) and the spin hint `rep; nop`. That statement is then the instruction with its
+        // prefix, as written on one line (asm_lock_mnemonic, asm_string_mnemonic): the prefix's token takes the place of
+        // the last separator before the instruction. Its bytes are the line's, which before a 16-bit instruction put the
+        // 66 first, where GNU as writes the prefix it emits alone first: the same instruction (docs/assembler.md). Only
+        // an instruction takes it, with no label between, which would mark the prefix's place apart from the
+        // instruction's.
+        static const char* const prefixes[] = { "lock", "rep", "repe", "repz", "repne", "repnz" };
+        bool prefix = false;
+        for (uint32_t i = 0; end == parser->at + 1 && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
         {
-            // The mnemonic parser expects two adjacent words. The separator token is no longer needed by this parse.
-            parser->tokens[end] = parser->tokens[end + 1];
-            parser->tokens[end + 1].kind = '\n';
-            end += 1;
+            prefix |= asm_is(parser, parser->at, prefixes[i]);
+        }
+        if (prefix && parser->result.error == 0)
+        {
+            uint32_t next = end;
+            while (next < parser->token_count && parser->tokens[next].kind == '\n')
+            {
+                next += 1;
+            }
+            const bool instruction = next < parser->token_count && parser->tokens[next].kind == BUSTER_ASM_WORD && asm_token_text(parser, next).pointer[0] != '.' &&
+                                     parser->tokens[next + 1].kind != ':';
+            if (!instruction)
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "a prefix needs an instruction after it, with no label between");
+            }
+            else
+            {
+                parser->tokens[next - 1] = parser->tokens[parser->at];
+                parser->at = next - 1;
+                end = next;
+                while (end < parser->token_count && parser->tokens[end].kind != '\n')
+                {
+                    end += 1;
+                }
+            }
         }
         if (parser->at < end && parser->result.error == 0)
         {

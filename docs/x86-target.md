@@ -74,8 +74,8 @@ and an exact pass over their full requirements then decides them.
 `x86_target_rows.c` is the single source for immutable policy data. The vector
 builder reads the compact32 table (33,408 bytes), and its exact pass the
 extended rows' full requirements and forms. The independent scalar
-reference keeps all 64 feature bits densely for 3,463 classified rows (27,704
-bytes), with their form indices (6,926 bytes). It clears all 8,352 output bytes
+reference keeps all 64 feature bits densely for 3,480 classified rows (27,840
+bytes), with their form indices (6,960 bytes). It clears all 8,352 output bytes
 then checks those complete requirements directly. Its loop stays scalar to
 avoid widening and extracting indices for byte stores.
 
@@ -83,7 +83,7 @@ A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
 canonical dense slot plus one. Zero means unknown, and the bounded query returns
 zero for out-of-range forms. Forward/inverse/requirement/projection checks cover
 every form; independent named-form expectations and external ISA checks remain.
-The four arrays contain 84,742 payload bytes before alignment (66,782 before
+The four arrays contain 84,912 payload bytes before alignment (66,782 before
 #760's rows), replacing 116,894 bytes of sparse64, compact32 and dense-reference
 data. A compact row with a requirement outside the 32-bit projection, an
 extended row without one or before a compact row, and a row without the

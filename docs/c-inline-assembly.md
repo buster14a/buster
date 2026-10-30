@@ -248,9 +248,19 @@ inline-assembly fixtures also run alone with `test-checker --program-asm`,
 including the eight mask saves and restores at the semantics harness's offsets.
 An `xchg` takes its memory operand first in Intel order, as the catalogue has
 it: `xchgl %ecx,(%rdi)`,
-not `xchgl (%rdi),%ecx`. The matcher's operand grammar has no accumulator role:
-`fnstsw` takes memory, not `%ax`, and an `xchg` of the accumulator with another
-register takes the two-byte form, where GNU as takes the one-byte one.
+not `xchgl (%rdi),%ecx`. An `xchg` of the accumulator with another register
+takes the two-byte form, where GNU as takes the one-byte one.
+
+For musl's templates (`arch/x86_64/atomic_arch.h`, `pthread_arch.h` and
+`src/math/x86_64`) the matcher also admits the `lock` prefix, as a statement of
+its own (`lock ; cmpxchg %3, %1`, which GNU as applies to the next instruction)
+or on the instruction's line, on `cmpxchg`, `xadd` and the arithmetic of memory
+destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
+SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
+the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
+`fistpll`. `rep; bsr` (dr_flac's spelling of `lzcnt`) is `lzcnt`'s form, its
+bytes. [The assembler's guide](assembler.md) lists the families, and the
+bytes of a prefix written alone before a 16-bit instruction.
 
 ## The helper's frame
 
@@ -395,7 +405,13 @@ has the commands, the logs and the default path's numbers against main.
     unit's static function and update its static, and take a `.L` label's
     address that another statement's template defines;
   - a label inside a helper at its exact record, whose snippet another
-    statement's template calls.
+    statement's template calls;
+  - musl's atomics as `atomic_arch.h` writes them (lock prefixes as statements
+    of their own on `cmpxchg`, `xadd` and the arithmetic, `xchg`, `bsf`, `bsr`
+    and `__get_tp`'s `%fs` load), the SSE templates of its x86_64 math
+    (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
+    dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
+    `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one

@@ -113,15 +113,41 @@ The admitted families are:
 - the processor-state instructions C's inline assembly uses (#147): `cpuid`,
   `xgetbv`, `xchg`, `bswap`, the x87's `fnstcw/fldcw/fnstsw/fnclex`,
   `stmxcsr/ldmxcsr`, and SSE2's `pcmpeqd` in its legacy forms. An `xchg` takes
-  its memory operand first in Intel order, as the catalogue has it. The operand
-  grammar has no accumulator role, so `fnstsw` takes memory, not `%ax`, and an
+  its memory operand first in Intel order, as the catalogue has it. `fnstsw`
+  takes memory or `%ax` (the operand grammar's accumulator alone), and an
   `xchg` of the accumulator with another register takes the two-byte form,
   where GNU as takes the one-byte one;
+- what musl's inline assembly uses (#147), with its families: the `lock`
+  prefix on the locked forms of `cmpxchg`, `xadd`, `add/or/adc/sbb/and/sub/xor`
+  and `inc/dec/not/neg` (memory destinations; `lock xchg` and the locked bit
+  tests aren't admitted), and those instructions' unlocked `cmpxchg` and
+  `xadd`; `bsf`, `bsr`, `lzcnt`, `tzcnt` and `hlt`; SSE's `sqrtss/sqrtsd`,
+  `cvtss2si/cvtsd2si`, `cvttss2si/cvttsd2si`, `andps/andpd`, `andnps/andnpd`,
+  `orps/orpd` and SSE2's `psrld/psrlq/pslld/psllq`, in their legacy forms on
+  XMM registers; FMA3's scalar `vfmadd`, `vfmsub`, `vfnmadd` and `vfnmsub`
+  (`132`, `213` and `231`, `ss` and `sd`); and the x87's operations on the
+  stack's top (`fsqrt`, `fabs`, `fchs`, `frndint`, `fprem`, `fprem1`,
+  `fscale`, `fxtract`, `f2xm1`, `fyl2x`, `fyl2xp1`, `fpatan`, `fptan`,
+  `fsin`, `fcos`, `fsincos`, `fxam`, `ftst` and the constants `fld1` to
+  `fldln2`) and its integer loads and stores `fild/fist/fistp/fisttp`, whose
+  AT&T suffixes are the integer's: `s` 16 bits, `l` 32, `ll` and `q` 64
+  (`fistpll`). The x87's stack registers (`%st(1)`) aren't the parser's;
 - operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc`, and `rdtscp`
   (#798). The assembler requires a target with RDTSCP for `rdtscp`; inline
   templates admit it independently of the target, so their author is responsible
   for selecting instructions supported by the CPU and declaring register outputs;
-- the spin-wait spellings `rep nop` and `rep; nop`, each encoded as `pause`;
+- the spin-wait spellings `rep nop` and `rep; nop`, each encoded as `pause`,
+  and `rep bsr` and `rep bsf`, which are `lzcnt`'s and `tzcnt`'s bytes (F3 0F
+  BD and BC: dr_flac spells `lzcnt` so), encoded as their forms, so a target
+  without LZCNT or BMI refuses them;
+- a prefix written as a statement of its own, `lock` or `rep` and its aliases,
+  past a semicolon or lines (`lock ; cmpxchg %ecx,(%rdx)`, as musl's atomics
+  write it): GNU as applies it to the next instruction, and so does this
+  assembler, which takes the two as one instruction, the prefix on its line.
+  Only an instruction takes it, with no label between. Before a 16-bit
+  instruction its bytes are then the line's (`66 f0 0f b1`), where GNU as
+  writes the prefix it emitted alone first (`f0 66 0f b1`), as clang's
+  integrated assembler does too: the same instruction;
 - what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
   between an XMM register and a general one or memory, the x87's `fld` and
   `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and

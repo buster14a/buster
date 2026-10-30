@@ -358,6 +358,71 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
         "#endif\n"
         "return z;}", "asm-flag-output-fallback", clang);
+    // musl's atomics (arch/x86_64/atomic_arch.h, as musl writes them): lock prefixes as statements of their own before
+    // cmpxchg, xadd, and, or, incl and decl on memory outputs, xchg, a store with a locked or of the stack as its fence,
+    // pause, the bit scans of a_ctz_64 and a_clz_64 (of operands never zero, whose result the scans leave undefined), and
+    // __get_tp's load of the thread pointer through %fs. hlt (a_crash) is compiled, assembled and linked, never run.
+    check_test_program_source(test,
+        "static inline int a_cas(volatile int *p, int t, int s){__asm__ __volatile__(\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");return t;}"
+        "static inline void *a_cas_p(volatile void *p, void *t, void *s){__asm__(\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*(void *volatile *)p) : \"a\"(t), \"r\"(s) : \"memory\");return t;}"
+        "static inline int a_swap(volatile int *p, int v){__asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");return v;}"
+        "static inline int a_fetch_add(volatile int *p, int v){__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");return v;}"
+        "static inline void a_and(volatile int *p, int v){__asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
+        "static inline void a_or(volatile int *p, int v){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
+        "static inline void a_and_64(volatile unsigned long *p, unsigned long v){__asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
+        "static inline void a_or_64(volatile unsigned long *p, unsigned long v){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\");}"
+        "static inline void a_inc(volatile int *p){__asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\");}"
+        "static inline void a_dec(volatile int *p){__asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\");}"
+        "static inline void a_store(volatile int *p, int x){__asm__ __volatile__(\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"r\"(x) : \"memory\");}"
+        "static inline void a_spin(void){__asm__ __volatile__(\"pause\" : : : \"memory\");}"
+        "static inline int a_ctz_64(unsigned long x){__asm__(\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x));return x;}"
+        "static inline int a_clz_64(unsigned long x){__asm__(\"bsr %1,%0 ; xor $63,%0\" : \"=r\"(x) : \"r\"(x));return x;}"
+        "static inline unsigned long get_tp(void){unsigned long tp;__asm__(\"mov %%fs:0,%0\" : \"=r\"(tp));return tp;}"
+        "void a_crash(void){__asm__ __volatile__(\"hlt\" : : : \"memory\");}"
+        "int tested(int n){volatile int x=n;int r=a_cas(&x,n,n*5);r=r*3+a_cas(&x,n,7)+x*11;void* volatile q=&x;void* old=a_cas_p(&q,&x,(void*)&r);"
+        "r+=(old==(void*)&x)+(q==(void*)&r)*2;r=r*7+a_swap(&x,n-9);r=r*5+a_fetch_add(&x,n*3)+x;a_and(&x,0x5a5a);a_or(&x,(n&15)<<4);a_inc(&x);a_inc(&x);a_dec(&x);"
+        "volatile unsigned long w=(unsigned long)n*0x100000001ul;a_and_64(&w,0xffff0000fffful);a_or_64(&w,(unsigned long)n<<40);a_store(&x,x+r);a_spin();"
+        "unsigned long b=(unsigned long)(n*n+1)<<(n&31);return r+x*13+(int)(w>>32)+(int)w+a_ctz_64(b)*17+a_clz_64(b)*19+a_ctz_64(b|0x8000000000000000ul)+"
+        "(int)((get_tp()!=0)+(get_tp()&0xff0));}",
+        "asm-musl-atomics", clang);
+    // musl's x86_64 math (src/math/x86_64): sqrtsd and sqrtss, cvtsd2si and cvtss2si into 64- and 32-bit registers under
+    // MXCSR's rounding, and fabs's and fabsf's mask, all ones (pcmpeqd) shifted right (psrlq, psrld) and and-ed (andps).
+    check_test_program_source(test,
+        "static double m_sqrt(double x){__asm__(\"sqrtsd %1, %0\" : \"=x\"(x) : \"x\"(x));return x;}"
+        "static float m_sqrtf(float x){__asm__(\"sqrtss %1, %0\" : \"=x\"(x) : \"x\"(x));return x;}"
+        "static long m_lrint(double x){long r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
+        "static long m_lrintf(float x){long r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
+        "static int m_irint(double x){int r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
+        "static int m_irintf(float x){int r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(x));return r;}"
+        "static double m_fabs(double x){double t;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(t));__asm__(\"psrlq   $1, %0\" : \"+x\"(t));"
+        "__asm__(\"andps   %1, %0\" : \"+x\"(x) : \"x\"(t));return x;}"
+        "static float m_fabsf(float x){float t;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(t));__asm__(\"psrld   $1, %0\" : \"+x\"(t));"
+        "__asm__(\"andps   %1, %0\" : \"+x\"(x) : \"x\"(t));return x;}"
+        "int tested(int n){double d=n*0.75-2.5;float f=(float)n*-1.25f+0.5f;double a=m_fabs(d);float b=m_fabsf(f);"
+        "return (int)(m_sqrt(a)*1000)+(int)(m_sqrtf(b)*100)*3+(int)m_lrint(d*1e12/7)%100000+(int)m_lrintf(f*3)*5+m_irint(d*31)*7+m_irintf(f*17)*11+"
+        "(int)(a*8)+(int)(b*4)*13;}",
+        "asm-musl-math", clang);
+    // dr_flac's lzcnt, `rep; bsr` in GCC's dialect alternatives (the AT&T one, `bsrq %1, %0`), and tzcnt so: their bytes
+    // (F3 0F BD and BC), which run as the scans where the processor has no LZCNT or BMI (of operands never zero, alike).
+    check_test_program_source(test,
+        "static unsigned long clz(unsigned long x){unsigned long r;__asm__ __volatile__(\"rep; bsr{q %1, %0| %0, %1}\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "static unsigned clz32(unsigned x){unsigned r;__asm__ __volatile__(\"rep; bsr{l %1, %0| %0, %1}\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "static unsigned long ctz(unsigned long x){unsigned long r;__asm__ __volatile__(\"rep\\n\\tbsfq %1, %0\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "int tested(int n){unsigned long x=(unsigned long)(n*n*1000003+1)<<(n&15);return (int)clz(x)*100+(int)clz32((unsigned)x|1)*10+(int)ctz(x);}",
+        "asm-rep-bsr", clang);
+    // FMA3's scalar forms, as musl's fma and fmaf take them where the target has FMA: compiled and linked everywhere, run
+    // where the host has FMA.
+    const bool fused_native = (native.features & BUSTER_X86_FEATURE(FMA)) != 0;
+    if (!fused_native)
+    {
+        printf("test-checker: asm-musl-fma: FMA unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static double m_fma(double x,double y,double z){__asm__(\"vfmadd132sd %1, %2, %0\" : \"+x\"(x) : \"x\"(y), \"x\"(z));return x;}"
+        "static float m_fmaf(float x,float y,float z){__asm__(\"vfmadd132ss %1, %2, %0\" : \"+x\"(x) : \"x\"(y), \"x\"(z));return x;}"
+        "int tested(int n){double a=n*0.1+1/3.0,b=n-0.7,c=1e-17*n;float d=n*0.3f+1/3.0f,e=n-0.7f,f=1e-8f*n;"
+        "double r=m_fma(a,b,c)-a*b;float s=m_fmaf(d,e,f)-d*e;return (int)(r*1e18)+(int)(s*1e9f)*7+(int)m_fma(b,b,a)*3;}",
+        "asm-musl-fma", clang, fused_native);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
