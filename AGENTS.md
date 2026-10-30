@@ -5338,7 +5338,12 @@ and `-c` and the direct path lower what it selects. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
---symbols` on any corpus. `benchmark-lowering-source [--passes N]
+--symbols` on any corpus. Every correctness run compiles the compiler's own
+`main.c` with `build.sh`'s flags for a plain `-march=znver5` build, by `-c` and
+by `--lower-all` (`--verify`, and the scalar path's `--lower-all` object the
+vector path's byte for byte), and compares its symbols with clang's
+(`test-checker-corpus --symbols-minimum 1`), so that it keeps compiling both
+ways. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced
 definitions saves against `--lower-all`, after checking, with each file's
 functions and objects defined, lowered and skipped. It times warm selection,
