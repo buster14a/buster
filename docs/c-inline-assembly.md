@@ -238,6 +238,9 @@ and SSE2's `pcmpeqd`, which `main.c`'s statements use, and the `bswap` of
 string instructions with their prefixes (`rep movsb`) and AVX-512F's
 `vmovdqa64` and `vmovdqu64`. Its other families are in
 [the assembler's guide](assembler.md).
+The operandless `pause`, `lfence`, `mfence`, `sfence`, `rdtsc` and `rdtscp`
+are also available (#798), with register outputs and CPU support chosen by the
+template's author.
 `test-assembler --cross-check` compares them with GNU as. An `xchg` takes its
 memory operand first in Intel order, as the catalogue has it: `xchgl %ecx,(%rdi)`,
 not `xchgl (%rdi),%ecx`. The matcher's operand grammar has no accumulator role:

@@ -729,7 +729,10 @@ static void asm_test_targets(AsmTest* test)
     {
         const bool avx2 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX2)) != 0 : architecture >= X86_ARCH_V3;
         const bool avx512 = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0 : architecture >= X86_ARCH_V4;
+        const bool rdtscp = architecture == X86_ARCH_NATIVE ? (native.features & BUSTER_X86_FEATURE(RDTSCP)) != 0 : architecture >= X86_ARCH_ZNVER5;
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nmov rax,200\naddps xmm0,xmm1\nret\n"), 1, architecture);
+        asm_test_pair(test, BUSTER_S8("pause\nlfence\nmfence\nsfence\nrdtsc\n"), 1, architecture);
+        asm_test_pair(test, BUSTER_S8("rdtscp\n"), rdtscp, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvpaddd ymm0,ymm1,ymm2\n"), avx2, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvaddps zmm0,zmm1,zmm2\n"), avx512, architecture);
         asm_test_pair(test, BUSTER_S8(".intel_syntax noprefix\nvmovdqa32 zmm0,[rax]\nvpsubd zmm0,zmm1,zmm2\n"), avx512, architecture);
@@ -849,6 +852,7 @@ static void asm_test_code(AsmTest* test)
     asm_test_code_pair(test, ".intel_syntax noprefix\nmov eax, 1\n.att_syntax prefix\naddl $2, %eax\n", 2, "inline code: the syntax directives");
     asm_test_code_pair(test, "", 0, "inline code: an empty source");
     asm_test_code_pair(test, "  # a comment, %eax\n\n", 0, "inline code: a comment alone");
+    asm_test_code_pair(test, "pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", 6, "inline code: spin hints, fences and timestamp counters");
     // The newly admitted processor-state instructions, each a record.
     asm_test_code_pair(test, "cpuid\nxgetbv\nxchgq %rbx,%rsi\nfnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\npcmpeqd %xmm1,%xmm2\n"
                              "bswapl %eax\nbswapq %r9\nfxsave (%rax)\nfxrstor 16(%rsp)\nfxsave64 (%rdi)\nfxrstor64 -512(%rbp)", 16,
@@ -913,6 +917,8 @@ static void asm_test_code(AsmTest* test)
         ".intel_syntax noprefix\nrep movsl",
         "fstp (%rax)",
         "bogus %eax",
+        "pause %eax",
+        "rdtsc %eax",
         ".cfi_startproc\nnop\n.cfi_endproc",
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
@@ -1413,6 +1419,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".intel_syntax noprefix\nsimd:\nmov ah,bl\nmov r8,[r12+r9*4-129]\nmov eax,dword ptr fs:[8]\naddps xmm1,xmm2\nvaddps ymm1,ymm2,ymm3\nvaddps zmm1{k2}{z},zmm2,zmm3\nvaddps zmm1,zmm2,dword ptr [rax]{1to16}\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
+                asm_test_oracle(&test, ".text\nf: pause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n.intel_syntax noprefix\npause\nlfence\nmfence\nsfence\nrdtsc\nrdtscp\n", directory, X86_ARCH_ZNVER5);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
                 // The processor-state instructions C's inline assembly reaches (#147).
                 asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"
