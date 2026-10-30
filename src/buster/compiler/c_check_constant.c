@@ -997,22 +997,30 @@ static uint32_t check_constant_separator(CheckConstantInput* input, uint32_t fir
 
 #include "c_check_intrinsic_input.c"
 
-// Only a direct call captured by the intrinsic adapter supplies a prototype. During source-order declaration
-// queries prepare that same record; after binding replay use the captured record, since its scope has closed.
-// The constant reader checks it as an ordinary call, retaining a nonconstant result with the exact return type.
+// Declaration queries can encounter a missing library name before the main reader reaches it, including an
+// address/sizeof operand. Bind it at that source point using the ordinary declaration path. Intrinsics still
+// require a direct call; replay reads the captured types instead of creating a new declaration in a closed scope.
 static TypeId check_constant_intrinsic_type(CheckConstantInput* input, uint32_t token, uint32_t handle)
 {
     CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
     TypeId type = 0;
-    if (handle == 0 && parser->tree.parents[token] < input->end && check_input_intrinsic_call_shape(parser, token))
+    if (handle == 0)
     {
-        const uint32_t close = parser->tree.parents[token];
-        const bool prepared = input->cached ? reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[close] != 0 :
-                              check_input_intrinsic_prepare(reader, token) == CHECK_INPUT_INTRINSIC_PREPARED;
-        if (prepared)
+        if (!input->cached)
         {
-            type = check_input_intrinsic_type(reader, token);
+            check_input_implicit_function(reader, token);
+            type = reader->declared_types[token];
+        }
+        if (type == 0 && parser->tree.parents[token] < input->end && check_input_intrinsic_call_shape(parser, token))
+        {
+            const uint32_t close = parser->tree.parents[token];
+            const bool prepared = input->cached ? reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[close] != 0 :
+                                  check_input_intrinsic_prepare(reader, token) == CHECK_INPUT_INTRINSIC_PREPARED;
+            if (prepared)
+            {
+                type = check_input_intrinsic_type(reader, token);
+            }
         }
     }
     return type;

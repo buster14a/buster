@@ -521,3 +521,13 @@ and helper records without importing implementation. The intrinsic query also
 instantiates the already-reviewed
 `generated/clang_builtin_own_main_23_1_1.inc` name inventory; that file's LLVM
 provenance and license remain unchanged. No new upstream data was imported.
+
+### Implicit library declarations (#804)
+
+The original `c_check_implicit_input.c`, `c_check_implicit_library_test.c` and
+related declaration, option and diagnostic changes use the existing frozen
+Clang 23.1.1 builtin catalogue; its provenance and licensing are unchanged.
+Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
+and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
+`CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
+as behavior references. No LLVM implementation or test fixtures were copied.

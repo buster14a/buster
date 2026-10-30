@@ -209,6 +209,7 @@ struct CheckInputNakedDiagnostic
 // its callers pass and its parameters convert from.
 #define CHECK_INPUT_FUNCTION_KR 0x08u
 #define CHECK_INPUT_FUNCTION_IMPLICIT 0x10u
+#define CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY 0x20u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -283,6 +284,7 @@ struct CheckInput
     uint32_t* implicit_function_tokens;
     uint32_t implicit_function_count;
     uint8_t implicit_function_diagnostic;
+    uint8_t implicit_library_diagnostic;
     bool implicit_function_c99;
     bool implicit_function_system;
     uint32_t* declarations;
@@ -2193,6 +2195,8 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
 #include "c_check_builtin_evidence.c"
 #include "c_check_generic.c"
+static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
+
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
@@ -4174,6 +4178,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && reader->linkage[old_declaration] != 0 && reader->linkage[token] != 0;
     const bool overload = check_input_overload_active(reader, token);
+    const uint32_t linked_library = kind == C_BINDING_FUNCTION && reader->linkage[token] == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
+    const bool library_redeclaration = kind == C_BINDING_FUNCTION && reader->linkage[token] == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
+        (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
+        (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) == 0;
     check_input_inherit_abi(reader, token, old, overload);
     if (old == 0 && reader->scope_count == 0)
     {
@@ -4203,7 +4211,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             type_parameters(reader->types, reader->declared_types[previous], &previous_count);
             parameter_conflict = previous_count != 0 && (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
         }
-        if (!repeatable || compatible != TYPE_ANSWER_YES || reader->bindings.kind[old - 1] != kind || reader->linkage[token] != reader->linkage[previous] ||
+        if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || reader->linkage[token] != reader->linkage[previous] ||
             reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
         {
             check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
@@ -4212,7 +4220,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             reader->objects[token] = reader->objects[previous];
             check_input_naked_inherit(reader, token, previous);
-            const TypeId composite = check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
+            const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
+                check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
             if (composite == 0)
             {
                 check_input_report(reader, token, CHECK_INPUT_DECLARATION);
@@ -4243,7 +4252,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 parameter_conflict = reader->defined[token] && previous_count != 0 &&
                                      (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
             }
-            if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] || compatible != TYPE_ANSWER_YES ||
+            if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] ||
+                (compatible != TYPE_ANSWER_YES && !library_redeclaration) ||
                 (reader->definition_origins[token] && reader->definition_origins[previous]) ||
                 reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
             {
@@ -4258,7 +4268,22 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 }
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);
-                composite = check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
+                if (library_redeclaration && compatible == TYPE_ANSWER_NO)
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_LIBRARY_REDECLARATION,
+                        .kind = CHECK_WARNING_EVENT_LIBRARY_REDECLARATION,
+                        .token = token,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = point,
+                        .payload = { .name = name, .token = previous },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
+                }
+                composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
+                    check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
                 if (composite == 0)
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
@@ -4297,66 +4322,16 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         check_input_visibility_declare(reader, token, point);
     }
     check_input_overload_declare(reader, token, point, old, overload);
-    if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, reader->scope_count) == 0)
+    // Lazy library declarations have file scope. Their lexical cache can be restored and rebuilt, but a local
+    // object declared after the first call is allowed to shadow them, unlike an ordinary block-scope implicit int.
+    const uint32_t depth = reader->output->function_flags != NULL && (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 ? 0 : reader->scope_count;
+    if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, depth) == 0)
     {
         reader->output->resource = true;
     }
 }
 
-// The C90 compatibility rule is a declaration at the first direct call's source point, with block scope and
-// external linkage. Reuse the ordinary declaration/binding path so later prototypes share its entity while calls
-// made before a prototype keep default argument promotions. C23 removed this rule even when its warning is off.
-static void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
-{
-    const Parser* parser = reader->parser;
-    const uint32_t count = parser->tokens.count;
-    const uint32_t callee = token;
-    const uint32_t parent = parser->tree.parents[callee];
-    const bool call = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CALL &&
-                      callee + 1 < parent && parser->tree.roles[callee + 1] == PARSE_ROLE_OPEN_CALL;
-    const uint32_t name = parser->tokens.names[token];
-    const bool builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
-    const bool missing = call && !builtin && reader->pp->options.language.standard < 2023 &&
-                         c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
-    check_input_lane_refuse(reader, reader->lane && missing, "an implicit function declaration needs source-order linkage");
-    if (missing && !reader->lane)
-    {
-        const TypeId type = check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0));
-        CheckInput* input = reader->output;
-        if (input->implicit_function_count == reader->implicit_function_capacity)
-        {
-            const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
-                                      reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
-            uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
-            if (tokens == NULL)
-            {
-                input->resource = true;
-            }
-            else
-            {
-                if (input->implicit_function_count != 0)
-                {
-                    memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
-                }
-                input->implicit_function_tokens = tokens;
-                reader->implicit_function_capacity = capacity;
-            }
-        }
-        if (!input->resource && type != 0)
-        {
-            input->implicit_function_tokens[input->implicit_function_count++] = token;
-            input->declarations[token] = token;
-            reader->declared_types[token] = type;
-            reader->declaration_kinds[token] = C_BINDING_FUNCTION;
-            input->function_flags[token] = CHECK_INPUT_FUNCTION_IMPLICIT;
-            reader->objects[token] = token + 1;
-            reader->static_objects[token] = true;
-            reader->linkage[token] = 2;
-            input->declaration_bodies[token] = reader->function_body;
-            check_input_bind(reader, token, token);
-        }
-    }
-}
+#include "c_check_implicit_input.c"
 
 #include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
@@ -6409,6 +6384,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 {
     *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
+                         .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
+                                                        pp->options.language.standard >= 1999 ? 3 : 2,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .implicit_function_system = pp->options.implicit_function_system };
     check_input_kr_warning_policy(input, &pp->options);
