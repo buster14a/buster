@@ -1872,7 +1872,12 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         }
         else
         {
-            session->lazy = false;
+            // The created lanes read `lazy` as they start: it changes only for a lazy session whose lane 1 didn't start,
+            // which has no other lane.
+            if (session->lazy)
+            {
+                session->lazy = false;
+            }
             session->count = started ? lanes : 1;
             session->created = created;
             lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
@@ -1916,7 +1921,8 @@ static uint32_t lane_session_settle(void)
 {
     LaneSession* session = lane_session_current();
     uint32_t result = 1;
-    if (session != 0 && !session->settled && pthread_equal(session->owner, pthread_self()))
+    // `settled` is lane 0's alone, which it writes while the other lanes run: they never read it.
+    if (session != 0 && pthread_equal(session->owner, pthread_self()) && !session->settled)
     {
         // Lane 1 publishes the count and the lanes it created before it opens the gate.
         const bool run = lane_sleep(&session->gate, 0) == BUSTER_LANE_GATE_RUN;
