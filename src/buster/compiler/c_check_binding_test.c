@@ -791,7 +791,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                     2,
                 };
                 uint8_t defined[2] = { 0 };
-                uint8_t definition_seen[2] = { 0 };
+                uint32_t definition_origins[2] = { 0 };
                 uint8_t thread_local[2] = { 0 };
                 uint32_t objects[] = {
                     17,
@@ -819,7 +819,7 @@ static void check_test_binding_compatibility_capacity(CheckTest* test)
                     .declared_types = declared_types,
                     .declaration_kinds = declaration_kinds,
                     .defined = defined,
-                    .definition_seen = definition_seen,
+                    .definition_origins = definition_origins,
                     .linkage = linkage,
                     .objects = objects,
                     .linked_declarations = linked_declarations,

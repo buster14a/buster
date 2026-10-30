@@ -633,7 +633,8 @@ struct CheckInputReader
     TypeId* return_types;
     uint8_t* declaration_kinds;
     uint8_t* defined;
-    uint8_t* definition_seen;
+    // Defining token plus one, inherited through prototypes; zero means no definition history.
+    uint32_t* definition_origins;
     uint8_t* static_objects;
     uint8_t* registers;
     uint8_t* linkage;
@@ -782,6 +783,8 @@ struct CheckInputReader
     bool cleanup_attributes;
     bool weak_attributes;
     bool late_attributes;
+    // Allocated only after the first late attribute: accepted attribute kinds indexed by linked object.
+    uint8_t* late_attribute_masks;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -3976,7 +3979,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 // A block-scope alias changes the linked entity's definition history outside this body. A deferred
                 // lane cannot publish that change in source order, so let the serial reader handle the unit.
                 check_input_lane_refuse(reader, reader->lane && alias_definition, "a body's alias changes its linked entity's definition history");
-                reader->definition_seen[name] = reader->defined[name] || alias_definition;
+                reader->definition_origins[name] = reader->defined[name] || alias_definition ? name + 1 : 0;
                 reader->output->tentative[name] = !is_typedef && !function && file && storage != C_NAME_EXTERN && kind != PARSE_KIND_EQUAL;
                 reader->static_objects[name] = !is_typedef && (is_static || function || storage == C_NAME_EXTERN || reader->function_result == 0);
                 reader->registers[name] = storage == C_NAME_REGISTER;
@@ -4000,16 +4003,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
                     }
                 }
-                // GNU's weak attribute needs external linkage (#147): clang's error at the attribute, but on a typedef,
-                // where it warns and ignores it (all of a typedef's declarators are typedefs).
+                // GNU's weak attribute needs external linkage (#147). A redeclaration of an already defined linked
+                // entity is different: clang drops a new attribute before checking its linkage. The binding walk later
+                // diagnoses and drops it (check_input_attribute_late). Do not use a shadowed local as that entity.
                 for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
                 {
                     CheckInputAttribute* attribute = attributes->records + a;
                     attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
                     if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
                     {
-                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
-                        valid = false;
+                        const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]);
+                        const uint32_t previous = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+                        const bool late = previous != BUSTER_CHECK_NONE && !reader->defined[name] && reader->linkage[name] != 0 &&
+                            reader->linkage[previous] == reader->linkage[name] && reader->definition_origins[previous] &&
+                            reader->declaration_kinds[previous] == (function ? C_BINDING_FUNCTION : C_BINDING_OBJECT);
+                        if (!late)
+                        {
+                            check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
+                            valid = false;
+                        }
                     }
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
@@ -4232,15 +4244,18 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                                      (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
             }
             if (reader->declaration_kinds[previous] != kind || reader->linkage[previous] != reader->linkage[token] || compatible != TYPE_ANSWER_YES ||
-                (reader->definition_seen[token] && reader->definition_seen[previous]) ||
+                (reader->definition_origins[token] && reader->definition_origins[previous]) ||
                 reader->output->thread_local[token] != reader->output->thread_local[previous] || parameter_conflict)
             {
                 check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
             }
             else
             {
-                check_input_attribute_late(reader, token, previous);
-                reader->definition_seen[token] |= reader->definition_seen[previous];
+                check_input_attribute_late(reader, token, previous, point);
+                if (reader->definition_origins[token] == 0)
+                {
+                    reader->definition_origins[token] = reader->definition_origins[previous];
+                }
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);
                 composite = check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
@@ -4268,6 +4283,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
         }
         reader->linked_types[name] = composite;
+        if (!reader->lane && reader->late_attribute_masks != NULL && reader->objects[token] != 0)
+        {
+            reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(reader->output->attributes[token], reader->output->function_flags[token]);
+        }
         if (reader->deferred != 0)
         {
             check_deferred_linked(reader, name, token);
@@ -6579,7 +6598,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(query_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(function_specifiers, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(return_types, TypeId);
-    BUSTER_CHECK_INPUT_ARRAY(definition_seen, uint8_t);
+    BUSTER_CHECK_INPUT_ARRAY(definition_origins, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(ignored, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializers, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(initializer_declarations, uint32_t);
@@ -6762,7 +6781,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             memset(reader.ignored, 0, (uint64_t)count + 1);
         }
         memset(reader.defined, 0, (uint64_t)count + 1);
-        memset(reader.definition_seen, 0, (uint64_t)count + 1);
+        memset(reader.definition_origins, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(input->tentative, 0, (uint64_t)count + 1);
         memset(reader.static_objects, 0, (uint64_t)count + 1);
         memset(reader.registers, 0, (uint64_t)count + 1);
