@@ -9,8 +9,88 @@
 
 #include <cpuid.h>
 
+// The planner without room (#929's review): a statement of x87 operands and a template of no instructions, one of an
+// x87 operand and an instruction, and one refused at its first operand (a flag output's) before its x87 operand, whose
+// later places the planner never writes. check_program_asm_plan of them, by both paths, with the output arena's room cut
+// to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
+// (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
+// places; then the plans must be the whole arena's: a helper each for the first two, and the third refused by name.
+static void check_test_program_asm_room(CheckTest* test)
+{
+    static const char source[] =
+        "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
+        "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "int flagged(int a, float x){int z;__asm__(\"cmpl $0, %2\" : \"=@ccz\"(z), \"+t\"(x) : \"r\"(a));return z+(int)x;}";
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PredefinesOptions predefines = check_test_program_predefines();
+    bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                        pp_run_source(&pp, "asm-room", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "asm room: source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                     parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                     check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                     check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                     check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 3;
+        char description[256];
+        snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
+        check_test_expect(test, ready, description);
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        const uint64_t capacity = output.capacity;
+        CheckProgramAsms planned = { 0 };
+        CheckProgramHelpers helpers = { 0 };
+        bool done = false;
+        bool kept = true;
+        uint32_t failures = 0;
+        for (uint64_t room = 0; ready && !done && room <= (UINT64_C(1) << 20); room += 8)
+        {
+            helpers = (CheckProgramHelpers){ 0 };
+            output.capacity = output_mark + room;
+            done = check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch);
+            output.capacity = capacity;
+            failures += !done;
+            kept &= done || (planned.status == CHECK_PROGRAM_RESOURCE && output.length == output_mark && scratch.length == scratch_mark && helpers.count == 0);
+        }
+        snprintf(description, sizeof(description), "asm room, %s: %u runs without room fail with the arenas as they were, then one plans", path == 0 ? "scalar" : "vector",
+                 failures);
+        check_test_expect(test, ready && done && kept && failures != 0, description);
+        const bool plans_right = done && planned.plans != NULL && planned.plans[0].reason == NULL && planned.plans[0].helper != BUSTER_CHECK_NONE &&
+                                 planned.plans[1].reason == NULL && planned.plans[1].helper != BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
+                                 strcmp(planned.plans[2].reason, "inline assembly flag outputs") == 0 && helpers.count == 2;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements have helpers, and the flag output is refused by name", path == 0 ? "scalar" : "vector");
+        check_test_expect(test, plans_right, description);
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
+    check_test_program_asm_room(test);
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
     // operands substituted into it assembles to nothing too.
     check_test_program_source(test,

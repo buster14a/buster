@@ -1283,8 +1283,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
+    // Only a statement whose places are all written has them to read: none with an arena that had no room for them, nor
+    // past a refusal (#929's review).
     bool x87 = false;
-    for (uint32_t k = 0; k < count; k += 1)
+    for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
     }
