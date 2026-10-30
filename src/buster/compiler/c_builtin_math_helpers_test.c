@@ -117,6 +117,29 @@ static bool cbuiltin_math_test_map(CBuiltinMathTestTally* tally, const Tier0Code
         result = cbuiltin_math_test_expect(tally, encoded > 0, "helper sizing and encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
+        if (result && caller == NULL)
+        {
+            Tier0Code sized_code = *helper;
+            sized_code.records = records;
+            UnwindFunction published = { 0 };
+            UnwindFunction scalar_frame = { 0 };
+            UnwindFunction vector_frame = { 0 };
+            const UnwindError described = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &published);
+            const UnwindError scalar_proof = unwind_tier0_scalar(&sized_code, offsets, program->byte_count, &scalar_frame);
+            const UnwindError vector_proof = unwind_tier0(&sized_code, offsets, program->byte_count, &vector_frame);
+            const bool framed = item != 2 && item != 3;
+            result = cbuiltin_math_test_expect(tally, described == UNWIND_OK && scalar_proof == UNWIND_OK && vector_proof == UNWIND_OK &&
+                memcmp(&published, &scalar_frame, sizeof(published)) == 0 && memcmp(&published, &vector_frame, sizeof(published)) == 0 &&
+                published.frame_size == (framed ? 16u : 0u) && published.saved == 0 && published.pointer == 0 &&
+                published.event_count == (framed ? 2u : 0u) && (!framed || (published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1)),
+                "published helper CFA matches both independent unwind proofs", item);
+            // The original missing reservation must be observable, and copysign must stay genuinely frameless.
+            sized_code.frame_size = framed ? 0 : 16;
+            UnwindFunction wrong = { 0 };
+            const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
+            result = cbuiltin_math_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &scalar_frame, sizeof(wrong)) != 0,
+                "incorrect helper frame metadata disagrees with the record proof", item) && result;
+        }
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };

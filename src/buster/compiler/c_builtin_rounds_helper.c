@@ -112,6 +112,7 @@ static CBuiltinRoundsHelper cbuiltin_rounds_helper(CBuiltinId id, Arena* output)
             memcpy(records, cbuiltin_rounds_helper_records, sizeof(cbuiltin_rounds_helper_records));
             result.code.records = records;
             result.code.count = BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records);
+            result.code.frame_size = 8;
             result.result_class = BUSTER_TYPED_CLASS_U32;
             result.compiler_barrier = true;
             result.reads_fp_environment = true;

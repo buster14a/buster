@@ -67,6 +67,32 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
         result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", path);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
+        if (result && caller == NULL)
+        {
+            X86Instruction records[BUSTER_ARRAY_LENGTH(cbuiltin_rounds_helper_records)];
+            uint32_t offsets[BUSTER_ARRAY_LENGTH(records)];
+            memcpy(records, helper->code.records, sizeof(records));
+            const BranchSizing sized = path == 0 ? size_branches_scalar(records, helper->code.count, NULL, NULL, 0, offsets) :
+                                                  size_branches(records, helper->code.count, NULL, NULL, 0, offsets);
+            Tier0Code sized_code = helper->code;
+            sized_code.records = records;
+            UnwindFunction published = { 0 };
+            UnwindFunction scalar_frame = { 0 };
+            UnwindFunction vector_frame = { 0 };
+            const UnwindError described = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &published);
+            const UnwindError scalar_proof = unwind_tier0_scalar(&sized_code, offsets, program->byte_count, &scalar_frame);
+            const UnwindError vector_proof = unwind_tier0(&sized_code, offsets, program->byte_count, &vector_frame);
+            result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK &&
+                scalar_proof == UNWIND_OK && vector_proof == UNWIND_OK && memcmp(&published, &scalar_frame, sizeof(published)) == 0 &&
+                memcmp(&published, &vector_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
+                published.saved == 0 && published.pointer == 0 && published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1,
+                "rounding-mode helper CFA matches both independent unwind proofs", path);
+            sized_code.frame_size = 0;
+            UnwindFunction wrong = { 0 };
+            const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
+            result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &scalar_frame, sizeof(wrong)) != 0,
+                "missing rounding-mode reservation disagrees with the record proof", path) && result;
+        }
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
