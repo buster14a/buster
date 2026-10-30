@@ -1823,12 +1823,12 @@ struct LaneSessionTest
 };
 
 // The thread that handled the sessions check's signal.
-static pid_t lane_test_signalled;
+static volatile sig_atomic_t lane_test_signalled;
 
 static void lane_test_session_signal(int signal_number)
 {
     (void)signal_number;
-    lane_test_signalled = (pid_t)syscall(SYS_gettid);
+    lane_test_signalled = (sig_atomic_t)syscall(SYS_gettid);
 }
 
 static void lane_test_session_forbidden(void* argument)

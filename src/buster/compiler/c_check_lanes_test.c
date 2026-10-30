@@ -1753,8 +1753,11 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     const bool referenced = built && check_lanes_test_run(reference_arguments, errors) == 0;
     check_lanes_test_expect(tally, !built || referenced, "the driver writes the reference object on one lane", program);
     const uint32_t cpus = check_driver_cpus();
+    const uint32_t two_cpus = cpus < 2 ? cpus : 2;
+    const uint32_t three_cpus = cpus < 3 ? cpus : 3;
+    const uint32_t four_cpus = cpus < 4 ? cpus : 4;
     // The commands: their options, their sources, whether they write an object to compare, the lane of the session that
-    // fails to start (0 for none), whether they may run on one CPU alone, the threads they create, and with --time-stages
+    // fails to start (0 for none), an affinity cap (0 for unchanged), the threads they create, and with --time-stages
     // the lanes its report must say the session asked for and ran on.
     typedef struct CheckLanesSessionCommand CheckLanesSessionCommand;
     struct CheckLanesSessionCommand
@@ -1764,7 +1767,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         bool link;
         bool two;
         const char* fail_at;
-        bool one_cpu;
+        uint32_t cpu_limit;
         uint32_t threads;
         uint32_t asked;
         uint32_t ran;
@@ -1773,12 +1776,15 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         { .options = { "--lanes", "1", "-c" }, .object = true, .threads = 0 },
         { .options = { "--worker-budget=1", "-c" }, .object = true, .threads = 0 },
         { .options = { "-fsyntax-only" }, .threads = 0 },
-        { .options = { "--lanes", "3", "-c", "--time-stages" }, .object = true, .threads = 2, .asked = 3, .ran = 3 },
+        { .options = { "--lanes", "3", "-c", "--time-stages" }, .object = true, .threads = three_cpus - 1, .asked = three_cpus, .ran = three_cpus },
         { .options = { "-c" }, .object = true, .threads = cpus - 1 },
-        { .options = { "-c" }, .object = true, .one_cpu = true, .threads = 0 },
+        { .options = { "-c" }, .object = true, .cpu_limit = 1, .threads = 0 },
+        { .options = { "--lanes=3", "-c", "--time-stages" }, .object = true, .cpu_limit = 1, .threads = 0, .asked = 1, .ran = 1 },
+        { .options = { "--lanes=8", "--worker-budget=3", "-c", "--time-stages" }, .object = true, .cpu_limit = 2, .threads = two_cpus - 1, .asked = two_cpus, .ran = two_cpus },
+        { .options = { "--lanes=8", "--worker-budget=1", "-c", "--time-stages" }, .object = true, .cpu_limit = 2, .threads = 0, .asked = 1, .ran = 1 },
         { .options = { "-o" }, .link = true, .threads = cpus - 1 },
         { .options = { "-c" }, .two = true, .threads = cpus - 1 },
-        { .options = { "--lanes", "4", "-c", "--time-stages" }, .object = true, .fail_at = "2", .threads = 1, .asked = 4, .ran = 1 },
+        { .options = { "--lanes", "4", "-c", "--time-stages" }, .object = true, .fail_at = "2", .threads = cpus < 3 ? cpus - 1 : 1, .asked = four_cpus, .ran = cpus < 3 ? cpus : 1 },
     };
     uint64_t inherited = 0;
     for (char** entry = environ; entry != NULL && *entry != NULL; entry += 1)
@@ -1840,17 +1846,22 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         // The two sources' objects are written in the current directory, as clang names them: run them in `directory`.
         char saved[PATH_MAX];
         const bool moved = !command->two || (getcwd(saved, sizeof(saved)) != NULL && chdir(directory) == 0);
-        // One CPU: this thread pins itself to the first it may run on while it starts the command, which inherits that,
-        // and has its own CPUs back after.
+        // Limit this thread to the first allowed CPUs while it starts the command, which inherits that mask, then
+        // restore the full original mask. The limited cases check explicit lanes against both CPU and budget caps.
         uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
-        const long affinity_bytes = command->one_cpu ? syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) : 0;
-        uint32_t first = 0;
-        while (affinity_bytes > 0 && first < (uint32_t)affinity_bytes * 8 && ((affinity[first / 64] >> (first % 64)) & 1) == 0)
+        uint64_t limited[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+        const long affinity_bytes = command->cpu_limit != 0 ? syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) : 0;
+        uint32_t selected = 0;
+        for (uint32_t cpu = 0; affinity_bytes > 0 && cpu < (uint32_t)affinity_bytes * 8 && selected < command->cpu_limit; cpu += 1)
         {
-            first += 1;
+            if (((affinity[cpu / 64] >> (cpu % 64)) & 1) != 0)
+            {
+                limited[cpu / 64] |= UINT64_C(1) << (cpu % 64);
+                selected += 1;
+            }
         }
-        const bool pinned = affinity_bytes > 0 && first < (uint32_t)affinity_bytes * 8 && lane_pin(first);
-        const int status = moved && (!command->one_cpu || pinned) ? object_test_run_environment(arguments, "/dev/null", errors, environment) : -1;
+        const bool pinned = selected != 0 && syscall(SYS_sched_setaffinity, 0, sizeof(limited), limited) == 0;
+        const int status = moved && (command->cpu_limit == 0 || pinned) ? object_test_run_environment(arguments, "/dev/null", errors, environment) : -1;
         const bool unpinned = !pinned || syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0;
         const bool returned = unpinned && (!command->two || (moved && chdir(saved) == 0));
         char text[32] = { 0 };
