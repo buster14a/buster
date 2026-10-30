@@ -226,8 +226,8 @@ typedef enum CheckX86LowerMerge
 } CheckX86LowerMerge;
 
 // A float compare's predicate, by its rule's `fixed` (BINARY_IMMEDIATE's and COMPARE's of a form): the immediate's whole
-// byte, as clang's code passes a scalar one's; or clang's code's of a packed one, the fcmp of the immediate's low 4 bits,
-// whose signaling it ignores, as LLVM selects it (check_x86_lower_float_predicate).
+// byte, as clang's code passes a scalar one's; or a packed one's predicate, retained in a function with FENV_ACCESS
+// and otherwise the fcmp of the immediate's low 4 bits, as LLVM selects it (check_x86_lower_float_predicate).
 typedef enum CheckX86LowerPredicate
 {
     CHECK_X86_PREDICATE_BYTE,
@@ -413,16 +413,16 @@ static bool check_x86_lower_family_masks(uint8_t family)
     return result;
 }
 
-// A packed float compare's predicate as clang's code has it (CHECK_X86_PREDICATE_FCMP): CGBuiltin's fcmp of the immediate's
-// low 4 bits, whose signaling it ignores, as LLVM selects that fcmp (translateX86FSETCC): the instruction's predicate, and
-// with *swap its operands the other way round, a greater-than's as a less-than's (ULT as NLE, ULE as NLT, OGE as LE, OGT
-// as LT). FALSE and TRUE, which clang's code makes constants, are the instruction's own (0x0b and 0x0f), which give them.
-static uint32_t check_x86_lower_float_predicate(uint64_t immediate, bool* swap)
+// A packed float compare's predicate (CHECK_X86_PREDICATE_FCMP): in a constrained function keep all 5 bits and the
+// operands' order, including the signaling bit. Otherwise use clang's unconstrained fcmp of the low 4 bits, as LLVM
+// selects it (translateX86FSETCC), with *swap for a greater-than's operands. FALSE and TRUE use their instruction's
+// own predicates. The caller supplies clang's function-wide FENV_ACCESS decision, not just the call token's state.
+static uint32_t check_x86_lower_float_predicate(uint64_t immediate, bool strict, bool* swap)
 {
     static const uint8_t predicates[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x06, 0x05, 0x0b, 0x0c, 0x02, 0x01, 0x0f };
     const uint32_t index = (uint32_t)(immediate & 15);
-    *swap = index == 0x09 || index == 0x0a || index == 0x0d || index == 0x0e;
-    return predicates[index];
+    *swap = !strict && (index == 0x09 || index == 0x0a || index == 0x0d || index == 0x0e);
+    return strict ? (uint32_t)(immediate & 31) : predicates[index];
 }
 
 // A record of a rule with a rounding control at that control's value, `round` (CheckX86LowerRounding): its form, or the
@@ -562,9 +562,10 @@ static void check_x86_lower_reduce_row(const CheckX86LowerRule* rule, Tier0Opera
 // in order, and a role's j is its operand's place among them all, so that a compare's mask is INTEGER(2) and a select's
 // vectors VECTOR(1) and VECTOR(2). An integer operand's class here is its width's; the caller gives each its argument's
 // own (check_lower_x86_builtin). A result is in the class the instruction extends it to, which the caller converts to
-// the builtin's type. The target's features and extensions must hold the rule's.
+// the builtin's type. `strict` retains a packed floating compare's signaling and SAE in a function with FENV_ACCESS.
+// The target's features and extensions must hold the rule's.
 static const char* check_x86_lower_row_of(const X86Target* target, const CheckX86LowerRule* rule, uint64_t immediate, uint64_t round, uint64_t mask,
-                                          Tier0Operation* row)
+                                          bool strict, Tier0Operation* row)
 {
     const char* reason = NULL;
     uint64_t needed = 0;
@@ -602,14 +603,17 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             const bool floating = rule->form != X86_FORM_NONE;
             bool swap = false;
             const uint64_t predicate = !floating                                ? immediate & 7 :
-                                       rule->fixed == CHECK_X86_PREDICATE_FCMP ? check_x86_lower_float_predicate(immediate, &swap) :
+                                       rule->fixed == CHECK_X86_PREDICATE_FCMP ? check_x86_lower_float_predicate(immediate, strict, &swap) :
                                                                                  immediate & 0xff;
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 2, 0, BUSTER_TIER0_ROLE_INTEGER(2));
             row->records[1] = check_x86_lower_record(floating ? rule->form : check_x86_lower_compare_form(rule->is_signed, size, width), 1, swap ? v1 : v0,
                                                      swap ? v0 : v1);
             row->records[1].immediate = (int64_t)predicate;
             row->records[1].decorations = 2;
-            check_x86_lower_round(rule, round, &row->records[1]);
+            if (!floating || rule->fixed != CHECK_X86_PREDICATE_FCMP || strict)
+            {
+                check_x86_lower_round(rule, round, &row->records[1]);
+            }
             row->records[2] = check_x86_lower_record(check_x86_lower_mask_out(lanes), BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, 1);
             row->record_count = 3;
             row->operand_count = 3;
@@ -930,7 +934,7 @@ static const char* check_x86_lower_row_of(const X86Target* target, const CheckX8
             const uint64_t lanes_in = rule->other != 0 ? (uint64_t)rule->bytes / rule->other : 256;
             const bool fcmp = rule->fixed == CHECK_X86_PREDICATE_FCMP;
             bool swap = false;
-            const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, &swap) : immediate & (lanes_in - 1);
+            const uint64_t value = fcmp ? check_x86_lower_float_predicate(immediate, strict, &swap) : immediate & (lanes_in - 1);
             row->records[0] = check_x86_lower_record(rule->form, v0, swap ? v1 : v0, swap ? v0 : v1);
             row->records[0].immediate = (int32_t)value;
             row->record_count = 1;

@@ -1278,9 +1278,9 @@
     // #148: the compares of floats by a predicate, their immediate: into a vector of all-ones and zeros (VEX's VCMPPS,
     // VCMPPD, VCMPSS and VCMPSD), into a mask under a mask (EVEX's, AVX512-FP16's half-precision ones too), and into an
     // int (vcomisd and vcomiss: the first elements', as vcomish's). A packed one's predicate is clang's code's: the fcmp
-    // of the immediate's low 4 bits, whose signaling it ignores, as LLVM selects it (CHECK_X86_PREDICATE_FCMP), and so is
-    // its rounding control (the form is its own either way); a scalar one's is the immediate's whole byte, with the
-    // exceptions' suppression its rounding control asks for.
+    // of the immediate's low 4 bits outside a constrained function (CHECK_X86_PREDICATE_FCMP). In a function with
+    // FENV_ACCESS keep the packed predicate and SAE, as clang's constrained intrinsic does; scalar ones keep the
+    // immediate's whole byte and the exceptions' suppression its rounding control asks for.
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps", BINARY_IMMEDIATE, 4, 16, VCMPPS_X_X_XM128_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd", BINARY_IMMEDIATE, 8, 16, VCMPPD_X_X_XM128_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps256", BINARY_IMMEDIATE, 4, 32, VCMPPS_Y_Y_YM256_IMM8, NONE, NONE, FCMP, BUSTER_X86_FEATURE(AVX), 0)
@@ -1289,17 +1289,17 @@
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsd", BINARY_IMMEDIATE, 8, 16, VCMPSD_X_X_XM64_IMM8, NONE, NONE, BYTE, BUSTER_X86_FEATURE(AVX), 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps128_mask", COMPARE, 4, 16, VCMPPS_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps256_mask", COMPARE, 4, 32, VCMPPS_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, 0)
-    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps512_mask", COMPARE, 4, 64, VCMPPS_K_Z_ZM512_IMM8, VCMPPS_K_Z_ZM512_IMM8, SAE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpps512_mask", COMPARE, 4, 64, VCMPPS_K_Z_ZM512_IMM8, VCMPPS_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd128_mask", COMPARE, 8, 16, VCMPPD_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd256_mask", COMPARE, 8, 32, VCMPPD_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, 0)
-    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd512_mask", COMPARE, 8, 64, VCMPPD_K_Z_ZM512_IMM8, VCMPPD_K_Z_ZM512_IMM8, SAE, FCMP, 0, 0)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmppd512_mask", COMPARE, 8, 64, VCMPPD_K_Z_ZM512_IMM8, VCMPPD_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpss_mask", COMPARE, 4, 16, VCMPSS_K_X_XM32_IMM8, VCMPSS_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsd_mask", COMPARE, 8, 16, VCMPSD_K_X_XM64_IMM8, VCMPSD_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("vcomiss", SCALAR_COMPARE, 4, 16, VCMPSS_K_X_XM32_IMM8, VCMPSS_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("vcomisd", SCALAR_COMPARE, 8, 16, VCMPSD_K_X_XM64_IMM8, VCMPSD_K_X_X_SAE_IMM8, SAE, BYTE, 0, 0)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph128_mask", COMPARE, 2, 16, VCMPPH_K_X_XM128_IMM8, NONE, NONE, FCMP, 0, BUSTER_CHECK_X86_FP16)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph256_mask", COMPARE, 2, 32, VCMPPH_K_Y_YM256_IMM8, NONE, NONE, FCMP, 0, BUSTER_CHECK_X86_FP16)
-    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph512_mask", COMPARE, 2, 64, VCMPPH_K_Z_ZM512_IMM8, VCMPPH_K_Z_ZM512_IMM8, SAE, FCMP, 0, BUSTER_CHECK_X86_FP16)
+    BUSTER_CHECK_X86_FLOAT_COMPARE("cmpph512_mask", COMPARE, 2, 64, VCMPPH_K_Z_ZM512_IMM8, VCMPPH_K_Z_Z_SAE_IMM8, SAE, FCMP, 0, BUSTER_CHECK_X86_FP16)
     BUSTER_CHECK_X86_FLOAT_COMPARE("cmpsh_mask", COMPARE, 2, 16, VCMPSH_K_X_XM16_IMM8, VCMPSH_K_X_X_SAE_IMM8, SAE, BYTE, 0, BUSTER_CHECK_X86_FP16)
     // The intersections' pairs of masks, stored by KMOVB (AVX512-DQ's) or, of 16 lanes, KMOVW.
     BUSTER_CHECK_X86_ONE("vp2intersect_d_128", INTERSECT, 4, 16, VP2INTERSECTD_K_X_XM128, BUSTER_X86_FEATURE(AVX512VP2INTERSECT) | BUSTER_X86_FEATURE(AVX512DQ))

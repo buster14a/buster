@@ -313,6 +313,54 @@ static void check_test_program_x86_rest_sources(CheckTest* test, const char* cla
             "return (int)h;}",
         },
         {
+            // Strict compares preserve their signaling bit and masked exception suppression. Uniform raw QNaN/SNaN
+            // inputs keep a quiet comparison from inheriting another lane's invalid flag. The nested function's
+            // compare is outside its empty ON block: clang constrains that entire function too.
+            "x86-rest-float-compares-fenv",
+            "int clear_fp(void);int fp_state(void);\n"
+            "static __attribute__((noinline)) unsigned nested(v4sf a,v4sf b){{\n#pragma STDC FENV_ACCESS ON\n}\n"
+            "clear_fp();unsigned r=__builtin_ia32_cmpps128_mask(a,b,16,15);return r|((unsigned)fp_state()<<8);}\n"
+            "#pragma STDC FENV_ACCESS ON\n"
+            "#define P8(F,o,...) F(o+0,__VA_ARGS__)F(o+1,__VA_ARGS__)F(o+2,__VA_ARGS__)F(o+3,__VA_ARGS__)"
+            "F(o+4,__VA_ARGS__)F(o+5,__VA_ARGS__)F(o+6,__VA_ARGS__)F(o+7,__VA_ARGS__)\n"
+            "#define P32(F,...) P8(F,0,__VA_ARGS__)P8(F,8,__VA_ARGS__)P8(F,16,__VA_ARGS__)P8(F,24,__VA_ARGS__)\n"
+            "#define V(P,N,T,A,B) {clear_fp();T r=(T)__builtin_ia32_##N(A,B,P);FOLD(r);unsigned f=(unsigned)fp_state();FOLD(f);}\n"
+            "#define M(P,N,A,B,K) {clear_fp();unsigned r=__builtin_ia32_##N(A,B,P,K);FOLD(r);unsigned f=(unsigned)fp_state();FOLD(f);}\n"
+            "#define R(P,N,A,B,K,S) {clear_fp();unsigned r=__builtin_ia32_##N(A,B,P,K,S);FOLD(r);unsigned f=(unsigned)fp_state();FOLD(f);}\n"
+            "int tested(int n){unsigned h=2166136261u;const unsigned fs[]={0x3fc00000u,0x7fc00001u,0x7f800001u,0x80000000u};"
+            "const unsigned long long ds[]={0x3ff8000000000000ull,0x7ff8000000000001ull,0x7ff0000000000001ull,0x8000000000000000ull};"
+            "unsigned ab[16],bb[16];unsigned long long db[8],eb[8];unsigned k=(unsigned)n&3u;\n"
+            "for(int i=0;i<16;i++){ab[i]=((unsigned)n&4u)?0x3f800000u:fs[k];bb[i]=((unsigned)n&4u)?fs[k]:0x3f800000u;"
+            "if(i<8){db[i]=((unsigned)n&4u)?0x3ff0000000000000ull:ds[k];eb[i]=((unsigned)n&4u)?ds[k]:0x3ff0000000000000ull;}}\n"
+            "v4sf a4,b4;v8sf a8,b8;v16sf a16,b16;v2df d2,e2;v4df d4,e4;v8df d8,e8;"
+            "__builtin_memcpy(&a4,ab,16);__builtin_memcpy(&b4,bb,16);__builtin_memcpy(&a8,ab,32);__builtin_memcpy(&b8,bb,32);"
+            "__builtin_memcpy(&a16,ab,64);__builtin_memcpy(&b16,bb,64);__builtin_memcpy(&d2,db,16);__builtin_memcpy(&e2,eb,16);"
+            "__builtin_memcpy(&d4,db,32);__builtin_memcpy(&e4,eb,32);__builtin_memcpy(&d8,db,64);__builtin_memcpy(&e8,eb,64);\n"
+            "unsigned m=nested(a4,b4);FOLD(m);unsigned char k8=(unsigned char)mask(n);unsigned short k16=(unsigned short)mask(n);\n"
+            "P32(V,cmpps,v4sf,a4,b4)P32(V,cmppd,v2df,d2,e2)P32(V,cmpps256,v8sf,a8,b8)P32(V,cmppd256,v4df,d4,e4)\n"
+            "P32(M,cmpps128_mask,a4,b4,k8)P32(M,cmpps128_mask,a4,b4,0)P32(M,cmppd128_mask,d2,e2,0xff)"
+            "P32(M,cmpps256_mask,a8,b8,0xff)P32(M,cmppd256_mask,d4,e4,k8)\n"
+            "P32(R,cmpps512_mask,a16,b16,k16,4)P32(R,cmpps512_mask,a16,b16,0xffff,8)P32(R,cmpps512_mask,a16,b16,0xffff,12)"
+            "P32(R,cmppd512_mask,d8,e8,0xff,4)P32(R,cmppd512_mask,d8,e8,0xff,8)P32(R,cmppd512_mask,d8,e8,0xff,12)"
+            "P32(R,cmppd512_mask,d8,e8,0,4)return (int)h;}",
+        },
+        {
+            // FP16's strict predicate and SAE are compiled/linked under the explicit target. They are not executed
+            // on a host without that ISA; the strict row controls cover all predicates and both SAE values as well.
+            "x86-rest-half-compares-fenv",
+            "#pragma STDC FENV_ACCESS ON\n"
+            "typedef _Float16 v8hf __attribute__((vector_size(16)));typedef _Float16 v16hf __attribute__((vector_size(32)));"
+            "typedef _Float16 v32hf __attribute__((vector_size(64)));\n"
+            "__attribute__((target(\"avx512fp16,avx512vl\"))) static unsigned strict_half(v8hf a,v8hf b,v16hf c,v16hf d,v32hf e,v32hf f)"
+            "{return __builtin_ia32_cmpph128_mask(a,b,16,0xff)+__builtin_ia32_cmpph128_mask(b,a,9,0)"
+            "+__builtin_ia32_cmpph256_mask(c,d,17,0xffff)+__builtin_ia32_cmpph512_mask(e,f,31,~0u,4)"
+            "+__builtin_ia32_cmpph512_mask(e,f,16,~0u,8)+__builtin_ia32_cmpph512_mask(e,f,16,~0u,12);}\n"
+            "int tested(int n){v8hf a,b;v16hf c,d;v32hf e,f;fill(&a,16,n);fill(&b,16,n+1);fill(&c,32,n+2);fill(&d,32,n+3);"
+            "fill(&e,64,n+4);fill(&f,64,n+5);return (int)strict_half(a,b,c,d,e,f);}",
+            0,
+            true,
+        },
+        {
             // AVX512-FP16's compares of halves into masks, at predicates that swap their operands, that clang's code makes
             // constants and past them, and the scalar one's with the exceptions' suppression: compiled and linked against
             // clang's build of the same, as no host of the tests runs them; test-x86-intrinsics compares their code.
