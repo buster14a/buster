@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Temporary implementation workspace for #905; not part of the proposed merge.
+name: Lane startup implementation workspace
+on:
+  push:
+    branches: [codex/lane-startup-work-905]
+    paths: [.github/workflows/lane-startup-work.yml, lane-startup-work.patch]
+permissions:
+  contents: write
+jobs:
+  workspace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Apply the reviewed implementation patch when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f lane-startup-work.patch; then
+            git apply --check lane-startup-work.patch
+            git apply lane-startup-work.patch
+            git rm lane-startup-work.patch .github/workflows/lane-startup-work.yml
+            git add src tests tools docs
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git -c core.hooksPath=/dev/null commit -m 'Implement command-lifetime compiler lanes (#905)'
+            git push origin HEAD:codex/lane-startup-work-905
+          fi
+      - name: Export the exact source snapshot for inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/source-head.txt"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lane-startup-source
+          path: |
+            ${{ runner.temp }}/source.tar.gz
+            ${{ runner.temp }}/source-head.txt
+          retention-days: 1
+          if-no-files-found: error
