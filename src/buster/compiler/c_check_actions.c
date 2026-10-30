@@ -301,7 +301,8 @@ static void check_action_scalar(TypeTable* table, const CheckAction* action, Che
 static void check_actions(TypeTable* table, const CheckAction* actions, CheckActionResult* results, uint32_t count);
 static bool check_action_vector_eligible(const TypeTable* table, const CheckAction* action);
 static void check_complex_convert(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node);
-static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, CheckValue* value, uint32_t node, uint32_t extensions);
+static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, uint32_t domains, CheckValue* value,
+                                   uint32_t node, uint32_t extensions);
 static void check_complex_part(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 static void check_complex_conjugate(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 static bool check_vector_type(const TypeTable* table, TypeId type);
@@ -1416,7 +1417,14 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                 }
                 else if (left.constant_kind == CHECK_CONSTANT_COMPLEX && (unary || right.constant_kind == CHECK_CONSTANT_COMPLEX))
                 {
-                    result->warnings |= check_complex_fold(table, op, &left, &right, &result->value, action->node, action->extensions);
+                    // The common type's conversions erase a real operand's domain. Take it from the original source
+                    // operands here, where constant complex arithmetic alone needs it: an imaginary +0.0 changes a
+                    // mixed expression's signed zero, and its zero products can introduce a spurious NaN.
+                    const TypeId original_left = type_conversion_operand(table, action->operands[0].type);
+                    const TypeId original_right = unary ? original_left : type_conversion_operand(table, action->operands[1].type);
+                    const uint32_t domains = (check_action_kind(table, original_left) == BUSTER_TYPE_KIND_COMPLEX ? 1u : 0u) |
+                                             (check_action_kind(table, original_right) == BUSTER_TYPE_KIND_COMPLEX ? 2u : 0u);
+                    result->warnings |= check_complex_fold(table, op, &left, &right, domains, &result->value, action->node, action->extensions);
                 }
                 else if (!check_action_fold_symbolic(table, op, &left, &right, &result->value))
                 {

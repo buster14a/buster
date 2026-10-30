@@ -1060,6 +1060,8 @@ designs and the compilers already built this way.
   `--program-vectors` selects the vector, x86 builtin and half-precision programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`, `c_check_program_vector_builtins_test.c`, `c_check_program_fp16_test.c`,
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
+  Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
+  XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -5339,13 +5341,15 @@ on fixtures of each kind of definition (functions, objects and string literals),
 --symbols` on any corpus. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced
 definitions saves against `--lower-all`, after checking, with each file's
-functions and objects defined, lowered and skipped. A file the checker rejects,
+functions and objects defined, lowered and skipped. It times warm selection,
+lowering and object construction in memory, with unwind generation and
+verification disabled; it excludes checking and file writing. A file the checker rejects,
 or that is refused by name (`CHECK_PROGRAM_UNSUPPORTED`,
 `CHECK_DATA_UNSUPPORTED`), is left out; any other failure, a timed run that
 lowers other than its warm-up, and a run that measures no file fail the command
 (`test-checker` checks each, `c_lowering_source_benchmark_test.c`). Run it under
 the 9700X's lock with `taskset -c 2`. [The lowering guide](docs/c-lowering.md) records the
-contract, the comparisons' results and what `main.c`'s measurement waits on.
+contract, the comparisons' results and the completed `main.c` measurement.
 
 ## Type tests
 

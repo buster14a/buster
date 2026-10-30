@@ -1589,7 +1589,8 @@ What the lowering covers past scalars (#145's programs):
   with `FENV_ACCESS` none folds, as none of
   clang's constrained conversions does, and a float rounds to a `__bf16` by
   libgcc's `__truncsfbf2` whatever the target. `__bf16` arithmetic where the
-  unit's target has AVX10.2's, `_Complex _Float16`, `_Atomic` ones ("values of
+  unit's target has AVX10.2's, arithmetic and comparisons of `_Complex
+  _Float16`, `_Atomic` ones ("values of
   this type"), an `_Atomic` integer's update by one ("this operation on
   half-precision values": clang's code adds the operand converted to an
   unsigned integer there, not as the usual arithmetic conversions compute), a
@@ -1859,6 +1860,20 @@ What the lowering covers past scalars (#145's programs):
     has their extensions, or their effects are on the machine's state (a
     transaction's, the user interrupts', the tiles' configuration, MSRs), and
     `test-x86-intrinsics` compares them all with clang's code;
+  - AMX internal tile-value builtins: zero, ordinary/streaming/read-shared loads,
+    stores, INT8/BF16/FP16/complex/FP8 products and the six AMX-AVX512 row
+    conversions. Their 1024-byte `int` vectors use memory objects for copies,
+    arguments, hidden results and element access. Active rows are packed using
+    their column-byte count as the stride; inactive result-object bytes are
+    initialized to zero. Per-unit leaves configure palette 1 with every reserved
+    byte zero, execute the real AMX instruction and release tile state. Each
+    operation requires its target extension, and row operations also require
+    AVX10.2. Ordinary arithmetic on tile-sized vectors remains unsupported.
+    `test-checker --program-amx` compares decoded Clang instruction chains with
+    the leaves at minimum, interior and full tile shapes, including wrong-width
+    and swapped-source negative controls. It separately executes value/ABI
+    tests on eligible ordinary x86-64 hosts; the instruction trace does not
+    establish native AMX execution;
   - AVX10.2's masked load and store of bf16's first element
     (`loadsbf16128_mask`, `storesbf16128_mask`), as AVX512-FP16's of a half's;
   - VP2INTERSECT's pairs of masks (k2 and k3), each stored at its pointer;
@@ -2011,6 +2026,14 @@ What the lowering covers past scalars (#145's programs):
     masked intrinsics use the existing masked byte selection. The opcode and
     result/effect traces are compared with clang by `test-x86-intrinsics`;
     no runtime result is claimed on a host without AVX512-BMM.
+  - byte funnel shifts of 16-byte vectors use XOP's VPSHLB with signed byte
+    counts, masking the original counts modulo eight. Their two halves are
+    shifted separately and combined with VPOR; splitting the complementary
+    shift into one and seven minus the count discards that half for a zero
+    count. Repeated-byte constants are extra row operands. Distinct halves,
+    signed inputs and `_mm_rot_epi8`'s identical halves are checked against
+    clang; native execution requires XOP. Other widths and targets lacking
+    XOP retain named refusals.
 
   `__builtin_nondeterministic_value` of a vector or a scalar is zeros, and
   `__builtin_bit_cast` (`check_lower_bit_cast`) is its operand's bits: a
@@ -2019,7 +2042,9 @@ What the lowering covers past scalars (#145's programs):
   vector of 4 or 8 bytes and an integer, a float or a double of its bytes, a
   move between their registers (VMOVD, VMOVQ); and between an integer and a
   float or a double they go through a frame temporary, as clang -O0's go through
-  memory. The other floating elementwise functions and conversions (between
+  memory. A `_Complex _Float16` bit cast reads or writes its four bytes through
+  its frame object, keeping both binary16 parts' representations, including
+  signed zeros and NaN payloads; a result gets an object of its own. The other floating elementwise functions and conversions (between
   8-bit integers and half-precision elements, between 8- and 16-bit integers and
   bf16 elements, to bf16 elements, and between half-precision elements and other
   types than floats without AVX512-FP16), the bf16 elements' other elementwise
@@ -2027,7 +2052,7 @@ What the lowering covers past scalars (#145's programs):
   half-precision ones' without AVX512-FP16, floating
   reductions, a shuffle by a vector of indices,
   bit reversal of elements wider than a byte, byte bit reversal without
-  AVX512-BMM, the funnel shifts of 8-bit elements, the
+  AVX512-BMM, funnel shifts of 8-bit elements outside 16-byte vectors or without XOP, the
   leading zero counts of 8- and 16-bit ones, nontemporal builtins of scalars and
   at underaligned addresses, bit casts of other types, and the rows whose
   extensions the target hasn't (VBMI for 8-bit shuffles, BW for 16-bit ones,
@@ -2097,11 +2122,15 @@ What the lowering covers past scalars (#145's programs):
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
   `libc.so.6` alone and print every part's bits as clang's code computes them.
-  The complex types it doesn't take are refused by what they need: the
-  complex `_BitInt`s past 128 bits ("complex types of _BitInt past 128
-  bits"), and the complex types of the other floating types, `_Complex
-  _Float16` ("complex types other than _Complex float, double, long double
-  and __float128"). A
+  `_Complex _Float16` uses the same aggregate representation, with two
+  binary16 parts in four bytes and one SSE eightbyte for arguments and results.
+  Copies, calls, returns, `va_arg`, constants, component access, truth and
+  conversions take the parts' half-precision storage and conversion rules.
+  Arithmetic and comparisons of this type are refused by name: their native
+  FP16 and excess-precision rules and complex runtime calls are not lowered.
+  `test-checker`'s half-precision fixtures check all pairs of special binary16
+  representations and Clang/Buster calls in both directions, including stack
+  arguments and variadic register-save and overflow areas. A
   local of a type that no class holds is refused by what its type needs, as
   its values are (`check_lower_type_feature`), rather than as "values of this
   type".

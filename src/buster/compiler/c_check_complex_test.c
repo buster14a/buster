@@ -115,6 +115,32 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
                                result.value.imaginary == imaginary[i] && result.value.fault == CHECK_FAULT_NONE,
                           "complex binary arithmetic matches independently derived real and imaginary components");
     }
+    const TypeId elements[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(elements); t += 1)
+    {
+        const TypeId complex = type_complex(table, elements[t]);
+        for (uint32_t swapped = 0; swapped < 2; swapped += 1)
+        {
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operations); i += 1)
+            {
+                const CheckValue c = check_test_complex_value(complex, 1.0L, i < 2 ? -0.0L : 0.0L);
+                const CheckValue r = check_test_float(elements[t], -2.0L);
+                const CheckAction action = {
+                    .op = operations[i],
+                    .operands = { swapped != 0 ? r : c, swapped != 0 ? c : r },
+                    .extensions = BUSTER_CHECK_EXTENSION_GNU,
+                };
+                const CheckActionResult result = check_test_action(test, table, action);
+                const long double expected_real = i == 0 ? -1.0L : i == 1 ? swapped != 0 ? -3.0L : 3.0L : i == 2 ? -2.0L : swapped != 0 ? -2.0L : -0.5L;
+                const bool negative_zero = swapped == 0 || i == 0 || i == 2;
+                check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == complex &&
+                                       result.value.constant_kind == CHECK_CONSTANT_COMPLEX && result.value.floating == expected_real &&
+                                       result.value.imaginary == 0.0L && (signbit(result.value.imaginary) != 0) == negative_zero &&
+                                       result.value.fault == CHECK_FAULT_NONE,
+                                  "mixed real/complex floating constants preserve the source domains and their imaginary signed zero");
+            }
+        }
+    }
     const TypeId destinations[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_INT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_COMPLEX_FLOAT };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(destinations); i += 1)
     {

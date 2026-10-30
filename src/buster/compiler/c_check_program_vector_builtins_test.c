@@ -416,7 +416,27 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
         "for(int i=0;i<100&&!committed;i++){if(__builtin_ia32_xbegin()==~0u){committed=1;__builtin_ia32_xend();}}"
         "for(int i=0;i<100&&!aborted;i++){if(__builtin_ia32_xbegin()==~0u){*(volatile int*)0=n;__builtin_ia32_xend();}else aborted=1;}"
         "FOLD(committed);FOLD(aborted);FOLD(n);return (int)h;}";
+    // XOP's byte shifts run only on an XOP host. Every possible count, including its high bits and the modulo-eight
+    // zero case, at every lane, with distinct halves and aliased ones, signed inputs and each operand evaluated once.
+    static const char byte_funnels[] =
+        "__attribute__((target(\"xop\"))) int tested(int n){unsigned h=2166136261u;v16qu a,b,c;int calls[3]={0};"
+        "fill(&a,16,n);fill(&b,16,n+1);for(int count=0;count<256;count++){for(int i=0;i<16;i++)c[i]=(unsigned char)(count+i);"
+        "v16qu l=__builtin_elementwise_fshl((calls[0]++,a),(calls[1]++,b),(calls[2]++,c));"
+        "v16qu r=__builtin_elementwise_fshr(a,b,c),rl=__builtin_elementwise_fshl(a,a,c),rr=__builtin_elementwise_fshr(b,b,c);"
+        "v16qs sl=__builtin_elementwise_fshl((v16qs)a,(v16qs)b,(v16qs)c),sr=__builtin_elementwise_fshr((v16qs)a,(v16qs)b,(v16qs)c);"
+        "for(int i=0;i<16;i++){unsigned s=c[i]&7u;unsigned el=((unsigned)a[i]<<s)|((unsigned)b[i]>>(8u-s));"
+        "unsigned er=((unsigned)a[i]<<(8u-s))|((unsigned)b[i]>>s);if((unsigned char)el!=l[i]||(unsigned char)er!=r[i])return 101;"
+        "if((unsigned char)sl[i]!=l[i]||(unsigned char)sr[i]!=r[i])return 102;"
+        "if(rl[i]!=(unsigned char)(((unsigned)a[i]<<s)|((unsigned)a[i]>>(8u-s))))return 103;"
+        "if(rr[i]!=(unsigned char)(((unsigned)b[i]<<(8u-s))|((unsigned)b[i]>>s)))return 104;}"
+        "FOLD(l);FOLD(r);FOLD(rl);FOLD(rr);FOLD(sl);FOLD(sr);}if(calls[0]!=256||calls[1]!=256||calls[2]!=256)return 105;FOLD(calls);return (int)h;}";
     const bool has_mwaitx = (x86_target_native().features & BUSTER_X86_FEATURE(MWAITX)) != 0;
+    uint32_t extended[4] = { 0 };
+    if (__get_cpuid_max(0x80000000u, 0) >= 0x80000001u)
+    {
+        __cpuid_count(0x80000001u, 0, extended[0], extended[1], extended[2], extended[3]);
+    }
+    const bool has_xop = (extended[2] >> 11 & 1) != 0;
     uint32_t leaf7[4] = { 0 };
     if (__get_cpuid_max(0, 0) >= 7)
     {
@@ -424,17 +444,18 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
     }
     const bool has_rtm = (leaf7[1] >> 11 & 1) != 0;
     const uint32_t count = BUSTER_ARRAY_LENGTH(programs);
-    for (uint32_t i = 0; i < count + 2; i += 1)
+    for (uint32_t i = 0; i < count + 3; i += 1)
     {
-        const char* program = i < count ? programs[i][1] : i == count ? mwaitx : rtm;
+        const char* program = i < count ? programs[i][1] : i == count ? mwaitx : i == count + 1 ? rtm : byte_funnels;
+        const char* name = i < count ? programs[i][0] : i == count ? "x86-mwaitx" : i == count + 1 ? "x86-rtm" : "vector-byte-funnels";
+        const bool native = i < count ? run_native : run_native && (i == count ? has_mwaitx : i == count + 1 ? has_rtm : has_xop);
         const size_t length = strlen(check_test_vector_builtin_types) + strlen(program) + 1;
         char* source = malloc(length);
         check_test_expect(test, source != 0, "vector builtin program source");
         if (source != 0)
         {
             snprintf(source, length, "%s%s", check_test_vector_builtin_types, program);
-            check_test_program_source_native_limits(test, source, i < count ? programs[i][0] : i == count ? "x86-mwaitx" : "x86-rtm", clang, false, -1, 0, target,
-                                                    i < count ? run_native : i == count ? run_native && has_mwaitx : run_native && has_rtm);
+            check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, target, native);
             free(source);
         }
     }
@@ -445,6 +466,10 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
     if (run_native && !has_rtm)
     {
         printf("  x86-rtm: native execution skipped (the host hasn't RTM); the program compiles and links\n");
+    }
+    if (run_native && !has_xop)
+    {
+        printf("  vector-byte-funnels: native execution skipped (the host hasn't XOP); the program compiles and links\n");
     }
 }
 
@@ -511,7 +536,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
         { "x86-64", "float tested(float x){return __builtin_elementwise_sqrt(x);}", "elementwise builtins of scalars without AVX-512F", 0 },
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
-          "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types and vectors", 0 },
+          "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, _Complex _Float16 and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
         { "znver5", "int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
           "vector leading zero counts of 8- and 16-bit elements", 2 },
@@ -524,7 +549,11 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector bit reversal of bytes without AVX512-BMM", 2 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
-          "vector funnel shifts of 8-bit elements", 3 },
+          "vector funnel shifts of 8-bit elements without XOP", 3 },
+        { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshr(a,b,b);return c[0];}",
+          "vector funnel shifts of 8-bit elements without XOP", 3 },
+        { "znver5", "__attribute__((target(\"xop\"))) void tested(v8qs* a,v8qs* b,v8qs* c){*a=__builtin_elementwise_fshl(*a,*b,*c);}",
+          "vector funnel shifts of 8-bit elements outside 16-byte XOP vectors", 0 },
         { "znver5", "int tested(int n){return ((v2qs){(signed char)n,1})[1];}", "vector types of other than 4, 8, 16, 32 or 64 bytes", 0 },
         { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },

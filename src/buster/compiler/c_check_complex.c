@@ -118,7 +118,11 @@ static CheckValue check_complex_integer_fold(CheckOp op, unsigned __int128 left,
     return value;
 }
 
-static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, CheckValue* value, uint32_t node, uint32_t extensions)
+// `domains` retains the original operands' complex domains (bits 0 and 1), before their common-type conversions.
+// Host C then computes a mixed real/complex expression in that domain, as the runtime lowering does, preserving
+// signed zeros and avoiding the extra zero products that converting a real operand to complex would introduce.
+static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, uint32_t domains, CheckValue* value,
+                                   uint32_t node, uint32_t extensions)
 {
     const TypeId element = type_element(table, type_strip_aligned(table, left->type));
     const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE;
@@ -151,10 +155,10 @@ static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const Che
             { \
                 case CHECK_OP_POSITIVE: c = a; break; \
                 case CHECK_OP_NEGATIVE: c = -a; break; \
-                case CHECK_OP_ADD: c = a + b; break; \
-                case CHECK_OP_SUBTRACT: c = a - b; break; \
-                case CHECK_OP_MULTIPLY: c = a * b; break; \
-                case CHECK_OP_DIVIDE: c = a / b; break; \
+                case CHECK_OP_ADD: c = domains == 1 ? a + (T)br.floating : domains == 2 ? (T)ar.floating + b : a + b; break; \
+                case CHECK_OP_SUBTRACT: c = domains == 1 ? a - (T)br.floating : domains == 2 ? (T)ar.floating - b : a - b; break; \
+                case CHECK_OP_MULTIPLY: c = domains == 1 ? a * (T)br.floating : domains == 2 ? (T)ar.floating * b : a * b; break; \
+                case CHECK_OP_DIVIDE: c = domains == 1 ? a / (T)br.floating : domains == 2 ? (T)ar.floating / b : a / b; break; \
                 default: supported = false; break; \
             } \
             value->floating = __real__ c; \

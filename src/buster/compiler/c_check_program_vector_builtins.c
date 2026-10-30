@@ -619,6 +619,10 @@ static const char* check_vector_builtin_feature_reason(CBuiltinId builtin, uint6
     return reason;
 }
 
+// Extra vector operands of a repeated byte: XOP's byte funnel shifts take 7, 0 and, for left shifts, -1. Their loads
+// stay outside the operation's eight records, just as a shuffle's constant index vector does.
+#define BUSTER_CHECK_VECTOR_ELEMENTWISE_SPLATS 3u
+
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading zero
 // counts (clzg's second operand the elements a zero element takes) and funnel shifts; of half-precision elements (with
@@ -628,8 +632,9 @@ static const char* check_vector_builtin_feature_reason(CBuiltinId builtin, uint6
 // and a in VEX.vvvv), moved to VECTOR(0), whose operands `negated` has the bit of (the lowering takes their negations'
 // operands: check_lower_brain_negations) negate the product (a's or b's alone) or the sum (c's) as the form does, as
 // clang's instruction selection folds the negations: VFMADD213BF16, VFMSUB213BF16, VFNMADD213BF16 or VFNMSUB213BF16.
+// `splats` gets the repeated bytes of any extra constant operands, `splat_count` their number.
 static const char* check_vector_elementwise_row(const TypeTable* types, const X86Target* target, CBuiltinId builtin, TypeId vector, uint32_t arguments, uint32_t negated,
-                                                Tier0Operation* row)
+                                                Tier0Operation* row, uint8_t splats[BUSTER_CHECK_VECTOR_ELEMENTWISE_SPLATS], uint32_t* splat_count)
 {
     const CheckVectorShape shape = check_vector_builtin_shape(types, vector);
     const uint32_t width = check_vector_builtin_width(shape.bytes);
@@ -638,6 +643,7 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
     const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
     const char* reason = NULL;
     uint64_t needed = 0;
+    *splat_count = 0;
     memset(row, 0, sizeof(*row));
     row->result_class = BUSTER_TYPED_CLASS_VECTOR;
     row->result_bytes = (uint8_t)shape.bytes;
@@ -703,6 +709,58 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
         else
         {
             reason = "vector bit reversal";
+        }
+    }
+    else if (shape.element == 1 && (builtin == CBUILTIN_ELEMENTWISE_FSHL || builtin == CBUILTIN_ELEMENTWISE_FSHR))
+    {
+        if (shape.bytes != 16)
+        {
+            reason = "vector funnel shifts of 8-bit elements outside 16-byte XOP vectors";
+        }
+        else if ((target->extensions & BUSTER_X86_EXTENSION(XOP)) == 0)
+        {
+            reason = "vector funnel shifts of 8-bit elements without XOP";
+        }
+        else
+        {
+            const bool left = builtin == CBUILTIN_ELEMENTWISE_FSHL;
+            const uint8_t mask = BUSTER_TIER0_ROLE_VECTOR(3);
+            const uint8_t zero = BUSTER_TIER0_ROLE_VECTOR(4);
+            const uint8_t ones = BUSTER_TIER0_ROLE_VECTOR(5);
+            const uint8_t temporary = BUSTER_TIER0_ROLE_VECTOR(6);
+            splats[0] = 7;
+            splats[1] = 0;
+            splats[2] = 255;
+            *splat_count = left ? 3 : 2;
+            row->operand_count = (uint8_t)(arguments + *splat_count);
+            for (uint32_t a = arguments; a < row->operand_count; a += 1)
+            {
+                row->operand_classes[a] = BUSTER_TYPED_CLASS_VECTOR;
+                row->operand_bytes[a] = 16;
+            }
+            // VPSHLB uses a signed count: positive shifts left, negative shifts right. With s = c & 7, first
+            // b >> 1 >> (7-s), then a << s for fshl; a << 1 << (7-s), then b >> s for fshr. Splitting the
+            // complementary shift makes it eight at s == 0, which discards that half instead of rotating it.
+            if (left)
+            {
+                row->records[0] = check_vector_lower_record(X86_FORM_VPSHLB_X_XM128_X, v1, ones, v1);
+                row->records[1] = check_vector_lower_record(X86_FORM_VPANDN_X_X_XM128, temporary, v2, mask);
+                row->records[2] = check_vector_lower_record(X86_FORM_VPSUBB_X_X_XM128, temporary, zero, temporary);
+                row->records[3] = check_vector_lower_record(X86_FORM_VPSHLB_X_XM128_X, v1, temporary, v1);
+                row->records[4] = check_vector_lower_record(X86_FORM_VPAND_X_X_XM128, v2, v2, mask);
+                row->records[5] = check_vector_lower_record(X86_FORM_VPSHLB_X_XM128_X, v0, v2, v0);
+            }
+            else
+            {
+                row->records[0] = check_vector_lower_record(X86_FORM_VPANDN_X_X_XM128, temporary, v2, mask);
+                row->records[1] = check_vector_lower_record(X86_FORM_VPADDB_X_X_XM128, v0, v0, v0);
+                row->records[2] = check_vector_lower_record(X86_FORM_VPSHLB_X_XM128_X, v0, temporary, v0);
+                row->records[3] = check_vector_lower_record(X86_FORM_VPAND_X_X_XM128, v2, v2, mask);
+                row->records[4] = check_vector_lower_record(X86_FORM_VPSUBB_X_X_XM128, v2, zero, v2);
+                row->records[5] = check_vector_lower_record(X86_FORM_VPSHLB_X_XM128_X, v1, v2, v1);
+            }
+            row->records[6] = check_vector_lower_record(X86_FORM_VPOR_X_X_XM128, v0, v0, v1);
+            row->record_count = 7;
         }
     }
     else

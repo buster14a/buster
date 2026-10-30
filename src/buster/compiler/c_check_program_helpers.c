@@ -31,7 +31,7 @@ struct CheckProgramHelper
     SymbolId symbol;
     Tier0Code code;
     uint32_t parameter_count;
-    TypeId parameter_types[6];
+    TypeId parameter_types[7];
     TypeId result_type;
     // A read/modify/write leaf's (c_builtin_atomic_rmw_helpers.c) value format.
     CBuiltinAtomicRmwFormat rmw_format;
@@ -469,7 +469,8 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     // the leaf takes or gives them (CBuiltinX86HelperInfo.vectors), the arguments' types at the
                     // builtin's prototype's (one for every use).
                     const CBuiltinX86HelperInfo* info = cbuiltin_x86_helper_infos + leaf;
-                    if (graph->argument_counts == 0 || graph->argument_counts[node] != info->parameter_count ||
+                    const bool output = info->amx != 0 && info->output_bytes != 0;
+                    if (graph->argument_counts == 0 || graph->argument_counts[node] + output != info->parameter_count ||
                         info->parameter_count > BUSTER_ARRAY_LENGTH(helper.parameter_types))
                     {
                         result->status = CHECK_PROGRAM_INVALID;
