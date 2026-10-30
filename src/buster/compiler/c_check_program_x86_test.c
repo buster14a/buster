@@ -1679,6 +1679,18 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
                                   "__m128 m[]={_mm_shuffle_ps(f,g,_MM_SHUFFLE(0,1,2,3)),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);"
                                   "int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);"
                                   "return (int)h;}");
+    // #799: independent Clang execution compares every byte, including lane boundaries and both operand orders.
+    check_test_program_x86_source(test, clang, target, run_native, "x86-immediate-sse-avx2-intrinsics",
+                                  "#include <immintrin.h>\n"
+                                  "int tested(int n){unsigned h=2166136261u;__m128d a,b;__m128i p,q;__m256i x,y;"
+                                  "fill(&a,16,n);fill(&b,16,n+1);fill(&p,16,n+2);fill(&q,16,n+3);fill(&x,32,n+4);fill(&y,32,n+5);"
+                                  "__m128d d[]={_mm_shuffle_pd(a,b,0),_mm_shuffle_pd(a,b,3),_mm_shuffle_pd(b,a,1)};FOLD(d);"
+                                  "__m128i w[]={_mm_blend_epi16(p,q,0),_mm_blend_epi16(p,q,255),_mm_blend_epi16(q,p,0xa5)};FOLD(w);"
+                                  "__m256i z[]={_mm256_shuffle_epi32(x,0),_mm256_shuffle_epi32(x,255),_mm256_shuffle_epi32(y,0x4e),"
+                                  "_mm256_permute4x64_epi64(x,0),_mm256_permute4x64_epi64(x,255),_mm256_permute4x64_epi64(y,0x1b),"
+                                  "_mm256_alignr_epi8(x,y,0),_mm256_alignr_epi8(x,y,15),_mm256_alignr_epi8(x,y,16),"
+                                  "_mm256_alignr_epi8(y,x,17),_mm256_alignr_epi8(x,y,32),_mm256_alignr_epi8(x,y,255)};FOLD(z);"
+                                  "__m256i deep=x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(x^(_mm256_shuffle_epi32(y,0x4e))))))))))))))))));FOLD(deep);return (int)h;}");
     check_test_program_includes = false;
 }
 
@@ -1705,6 +1717,12 @@ static void check_test_program_x86_refusals(CheckTest* test)
         check_test_program_boundary_target(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n,1,2,3};"
                                                  "v4si b=__builtin_ia32_pshufd(a,0x1b);return b[0];}",
                                            "sse-builtin-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
+        check_test_program_boundary_target(test, "typedef double v2df __attribute__((vector_size(16)));int tested(int n){v2df a={n,1};"
+                                                 "v2df b=__builtin_ia32_shufpd(a,a,3);return (int)b[0];}",
+                                           "sse-shufpd-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
+        check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
+                                                 "v8si b=__builtin_ia32_pshufd256(a,0x1b);return b[0];}",
+                                           "avx2-pshufd-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
     }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
@@ -1789,6 +1807,23 @@ static void check_test_program_x86_rows(CheckTest* test)
     char description[128];
     snprintf(description, sizeof(description), "every x86 rule's row is one Tier 0 takes (%u rows, %u not)", rows, invalid);
     check_test_expect(test, rows != 0 && invalid == 0, description);
+    static const struct { const char* name; uint64_t feature; } immediate_features[] = {
+        { "__builtin_ia32_shufpd", BUSTER_X86_FEATURE(AVX) },
+        { "__builtin_ia32_pblendw128", BUSTER_X86_FEATURE(AVX) },
+        { "__builtin_ia32_pshufd256", BUSTER_X86_FEATURE(AVX2) },
+        { "__builtin_ia32_permdi256", BUSTER_X86_FEATURE(AVX2) },
+        { "__builtin_ia32_palignr256", BUSTER_X86_FEATURE(AVX2) },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(immediate_features); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rule(immediate_features[i].name, strlen(immediate_features[i].name));
+        X86Target without = every;
+        without.features &= ~immediate_features[i].feature;
+        Tier0Operation row;
+        check_test_expect(test, rule != NULL && check_x86_lower_row_of(&every, rule, 1, 4, &row) == NULL &&
+                                check_x86_lower_row_of(&without, rule, 1, 4, &row) != NULL,
+                          "immediate rule requires its VEX instruction's target feature");
+    }
 }
 
 // A function's target attribute (#180, check_program_targets): in a baseline unit, functions of BMI, BMI2 and CRC32

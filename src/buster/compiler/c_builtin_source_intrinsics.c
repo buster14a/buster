@@ -40,6 +40,12 @@ static const CBuiltinSourceName cbuiltin_source_intrinsic_scope[] = {
 };
 #undef BUSTER_BUILTIN_METADATA
 
+#define BUSTER_CBUILTIN_IMMEDIATE_NAME(n) { n, sizeof(n) - 1 },
+static const CBuiltinSourceName cbuiltin_source_immediate_scope[] = {
+#include "c_builtin_immediate_scope.inc"
+};
+#undef BUSTER_CBUILTIN_IMMEDIATE_NAME
+
 static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* name, uint32_t length)
 {
     bool scoped = false;
@@ -66,6 +72,12 @@ static __attribute__((unused)) bool cbuiltin_source_intrinsic(const uint8_t* nam
         {
             low = middle + 1;
         }
+    }
+    const bool immediate_candidate = !scoped && name != NULL && (length == 21 || length == 24 || length == 25) && memcmp(name, "__builtin_ia32_", 15) == 0;
+    for (uint32_t i = 0; immediate_candidate && !scoped && i < sizeof(cbuiltin_source_immediate_scope) / sizeof(cbuiltin_source_immediate_scope[0]); i += 1)
+    {
+        const CBuiltinSourceName* entry = cbuiltin_source_immediate_scope + i;
+        scoped = length == entry->length && memcmp(name, entry->name, length) == 0;
     }
     for (uint32_t i = 0; scoped && !result && i < sizeof(cbuiltin_source_rows) / sizeof(cbuiltin_source_rows[0]); i += 1)
     {

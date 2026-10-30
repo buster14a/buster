@@ -26,10 +26,11 @@
 // SUPPRESSED retains the audited fact without a diagnostic. No event is a hard action error. Missing CFG information
 // must remain DEFERRED or later emit conservatively; it must not silently suppress the warning.
 //
-// The immutable 217 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
-// implementation was copied. They cover 215 exact names: 87 RC sets, 61 SAE sets, 6 scale sets and 63 deferred ranges
+// The immutable 222 rows below are original factual metadata audited against the exact Clang 23.1.1 rules; no LLVM
+// implementation was copied. They cover 220 exact names: 87 RC sets, 61 SAE sets, 6 scale sets and 68 deferred ranges
 // (#126 added the build's 17 ranges and 6 scales, whose names joined the own-main scope, #619 ucmpd128_mask's range,
-// and #148 the 8 ranges of the SSE shuffles, shifts, extracts and inserts that stb_image, dr_libs and minimp3 call). Names in the
+// #148 the 8 ranges of the SSE shuffles, shifts, extracts and inserts that stb_image, dr_libs and minimp3 call, and
+// #799 five additional 128/256-bit shuffle, blend and align names). Names in the
 // attested catalogue without a row have no additional SemaX86 rule. Reference source/case lines accompany each row:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaX86.cpp
 // Generic ICE/range behavior: SemaChecking.cpp:2971-2989,6796-6843; runtime context/reachability: SemaExpr.cpp and
@@ -209,10 +210,14 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_minsh_round_mask", 31, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 116 },
     { "__builtin_ia32_minss_round_mask", 31, CHECK_BUILTIN_X86_CONSTRAINT_SAE, 4, 0, 0, 0x1110, 115 },
     { "__builtin_ia32_palignr128", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 840 },
+    { "__builtin_ia32_palignr256", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 841 },
+    { "__builtin_ia32_pblendw128", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 836 },
+    { "__builtin_ia32_permdi256", 24, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 744 },
     { "__builtin_ia32_prefetchi", 24, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 2, 3, 0, 948 },
     { "__builtin_ia32_prold512", 23, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 787 },
     { "__builtin_ia32_prord512", 23, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 793 },
     { "__builtin_ia32_pshufd", 21, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 751 },
+    { "__builtin_ia32_pshufd256", 24, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 752 },
     { "__builtin_ia32_pshufd512", 24, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 753 },
     { "__builtin_ia32_pshufhw", 22, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 754 },
     { "__builtin_ia32_pshuflw", 22, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 255, 0, 757 },
@@ -235,6 +240,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_scattersiv16si", 29, CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 0x0116, 414 },
     { "__builtin_ia32_shuf_i32x4", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 853 },
     { "__builtin_ia32_shuf_i64x2", 25, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 854 },
+    { "__builtin_ia32_shufpd", 21, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 3, 0, 616 },
     { "__builtin_ia32_shufps", 21, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 856 },
     { "__builtin_ia32_sqrtsd_round_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 0x0f10, 254 },
     { "__builtin_ia32_sqrtsh_round_mask", 32, CHECK_BUILTIN_X86_CONSTRAINT_RC, 4, 0, 0, 0x0f10, 256 },
@@ -364,7 +370,7 @@ static const CheckBuiltinX86Rule check_builtin_x86_rules[] =
     { "__builtin_ia32_vpcomw", 21, CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 7, 0, 669 },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 217, "the audited x86 rule manifest has 217 rows");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_builtin_x86_rules) == 222, "the audited x86 rule manifest has 222 rows");
 
 static int check_builtin_x86_compare(const char* name, uint32_t bytes, const CheckBuiltinX86Rule* rule)
 {
