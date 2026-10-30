@@ -2726,15 +2726,17 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   dispatch and startup failure cleanup;
 - sessions (#905): sessions of 1, 2, 3 and 8 lanes, and lazy ones of 1, 3 and
   8, each lane running the flow once, lane 0 the calling thread, with
-  capacity − 1 threads created (`lane_threads_created`, and the process's
-  threads) and joined after, none for one lane; in the flow, the created lanes' asynchronous signals blocked
+  capacity − 1 threads created (`LaneProcess.threads_created`, and the
+  process's threads) and joined after, none for one lane; in the flow, the created lanes' asynchronous signals blocked
   and the synchronous ones not, a signal sent to the process handled on lane
   0, parked broadcasts, narrowings to 1, 2, 3, every lane and more, nested,
   each narrowed group syncing, broadcasting and taking parts, lane 0 serving
-  regions of 1, 3, every lane and more, a run, a team, a cold group and a
-  session of several refused where they would create a thread, and a child
-  forked from lane 0, which forgets the session; then sessions whose third
-  lane fails to start (`lane_session_fail_at`), eagerly and lazily, and a lazy
+  regions of 1, 3, every lane and more, and regions whose lane 0 serves the
+  region's lanes, after which it serves the session's again, a run, a team, a
+  cold group and a session of several refused where they would create a
+  thread, and a child forked from lane 0, which forgets the session; then
+  sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
+  and lazily, and a lazy
   one whose second does, the lanes created joined and the flow on lane 0
   alone, and in a child, a session that leaves its lanes parked at its end;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
@@ -5298,16 +5300,19 @@ objects and executables by `--lanes`, by default and by `--lanes 8
 that don't start, and the failing programs' exit statuses and diagnostics by
 `--lanes 8`, with the ids in another order too, each `--lanes 1`'s. Then the
 driver's session (#905): a library preloaded into the driver counts its calls
-of `pthread_create`: none for `--lanes 1`, `--worker-budget=1` and a source's
-`-fsyntax-only`, one per lane past the first of `--lanes 3` and by default of
-the CPUs it may run on, for an object, an executable and two sources'
-objects, and with its second lane failing to start
-(`BUSTER_TEST_LANE_FAIL_AT`) the one created, the object `--lanes 1`'s; and
+of `pthread_create`: none for `--lanes 1`, `--worker-budget=1`, a source's
+`-fsyntax-only` and an object compiled on one CPU, one per lane past the first
+of `--lanes 3` and by default of the CPUs it may run on, for an object, an
+executable and two sources' objects, and with its second lane failing to start
+(`BUSTER_TEST_LANE_FAIL_AT`) the one created, the object `--lanes 1`'s, each
+with `--time-stages`' lanes asked for and run on (3 and 3, 4 and 1); and
 commands in one process, on a session of 4 lanes: a failing command, objects
-on 4 lanes and on 2 by `--worker-budget 2`, and a `-fsyntax-only`, three
-times, every lane calling each (`run_check_command`'s collective call), each
-lane the same thread throughout, no thread created, each object `--lanes 1`'s;
-then the same from lane 0 alone, the others serving its regions.
+on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
+sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
+each (`run_check_command`'s collective call), each lane the same thread
+throughout, no thread created, each object `--lanes 1`'s; then the same from
+lane 0 alone, the others serving its regions, lane 0 serving the session's
+lanes again after each (two sources' command serves its own region's).
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
