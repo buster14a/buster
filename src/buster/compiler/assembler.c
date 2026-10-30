@@ -1607,6 +1607,13 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
     }
     const bool prefixed = prefix != NULL && parser->at < end && parser->tokens[parser->at].kind == BUSTER_ASM_WORD;
     const String8 instruction = prefixed ? asm_token_text(parser, parser->at) : *name;
+    const bool rep_nop = prefixed && strcmp(prefix, "rep") == 0 && x86_match_name(instruction, "nop");
+    if (rep_nop)
+    {
+        // The spin hint is the same encoding as PAUSE. Its operandless form alone is admitted here.
+        *name = BUSTER_S8("pause");
+        parser->at += 1;
+    }
     uint32_t base = BUSTER_ARRAY_LENGTH(bases);
     for (uint32_t i = 0; candidate && instruction.length == 5 && i < BUSTER_ARRAY_LENGTH(bases); i += 1)
     {
@@ -1614,7 +1621,7 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
     }
     const char written = base < BUSTER_ARRAY_LENGTH(bases) ? instruction.pointer[4] : 0;
     const char size = !parser->options.intel && written == 'l' ? 'd' : written;
-    if ((size == 'b' || size == 'w' || size == 'd' || size == 'q') && (prefixed || size != written))
+    if (!rep_nop && (size == 'b' || size == 'w' || size == 'd' || size == 'q') && (prefixed || size != written))
     {
         const char* spelled = prefixed && base >= 3 && strcmp(prefix, "rep") == 0 ? "repe" : prefixed ? prefix : "";
         const uint64_t prefix_length = strlen(spelled);
@@ -2276,6 +2283,17 @@ static void asm_parse(AsmParser* parser)
         uint32_t end = parser->at;
         while (end < parser->token_count && parser->tokens[end].kind != '\n')
         {
+            end += 1;
+        }
+        // GNU as permits `rep; nop` as the same spin hint. Join only these two complete statements, and only across
+        // a semicolon: labels, directives and other standalone prefixes retain their own semantics and refusals.
+        if (end == parser->at + 1 && asm_is(parser, parser->at, "rep") && end + 1 < parser->token_count &&
+            parser->source.pointer[parser->tokens[end].start] == ';' && asm_is(parser, end + 1, "nop") &&
+            (end + 2 == parser->token_count || parser->tokens[end + 2].kind == '\n'))
+        {
+            // The mnemonic parser expects two adjacent words. The separator token is no longer needed by this parse.
+            parser->tokens[end] = parser->tokens[end + 1];
+            parser->tokens[end + 1].kind = '\n';
             end += 1;
         }
         if (parser->at < end && parser->result.error == 0)

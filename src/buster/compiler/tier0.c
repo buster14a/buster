@@ -8677,11 +8677,13 @@ static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier
 
 // The legacy forms a row may have (tier0_operation_form_valid), for the x86 builtins VEX and EVEX have no form of
 // (#148): ones that touch no stack, string or fixed register, and whose other effects (flags; the FS and GS bases, the
-// shadow stack, the caches, the x87's tags) aren't any value Tier 0 keeps across an entry. MOV, the flags' tests' SETcc,
-// AND and OR of bytes and MOVZX, ADC, SBB and NEG, CRC32, RDRAND, RDSEED and RDPID, the FS and GS bases, the non-temporal
-// and direct stores, the cache lines' flushes and prefetches, FXSAVE (not FXRSTOR, which writes the XMM registers floating
-// values live in), the shadow stack's, SHA's and SSE4A's (whose XMM registers are below 16, as VEX's:
-// tier0_operation_reach), and EMMS, WBINVD, WBNOINVD and INVPCID.
+// shadow stack, the caches, the x87's tags, a transaction, the user interrupts' flag, MSRs) aren't any value Tier 0 keeps
+// across an entry. MOV, the flags' tests' SETcc, AND and OR of bytes and MOVZX, ADC, SBB and NEG, CRC32, RDRAND, RDSEED
+// and RDPID, the FS and GS bases, the non-temporal and direct stores, the cache lines' flushes, demotion and prefetches,
+// FXSAVE (not FXRSTOR, which writes the XMM registers floating values live in), the shadow stack's, SHA's and SSE4A's
+// (whose XMM registers are below 16, as VEX's: tier0_operation_reach), EMMS, WBINVD, WBNOINVD and INVPCID, and the
+// extensions' (c_check_program_x86.c): RAO-INT's atomic operations, SERIALIZE, UINTR's, PTWRITE, UMONITOR, MOVRS's loads,
+// RTM's XEND and XTEST, TSXLDTRK's, ENQCMD's and USER_MSR's register forms.
 static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_MOV_R32_IMM32, X86_FORM_MOV_R32_RM32, X86_FORM_MOV_R64_RM64, X86_FORM_MOV_RM16_R16, X86_FORM_MOV_RM32_R32, X86_FORM_MOV_RM64_R64,
     X86_FORM_SETO_RM8, X86_FORM_SETNO_RM8, X86_FORM_SETB_RM8, X86_FORM_SETAE_RM8, X86_FORM_SETE_RM8, X86_FORM_SETNE_RM8, X86_FORM_SETBE_RM8,
@@ -8696,15 +8698,21 @@ static const uint16_t tier0_operation_legacy_forms[] = {
     X86_FORM_WRSSQ_M64_R64, X86_FORM_WRUSSD_M32_R32, X86_FORM_WRUSSQ_M64_R64, X86_FORM_RSTORSSP_M64, X86_FORM_CLRSSBSY_M64, X86_FORM_SAVEPREVSSP,
     X86_FORM_SETSSBSY, X86_FORM_SHA1MSG1_X_XM128, X86_FORM_SHA1MSG2_X_XM128, X86_FORM_SHA1NEXTE_X_XM128, X86_FORM_SHA256MSG1_X_XM128,
     X86_FORM_SHA256MSG2_X_XM128, X86_FORM_EXTRQ_X_X, X86_FORM_INSERTQ_X_X, X86_FORM_MOVNTSD_M64_X, X86_FORM_MOVNTSS_M32_X, X86_FORM_EMMS, X86_FORM_WBINVD,
-    X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128,
+    X86_FORM_WBNOINVD, X86_FORM_INVPCID_R64_M128, X86_FORM_AADD_M32_R32, X86_FORM_AADD_M64_R64, X86_FORM_AAND_M32_R32, X86_FORM_AAND_M64_R64,
+    X86_FORM_AOR_M32_R32, X86_FORM_AOR_M64_R64, X86_FORM_AXOR_M32_R32, X86_FORM_AXOR_M64_R64, X86_FORM_CLDEMOTE_M8, X86_FORM_SERIALIZE, X86_FORM_CLUI,
+    X86_FORM_STUI, X86_FORM_TESTUI, X86_FORM_SENDUIPI_R64, X86_FORM_PTWRITE_RM32, X86_FORM_PTWRITE_RM64, X86_FORM_UMONITOR_R64, X86_FORM_MOVRS_R8_M8,
+    X86_FORM_MOVRS_R16_M16, X86_FORM_MOVRS_R32_M32, X86_FORM_MOVRS_R64_M64, X86_FORM_MOVZX_R32_RM16, X86_FORM_PREFETCHRST2_M8, X86_FORM_XEND,
+    X86_FORM_XTEST, X86_FORM_XSUSLDTRK, X86_FORM_XRESLDTRK, X86_FORM_ENQCMD_R64_M512, X86_FORM_ENQCMDS_R64_M512, X86_FORM_URDMSR_R64_R64,
+    X86_FORM_UWRMSR_R64_R64,
 };
 
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
-// branch, whose syntax names its operands, that has a vector or an opmask operand when it is EVEX (APX's forms of general
-// registers alone are a target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its
-// syntax doesn't name: a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A
-// form the tables don't cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's
-// memory) and the string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
+// branch, whose syntax names its operands (or that has none: TILERELEASE, and VZEROUPPER and VZEROALL, which the effects
+// keep out), that has a vector or an opmask operand when it is EVEX (APX's forms of general registers alone are a
+// target's that Tier 0 doesn't take), and whose effects (x86_semantics.c's, #760) touch nothing its syntax doesn't name:
+// a covered form without implicit registers (mulx's rdx) or vzeroupper's every vector register. A form the tables don't
+// cover has the conservative record, whose registers are all implicit: vzeroall, vmaskmovdqu (rdi's memory) and the
+// string compares (rax, rcx, rdx and xmm0) among them. Or one of tier0_operation_legacy_forms. Requires
 // x86_semantics_initialize, as tier0_compile does.
 static bool tier0_operation_form_valid(uint32_t form)
 {
@@ -8718,7 +8726,7 @@ static bool tier0_operation_form_valid(uint32_t form)
                               syntax == X86_SYNTAX_REG_RM_IMM || syntax == X86_SYNTAX_RM_REG_IMM || syntax == X86_SYNTAX_REG_VVVV_RM ||
                               syntax == X86_SYNTAX_REG_VVVV_RM_IMM || syntax == X86_SYNTAX_REG_RM_VVVV || syntax == X86_SYNTAX_VVVV_RM ||
                               syntax == X86_SYNTAX_VVVV_RM_IMM || syntax == X86_SYNTAX_RM_REG_VVVV || syntax == X86_SYNTAX_RM_VVVV_REG ||
-                              syntax == X86_SYNTAX_REG || tier0_form_is4(description);
+                              syntax == X86_SYNTAX_REG || syntax == X86_SYNTAX_NONE || tier0_form_is4(description);
         const bool vex = description->family == BUSTER_X86_FAMILY_VEX;
         const bool evex = description->family == BUSTER_X86_FAMILY_EVEX && x86_form_has_vector_operand(description) &&
                           (description->evex & (BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF)) == 0;
