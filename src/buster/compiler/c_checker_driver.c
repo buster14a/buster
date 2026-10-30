@@ -1023,6 +1023,75 @@ static bool check_driver_dump_static(const CheckInput* input, const CheckStream*
     return valid;
 }
 
+// A function object's name, from one of its declarations: its spelling and length.
+static const uint8_t* check_driver_function_name(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, uint32_t object,
+                                                 uint32_t* length)
+{
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const uint32_t name = declaration < parser->tokens.count ? parser->tokens.names[declaration] : 0;
+    *length = intern_length(identifiers, name);
+    return intern_bytes(identifiers, name);
+}
+
+// Code generation's check of target features (#775, check_program_target_features): clang's errors, at -c and when it
+// links but not at -fsyntax-only, for the calls of always_inline functions, and a flatten function's calls, whose callees
+// need features their callers lack, in clang's words. Clang reports them as it emits their function: after its closing
+// brace and the lookahead past it (as the x86 builtins' deferred range errors, from `original`'s tree), or at the
+// unit's end for a function it defers. Returns false after an error.
+static bool check_driver_target_features(CheckProgram* program, const Parser* parser, const Parser* original, Preprocessor* pp, const PredefinesOptions* predefines,
+                                         bool scalar, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    CheckTargetFeatureError* errors = NULL;
+    uint32_t count = 0;
+    const bool valid = check_program_target_features(program, predefines, scalar, output, scratch, &errors, &count);
+    if (!valid)
+    {
+        check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const CheckTargetFeatureError* error = errors + i;
+        uint32_t caller_length = 0;
+        uint32_t callee_length = 0;
+        const uint8_t* caller = check_driver_function_name(program, parser, pp->table, error->caller, &caller_length);
+        const uint8_t* callee = check_driver_function_name(program, parser, pp->table, error->callee, &callee_length);
+        const char* feature = predefines_features[error->feature].name;
+        char message[1024];
+        if (error->flatten)
+        {
+            snprintf(message, sizeof(message), "flatten function '%.*s' calls '%.*s' which requires target feature '%s', but the caller is compiled without support for '%s'",
+                     (int)caller_length, (const char*)caller, (int)callee_length, (const char*)callee, feature, feature);
+        }
+        else
+        {
+            snprintf(message, sizeof(message),
+                     "always_inline function '%.*s' requires target feature '%s', but would be inlined into function '%.*s' that is compiled without support for '%s'",
+                     (int)callee_length, (const char*)callee, feature, (int)caller_length, (const char*)caller, feature);
+        }
+        uint32_t publication = pp->output.count + 1u;
+        for (uint32_t at = error->token, steps = 0; !error->deferred && at < original->tokens.count && steps < original->tokens.count; steps += 1)
+        {
+            if (original->tree.roles[at] == PARSE_ROLE_CLOSE_BODY && original->tokens.kinds[at] == PARSE_KIND_R_BRACE)
+            {
+                publication = check_driver_publication_position(original, pp, at + 1u, pp->output.count);
+                break;
+            }
+            at = original->tree.parents[at];
+        }
+        if (error->token < parser->tokens.count)
+        {
+            pp_diagnose_output_phase(pp, PP_SEVERITY_ERROR, parser->tokens.sources[error->token], publication, PP_DIAGNOSTIC_DEFERRED, "%s", message);
+        }
+        else
+        {
+            check_driver_diagnose(parser, pp, error->token, message);
+        }
+    }
+    arena_pop_to(output, mark);
+    return valid && count == 0;
+}
+
 // Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the
 // others are the compiler's own failures, with what the backend reported.
 static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp, const CheckProgramCode* code)
@@ -2175,12 +2244,16 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
+                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                        }
+                        if (selection && result == 0)
+                        {
                             const char* object_path = output != 0 ? output : check_driver_object_name(arena, path);
                             result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, pp, &types, path,
                                                                            object_path, scalar, verify, dump_static, source_rows, unwind_tables, lanes,
                                                                            scratch, stage_clock, errors, kept) ? 0 : 1;
                         }
-                        else
+                        else if (!selection)
                         {
                             check_driver_diagnose(checking, pp, selected.token, "checked definition selection failed");
                             result = 1;
@@ -2194,10 +2267,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         check_clock_mark(stage_clock, CHECK_STAGE_SELECT);
                         if (selection)
                         {
+                            result = check_driver_target_features(&selected.program, checking, parser, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                        }
+                        if (selection && result == 0)
+                        {
                             result = check_driver_executable(&selected.program, &selected.data, checking, pp, &types, output != 0 ? output : "a.out", scalar, verify,
                                                              source_rows, unwind_tables, command->libraries, lanes, scratch, stage_clock, NULL, 0) ? 0 : 1;
                         }
-                        else
+                        else if (!selection)
                         {
                             check_driver_diagnose(checking, pp, selected.token, "checked definition selection failed");
                             result = 1;

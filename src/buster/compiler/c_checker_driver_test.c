@@ -15,8 +15,11 @@ struct CheckDriverFixture
     bool quiet;
 };
 
-static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
-                                  CheckCorpusOracle* outcome, uint32_t* warnings)
+// Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
+// without one -fsyntax-only, and `extra`'s `extra_count` arguments (at most 8) before the source: its first error, as
+// clang's oracle reads one, and its warnings' count.
+static bool check_test_driver_run_with(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                       const char* const* extra, uint32_t extra_count, CheckCorpusOracle* outcome, uint32_t* warnings)
 {
     *outcome = (CheckCorpusOracle){ 0 };
     *warnings = 0;
@@ -38,7 +41,7 @@ static bool check_test_driver_run(const char* executable, const char* source, co
                 _exit(126);
             }
             close(output);
-            char* arguments[16] = { 0 };
+            char* arguments[24] = { 0 };
             uint32_t count = 0;
             arguments[count++] = (char*)(executable != NULL ? executable : "checker");
             if (scalar)
@@ -68,6 +71,10 @@ static bool check_test_driver_run(const char* executable, const char* source, co
             else
             {
                 arguments[count++] = "-fsyntax-only";
+            }
+            for (uint32_t i = 0; i < extra_count && i < 8; i += 1)
+            {
+                arguments[count++] = (char*)extra[i];
             }
             arguments[count++] = (char*)source;
             if (executable != NULL)
@@ -119,6 +126,12 @@ static bool check_test_driver_run(const char* executable, const char* source, co
     }
     free(text);
     return ready;
+}
+
+static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                  CheckCorpusOracle* outcome, uint32_t* warnings)
+{
+    return check_test_driver_run_with(executable, source, object, scalar, dump_static, quiet, lazy, NULL, 0, outcome, warnings);
 }
 
 // Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
@@ -3612,6 +3625,467 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
     }
 }
 
+// #775: code generation's check of target features, which clang makes at -c and not at -fsyntax-only. Each fixture's
+// first error at -c, or none, must be clang -c's at its -march, by both paths, in this process and through the
+// executable: its place, and its message where clang names the feature by the attribute's order (`message`; clang's
+// order past it is its StringMap's). At -fsyntax-only each must pass, as it does clang's.
+static void check_test_driver_target_features(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* march;
+        const char* source;
+        bool rejected;
+        bool message;
+        // The fixture's -std=, or null for gnu17.
+        const char* standard;
+    } fixtures[] = {
+        { "an always_inline callee's target attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true, true },
+        { "a caller of the callee's features", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target(\"avx2,bmi2\"))) int caller(int x) { return h(x); }\n",
+          false, true },
+        { "an always_inline callee without an attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"avx2\"))) int caller(int x) { return h(x); }\n", false,
+          true },
+        { "a caller's attribute that turns a feature off", "-march=x86-64-v2",
+          "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n"
+          "__attribute__((target(\"no-sse4.2\"))) int caller(int x) { return h(x); }\n",
+          true, true },
+        { "a flatten caller", "-march=x86-64",
+          "__attribute__((target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((flatten)) int caller(int x) { return h(x); }\n", true, true },
+        { "calls through the function's address", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nint caller(int x) { return (*h)(x) + (&h)(x); }\n", false,
+          true },
+        { "attributes declared after the call", "-march=x86-64",
+          "int h(int x);\nint caller(int x) { return h(x); }\n__attribute__((always_inline, target(\"avx2\"))) inline int h(int x) { return x + 1; }\n", false,
+          true },
+        { "an attribute declared before the call", "-march=x86-64",
+          "__attribute__((target(\"avx2\"))) static inline __attribute__((always_inline)) int h(int x);\nint caller(int x) { return h(x); }\n"
+          "static inline int h(int x) { return x + 1; }\n",
+          true, true },
+        { "dead branches and code", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int caller(int x) { if (0) return h(x); return (0 && h(x)) + (1 ? x : h(x)); }\nint after(int x) { return x; return h(x); }\n",
+          false, true },
+        { "the first function to have an error", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e1(int x) { return s(x) + h(x + 1); }\nint e2(int x) { return h(x + 2); }\n",
+          true, true },
+        { "a deferred function's error", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e(int x) { return s(x); }\n",
+          true, true },
+        { "an argument's call first", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\nint e1(int x) { return h(g(x)) + h(x); }\n",
+          true, true },
+        { "an arch= attribute", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"arch=haswell\"))) int h(int x) { return x + 1; }\nint caller(int x) { return h(x); }\n", true,
+          false },
+        { "an intrinsic of a feature the unit lacks", "-march=x86-64",
+          "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", true, true },
+        { "an intrinsic of a feature the unit has", "-march=x86-64-v3",
+          "#include <immintrin.h>\nunsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
+        { "an intrinsic of a feature its caller's attribute adds", "-march=x86-64",
+          "#include <immintrin.h>\n__attribute__((target(\"bmi2\"))) unsigned f(unsigned x, unsigned y) { return _bzhi_u32(x, y); }\n", false, true },
+        // #147's cleanup attribute calls its function where its variable's scope ends (#863's review).
+        { "a cleanup's call", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          true, true },
+        { "a cleanup's call of a feature the unit has", "-march=x86-64-v3",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          false, true },
+        { "a cleanup's call of a feature its caller's attribute adds", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "__attribute__((target(\"avx2\"))) int caller(void) { int x __attribute__((cleanup(h))) = 0; return x; }\n",
+          false, true },
+        { "a cleanup function's attributes declared after the cleanup", "-march=x86-64",
+          "void k(int *p);\nint caller(void) { int x __attribute__((cleanup(k))) = 0; return x; }\n"
+          "__attribute__((always_inline, target(\"avx2\"))) inline void k(int *p) { *p = 1; }\n",
+          false, true },
+        { "cleanups no exit reaches: dead code's and an endless loop's", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "int dead(void) { return 0; { int x __attribute__((cleanup(h))) = 0; } }\n"
+          "void endless(void) { int x __attribute__((cleanup(h))) = 0; for (;;) { x += 1; } }\n",
+          false, true },
+        // Code generation emits nothing after an expression statement that ends in a call that doesn't return, and goes on
+        // from a label (#863's fourth review).
+        { "a call after a call of a function that doesn't return", "-march=x86-64",
+          "__attribute__((noreturn)) void stop(void);\nstatic inline __attribute__((always_inline, target(\"avx2\"))) void h(void) {}\n"
+          "void f(void) { stop(); h(); }\n",
+          false, true },
+        { "calls after code that ends where nothing branches to", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n_Noreturn void stop2(void);\nint g(int);\nint f1(int x) { stop2(); return h(x); }\n"
+          "int f2(int x) { __builtin_unreachable(); return h(x); }\nint f3(int x) { (void)stop(); return h(x); }\nint f4(int x) { (x++, stop()); return h(x); }\n"
+          "int f5(int x) { (stop(), x++); return h(x); }\nint f6(int x) { x = stopi(); return h(x); }\nint f7(int x) { g(stopi()); return h(x); }\n"
+          "int f8(int x) { 0 ? (void)0 : stop(); return h(x); }\nint f9(int x) { 1 && stopi(); return h(x); }\nint f10(int x) { ({ stop(); }); return h(x); }\n"
+          "int f11(int x) { switch (x) { case 1: stop(); h(x); default: break; } return x; }\nint f12(int x) { while (x) { stop(); h(x); } return x; }\n",
+          false, true },
+        { "calls after <stdlib.h>'s exit and abort", "-march=x86-64",
+          "#include <stdlib.h>\nstatic inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "int f(int x) { if (x) exit(1); else abort(); return h(x); }\n",
+          false, true },
+        { "a noreturn attribute declared after the call", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nvoid late(void);\n"
+          "int f(int x) { late(); return h(x); }\n__attribute__((noreturn)) void late(void);\n",
+          true, true },
+        // Only an unscoped standard noreturn first added after a definition is ignored. GNU's function-type attribute
+        // (gnu:: syntax too), C's keyword and an earlier standard declaration must keep stopping emission.
+        { "C23 noreturn first added after a returning definition", "-march=x86-64",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          true, true, "-std=c23" },
+        { "C23 _Noreturn attribute first added after a returning definition", "-march=x86-64",
+          "void stop(void) {}\n[[_Noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          true, true, "-std=c23" },
+        { "C23 ignored late noreturn with the target feature enabled", "-march=x86-64-v3",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 noreturn on a definition remains after a redeclaration", "-march=x86-64",
+          "[[noreturn]] void stop(void) { for (;;) {} }\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 noreturn before a definition remains after a redeclaration", "-march=x86-64",
+          "[[noreturn]] void stop(void);\nvoid stop(void) { for (;;) {} }\n[[noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late GNU noreturn still changes the function type in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n__attribute__((noreturn)) void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late gnu scoped noreturn still changes the function type in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n[[gnu::noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "late C noreturn keyword remains allowed in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n_Noreturn void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "an ignored standard record keeps a neighbouring GNU noreturn in C23", "-march=x86-64",
+          "void stop(void) { for (;;) {} }\n[[noreturn, gnu::noreturn]] void stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nint caller(void) { stop(); return h(1); }\n",
+          false, true, "-std=c23" },
+        { "C23 late noreturn copies a shared specifier list before ignoring it", "-march=x86-64",
+          "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2); }\n", true, true, "-std=c23" },
+    };
+    const uint32_t routes = executable != NULL ? 4 : 2;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[1024];
+        snprintf(source, sizeof(source), "%s/target-feature-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/target-feature-%u.o", directory, i);
+        const char* standard = fixtures[i].standard != NULL ? fixtures[i].standard : "-std=gnu17";
+        const char* arguments[] = { standard, fixtures[i].march, "-w" };
+        CheckCorpusOracle oracle = { 0 };
+        const bool oracle_ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                                  check_corpus_clang_compile(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        snprintf(description, sizeof(description), "%s: clang -c %s it", fixtures[i].name, fixtures[i].rejected ? "refuses" : "takes");
+        check_test_expect(test, oracle_ready && oracle.rejected == fixtures[i].rejected, description);
+        const char* extra[] = { standard, fixtures[i].march, "-w" };
+        for (uint32_t route = 0; oracle_ready && route < routes; route += 1)
+        {
+            unlink(object);
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const char* driver = route >= 2 ? executable : NULL;
+            const bool scalar = (route & 1) != 0;
+            const bool ready = check_test_driver_run_with(driver, source, object, scalar, false, false, false, extra, BUSTER_ARRAY_LENGTH(extra), &checked, &warnings);
+            const bool same = ready && checked.rejected == oracle.rejected &&
+                              (!oracle.rejected || (checked.line == oracle.line && checked.column == oracle.column &&
+                                                    (!fixtures[i].message || strcmp(checked.message, oracle.message) == 0)));
+            snprintf(description, sizeof(description), "%s, %s %s: -c's first error %u:%u \"%s\", clang's %u:%u \"%s\"", fixtures[i].name,
+                     route >= 2 ? "default CLI" : "direct", scalar ? "scalar" : "vector", checked.line, checked.column, checked.message, oracle.line,
+                     oracle.column, oracle.message);
+            check_test_expect(test, same, description);
+            snprintf(description, sizeof(description), "%s, %s %s: a refused unit writes no object", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     scalar ? "scalar" : "vector");
+            check_test_expect(test, !checked.rejected || access(object, F_OK) != 0, description);
+            CheckCorpusOracle syntax = { 0 };
+            const bool syntax_ready = check_test_driver_run_with(driver, source, NULL, scalar, false, false, false, extra, BUSTER_ARRAY_LENGTH(extra), &syntax, &warnings);
+            snprintf(description, sizeof(description), "%s, %s %s: -fsyntax-only takes it, as clang's does", fixtures[i].name, route >= 2 ? "default CLI" : "direct",
+                     scalar ? "scalar" : "vector");
+            check_test_expect(test, syntax_ready && !syntax.rejected, description);
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
+// The lines of `text` that hold an error, each from its path's end on (`path` itself cut), joined in their order. Returns
+// false if one had no room in `capacity`.
+static bool check_test_driver_error_lines(const char* text, const char* path, char* lines, size_t capacity)
+{
+    size_t used = 0;
+    bool room = true;
+    lines[0] = 0;
+    for (const char* at = text != NULL ? text : ""; *at != 0;)
+    {
+        const char* end = strchr(at, '\n');
+        const size_t length = end != NULL ? (size_t)(end - at) : strlen(at);
+        const char* error = memmem(at, length, ": error: ", 9);
+        const size_t path_length = strlen(path);
+        const bool own = length > path_length && memcmp(at, path, path_length) == 0;
+        room &= error == NULL || used + length + 2 < capacity;
+        if (error != NULL && used + length + 2 < capacity)
+        {
+            const size_t skip = own ? path_length : 0;
+            memcpy(lines + used, at + skip, length - skip);
+            used += length - skip;
+            lines[used++] = '\n';
+            lines[used] = 0;
+        }
+        at = end != NULL ? end + 1 : at + length;
+    }
+    return room;
+}
+
+// #775: every error of the code-generation check, in order, must be clang -c's, which reports them all (without
+// -ferror-limit): the errors of the first function that clang emits where it is defined (an external definition, or one
+// with a used, constructor or destructor attribute, by the declarations up to the definition) that has any, and no
+// other's, or where none has any, every deferred function's (in the order clang's emission first refers to them or a
+// declaration queues them, which the fixtures keep in source order), each by its calls' ends. Through the executable.
+static void check_test_driver_target_feature_errors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        // The fixture's -std=, or null for gnu17.
+        const char* standard;
+    } fixtures[] = {
+        { "the first function's errors alone",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e1(int x) { return s(x) + h(x + 1) + h(x + 3); }\nint e2(int x) { return h(x + 2); }\n" },
+        { "a function's errors by their calls' ends",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\n"
+          "int e1(int x) { return h(g(x)) + h(x) + g(h(g(x))); }\n" },
+        { "a deferred function's errors where no other has any",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x) + h(x + 1); }\n"
+          "static int t(int x) { return h(x + 2); }\nint e(int x) { return s(x) + t(x); }\n" },
+        { "an external function's errors before a static one's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
+          "int e(int x) { return s(x) + h(x + 1); }\n" },
+        { "loops' errors in clang's emission order: a for loop's increment after its body",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int x) { return x + 2; }\n"
+          "int e(int n)\n{\n    int s = 0;\n    for (int i = h(n); i < g(n); i = h(i)) { s += g(i); }\n    while (h(s) < n) { s += g(s); }\n"
+          "    do { s += g(s); } while (h(s) < n);\n    return ({ int t = g(s); t; }) + h(s);\n}\n" },
+        // Which functions clang emits where they are (ASTContext::DeclMustBeEmitted), and so whose errors come first: an
+        // external definition by the inline rules, before a later ordinary function's (#863's review).
+        { "a GNU89 inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n", "-std=gnu89" },
+        { "a C99 extern inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n" },
+        { "a gnu_inline plain inline definition, emitted where it is, before an ordinary function",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n__attribute__((gnu_inline)) inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n" },
+        { "a C99 inline definition and a gnu_inline extern inline one, never emitted",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\n__attribute__((gnu_inline)) extern inline int c(int x) { return h(x + 2); }\n"
+          "int b(int x) { return h(x + 1) + a(x) + c(x); }\n" },
+        { "a used static function emitted where it is, a retain one deferred",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic __attribute__((retain)) int r(void) { return h(1); }\nstatic __attribute__((used)) int s(void) { return h(2); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a destructor and a constructor emitted where they are",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic __attribute__((destructor)) void d(void) { h(3); }\nint b(int x) { return h(x + 1); }\n"
+          "static __attribute__((constructor)) void c(void) { h(4); }\n" },
+        // A later declaration is no emission point (#863's second review): clang emits a function where its definition is
+        // handed over, by the declarations up to the definition, and a later one that makes an inline definition
+        // external only queues it for the unit's end, so the first ordinary function with errors, before or after that
+        // declaration, is the only one reported, and the queued function's errors come with the deferred ones.
+        { "a C99 inline definition released by a later extern declaration, after an ordinary function's errors",
+          "__attribute__((always_inline,target(\"avx2\"))) int h(int x){return x;}\ninline int a(int x){return h(x);}\nint b(int x){return h(x+1);}\nextern int a(int);\n", "-std=c99" },
+        { "a later extern declaration is no emission point: the ordinary function after it fails first",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nextern int a(int);\n"
+          "int c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "an ordinary function's errors between a C99 inline definition and its extern declaration, and another's after it",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "extern int a(int);\nint c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "a later plain declaration of a C99 inline definition, after an ordinary function's errors and before another's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "int a(int);\nint c(int x) { return h(x + 2); }\n", "-std=c99" },
+        { "a C99 inline definition released by a later extern declaration, emitted with the deferred functions",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int x) { return h(x); }\nextern int a(int);\n"
+          "static int s(int x) { return h(x + 1); }\nint e(int x) { return s(x); }\n", "-std=c99" },
+        { "an earlier extern declaration makes a C99 inline definition external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n", "-std=c99" },
+        { "a GNU89 extern inline definition released by a later plain inline declaration, after an ordinary function's errors",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\nint b(int x) { return h(x + 1); }\n"
+          "inline int a(int x);\nint c(int x) { return h(x + 2); }\n", "-std=gnu89" },
+        { "a GNU89 extern inline definition released by a later plain inline declaration, emitted at the unit's end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nextern inline int a(int x) { return h(x); }\ninline int a(int x);\n", "-std=gnu89" },
+        { "a used attribute on a later declaration doesn't emit a static function where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic int s(void) { return h(2); }\nstatic int s(void) __attribute__((used));\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a used attribute on an earlier declaration does",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic int s(void) __attribute__((used));\nstatic int s(void) { return h(2); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a constructor attribute on a later declaration doesn't emit a static function where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic void c(void) { h(4); }\nstatic void c(void) __attribute__((constructor));\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "a destructor attribute on an earlier declaration does",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\nstatic void d(void) __attribute__((destructor));\nstatic void d(void) { h(3); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "an earlier plain inline declaration makes a GNU89 extern inline definition external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int);\nextern inline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n", "-std=gnu89" },
+        { "a gnu_inline attribute on an earlier declaration is the definition's: its plain inline spelling is external where it is defined",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n__attribute__((gnu_inline)) inline int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        { "an earlier plain inline declaration of a C99 inline definition leaves it inline-only",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\ninline int a(int);\ninline int a(int x) { return h(x); }\n"
+          "int b(int x) { return h(x + 1); }\n" },
+        // #147's cleanup attribute (#863's third review): clang calls a variable's cleanup function where its scope ends,
+        // once whichever exits reach it, after the scope's statements and the innermost variable's first, and reports the
+        // call at the attribute.
+        { "cleanups' calls at their scopes' ends, among the calls",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = g(n);\n    {\n        int y __attribute__((cleanup(h))) = g(1);\n        n += g(2);\n    }\n"
+          "    return x + g(3);\n}\n" },
+        { "a cleanup that returns and breaks reach, once at its scope's end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n    if (n)\n        return g(1);\n    for (int i = 0; i < n; i++)\n    {\n"
+          "        int y __attribute__((cleanup(h))) = i;\n        if (g(i))\n            break;\n        if (i == 3)\n            continue;\n    }\n"
+          "    return x + g(2);\n}\n" },
+        { "a goto out of a scope whose end no path reaches",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "void f(int n)\n{\n    {\n        int x __attribute__((cleanup(h))) = 0;\n        if (n)\n            goto out;\n        g(1);\n        for (;;)\n"
+          "            g(2);\n    }\nout:\n    g(3);\n}\n" },
+        { "a statement expression's cleanups after its value, and a return out of one",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "static inline __attribute__((always_inline, target(\"lzcnt\"))) void k(int *p) { *p = 2; }\n"
+          "int f(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n"
+          "    int v = ({ int y __attribute__((cleanup(h))) = g(1); int z __attribute__((cleanup(k))) = g(6); y + z; }) + g(2);\n"
+          "    int w = ({ if (n) return g(3); g(4); }) + g(5);\n    return v + w + x;\n}\n" },
+        { "a for statement's own variable's cleanup after its increment",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "int f(int n)\n{\n    for (int i __attribute__((cleanup(h))) = g(0); i < n; i += g(1))\n    {\n        if (g(2))\n            break;\n"
+          "        if (g(3))\n            return 1;\n        g(4);\n    }\n    return g(5);\n}\n" },
+        { "variables' cleanups innermost first, a loop body's at its end",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "void f(int n)\n{\n    int a __attribute__((cleanup(h))) = 0;\n    int b __attribute__((cleanup(h))) = 0;\n    while (1)\n    {\n"
+          "        int c __attribute__((cleanup(h))) = g(1);\n        if (g(2))\n            break;\n        g(3);\n    }\n    g(4);\n}\n" },
+        { "a flatten caller's cleanups",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "__attribute__((target(\"avx2\"))) void k(int *p) { *p = 2; }\n"
+          "__attribute__((flatten, target(\"sse4.2\"))) int f(int n)\n{\n    int x __attribute__((cleanup(h))) = n;\n"
+          "    int y __attribute__((cleanup(k))) = n;\n    return x + y;\n}\n" },
+        { "a standard attribute's cleanup, at its scope",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\nvoid f(void)\n{\n"
+          "    [[gnu::cleanup(h)]] int x = 0;\n    [[gnu::__cleanup__(h)]] int y = 0;\n}\n", "-std=gnu23" },
+        { "a cleanup among other attributes, and one from a macro",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n#define AUTO __attribute__((cleanup(h)))\n"
+          "void f(void)\n{\n    int x __attribute__((unused, __cleanup__(h))) = 0;\n    int y AUTO = 0, z AUTO = 1;\n}\n" },
+        { "cleanups no exit reaches: an endless loop's and dead code's",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static inline __attribute__((always_inline, target(\"bmi2\"))) int g(int n) { return n + 1; }\n"
+          "static void endless(int n)\n{\n    int x __attribute__((cleanup(h))) = 0;\n    for (;;)\n        g(n);\n}\n"
+          "static int dead(int n)\n{\n    return g(n);\n    {\n        int x __attribute__((cleanup(h))) = 0;\n        g(x);\n    }\n}\n"
+          "int e(int n)\n{\n    endless(n);\n    return dead(n);\n}\n" },
+        { "an external function's cleanup alone, as clang emits no deferred function after it",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void h(int *p) { *p = 1; }\n"
+          "static int s(void) { int x __attribute__((cleanup(h))) = 0; return x; }\nint b(void) { return s(); }\n"
+          "int e(void) { int z __attribute__((cleanup(h))) = 0; return z; }\n" },
+        // Code generation's emission, where it differs from Sema's reachability (#863's fourth review): nothing after an
+        // expression statement that ends in a call that doesn't return, loops' blocks emitted whatever their conditions and
+        // bodies' code, and code after a label whatever precedes it.
+        { "calls code generation emits around calls that don't return",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nint f(int n)\n{\n    if (n == 1)\n        stop();\n    n += h(1);\n    n ? (void)0 : stop();\n"
+          "    n += h(2);\n    int y = stopi();\n    n += h(3) + y;\n    n && stopi();\n    n += h(4);\n    n = stopi() + h(5);\n    n += h(6);\nlbl:\n"
+          "    n += h(7);\n    __builtin_trap();\n    n += h(8);\n    if (n)\n        goto lbl;\n    return n;\n}\n" },
+        { "loops' blocks code generation emits whatever their conditions and bodies leave",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nstatic int a(int n) { while (0) { n = h(n); } return n; }\n"
+          "static int b(int n) { for (; 0; n = h(n + 1)) { n = h(n + 2); } return n; }\n"
+          "static int c(int n) { do { stop(); } while (h(n + 3)); return h(n + 4); }\nstatic int d(int n) { do { n++; } while (1); return h(n + 5); }\n"
+          "static int e(int n) { for (; 1;) { n++; } return h(n + 6); }\nstatic int f(int n) { for (int i = 0; i < n; i = h(i)) { stop(); } return n; }\n"
+          "static int g(int n) { while (1) { n++; } return h(n + 7); }\nint entry(int n) { return a(n) + b(n) + c(n) + d(n) + e(n) + f(n) + g(n); }\n" },
+        { "code after labels, whatever precedes them",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\n\nstatic void hp(int *p) { *p = h(*p); }\nstatic int a(int n) { stop(); lbl: return h(n); }\n"
+          "static int b(int n) { stop(); goto end; end: return h(n + 1); }\nstatic int c(int n) { if (n) goto out; stop(); out: return h(n + 2); }\n"
+          "static int d(int n) { return n; skip: n = h(n + 3); goto skip; }\nstatic void e(int n) { int x __attribute__((cleanup(hp))) = n; stop(); }\n"
+          "static void g(int n) { int x __attribute__((cleanup(hp))) = n; if (n) return; stop(); }\n"
+          "int entry(int n) { e(n); g(n); return a(n) + b(n) + c(n) + d(n); }\n" },
+        { "a join after a call that doesn't return, in its statement, a select, which isn't one, and constant conditions' "
+          "operands that aren't emitted",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "__attribute__((noreturn)) int stopi(void);\nstatic int f(int n)\n{\n    int y = 0;\n    *(n ? &n : &y) = stopi();\n    n += h(9);\n"
+          "    (stop(), n ? 1 : 2);\n    n += h(10);\n    (n ? 1 : 2, stop());\n    n += h(11);\n    return n;\n}\n"
+          "static int g(int n)\n{\n    1 ? (void)0 : stop();\n    n += h(12);\n    0 && stopi();\n    n += h(13);\n    1 || stopi();\n    n += h(14);\n"
+          "    n = 0 ? stopi() : n;\n    return h(n);\n}\nint entry(int n) { return f(n) + g(n); }\n" },
+        { "cleanups after calls that don't return",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) void hp(int *p) { *p = 1; }\n__attribute__((noreturn)) void stop(void);\n"
+          "static void e(int n) { int x __attribute__((cleanup(hp))) = n; stop(); }\n"
+          "static void g(int n) { int x __attribute__((cleanup(hp))) = n; if (n) return; stop(); }\n"
+          "static void k(int n) { int x __attribute__((cleanup(hp))) = n; stop(); lbl: x++; }\nint entry(int n) { e(n); g(n); k(n); return n; }\n" },
+        { "every target error after ignored late unscoped C23 noreturn attributes",
+          "void stop(void) {}\n[[noreturn]] void stop(void);\nvoid stop2(void) {}\n[[_Noreturn]] void stop2(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int caller(void) { stop(); h(1); stop2(); return h(2) + h(3); }\n", "-std=c23" },
+        { "permitted C23 noreturn spellings keep only the final reachable target error",
+          "[[noreturn]] void early(void);\nvoid early(void) { for (;;) {} }\n[[noreturn]] void early(void);\n"
+          "void gnu_late(void) { for (;;) {} }\n__attribute__((noreturn)) void gnu_late(void);\n"
+          "void scoped_late(void) { for (;;) {} }\n[[gnu::noreturn]] void scoped_late(void);\n"
+          "void keyword_late(void) { for (;;) {} }\n_Noreturn void keyword_late(void);\n"
+          "void mixed_late(void) { for (;;) {} }\n[[noreturn, gnu::noreturn]] void mixed_late(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { early(); return h(1); }\nint b(void) { gnu_late(); return h(2); }\nint c(void) { scoped_late(); return h(3); }\n"
+          "int d(void) { keyword_late(); return h(4); }\nint e(void) { mixed_late(); return h(5); }\nint reachable(void) { return h(6); }\n", "-std=c23" },
+        { "shared C23 noreturn specifiers retain each declarator's disposition",
+          "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
+          "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2) + h(3); }\n", "-std=c23" },
+    };
+    for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        snprintf(source, sizeof(source), "%s/target-feature-errors-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/target-feature-errors-%u.o", directory, i);
+        const bool written = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
+        char* const standard = (char*)(fixtures[i].standard != NULL ? fixtures[i].standard : "-std=gnu17");
+        char* const theirs_arguments[] = { (char*)clang, standard, "-march=x86-64", "-w", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-c", "-o",
+                                           "/dev/null", source, NULL };
+        char* const ours_arguments[] = { (char*)executable, standard, "-march=x86-64", "-w", "-c", "-o", object, source, NULL };
+        char* theirs_text = NULL;
+        char* ours_text = NULL;
+        const int theirs_status = written ? check_test_driver_spawn(theirs_arguments, &theirs_text) : -1;
+        const int ours_status = written ? check_test_driver_spawn(ours_arguments, &ours_text) : -1;
+        static char theirs[16384];
+        static char ours[16384];
+        static char description[2 * 16384 + 512];
+        const bool theirs_whole = check_test_driver_error_lines(theirs_text, source, theirs, sizeof(theirs));
+        const bool ours_whole = check_test_driver_error_lines(ours_text, source, ours, sizeof(ours));
+        snprintf(description, sizeof(description), "%s: -c's errors are clang -c's, every line of both read (status %d and %d)\n-c's:\n%sclang's:\n%s",
+                 fixtures[i].name, ours_status, theirs_status, ours, theirs);
+        check_test_expect(test, written && theirs_whole && ours_whole && theirs_status == 1 && ours_status == 1 && theirs[0] != 0 && strcmp(ours, theirs) == 0, description);
+        free(theirs_text);
+        free(ours_text);
+        unlink(object);
+        unlink(source);
+    }
+}
+
 #include "c_check_packed_test.c"
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
@@ -4805,6 +5279,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
         check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
         check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
+        check_test_driver_target_features(&test, clang, executable, directory);
+        check_test_driver_target_feature_errors(&test, clang, executable, directory);
         check_test_driver_optimize_pragmas(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {

@@ -595,7 +595,13 @@ static void check_builtin_x86_test_pages(CheckBuiltinX86Test* test, const TypeTa
             {
                 check_builtin_x86_test_expect(test, *((uint8_t*)actions - i) == 0xa5 && *((uint8_t*)results - i) == 0xa5, "batch leading sentinels unchanged", i);
             }
-            check_builtin_x86_test_expect(test, memcmp(original, arguments, sizeof(original)) == 0, "read-only argument slice remains unchanged", count);
+            // By field: the values' padding is no part of them.
+            bool unchanged = true;
+            for (uint32_t i = 0; i < BUSTER_CHECK_BUILTIN_X86_TEST_ARGUMENTS; i += 1)
+            {
+                unchanged &= check_test_value_equal(original + i, arguments + i);
+            }
+            check_builtin_x86_test_expect(test, unchanged, "read-only argument slice remains unchanged", count);
         }
         check_builtin_x86_test_expect(test, memcmp(guarded_name, name, sizeof(name) - 1) == 0, "non-NUL exact name remains unchanged", 0);
     }
