@@ -172,6 +172,28 @@ their helper no saves. An input fixed to an output's fixed register, as in
 `"=a"(r) : "a"(n)`, shares it, as GCC and clang let it, unless the output is
 early-clobbered or `+`. It is that output's matching input then.
 
+### Explicit register variables
+
+An operand that names an explicit register variable, `register long r10
+__asm__("r10") = a4;` and then `"r"(r10)` (musl's syscall wrappers pass a
+system call's fourth to sixth arguments so), takes the variable's register, as
+clang's code gives it (CodeGen's `AddVariableConstraints`;
+`check_asm_variable_register`):
+
+- the operand is the variable itself, or a cast of it that keeps its value: to
+  its own type, or between integers and pointers of one width (clang's
+  `IgnoreParenNoopCasts`), so `"r"((unsigned long)r10)` is in r10, but
+  `"r"((int)r10)` and `"r"(r10 + 0)` are ordinary operands;
+- the register replaces the constraint's letters: `"a"(r10)` is in r10, an
+  output of a memory constraint (`"=m"(r10)`) is r10 too, and a matching input
+  is in its variable's register rather than its output's;
+- a general register by any of its names (`"ebx"` is rbx; an `int`'s operand
+  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`.
+
+The variable is an ordinary local otherwise: the operand block takes its value,
+or an output's address, as any operand's, and the helper loads it into the
+register (a callee-saved one among the helper's pushes).
+
 The operand block, a frame object of the caller's, holds 8 bytes per slot:
 
 - each register output's address, and a `+` one's value;
@@ -307,7 +329,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
   but a vector in a template of no instructions that doesn't refer to it;
-- bit-fields, and explicit register variables (`register long r asm("r10")`);
+- bit-fields;
+- explicit register variables in registers the helper doesn't place one in
+  (rsp, which is the helper's own, the high bytes, APX's r16 to r31, XMM16 to
+  XMM31 and the other classes' registers), as memory inputs (`"m"(r10)`, which
+  clang's code refuses too), and of other types than a general register's or
+  an XMM register's (an integer in an XMM register's variable);
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
@@ -411,7 +438,13 @@ has the commands, the logs and the default path's numbers against main.
     and `__get_tp`'s `%fs` load), the SSE templates of its x86_64 math
     (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
     dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
-    `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA.
+    `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA;
+  - explicit register variables: musl's syscall wrappers (r10, r8 and r9 beside
+    the fixed registers) on harmless system calls, and each shape of a
+    variable's operand: a constraint's letter replaced, a cast that keeps the
+    width, a 32-bit name, outputs of a register's and a memory constraint, a
+    `+` operand in rbx, a matching input in its variable's register, an XMM
+    register's, and a template of no instructions.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one

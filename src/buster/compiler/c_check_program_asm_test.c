@@ -423,6 +423,42 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){double a=n*0.1+1/3.0,b=n-0.7,c=1e-17*n;float d=n*0.3f+1/3.0f,e=n-0.7f,f=1e-8f*n;"
         "double r=m_fma(a,b,c)-a*b;float s=m_fmaf(d,e,f)-d*e;return (int)(r*1e18)+(int)(s*1e9f)*7+(int)m_fma(b,b,a)*3;}",
         "asm-musl-fma", clang, fused_native);
+    // Explicit register variables as operands, musl's syscall wrappers (arch/x86_64/syscall_arch.h): the fourth to sixth
+    // arguments in r10, r8 and r9, `register long r10 __asm__("r10") = a4;` and "r"(r10), beside the fixed registers of
+    // the others. getpid, rt_sigprocmask's mask, prctl's PR_GET_DUMPABLE and an anonymous page mapped and unmapped, each
+    // the same in clang's build in the same process.
+    check_test_program_source(test,
+        "static __inline long __syscall0(long n){unsigned long ret;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n) : \"rcx\", \"r11\", \"memory\");return ret;}"
+        "static __inline long __syscall2(long n, long a1, long a2){unsigned long ret;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2)"
+        ": \"rcx\", \"r11\", \"memory\");return ret;}"
+        "static __inline long __syscall4(long n, long a1, long a2, long a3, long a4){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
+        "__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10): \"rcx\", \"r11\", \"memory\");return ret;}"
+        "static __inline long __syscall5(long n, long a1, long a2, long a3, long a4, long a5){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
+        "register long r8 __asm__(\"r8\") = a5;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2), \"d\"(a3), \"r\"(r10), \"r\"(r8)"
+        " : \"rcx\", \"r11\", \"memory\");return ret;}"
+        "static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long a5, long a6){unsigned long ret;register long r10 __asm__(\"r10\") = a4;"
+        "register long r8 __asm__(\"r8\") = a5;register long r9 __asm__(\"r9\") = a6;__asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a1), \"S\"(a2),"
+        "\"d\"(a3), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");return ret;}"
+        "int tested(int n){long pid=__syscall0(39);unsigned long mask[2]={0,0};long masked=__syscall4(14,0,0,(long)mask,8);long dumpable=__syscall5(157,3,0,0,0,0);"
+        "long page=__syscall6(9,0,4096,1,0x22,-1,0);long unmapped=__syscall2(11,page,4096);"
+        "return (pid>0)+(int)(mask[0]&0xffff)*2+(int)masked*3+(int)dumpable*5+(page>0&&(page&4095)==0)*7+(int)unmapped*11+n;}",
+        "asm-register-variables-syscalls", clang);
+    // Each shape of a register variable's operand, as clang places it: an input in the variable's register whatever its
+    // letters ("a"), through a cast that keeps its width, by a 32-bit name of a 64-bit register and as an int's 32-bit
+    // name; outputs in their variables' registers, a memory output's among them; a `+` operand in a callee-saved one; a
+    // matching input in its variable's register, not its output's; an XMM register's; and a template of no instructions.
+    check_test_program_source(test,
+        "int tested(int n){register long a __asm__(\"r10\")=n*3;long o1;__asm__(\"movq %%r10, %0\" : \"=r\"(o1) : \"a\"(a));"
+        "register unsigned long b __asm__(\"r9\")=(unsigned long)n<<33;long o2;__asm__(\"movq %%r9, %0\" : \"=r\"(o2) : \"r\"((long)b));"
+        "register long c __asm__(\"ebx\")=n-7;long o3;__asm__(\"movq %%rbx, %0\" : \"=r\"(o3) : \"r\"(c));"
+        "register int d __asm__(\"r12\")=n*5;int o4;__asm__(\"movl %1, %0\" : \"=r\"(o4) : \"r\"(d));"
+        "register long e __asm__(\"r11\");__asm__(\"movq $42, %%r11\" : \"=r\"(e));register long f __asm__(\"r8\");__asm__(\"movq $7, %%r8\" : \"=m\"(f));"
+        "register long g __asm__(\"rbx\")=n;__asm__(\"addq $5, %%rbx\" : \"+r\"(g));"
+        "register long h __asm__(\"r13\")=n*9;long o5;__asm__(\"movq %%r13, %0\" : \"=r\"(o5) : \"0\"(h));"
+        "register double x __asm__(\"xmm5\")=n*0.5;double o6;__asm__(\"movaps %%xmm5, %0\" : \"=x\"(o6) : \"x\"(x));"
+        "register long i __asm__(\"r10\")=n+100;__asm__(\"\" : \"+r\"(i));"
+        "return (int)o1+(int)(o2>>33)*3+(int)o3*5+o4*7+(int)e+(int)f*11+(int)g*13+(int)o5*17+(int)(o6*4)*19+(int)i*23;}",
+        "asm-register-variables", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
@@ -434,8 +470,18 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-operand", true, false, 0, 1, "inline assembly operands in x87 registers");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
-    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__(\"\" : \"+r\"(r));return (int)r;}",
-                                       "asm-register-variable", true, false, 0, 1, "explicit register variables as inline assembly operands");
+    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
+    // past XMM15; an input of a memory constraint, which clang's code refuses too; and an integer in an XMM register.
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",
+                                       "asm-register-variable-rsp", true, false, 0, 0, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\"\" : : \"q\"(r));return n;}",
+                                       "asm-register-variable-high", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
+                                       "asm-register-variable-xmm16", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__ volatile(\"\" : : \"m\"(r));return n;}",
+                                       "asm-register-variable-memory", true, false, 0, 1, "explicit register variables as inline assembly memory inputs");
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"xmm3\")=n;__asm__ volatile(\"\" : : \"x\"(r));return n;}",
+                                       "asm-register-variable-integer-xmm", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     // #554 rejects ordinary statements and parameter operands before lowering. An uninitialized named-register VLA
     // passes that constraint, but evaluating its bound still gives the naked planner a non-asm control to refuse.
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(int n){register int x[n] asm(\"rax\");__asm__(\"ret\");}int tested(int n){return n;}",

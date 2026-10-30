@@ -11,8 +11,10 @@
 // helpers, in this order (CheckProgramAsm):
 //   - Placement. Each operand takes its constraint's first alternative (check_asm_constraint_parse): a general register
 //     of a class or a fixed one, an XMM register for a float or a double, memory (an lvalue's: clang and the checker
-//     refuse an rvalue there), an integer constant, or an output's register (a matching input). Every operand has a
-//     register of its own but a matching pair, none a clobber, caller-saved ones first (check_asm_take).
+//     refuse an rvalue there), an integer constant, or an output's register (a matching input). An operand that names
+//     an explicit register variable takes the variable's register instead, as clang's code gives it
+//     (check_asm_variable_register). Every operand has a register of its own but a matching pair, none a clobber,
+//     caller-saved ones first (check_asm_take).
 //   - Substitution (check_asm_substitute): the template with each operand as GCC and clang print it in AT&T syntax: a
 //     register by the operand's size or its modifier's (b h w k q), memory as (%reg), a constant as $value, and %%, %=,
 //     %{ %| %} and {att|intel}'s first alternative. A basic asm statement's template is its text, as it is.
@@ -38,9 +40,10 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): asm goto, flag outputs, the x87, MMX, mask and vector
 // register classes and the other letters it doesn't place (A, p, Y, the floating constants), symbolic immediates and
 // constants outside their letter's range, operands of types no general or XMM register holds by value (but a vector in
-// a template of no instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables, clobbers of an
-// operand's register, APX's registers, templates the assembler refuses, a label two templates define, and a `.L` name no
-// template defines; and of naked functions (CheckProgramNaked.reason)
+// a template of no instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't
+// place one in (rsp, a high byte, APX's and the other classes') and as memory inputs, clobbers of an operand's register,
+// APX's registers, templates the assembler refuses, a label two templates define, and a `.L` name no template defines;
+// and of naked functions (CheckProgramNaked.reason)
 // statements other than asm statements, operands other than integer constants, and bodies of no instructions.
 // Include after c_check_program_helpers.c, assembler.c, x86_target.c and tier0.c.
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
@@ -156,10 +159,11 @@ struct CheckProgramAsms
     uint32_t token;
 };
 
-// A constraint's first alternative: the general registers it allows (a bit each), whether it allows an XMM register,
-// memory or an integer constant (`ranged`: in [low, high], by its sign-extended value; `unsigned32`: Z's, by its
-// zero-extended one, check_asm_constant_fits), the output a matching input is tied to (BUSTER_CHECK_NONE for none), and
-// the first letter the lowering doesn't place, as the feature it names.
+// A constraint's first alternative: the general registers it allows (a bit each), whether it allows an XMM register
+// (`fixed_vector` its number plus one where an explicit register variable fixes it, 0 for any), memory or an integer
+// constant (`ranged`: in [low, high], by its sign-extended value; `unsigned32`: Z's, by its zero-extended one,
+// check_asm_constant_fits), the output a matching input is tied to (BUSTER_CHECK_NONE for none), and the first letter
+// the lowering doesn't place, as the feature it names.
 typedef struct CheckAsmConstraint CheckAsmConstraint;
 struct CheckAsmConstraint
 {
@@ -168,6 +172,7 @@ struct CheckAsmConstraint
     const char* refused;
     uint32_t general;
     uint32_t tied;
+    uint8_t fixed_vector;
     bool vector;
     bool memory;
     bool immediate;
@@ -790,22 +795,71 @@ static bool check_asm_integer_constant(const TypeTable* types, const CheckAsmChe
     return value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && integer;
 }
 
-// Whether operand expression `node` names an explicit register variable (`register T x asm("reg")`), whose register
-// GCC and clang give the operand: the lowering doesn't place one there yet. An object's id is its first declaration's
-// token plus one, which has its attributes.
-static bool check_asm_register_variable(const CheckProgram* program, uint32_t node)
+// Whether a cast from `source` to `destination` keeps its operand's value, as clang's IgnoreParenNoopCasts takes it: to
+// its own type (an lvalue's conversion among them), or between integers and pointers of one width.
+static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId destination)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool from = check_action_integer_type(types, source, &width, &is_signed) || check_action_kind(types, source) == BUSTER_TYPE_KIND_POINTER;
+    const bool to = check_action_integer_type(types, destination, &width, &is_signed) || check_action_kind(types, destination) == BUSTER_TYPE_KIND_POINTER;
+    const bool sized = type_is_complete(types, source) && type_is_complete(types, destination);
+    return type_unqualified(source) == type_unqualified(destination) || (from && to && sized && type_size(types, source) == type_size(types, destination));
+}
+
+// The register an asm operand takes when its expression names an explicit register variable (`register long r10
+// asm("r10") = a4;` and then "r"(r10), musl's syscall wrappers'), as clang's code gives it (CodeGen's
+// AddVariableConstraints): the variable itself, through casts that keep its value (check_asm_noop_cast), so that
+// "r"((unsigned long)r10) is in r10 but "r"((int)r10) and "r"(r10 + 0) aren't. Its constraint is then that register,
+// whatever its letters: "a"(r10) is in r10, and a matching input is in it rather than in its output's register. A
+// general register's number (0 to 15, by any of its names), 16 plus an XMM register's (16 to 31), -1 for an operand
+// that names no such variable, or -2 for a register the lowering doesn't place one in: rsp, which is the helper's, a
+// high byte, APX's r16 to r31, XMM16 to XMM31 and the other classes (the x87's, MMX's, the opmasks', YMM's and ZMM's).
+// An object's id is its first declaration's token plus one, which has its attributes.
+static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node)
 {
     const CheckInput* input = program->input;
-    const CheckValue* value = node < program->stream->count ? program->stream->values + node : 0;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &input->graph;
+    uint32_t at = node;
+    bool walking = true;
+    while (walking && at < stream->count && (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT))
+    {
+        // Operands are earlier nodes, so the walk ends.
+        const uint32_t inner = graph->operand0[at];
+        walking = inner < at && check_asm_noop_cast(program->types, stream->values[inner].type, stream->values[at].type);
+        at = walking ? inner : at;
+    }
+    const CheckValue* value = at < stream->count && graph->ops[at] == CHECK_OP_VALUE ? stream->values + at : 0;
     const uint32_t declaration = value != 0 && (value->flags & BUSTER_CHECK_REGISTER) != 0 && value->object != 0 && value->object <= input->token_count ?
                                  value->object - 1 : BUSTER_CHECK_NONE;
     const CheckInputAttributes* attributes = declaration < input->token_count && input->registers[declaration] ? input->attributes[declaration] : 0;
-    bool labelled = false;
+    int32_t result = -1;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
-        labelled |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL;
+        const CheckInputAttribute* attribute = attributes->records + i;
+        String8 name = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute->text : (String8){ 0 };
+        if (name.length != 0 && (name.pointer[0] == '%' || name.pointer[0] == '#'))
+        {
+            name.pointer += 1;
+            name.length -= 1;
+        }
+        int32_t reg = name.length != 0 ? -2 : -1;
+        for (uint32_t size = 0; reg == -2 && size < 4; size += 1)
+        {
+            for (uint32_t r = 0; reg == -2 && r < 16; r += 1)
+            {
+                const char* spelling = check_asm_registers[size][r];
+                reg = r != X86_REGISTER_RSP && name.length == strlen(spelling) && memcmp(name.pointer, spelling, name.length) == 0 ? (int32_t)r : -2;
+            }
+        }
+        // xmm0 to xmm15, without leading zeros, as clang's register names spell them.
+        const bool xmm = reg == -2 && (name.length == 4 || name.length == 5) && memcmp(name.pointer, "xmm", 3) == 0 && name.pointer[3] >= '0' &&
+                         name.pointer[3] <= '9' && (name.length == 4 || (name.pointer[3] == '1' && name.pointer[4] >= '0' && name.pointer[4] <= '5'));
+        reg = xmm ? 16 + (name.length == 4 ? name.pointer[3] - '0' : 10 + name.pointer[4] - '0') : reg;
+        result = reg != -1 ? reg : result;
     }
-    return labelled;
+    return result;
 }
 
 // Plans statement `s` (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
@@ -862,7 +916,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         const bool floating = kind == BUSTER_TYPE_KIND_FLOATING && (size == 4 || size == 8);
         const bool registered = (integer || floating) && (size == 1 || size == 2 || size == 4 || size == 8);
         constraints[k] = check_asm_constraint_parse(statement, program->identifiers, statement->operands[k].constraint, output);
-        const CheckAsmConstraint* constraint = constraints + k;
+        CheckAsmConstraint* constraint = constraints + k;
         CheckAsmPlace* place = places + k;
         *place = (CheckAsmPlace){
             .type = type,
@@ -879,6 +933,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         uint32_t bits = 64;
         const bool constant = !output && check_asm_integer_constant(types, checked, &extended, &bits);
         const bool fits = constant && constraint->immediate && check_asm_constant_fits(constraint, extended, bits);
+        // An explicit register variable's register, whatever the constraint's letters (check_asm_variable_register): an
+        // output's even of a memory constraint, which clang's code makes that register too, but not an input's of one,
+        // which clang refuses as it lowers it ("cannot handle indirect register inputs yet").
+        const int32_t variable = check_asm_variable_register(program, checked->node);
+        const bool memory_only = constraint->memory && constraint->general == 0 && !constraint->vector;
         if (constraint->refused != NULL)
         {
             reason = constraint->refused;
@@ -887,9 +946,30 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = "bit-fields as inline assembly operands";
         }
-        else if (check_asm_register_variable(program, checked->node))
+        else if (variable == -2)
         {
-            reason = "explicit register variables as inline assembly operands";
+            reason = "explicit register variables of this register as inline assembly operands";
+        }
+        else if (variable >= 0 && !output && memory_only)
+        {
+            reason = "explicit register variables as inline assembly memory inputs";
+        }
+        else if (variable >= 0 && variable < 16 && registered)
+        {
+            // Fixed to it (taken first, below), and not a matching input's: clang gives it the variable's register.
+            place->kind = BUSTER_CHECK_ASM_GENERAL;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->general = 1u << variable;
+        }
+        else if (variable >= 16 && floating)
+        {
+            place->kind = BUSTER_CHECK_ASM_VECTOR;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->fixed_vector = (uint8_t)(variable - 15);
+        }
+        else if (variable >= 0)
+        {
+            reason = "inline assembly operands of this type in their constraint's registers";
         }
         else if (place->tied != BUSTER_CHECK_NONE)
         {
@@ -951,6 +1031,13 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             {
                 reg = (taken & allowed) == 0 ? check_asm_take(allowed, &taken) : -2;
             }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_VECTOR && constraints[k].fixed_vector != 0)
+            {
+                // An explicit register variable's XMM register, before any other operand takes one.
+                const uint32_t bit = 1u << (constraints[k].fixed_vector - 1);
+                reg = (vectors & bit) == 0 ? constraints[k].fixed_vector - 1 : -2;
+                vectors |= bit;
+            }
             else if (pass == 1 && place->kind == BUSTER_CHECK_ASM_GENERAL && place->tied == BUSTER_CHECK_NONE && !fixed && output)
             {
                 reg = check_asm_take(allowed, &taken);
@@ -966,7 +1053,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = check_asm_take(BUSTER_CHECK_ASM_GENERAL_ALL, &taken);
                 reg = reg < 0 ? -3 : reg;
             }
-            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_VECTOR && place->tied == BUSTER_CHECK_NONE)
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_VECTOR && place->tied == BUSTER_CHECK_NONE && constraints[k].fixed_vector == 0)
             {
                 const uint32_t free = ~vectors & 0xffffu;
                 reg = free != 0 ? __builtin_ctz(free) : -3;
