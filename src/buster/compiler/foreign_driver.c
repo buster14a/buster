@@ -564,7 +564,8 @@ static uint32_t foreign_driver_lanes(uint64_t bytes, uint32_t most)
 
 // The CPUs this process may run on, at least 1. Lanes past them share CPUs, and each of their syncs waits for a lane the
 // scheduler has set aside: on the 9700X, eight lanes on one CPU took a hello world's link from 0.6 ms to 342 ms, each
-// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU.
+// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU, and without --lanes one per
+// core (BUSTER_LANE_SESSION_PER_CORE).
 static uint32_t foreign_driver_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -900,8 +901,11 @@ static int foreign_driver_link(ForeignDriverRun* run)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        // The session's lanes, which lane 0 knows since it began serving them.
-        foreign_driver_report(lanes, lane_session_settle(), run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
+        // The session's lanes, which lane 0 knows since it began serving them, and those it asked for: by default one per
+        // core, at most.
+        const uint32_t asked = lane_session_current() != NULL ? lane_session_asked() : run->most;
+        foreign_driver_report(lanes, lane_session_settle(), asked < run->most ? asked : run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends,
+                              write_begin, &written);
     }
     return succeeded ? 0 : 1;
 }
@@ -941,9 +945,10 @@ static void foreign_driver_flow(void* argument)
     }
 }
 
-// The command's arguments, then its session, before any input is opened (#905): as many lanes as it may take, which
-// stay parked for the process's exit once the link is done. A session whose threads can't start runs the link on one
-// lane, --lanes or not; --time reports the lanes it ran on.
+// The command's arguments, then its session, before any input is opened (#905): as many lanes as it may take, without
+// --lanes at most one per core of its CPUs, which lane 1 counts while lane 0 opens the first inputs
+// (BUSTER_LANE_SESSION_PER_CORE), and which stay parked for the process's exit once the link is done. A session whose
+// threads can't start runs the link on one lane, --lanes or not; --time reports the lanes it ran on.
 static int run_foreign_link(int argc, char** argv)
 {
     ForeignDriverRun run = { .begin = foreign_driver_now(), .result = 1 };
@@ -962,7 +967,8 @@ static int run_foreign_link(int argc, char** argv)
     // which the process's exit releases with the lanes parked on it.
     Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
     LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
-    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END;
+    const uint32_t per_core = run.driver.lanes == 0 ? BUSTER_LANE_SESSION_PER_CORE : 0;
+    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END | per_core;
     if (session == NULL || lane_session_run(session, run.succeeded && !run.driver.help ? run.most : 1, NULL, foreign_driver_flow, &run, flags) == 0)
     {
         run.session_lanes = 1;

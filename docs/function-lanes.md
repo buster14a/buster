@@ -9,8 +9,8 @@ and whichever lane finishes first ([#153](https://github.com/buster14a/buster/is
 
 The driver runs it for `-c` and for the direct path's executables:
 `./build/compiler [--lanes N] [--worker-budget N] ...`. By default it may run
-one lane per CPU the process may run on, and runs as many as the bodies'
-tokens pay for (below). External worker ownership further bounds this count
+one lane per core of the CPUs the process may run on (#905, below), and runs as
+many as the bodies' tokens pay for (below). External worker ownership further bounds this count
 (#673). `--lanes N` forces that many profitable-work candidates, up to the
 body count, within the explicit worker cap and GNU make's available slots.
 
@@ -213,14 +213,31 @@ body's Tier 0 code or in a body's code after Tier 0.
 
 In the C driver the lanes are the command's session's (`lane_session_run`,
 `check_driver_run`), started once, after the options and before any source is
-read: as many as the command may take (one per CPU it may run on, or
-`--lanes N`, at most `--worker-budget N`), none for one source without code to
-emit (`-fsyntax-only`), the calling thread lane 0. The session is lazy
-(`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts the
-command, and lane 1 creates the others while lane 0 runs the front end, so that
-the threads' creation is off lane 0's path; lane 0 learns how their start went
-at its first round or at the flow's end (`lane_session_settle`), and a round
-whose lanes didn't start runs its bodies on one lane (`CHECK_PROGRAM_AGAIN_START`). Every lane runs the
+read: as many as the command may take (one per core of the CPUs it may run
+on, or `--lanes N`, at most one per CPU, and at most `--worker-budget N`), none
+for one source without code to emit (`-fsyntax-only`), the calling thread lane
+0. The session is lazy (`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1
+alone and starts the command, and lane 1 counts the cores and creates the
+others while lane 0 runs the front end, so that the count and the threads'
+creation are off lane 0's path; lane 0 learns how many lanes the session asks
+for when an emission pays for more than one (`lane_session_asked`), how their
+start went at its first round or at the flow's end (`lane_session_settle`),
+and a round whose lanes didn't start runs its bodies on one lane
+(`CHECK_PROGRAM_AGAIN_START`).
+
+One lane per core rather than one per CPU (`BUSTER_LANE_SESSION_PER_CORE`): two
+lanes on one core's SMT siblings share its pipes, caches and power, and every
+lane costs its thread, its arenas and its waits. On the 9700X (8 cores, 15 CPUs
+online), `-c sqlite3.c` on 8 lanes took 117.2 ms against 119.2 ms on 15, with
+ranges that don't overlap, in 18% less user time and with 44 MB less peak
+memory; small inputs and four units barely differed. Lane 1 counts the cores
+from sysfs' sibling lists (`lane_core_count`: one `core_cpus_list` read per
+core, its siblings skipped), about 4 µs a core, 50 to 65 µs as a process's first
+count on a 16-CPU Zen 4: more than the lazy session's whole start on lane 0's
+path, so lane 1 counts them first, publishes the lanes it asks for, then creates
+them. On a core's two siblings it asks for one, and lane 0 joins it at its
+settle; the flow's group, which lane 0 keeps from before the settle
+(`lane_flow_begin`), takes the settled count (`lane_flow_group`). Every lane runs the
 command's flow (`check_driver_flow`): lane 0 the unit's stages alone, while the
 others park on the futex (`lane_park`), and each emission that pays for more
 than one lane is a round of the flow (a `LaneFlow`, `lane.c`), which lane 0

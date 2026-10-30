@@ -1304,6 +1304,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;
     active = paid < active ? (uint32_t)paid : active;
+    // In a command's flow (#905), no more than its session asks for: by default one lane per core, which a lazy session's
+    // lane 1 has been counting meanwhile (lane_session_asked).
+    if (active > 1 && lanes->flow != NULL)
+    {
+        const uint32_t asked = lane_session_asked();
+        active = asked < active ? asked : active;
+    }
     WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
     if (valid && count != 0 && lanes != NULL && lanes->budget != NULL)
     {

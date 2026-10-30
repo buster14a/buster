@@ -4827,7 +4827,11 @@ signals blocked, so a signal sent to the process reaches lane 0. A lazy session
 creation off lane 0's path: lane 0 creates lane 1 alone and runs the flow, and
 lane 1 creates the others and opens the gate they wait at, or closes it if one
 can't start; lane 0 learns which (`lane_session_settle`) before it first meets
-them. A session whose
+them. The compiler's commands ask by default for no more lanes than the cores of
+the CPUs they may run on (`BUSTER_LANE_SESSION_PER_CORE`), which lane 1 counts
+from sysfs' sibling lists before it creates the others, about 4 µs a core off
+lane 0's path; lane 0 reads the count when a wide part first needs it
+(`lane_session_asked`). A session whose
 lanes can't start runs the flow on lane 0 alone and never tries again; a
 terminal command's lanes stay parked when its flow ends, for the process's exit
 to end them (a sanitizer build joins them), and a test's are joined. The

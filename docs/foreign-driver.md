@@ -37,7 +37,8 @@ its objects and of the archives under `--whole-archive`
 (`BUSTER_FOREIGN_DRIVER_LANE_BYTES`), at most 8 (`BUSTER_FOREIGN_DRIVER_LANES`:
 on the 9700X the whole link of synth's shape is fastest on 7 or 8 lanes, one
 per core, and slower on their SMT siblings, [linker
-scaling](linker-scaling.md)'s "Complete foreign links") and one per CPU. Lane
+scaling](linker-scaling.md)'s "Complete foreign links") and one per core of
+the CPUs the process may run on (#905, `BUSTER_LANE_SESSION_PER_CORE`). Lane
 0 decides them before any other lane works: it opens the command line's inputs
 in link order, as one lane's open phase would (`foreign_open_first`), until
 their objects come to the bytes that pay for the most lanes, and the lanes open
@@ -46,12 +47,14 @@ and opens each input once, as with `--lanes 1`.
 
 The command's threads are its session's (#905, "The session owns the threads"
 in the linker's design): started once, right after its arguments and before any
-input is opened, as many as the link may take (`--lanes N`'s, or 8, at most one
-per CPU), none for one; lane 0 creates lane 1, which creates the others
-(`BUSTER_LANE_SESSION_LAZY`), and learns how they started before the link sets
-its lanes up. The three stages are rounds of the link's flow on them in turn
-(a `LaneFlow`, `lane.c`): lane 0 links alone and runs its part of each round
-itself, and the other lanes follow the rounds by their kinds
+input is opened, as many as the link may take (`--lanes N`'s, at most one per
+CPU, or 8, at most one per core), none for one; lane 0 creates lane 1, which
+without `--lanes` counts the cores from sysfs' sibling lists, about 4 µs a core
+off lane 0's path (`lane_core_count`), creates the others
+(`BUSTER_LANE_SESSION_LAZY`), and lane 0 learns how they started before the
+link sets its lanes up. The three stages are rounds of the link's flow on them
+in turn (a `LaneFlow`, `lane.c`): lane 0 links alone and runs its part of each
+round itself, and the other lanes follow the rounds by their kinds
 (`ForeignFlowRound`: the resolution's, the conversion's and the write's),
 sleeping between them and keeping their scratch arenas from one to the next
 (#501); when

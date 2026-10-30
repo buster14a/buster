@@ -379,8 +379,8 @@ the fewest lanes within 3% of that time.
   took 5.95 ms and the resolution's groups 2.16. The resolution's headers and
   resolve, whose timers end before their syncs, still read 0.064 and 1.22 ms
   on 16, their waits landing in the phases after them. `link-foreign` now runs
-  at most a lane per CPU it may run on, and `--time` names the lanes it ran
-  on.
+  at most a lane per CPU it may run on (and since #905, without `--lanes`, at
+  most one per core), and `--time` names the lanes it ran on.
 - **Small links want one lane:** the appendix's hello world took 0.60, 0.89,
   1.18, 1.24 and 1.76 ms on 1, 2, 3, 4 and 8 lanes, and tcc 1.09, 1.31, 1.47,
   1.72 and 2.18 (`timeit`, output on tmpfs); each lane's thread costs more than
