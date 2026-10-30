@@ -100,15 +100,13 @@ static void builtin_intrinsic_catalog_test_filter(BuiltinIntrinsicCatalogTest* t
                 {
                     memset(name, 'x', length);
                 }
-                BuiltinIntrinsicName inputs[8] = {
+                const BuiltinIntrinsicName inputs[8] = {
                     { name, length },
                     { NULL, UINT32_MAX },
                     { (const char*)memory + page, 0 },
-                    { "memcpy", 6 },
-                    { "__builtin_bswap32", 17 },
+                    { "memcpy", sizeof("memcpy") - 1 },
+                    { "__builtin_bswap32", sizeof("__builtin_bswap32") - 1 },
                 };
-                // Derive the builtin's length rather than granting the name literal readable padding.
-                inputs[4].length = sizeof("__builtin_bswap32") - 1;
                 for (uint32_t count = 1; count <= 8; count += 1)
                 {
                     const BuiltinIntrinsicInfo* outputs[8];
