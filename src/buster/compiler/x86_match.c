@@ -146,6 +146,11 @@ static uint32_t x86_match_roles(uint8_t syntax, uint8_t roles[4])
         roles[1] = X86_MATCH_IMM;
         count = 2;
         break;
+    case X86_SYNTAX_ACC:
+        // The accumulator alone: fnstsw's %ax form (#147: musl's fmodl reads the x87's status word so).
+        roles[0] = X86_MATCH_ACC;
+        count = 1;
+        break;
     case X86_SYNTAX_RM_CL:
         roles[0] = X86_MATCH_RM;
         roles[1] = X86_MATCH_CL;
@@ -333,6 +338,71 @@ static bool x86_match_supported(const X86FormDescription* form)
             "movq",
             "fld",
             "fstp",
+            // And musl's inline assembly (#147): the bit scans of its a_ctz_64 and a_clz_64, a_crash's hlt, the atomic
+            // exchanges (alone, and with lock as `lockable` below has them), and the x87's: the operations of no operands
+            // its long double functions and other math code run on the stack's top (fsqrt, fprem, frndint, fscale and the
+            // rest), the integer loads and stores (fistpll), and fnstsw into %ax (its accumulator form, which
+            // x86_match_roles names). And the counts of leading and trailing zeros, which `rep bsr` and `rep bsf` spell
+            // (dr_flac's, asm_string_mnemonic).
+            "bsf",
+            "bsr",
+            "lzcnt",
+            "tzcnt",
+            "hlt",
+            "cmpxchg",
+            "xadd",
+            "fsqrt",
+            "fabs",
+            "fchs",
+            "frndint",
+            "fprem",
+            "fprem1",
+            "fscale",
+            "fxtract",
+            "f2xm1",
+            "fyl2x",
+            "fyl2xp1",
+            "fpatan",
+            "fptan",
+            "fsin",
+            "fcos",
+            "fsincos",
+            "fld1",
+            "fldz",
+            "fldpi",
+            "fldl2e",
+            "fldl2t",
+            "fldlg2",
+            "fldln2",
+            "fxam",
+            "ftst",
+            "fild",
+            "fist",
+            "fistp",
+            "fisttp",
+    };
+    // The instructions a lock prefix takes (`lock cmpxchg`, the catalogue's mnemonic for the prefixed forms, whose
+    // operand is memory): the exchanges and the arithmetic of musl's atomics and of GCC's and clang's.
+    static const char* const lockable[] = { "cmpxchg", "xadd", "add", "or", "adc", "sbb", "and", "sub", "xor", "inc", "dec", "not", "neg" };
+    // SSE's and SSE2's scalar and logic instructions musl's math takes (sqrtsd, cvtsd2si, andps, psrlq), with their
+    // siblings, in their legacy forms on XMM registers alone (no VEX forms, and none of MMX's for the shifts).
+    static const char* const scalar[] = {
+        "sqrtss",
+        "sqrtsd",
+        "cvtss2si",
+        "cvtsd2si",
+        "cvttss2si",
+        "cvttsd2si",
+        "andps",
+        "andpd",
+        "andnps",
+        "andnpd",
+        "orps",
+        "orpd",
+        "psrld",
+        "psrlq",
+        "pslld",
+        "psllq",
     };
     // The string instructions, which take no operands, alone or with the prefixes the catalogue spells with them: rep
     // for the moves, stores and loads, repe and repne for the compares and scans. Each takes a size letter (b, w, d or
@@ -395,6 +465,15 @@ static bool x86_match_supported(const X86FormDescription* form)
         {
             allowed = name[0] == sse[i][0] && strcmp(name, sse[i]) == 0;
         }
+        for (uint32_t i = 0; !allowed && strncmp(name, "lock ", 5) == 0 && i < BUSTER_ARRAY_LENGTH(lockable); i += 1)
+        {
+            allowed = strcmp(name + 5, lockable[i]) == 0;
+        }
+        const bool mmx = (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_MMX || (form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_MMX;
+        for (uint32_t i = 0; !allowed && !mmx && i < BUSTER_ARRAY_LENGTH(scalar); i += 1)
+        {
+            allowed = name[0] == scalar[i][0] && strcmp(name, scalar[i]) == 0;
+        }
         const char* suffix = strncmp(name, "cmov", 4) == 0 ? name + 4 : strncmp(name, "set", 3) == 0 ? name + 3
                                                                     : name[0] == 'j'                 ? name + 1
                                                                                                      : "";
@@ -416,6 +495,16 @@ static bool x86_match_supported(const X86FormDescription* form)
             allowed |= name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vzeroupper") == 0;
+        // FMA3's scalar forms (#147: musl's fma and fmaf take vfmadd132sd and vfmadd132ss where the target has FMA):
+        // vfmadd, vfmsub, vfnmadd and vfnmsub, each in its three operand orders, of a float or a double.
+        static const char* const fused[] = { "vfmadd", "vfmsub", "vfnmadd", "vfnmsub" };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fused); i += 1)
+        {
+            const uint64_t prefix = strlen(fused[i]);
+            const char* rest = strncmp(name, fused[i], prefix) == 0 ? name + prefix : "";
+            const bool order = strncmp(rest, "132", 3) == 0 || strncmp(rest, "213", 3) == 0 || strncmp(rest, "231", 3) == 0;
+            allowed |= order && (strcmp(rest + 3, "ss") == 0 || strcmp(rest + 3, "sd") == 0);
+        }
     }
     else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'k')
     {

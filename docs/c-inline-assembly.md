@@ -20,7 +20,11 @@ unwind entry.
 
 A template that assembles to no instructions makes no helper and no call. These
 are the compiler barriers, `asm volatile("" : : "r"(x) : "memory")`, and comments
-with operands substituted into them. Their operands are evaluated in the same
+with operands substituted into them. But one with x87 operands has a helper,
+whose loads and stores pass their values through the x87's stack as clang's
+code does: `asm volatile("" : "+t"(x))` of a `float` holding a signaling NaN
+quiets it (fld raises the invalid operation, masked, and loads the quiet NaN),
+as clang's build does. Their operands are evaluated in the same
 order as a helper's. A matching input's value is stored into its output as the
 register would hold it: an integer narrower than its output is zero-extended
 from its own width, as GCC and clang place it (`"=r"(long) : "0"(-1)` is
@@ -156,6 +160,7 @@ alternative (`check_asm_constraint_parse`):
 | `r`, `q`, `l`, `R`, `Q` | a general register of the class (`Q`: rax, rbx, rcx, rdx; `R`: the first eight) |
 | `a b c d S D` | that register |
 | `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
+| `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
 | `m`, `o`, `V`, `<`, `>` | memory at an lvalue's address, which a general register holds |
 | `i`, `n`, `I J K M N O`, `e`, `Z` | an integer constant, within its letter's range |
 | a digit, `[name]` | the output's register (a matching input) |
@@ -172,7 +177,53 @@ their helper no saves. An input fixed to an output's fixed register, as in
 `"=a"(r) : "a"(n)`, shares it, as GCC and clang let it, unless the output is
 early-clobbered or `+`. It is that output's matching input then.
 
-The operand block, a frame object of the caller's, holds 8 bytes per slot:
+### Explicit register variables
+
+An operand that names an explicit register variable, `register long r10
+__asm__("r10") = a4;` and then `"r"(r10)` (musl's syscall wrappers pass a
+system call's fourth to sixth arguments so), takes the variable's register, as
+clang's code gives it (CodeGen's `AddVariableConstraints`;
+`check_asm_variable_register`):
+
+- the operand is the variable itself, or a cast of it that keeps its value: to
+  its own type, or between integers and pointers of one width (clang's
+  `IgnoreParenNoopCasts`), so `"r"((unsigned long)r10)` is in r10, but
+  `"r"((int)r10)` and `"r"(r10 + 0)` are ordinary operands;
+- the register replaces the constraint's letters: `"a"(r10)` is in r10, an
+  output of a memory constraint (`"=m"(r10)`) is r10 too, and a matching input
+  is in its variable's register rather than its output's;
+- a general register by any of its names (`"ebx"` is rbx; an `int`'s operand
+  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`.
+
+The variable is an ordinary local otherwise: the operand block takes its value,
+or an output's address, as any operand's, and the helper loads it into the
+register (a callee-saved one among the helper's pushes).
+
+### The x87's operands
+
+`t` and `u` place a `float`, a `double` or a `long double` at st(0) and st(1),
+as clang's `{st}` and `{st(1)}`, by the rules LLVM's stackifier applies to an
+asm (`X86FloatingPoint.cpp`), which clang's code keeps and refuses to break:
+
+- the inputs (a `+` operand's and a matching input's among them) take the
+  stack's depths from st(0) without a gap, and so do the outputs, alone and
+  with the clobbered x87 registers (`"st"`, `"st(1)"`);
+- an input in an output's or a clobbered register is popped by the template
+  (`fistpll %0` of a `"t"` input, clobbering `"st"`; `"=t"(r) : "0"(x)`), and
+  the popped inputs lie above the others;
+- the template finds the inputs at their depths, and leaves the outputs from
+  st(0) down above the inputs it didn't pop (fscale's st(1), fprem's).
+
+The helper loads the inputs from the operand block, the deepest first, by their
+types' widths (`flds`, `fldl`, `fldt`). After the template it stores the
+outputs from st(0) down, each popped through its address, then pops the inputs
+left below them: the stack is empty at the return, as the convention has it,
+and as Tier 0 has it at every call (its long doubles live in memory). musl's
+`fmodl` (`"fprem; fnstsw %%ax" : "+t"(x), "=a"(fpsr) : "u"(y)`) loads y, then
+x; stores x and pops y.
+
+The operand block, a frame object of the caller's, holds 8 bytes per slot, but
+an x87 operand's `long double` value 16:
 
 - each register output's address, and a `+` one's value;
 - each memory operand's address;
@@ -248,9 +299,19 @@ inline-assembly fixtures also run alone with `test-checker --program-asm`,
 including the eight mask saves and restores at the semantics harness's offsets.
 An `xchg` takes its memory operand first in Intel order, as the catalogue has
 it: `xchgl %ecx,(%rdi)`,
-not `xchgl (%rdi),%ecx`. The matcher's operand grammar has no accumulator role:
-`fnstsw` takes memory, not `%ax`, and an `xchg` of the accumulator with another
-register takes the two-byte form, where GNU as takes the one-byte one.
+not `xchgl (%rdi),%ecx`. An `xchg` of the accumulator with another register
+takes the two-byte form, where GNU as takes the one-byte one.
+
+For musl's templates (`arch/x86_64/atomic_arch.h`, `pthread_arch.h` and
+`src/math/x86_64`) the matcher also admits the `lock` prefix, as a statement of
+its own (`lock ; cmpxchg %3, %1`, which GNU as applies to the next instruction)
+or on the instruction's line, on `cmpxchg`, `xadd` and the arithmetic of memory
+destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
+SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
+the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
+`fistpll`. `rep; bsr` (dr_flac's spelling of `lzcnt`) is `lzcnt`'s form, its
+bytes. [The assembler's guide](assembler.md) lists the families, and the
+bytes of a prefix written alone before a 16-bit instruction.
 
 ## The helper's frame
 
@@ -260,11 +321,12 @@ register takes the two-byte form, where GNU as takes the one-byte one.
    its clobbers' and the stores';
 2. a reservation of 8 or 16 bytes, which aligns rsp to 16 and keeps the block's
    address;
-3. the loads of the operands from the block: a narrower integer zero-extended,
-   and the load into rdi last;
+3. the loads of the operands from the block: the x87's first, the deepest
+   first, a narrower integer zero-extended, and the load into rdi last;
 4. the template's records;
 5. the register outputs' stores through their addresses, from two registers no
-   output holds;
+   output holds, then the x87's from st(0) down, and the pops of the x87 inputs
+   the template left;
 6. the epilogue.
 
 `unwind_tier0_frame` describes it (`Tier0Code.frame_saved` and `frame_size`).
@@ -292,12 +354,23 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
 - `asm goto`;
 - flag outputs (`=@cc...`);
-- the x87's, MMX's, the opmasks' and the rax and rdx pair's constraints (`f t u`,
-  `y`, `k`, `A`), and the other letters it doesn't place;
+- MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
+  `f` (an x87 register of the compiler's choice), and the other letters it
+  doesn't place;
+- x87 operands and clobbers off the stack's top (an input at st(1) without one
+  at st(0), a clobber below the outputs), which clang's code refuses too; two
+  operands at one depth, which clang compiles as one register's; an integer in
+  an x87 register; and an x87 register named in the template (`%st`,
+  `%st(1)`), whose registers the assembler's operand grammar doesn't take;
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
   but a vector in a template of no instructions that doesn't refer to it;
-- bit-fields, and explicit register variables (`register long r asm("r10")`);
+- bit-fields;
+- explicit register variables in registers the helper doesn't place one in
+  (rsp, which is the helper's own, the high bytes, APX's r16 to r31, XMM16 to
+  XMM31 and the other classes' registers), as memory inputs (`"m"(r10)`, which
+  clang's code refuses too), and of other types than a general register's or
+  an XMM register's (an integer in an XMM register's variable);
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
@@ -395,7 +468,30 @@ has the commands, the logs and the default path's numbers against main.
     unit's static function and update its static, and take a `.L` label's
     address that another statement's template defines;
   - a label inside a helper at its exact record, whose snippet another
-    statement's template calls.
+    statement's template calls;
+  - the forms of musl's atomics (`atomic_arch.h`), in functions of the test's
+    own (lock prefixes as statements of their own on `cmpxchg`, `xadd` and the
+    arithmetic, `xchg`, `bsf`, `bsr` and a `%fs` load), the SSE templates of its
+    x86_64 math, likewise
+    (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
+    dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
+    `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA;
+  - explicit register variables: wrappers of the test's own in the shape of
+    musl's syscall wrappers (r10, r8 and r9 beside the fixed registers) on
+    harmless system calls, and each shape of a
+    variable's operand: a constraint's letter replaced, a cast that keeps the
+    width, a 32-bit name, outputs of a register's and a memory constraint, a
+    `+` operand in rbx, a matching input in its variable's register, an XMM
+    register's, and a template of no instructions;
+  - the x87's operands: the shapes of musl's long double functions, in
+    functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
+    and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
+    from that word, `fistpll`'s popping store, and `X` operands); each shape of
+    the stack's rules (fsincos's two outputs, fyl2x's popped st(1), fscale's kept
+    one, outputs pushed by the template, a `float`'s and a `double`'s operands,
+    templates of no instructions); and a `float`'s and a `double`'s signaling
+    NaNs through `+t` in templates of no instructions, the results' bits and the
+    status word's invalid-operation flag as clang's build gives them.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one
@@ -416,4 +512,9 @@ What the lowering still refuses of what GCC and clang take:
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
 - the matcher's gaps: `fstp` without a suffix (GNU as assumes `fstps`), Intel's
-  `tbyte ptr`, MMX's `movq`, and the instructions outside its families.
+  `tbyte ptr`, MMX's `movq`, the x87's stack registers as operands
+  (`fxch %st(1)`, and an x87 operand named in a template), `lock xchg`, and the
+  instructions outside its families;
+- `f`'s x87 registers of the compiler's choice, two operands at one x87
+  depth, and explicit register variables in the registers the helper doesn't
+  place them in.

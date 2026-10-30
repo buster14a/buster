@@ -74,6 +74,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wunknown-pragmas", "-Wpragmas", "unknown pragma ignored" },
     { "-Wignored-pragmas", "-Wpragmas", "pragma ignored" },
     { "-Wsource-uses-openmp", "-Wopenmp", "unexpected OpenMP directive; OpenMP is not enabled" },
+    { "-Wincompatible-library-redeclaration", NULL, "incompatible redeclaration of library function" },
+    { "-Wbuiltin-requires-header", NULL, "declaration of built-in function requires inclusion of its header" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -151,8 +153,9 @@ static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input
 
 static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
 {
-    const CheckWarningSeverity baseline = input->implicit_function_diagnostic == 1 ? CHECK_WARNING_IGNORE :
-                                          input->implicit_function_diagnostic == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
+    const bool library = token < input->token_count && input->function_flags != NULL && (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
+    const uint8_t policy = library ? input->implicit_library_diagnostic : input->implicit_function_diagnostic;
+    const CheckWarningSeverity baseline = policy == 1 ? CHECK_WARNING_IGNORE : policy == 2 ? CHECK_WARNING_WARNING : CHECK_WARNING_ERROR;
     const CheckWarningSeverity severity = input->implicit_function_system || !check_graph_system_token(&input->graph, token) ?
         check_diagnostic_severity_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION, baseline) : CHECK_WARNING_IGNORE;
     return severity;

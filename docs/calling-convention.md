@@ -857,7 +857,12 @@ passes as values too, are refused: see "Where clang's LLVM types decide"):
   argument the call placed by LLVM's registers otherwise (`SPLIT`,
   `UNCOUNTED`, `LOW_GENERAL`, a `PAIR` on the stack, or after a `DEMOTED`
   result), the two can disagree; a scalar, which both place by LLVM's
-  registers, still agrees.
+  registers, still agrees. So can such an argument itself: a value whose low
+  eightbyte is padding, to which clang's count gives a general register that
+  LLVM hasn't, has its high eightbyte alone in an 8-byte slot (`HIGH`), which
+  `va_arg`, reading the whole value from the overflow area, finds 8 bytes past
+  the slot even when the slot is where it reads (the cross-check's seed 11 at
+  32 bytes found one after an uncounted `_Atomic __int128`).
 - **A `WIDE` union of a 16-byte member and a long array** (SSE, SSEUP, since
   the array adds NO_CLASS): as an unnamed argument clang classifies it so,
   counts a vector register, and its call puts it on the stack while its
@@ -1504,30 +1509,45 @@ compiles on our side. Their worlds (`AbiTestWorld.compiled`,
 and `_BitInt`s of 2 to 256 bits, the world's widths (#534's lowering, in the
 classes of 8 to 64 bits, the 128-bit classes for 65 to 128, and past 128 bits
 frame objects of their limbs, #137), `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128
-and U128), enums, pointers, clang's `nullptr_t`, `float`, `double` and
-`long double` (#136's item 8), `_Complex float`, `double` and `long double`
-(#133's lowering, as aggregates of their two parts) and, in clang's runs,
-`_Complex __float128` (#137), GNU's complex integer
+and U128), enums, pointers, clang's `nullptr_t`, `_Float16` and `__bf16`
+(#136's half-precision values, their 16 bits on the integer stack, in an XMM
+register's low 16 bits as arguments and results), `float`, `double` and
+`long double` (#136's item 8), `_Complex _Float16`, `float`, `double` and
+`long double` (#133's lowering, as aggregates of their two parts; GCC's runs
+pass a `_Complex _Float16` but make no member of one, as GCC classifies one off
+an eightbyte's start otherwise) and, in clang's runs, the `_Complex __bf16`
+the usual arithmetic conversions make (`__typeof__((_Complex int)0 +
+(__bf16)0)`, which GCC passes otherwise, carried as a `_Complex _Float16` is)
+and `_Complex __float128` (#137), GNU's complex integer
 types (`_Complex char` to `_Complex unsigned __int128`, the same, those of
 `__int128` spelled as the usual arithmetic conversions make them, #137) and,
 in clang's runs, complex `_BitInt`s of 13 to 256 bits (past 128 bits, those
 of an even number of 64-bit limbs), spelled so too,
 `__float128` (an aggregate's value in this compiler's C, whose arithmetic and
 conversions are libgcc's, #137), at 64 bytes the vectors
-the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
-`char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
-clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
-in clang's runs `_Atomic`s of integers of up to 8 bytes, enums, pointers,
-`float`, `double`, structs and unions (#720's lowering of C11's atomics,
-`abi_test_compiled_atomic`), which the signatures pass as the record runs' do:
-themselves, as named arguments and results, records holding them and aligned
-typedefs of them, and the structs, unions, arrays and aligned typedefs made of
-them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
-object or a call's outgoing area aligned past 16, and a value aligned past 8 is
-an object), with flexible array members, bit-fields, packing and member
-alignments;
-no vector of another size or of `bool`, complex `_BitInt` past 128 bits, `_Atomic` of another type, and none of the
-record runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
+the producer lowers with AVX-512 (#717: GNU's of 4, 8, 16, 32 and 64 bytes of
+`char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements
+(one `long` is MMX's `__m64`, as clang classifies a `long long` alike), whose
+classes the record runs' worlds already drew: an INTEGER eightbyte for 4
+bytes, an SSE one for 8 and MEMORY for one `double`; and clang's extended ones
+of 16, 32 and 64 bytes in clang's runs,
+`AbiTestWorld.vectors`), in clang's runs `_Atomic`s of every type C makes
+atomic but a `_BitInt`, which clang refuses (#720's lowering of C11's atomics,
+`abi_test_compiled_atomic`: integers, `bool` and the 128-bit ones among them,
+enums, pointers, every floating type, `_Float16` and `__bf16` among them,
+complex types, vectors, structs and unions), which the signatures pass as the
+record runs' do: themselves, as named arguments and results, records holding
+them and aligned typedefs of them, and the structs, unions, arrays and aligned
+typedefs made of them, aligned as the clang worlds' are (to 64: Tier 0
+realigns a frame for an object or a call's outgoing area aligned past 16, and
+a value aligned past 8 is an object), with flexible array members,
+bit-fields, packing and member alignments. They leave out what the producer
+refuses by name: a vector of 1 or 2 bytes (Tier 0's VECTOR has no such width)
+or of `bool` (whose elements pack a bit each, of which the lowering makes no
+value), and any vector at 16 bytes (its vector values need AVX-512F and
+AVX-512VL); a complex `_BitInt` past 128 bits of an odd number of limbs,
+which clang lays out wrong (above); and the record
+runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
@@ -1539,7 +1559,8 @@ the 128-bit integers' and the vectors'), whose slots its depths index; and our
 caller's `r = c_callee(...)` holds `r`'s address under
 the arguments when the result is a struct, a union, a `long double` or a
 128-bit integer. So a compiled world's signature with a `long double`, a
-128-bit integer (a `_BitInt` of 65 to 128 bits too) or a vector among its
+128-bit integer (a `_BitInt` of 65 to 128 bits too) or a vector, or an
+`_Atomic` of one, whose loads and stores are its value's, among its
 arguments or as its result
 (`abi_test_tier0_memory`) passes at most 12 integer values (an aggregate is
 its address, and a `long double` or a 128-bit integer takes an integer depth)
@@ -1580,6 +1601,23 @@ compiled worlds took `__int128` and `_Complex`, every run passes at seeds 1 to
 compiled ones) make 320,000 signatures and 4,465,433 checks, of which the
 compiled runs' are 80,000 signatures and 1,080,346 checks; the two extension
 runs ("Extension", below) pass as well.
+
+On the 7940HS again (2026-10-30, clang 23.1.4 and GCC 16.2.1), once the
+compiled worlds took `_Float16`, `__bf16`, their complex types, vectors of 4
+and 8 bytes and, against clang, `_Atomic`s of every type but `_BitInt`s, every
+run passes at seeds 1 to 36. Against clang, the compiled runs' 28,800
+signatures of 173,491 arguments make 544,954 checks; against GCC, 28,800
+signatures of 170,607 arguments make 536,762; the record runs make 610,406
+checks against clang and 609,530 against GCC, and the extension runs 72,288.
+Over seeds 21 to 36, the kept C files' typedefs show what the compiled runs
+passed as named arguments and as callees' results: against clang, 93 and 16
+`_Float16`s, 90 and 17 `__bf16`s, 122 and 16 `_Complex _Float16`s, 115 and 16
+`_Complex __bf16`s, 425 and 68 vectors of 4 bytes, 669 and 76 of 8, and 2,238
+and 354 `_Atomic`s (999 and 153 of them of records, the others of pointers,
+complex types, enums, integers, half-precision types, 128-bit integers, floats
+and doubles, vectors, `__float128`, `bool` and long double); against GCC, 107
+and 13 `_Float16`s, 116 and 15 `__bf16`s, 129 and 18 `_Complex _Float16`s, 302
+and 45 vectors of 4 bytes and 662 and 65 of 8.
 
 With the defaults (seed 1), each run of random signatures has 400 of 2,100 to
 2,600 arguments, and the ten make about 55,000 checks, besides the two
@@ -1813,6 +1851,13 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   `i64`s to clang 23, and the module makes it a `PAIR` at every width.
   `abi_wide_alignment` could walk them as it walks large records, with the
   levels waiting for what it reads.
+- **The compiled worlds' other vectors.** The compiled runs leave out the
+  vectors the producer refuses by name: those of `bool` (an extended vector
+  packs a bit per element, of which the lowering makes no value: its transport
+  would be an aggregate's, with every operation, conversion, constant and
+  builtin on one refused, and the `SMALLER` copies LLVM makes of the longer
+  ones), those of 1 or 2 bytes (Tier 0's VECTOR has no such width), and every
+  vector without AVX-512F and AVX-512VL, so none in the runs at 16 bytes.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it, or
   as unsigned where the type table says so (`TypeTable.char_unsigned`, from
   `-funsigned-char`). The cross-check's worlds keep signed char; its extension

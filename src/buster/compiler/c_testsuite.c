@@ -35,7 +35,7 @@
 // write their outcomes into a shared mapping; the report lists every test in name order, then the counts. This is test
 // tooling outside the compile path, with no vector path.
 //
-// main.c includes this file after parallel.c, whose parallel_core_count it takes. Layout: the outcomes (CTestsuite,
+// main.c includes this file after lane.c, whose lane_core_count it takes. Layout: the outcomes (CTestsuite,
 // CTestsuiteResult), the processes (c_testsuite_run, c_testsuite_read, c_testsuite_same), a test (c_testsuite_feature,
 // c_testsuite_compiled, c_testsuite_cross_check, c_testsuite_one), the tests' list (c_testsuite_find, c_testsuite_subset),
 // cleanup (c_testsuite_remove), the run (c_testsuite_execute, c_testsuite_report), the self-test (c_testsuite_self_test)
@@ -721,7 +721,7 @@ static bool c_testsuite_execute(CTestsuite* suite, const char* root, const char*
         // Workers take the tests in turn: worker w the tests w, w + jobs, ... The oracle cache is set up before they fork,
         // so that their counts reach its report.
         OracleCache* oracle = oracle_cache();
-        const uint64_t workers = jobs != 0 ? jobs : parallel_core_count();
+        const uint64_t workers = jobs != 0 ? jobs : lane_core_count();
         pid_t* children = malloc((workers != 0 ? workers : 1) * sizeof(pid_t));
         uint64_t started = 0;
         for (uint64_t w = 0; children != 0 && w < workers && w < suite->count; w += 1)

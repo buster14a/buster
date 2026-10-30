@@ -15,7 +15,37 @@
 // too); __float128's arithmetic, comparisons and conversions (check_lower_quad_compute, check_lower_quad_conversion);
 // the products, quotients and remainders of _BitInts past 128 bits, and their conversions to and from the floating
 // types (check_lower_limb_library, check_lower_limb_conversion); and the half-precision types' extension and roundings
-// where the function's target has no instruction for them (c_check_program_half.c).
+// where the function's target has no instruction for them (c_check_program_half.c); and the C library's mathematical
+// functions that clang -O0 calls for the generic vector builtins (check_lower_vector_calls: acosf ... powf, acos ... pow
+// and acosl ... powl, each name's float, double and long double ones, in BUSTER_CHECK_LOWER_LIBM's order), with fmaxl,
+// fminl and ldexpl, a long double's maxnum, minnum and ldexp.
+#define BUSTER_CHECK_LOWER_LIBM(X) \
+    X(ACOS, "acos") \
+    X(ASIN, "asin") \
+    X(ATAN, "atan") \
+    X(COS, "cos") \
+    X(COSH, "cosh") \
+    X(EXP, "exp") \
+    X(EXP10, "exp10") \
+    X(EXP2, "exp2") \
+    X(LOG, "log") \
+    X(LOG10, "log10") \
+    X(LOG2, "log2") \
+    X(SIN, "sin") \
+    X(SINH, "sinh") \
+    X(TAN, "tan") \
+    X(TANH, "tanh") \
+    X(CEIL, "ceil") \
+    X(FLOOR, "floor") \
+    X(TRUNC, "trunc") \
+    X(RINT, "rint") \
+    X(NEARBYINT, "nearbyint") \
+    X(ROUNDEVEN, "roundeven") \
+    X(ROUND, "round") \
+    X(ATAN2, "atan2") \
+    X(FMOD, "fmod") \
+    X(POW, "pow")
+
 typedef enum CheckLowerRuntime
 {
     CHECK_LOWER_RUNTIME_ERRNO,
@@ -129,10 +159,20 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_FLOATUNTIHF,
     CHECK_LOWER_RUNTIME_FIXHFTI,
     CHECK_LOWER_RUNTIME_FIXUNSHFTI,
+#define BUSTER_CHECK_LOWER_LIBM_ENUM(id, name) CHECK_LOWER_RUNTIME_LIBM_##id##F, CHECK_LOWER_RUNTIME_LIBM_##id, CHECK_LOWER_RUNTIME_LIBM_##id##L,
+    BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_ENUM)
+#undef BUSTER_CHECK_LOWER_LIBM_ENUM
+    CHECK_LOWER_RUNTIME_FMAXL,
+    CHECK_LOWER_RUNTIME_FMINL,
+    CHECK_LOWER_RUNTIME_LDEXPL,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
-_Static_assert(CHECK_LOWER_RUNTIMES <= 128, "the runtime mask has two 64-bit words");
+// The libm functions' first, from which a name's float, double and long double ones follow (check_lower_libm_function).
+#define BUSTER_CHECK_LOWER_LIBM_FIRST CHECK_LOWER_RUNTIME_LIBM_ACOSF
+
+// The mask of the runtime functions a part calls has a bit each, in as many 64-bit words as that takes.
+_Static_assert(CHECK_LOWER_RUNTIMES <= 256, "the runtime functions are numbered in bytes");
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
@@ -174,6 +214,10 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "vsnprintf",
     "__extendhfsf2", "__truncsfhf2", "__truncdfhf2", "__truncxfhf2", "__truncsfbf2", "__truncdfbf2", "__truncxfbf2", "__floattihf",
     "__floatuntihf", "__fixhfti", "__fixunshfti",
+#define BUSTER_CHECK_LOWER_LIBM_NAME(id, name) name "f", name, name "l",
+    BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
+#undef BUSTER_CHECK_LOWER_LIBM_NAME
+    "fmaxl", "fminl", "ldexpl",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -563,7 +607,7 @@ struct CheckLowerWriter
     // (check_lower_half_entry): check_lower_half_temporary's.
     uint32_t half_locals[3];
     // Whether the body whose opening token is `half_strict_body` - 1 has FENV_ACCESS anywhere (check_lower_half_strict):
-    // the first half-precision fold in a body asks, and the body's later folds read the answer.
+    // the first half-precision fold or packed floating comparison asks, and the body's later uses read the answer.
     uint32_t half_strict_body;
     bool half_strict;
     bool x87;
@@ -790,9 +834,10 @@ static uint8_t check_lower_type_class(const TypeTable* types, TypeId type)
         // entry that makes or moves one has its bytes (check_lower_vector_bytes), as the class has no width.
         result = BUSTER_TYPED_CLASS_VECTOR;
     }
-    else if (type_kind(types, type_unqualified(type_strip_aligned(types, type))) != BUSTER_TYPE_KIND_ATOMIC && check_action_half_format(base) != CHECK_HALF_NONE)
+    else if (check_action_half_format(base) != CHECK_HALF_NONE)
     {
-        // An _Atomic one's operations would be the atomics', which refuse a type of no class.
+        // An _Atomic one's too (#137): its loads and stores are the atomics' of its 2 bytes, through buffers whose LOCAL
+        // and SET_LOCAL of the class are a U16's (check_lower_half_entry), and its value the type's.
         result = check_action_half_format(base) == CHECK_HALF_IEEE ? BUSTER_CHECK_LOWER_CLASS_BINARY16 : BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
     }
     return result;
@@ -823,17 +868,20 @@ static bool check_lower_wide_class(uint8_t class)
 }
 
 // A complex type's element, unqualified, for one the lowering takes, or 0: a floating element (_Complex _Float16,
-// float, double, long double and __float128), or an integer one: GNU's complex integer types (_Complex char to _Complex unsigned
+// __bf16, float, double, long double and __float128: the half-precision ones carried and converted, not computed with,
+// check_lower_complex_compute), or an integer one: GNU's complex integer types (_Complex char to _Complex unsigned
 // __int128), and the complex _BitInts that the usual arithmetic conversions make (#137), whose parts Tier 0's classes
-// hold as a _BitInt's values (check_lower_type_class) up to 128 bits, and past them frame objects of their limbs.
+// hold as a _BitInt's values (check_lower_type_class) up to 128 bits, and past them frame objects of their limbs. C can't
+// spell a _Complex __bf16, but the usual arithmetic conversions make one (of a _Complex int and a __bf16), which clang
+// passes as a <2 x bfloat>, as it passes a _Complex _Float16 as a <2 x half> (#137).
 static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_conversion_operand(types, type);
     const TypeId element = type_kind(types, base) == BUSTER_TYPE_KIND_COMPLEX ? type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
     // _Complex __float128's parts are __float128s, and a complex _BitInt's past 128 bits are _BitInts past 128 bits: values
     // carried by their addresses (check_lower_complex_parts).
-    const bool floating = element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE || element == BUSTER_TYPE_LONG_DOUBLE ||
-                          element == BUSTER_TYPE_FLOAT128;
+    const bool floating = element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16 || element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE ||
+                          element == BUSTER_TYPE_LONG_DOUBLE || element == BUSTER_TYPE_FLOAT128;
     const bool integer = element >= BUSTER_TYPE_CHAR && element <= BUSTER_TYPE_UINT128;
     const bool bit_int = element != 0 && type_kind(types, element) == BUSTER_TYPE_KIND_BIT_INT;
     return floating || integer || bit_int ? element : 0;
@@ -1208,12 +1256,11 @@ static uint8_t check_lower_value_class(const CheckLowerWriter* writer, TypeId ty
     return check_lower_aggregate(writer, type) ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, type);
 }
 
-// A type's half-precision format (CheckHalf, c_check_program_half.c's values), or none for an _Atomic one: its
-// operations are the atomics', which refuse it.
+// A type's half-precision format (CheckHalf, c_check_program_half.c's values): an _Atomic one's value's too, as its class
+// is (check_lower_type_class), whose loads and stores are the atomics'.
 static CheckHalf check_lower_half(const TypeTable* types, TypeId type)
 {
-    const TypeId stripped = type_unqualified(type_strip_aligned(types, type));
-    return type_kind(types, stripped) != BUSTER_TYPE_KIND_ATOMIC ? check_action_half_format(type_conversion_operand(types, type)) : CHECK_HALF_NONE;
+    return check_action_half_format(type_conversion_operand(types, type));
 }
 
 // A type's half-precision format from its cached class (check_lower_class_half of check_lower_class's).
@@ -1249,7 +1296,7 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
         // One check_lower_complex doesn't take: a complex type of another floating type.
-        feature = "complex types other than _Complex _Float16, float, double, long double and __float128";
+        feature = "complex types other than _Complex _Float16, __bf16, float, double, long double and __float128";
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT)
     {
@@ -3308,11 +3355,12 @@ static uint32_t check_lower_complex_compute(CheckLowerWriter* writer, CheckOp op
     const bool product = integer && op == CHECK_OP_MULTIPLY && a.complex && b.complex;
     const bool quotient = integer && op == CHECK_OP_DIVIDE;
     uint32_t result = BUSTER_CHECK_NONE;
-    if (element == BUSTER_TYPE_FLOAT16)
+    if (element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16)
     {
-        // Copies, conversions and bit casts need only the two binary16 representations. Arithmetic needs its own
-        // excess-precision/native-FP16 rules and complex library calls; never compute with the representation's bits.
-        check_lower_unsupported(writer, "arithmetic and comparisons of _Complex _Float16 values");
+        // Copies, conversions and bit casts need only the two binary16 or bfloat16 representations. Arithmetic needs its
+        // own excess-precision/native rules and complex library calls; never compute with the representation's bits.
+        check_lower_unsupported(writer, element == BUSTER_TYPE_FLOAT16 ? "arithmetic and comparisons of _Complex _Float16 values" :
+                                                                         "arithmetic and comparisons of _Complex __bf16 values");
     }
     else if (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL)
     {
@@ -7354,21 +7402,27 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
             constants &= a == BUSTER_CHECK_X86_NO_IMMEDIATE;
         }
     }
-    // A MASK_UNARY's or MASK_MERGE's mask, its last argument before a rounding control, where it is a constant.
+    // A MASK_UNARY's or MASK_MERGE's mask, its last argument but a rounding control and an immediate (which follows the
+    // mask of the scalar range, reduce and rndscale builtins), where it is a constant.
     uint64_t mask = 0;
-    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) &&
-        count > (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u))
+    if (rule != NULL && (rule->family == CHECK_X86_LOWER_MASK_UNARY || rule->family == CHECK_X86_LOWER_MASK_MERGE) && count >= 3)
     {
-        const uint32_t a = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t last = count - 1 - (rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? 1u : 0u);
+        const uint32_t a = last == skipped ? last - 1 : last;
         CheckValue value = stream->values[graph->argument_nodes[first + a]];
         check_action_convert_value(program->types, &value, stream->argument_conversions[first + a].type, node);
         mask = value.constant_kind == CHECK_CONSTANT_INTEGER ? (uint64_t)value.integer : 0;
     }
+    // Clang constrains the whole function when any block has FENV_ACCESS. Share the existing once-per-body scan
+    // used by half-precision lowering, and ask only for packed float-compare rows, leaving other builtins unchanged.
+    const bool packed = rule != NULL && rule->fixed == CHECK_X86_PREDICATE_FCMP &&
+                        (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
+    const bool strict = packed && check_lower_half_strict(writer);
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          !constants ? "x86 builtins of an immediate that isn't a constant" :
                          check_x86_lower_row_of(&writer->target, rule, (uint64_t)immediates[0].integer,
-                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, &row);
+                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, mask, strict, &row);
     Tier0Operation tail;
     const bool reduce = reason == NULL && rule->family == CHECK_X86_LOWER_REDUCE;
     if (reduce)
@@ -7685,6 +7739,358 @@ static uint32_t check_lower_brain_negations(const CheckProgram* program, uint32_
     return negated;
 }
 
+// The C library's function of a floating elementwise builtin clang -O0's code calls (BUSTER_CHECK_LOWER_LIBM's: acos ...
+// tanh, then ceil ... round, then atan2, fmod and pow, in the catalog's order of their builtins), of a value of `class`:
+// F32's the float one (sinf), F64's the double one (sin), F80's the long double one (sinl).
+static CheckLowerRuntime check_lower_libm_function(CBuiltinId builtin, uint8_t class)
+{
+    const uint32_t index = builtin <= CBUILTIN_ELEMENTWISE_TANH ? (uint32_t)(builtin - CBUILTIN_ELEMENTWISE_ACOS) :
+                           builtin <= CBUILTIN_ELEMENTWISE_ROUND ? 15 + (uint32_t)(builtin - CBUILTIN_ELEMENTWISE_CEIL) :
+                                                                   22 + (uint32_t)(builtin - CBUILTIN_ELEMENTWISE_ATAN2);
+    const uint32_t kind = class == BUSTER_TYPED_CLASS_F32 ? 0 : class == BUSTER_TYPED_CLASS_F64 ? 1 : 2;
+    return (CheckLowerRuntime)(BUSTER_CHECK_LOWER_LIBM_FIRST + 3 * index + kind);
+}
+
+// Whether clang -O0's code computes a floating elementwise builtin by the C library's function for each element:
+// acos ... tanh, atan2, fmod (its frem) and pow, whatever the target.
+static bool check_lower_libm_builtin(CBuiltinId builtin)
+{
+    return (builtin >= CBUILTIN_ELEMENTWISE_ACOS && builtin <= CBUILTIN_ELEMENTWISE_TANH) || (builtin >= CBUILTIN_ELEMENTWISE_ATAN2 && builtin <= CBUILTIN_ELEMENTWISE_POW);
+}
+
+// Whether node `node`, a call of `builtin`, is __builtin_elementwise_round under FENV_ACCESS (#934's review): clang
+// computes it by the constrained round, the C library's round for each element, since the rows' expansion
+// (check_vector_floating_row's) adds the half below 0.5 in MXCSR's rounding mode, which a caller may have changed (0.5f
+// rounds to 0 under FE_DOWNWARD), and raises inexact; ceil, floor, trunc and roundeven fix their rounding in their
+// instructions, and rint and nearbyint take MXCSR's, as their functions do.
+static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBuiltinId builtin)
+{
+    return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+}
+
+// Pushes the instructions of an address `offset` bytes into frame object `object`, which run in the reverse of their
+// pushes: LOCAL_ADDRESS, then the offset's PTR_ADD.
+static void check_lower_element_address(CheckLowerWriter* writer, uint32_t object, uint32_t offset)
+{
+    if (offset != 0)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+}
+
+// Pushes a row's constant operands (c_check_program_vector_builtins.c's CheckVectorConstants), the row's operands from
+// `first` on, the last first: a VECTOR one's pattern repeated through its bytes, a floating one's bits.
+static void check_lower_row_constants(CheckLowerWriter* writer, const Tier0Operation* row, const CheckVectorConstants* constants, uint32_t first)
+{
+    for (uint32_t c = constants->count; c-- > 0;)
+    {
+        const uint32_t operand = first + c;
+        const uint8_t class = row->operand_classes[operand];
+        if (class == BUSTER_TYPED_CLASS_VECTOR)
+        {
+            uint64_t words[8] = { 0 };
+            uint8_t* bytes = (uint8_t*)words;
+            const uint32_t count = row->operand_bytes[operand];
+            for (uint32_t b = 0; b < count && b < 64; b += 1)
+            {
+                bytes[b] = constants->patterns[c][b % constants->bytes[c]];
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, words, count));
+        }
+        else
+        {
+            uint64_t bits = 0;
+            memcpy(&bits, constants->patterns[c], 8);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, class, bits);
+        }
+    }
+}
+
+// A floating elementwise builtin as the C library's function's calls (check_lower_libm_function), clang -O0's: of a
+// scalar (a float, a double or a long double), one call; of a vector of floats or doubles, a call an element, in element
+// order, each element read from a frame object the vector is stored into (one per operand) and each result written into
+// another, the result vector. clang's code extracts and inserts the elements in registers instead; the calls, their
+// operands and their results are the same, but not their order, which is clang's instruction scheduler's and changes
+// with the code around them (LLVM's llvm.log and the rest don't model errno): so errno after a vector's calls is
+// unspecified. Half-precision and bf16 elements, which clang's code converts to floats and back around the calls, are
+// refused by name.
+static void check_lower_vector_calls(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const TypeId result = stream->values[node].type;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const uint32_t bytes = check_lower_vector_of(writer, result);
+    const CheckVectorShape shape = check_vector_builtin_shape(types, result);
+    const uint8_t class = check_lower_class(writer, result);
+    if (bytes != 0 && (!shape.floating || shape.bfloat || shape.element == 2))
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of half-precision or bf16 elements");
+    }
+    else if (bytes == 0 && class != BUSTER_TYPED_CLASS_F32 && class != BUSTER_TYPED_CLASS_F64 && class != BUSTER_TYPED_CLASS_F80)
+    {
+        check_lower_unsupported(writer, "elementwise builtins of half-precision, bf16 or __float128 values");
+    }
+    else if (bytes != 0)
+    {
+        const bool d = shape.element == 8;
+        const uint8_t element_class = d ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+        const TypeId element = d ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_FLOAT;
+        const TypeId parameters[2] = { element, element };
+        const CheckLowerRuntime runtime = check_lower_libm_function(builtin, element_class);
+        uint32_t operands[2] = { 0, 0 };
+        for (uint32_t a = 0; a < arguments && a < 2; a += 1)
+        {
+            operands[a] = check_lower_temporary_of(writer, stream->argument_conversions[first + a].type);
+        }
+        const uint32_t out = check_lower_temporary_of(writer, result);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+        // Pushed in the reverse of the calls' order: the last element's first.
+        for (uint32_t i = shape.lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const uint32_t call = check_lower_runtime_call(writer, runtime, element, parameters, arguments, BUSTER_CHECK_NONE);
+            check_lower_instruction(writer, BUSTER_TYPED_SET, element_class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CALL, element_class, call);
+            for (uint32_t a = arguments; a-- > 0;)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, element_class, 0);
+                check_lower_element_address(writer, operands[a], i * shape.element);
+            }
+            check_lower_element_address(writer, out, i * shape.element);
+        }
+        for (uint32_t a = arguments; a-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[a]);
+            check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+        }
+        writer->vectors = true;
+    }
+    else
+    {
+        const TypeId parameters[2] = { result, result };
+        const uint32_t call = check_lower_runtime_call(writer, check_lower_libm_function(builtin, class), result, parameters, arguments, BUSTER_CHECK_NONE);
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, class, call);
+        for (uint32_t a = arguments; a-- > 0;)
+        {
+            check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+        }
+    }
+}
+
+// __builtin_reduce_in_order_fadd(v, start) of a vector of floats or doubles: ((start + v[0]) + v[1]) + ... in order, as
+// clang -O0's code adds them, its elements read from a frame object the vector is stored into: the typed stream's ADD
+// of the sum and each element, the sum first, which the start is converted to the element type for.
+static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const TypeId source = stream->argument_conversions[first].type;
+    const CheckVectorShape shape = check_vector_builtin_shape(program->types, source);
+    if (check_lower_vector_of(writer, source) == 0)
+    {
+        check_lower_unsupported(writer, "vector types of other than 4, 8, 16, 32 or 64 bytes");
+    }
+    else if (!shape.floating || shape.bfloat || shape.element == 2)
+    {
+        check_lower_unsupported(writer, "vector reductions of half-precision or bf16 elements");
+    }
+    else
+    {
+        const uint8_t class = shape.element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+        const uint32_t vector = check_lower_temporary_of(writer, source);
+        for (uint32_t i = shape.lanes; i-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_ADD, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+            check_lower_element_address(writer, vector, i * shape.element);
+        }
+        check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector);
+        check_lower_operand(writer, node, 3, false, source);
+        writer->vectors = true;
+    }
+}
+
+// __builtin_elementwise_pdep and _pext of vectors of integers: each element's BMI2 PDEP or PEXT (no vector instruction
+// deposits or extracts bits), of its zero extension to 32 bits for 8- and 16-bit elements (the mask's extension has no
+// bits past theirs, so neither has the result), the elements read from frame objects the vectors are stored into and
+// each result, truncated to its element, written into another, the result vector.
+static void check_lower_vector_deposit(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const TypeId result = stream->values[node].type;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const CheckVectorShape shape = check_vector_builtin_shape(program->types, result);
+    if (check_lower_vector_of(writer, result) == 0)
+    {
+        check_lower_unsupported(writer, check_lower_class(writer, result) == BUSTER_TYPED_CLASS_VECTOR ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
+                                                                                                        "elementwise builtins of scalars");
+    }
+    else if (!shape.integer || shape.element == 0)
+    {
+        check_lower_unsupported(writer, "elementwise vector builtins of elements of this size");
+    }
+    else if ((writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
+    {
+        check_lower_unsupported(writer, "vector bit deposits and extractions without BMI2");
+    }
+    else
+    {
+        const bool wide = shape.element == 8;
+        const uint8_t computed = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+        const uint8_t stored = shape.element == 1 ? BUSTER_TYPED_CLASS_U8 : shape.element == 2 ? BUSTER_TYPED_CLASS_U16 : computed;
+        const bool deposit = builtin == CBUILTIN_ELEMENTWISE_PDEP;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        row.records[0] = check_vector_lower_record(deposit ? (wide ? X86_FORM_PDEP_R64_R64_RM64 : X86_FORM_PDEP_R32_R32_RM32) :
+                                                             (wide ? X86_FORM_PEXT_R64_R64_RM64 : X86_FORM_PEXT_R32_R32_RM32),
+                                                   BUSTER_TIER0_ROLE_INTEGER_RESULT, BUSTER_TIER0_ROLE_INTEGER(0), BUSTER_TIER0_ROLE_INTEGER(1));
+        row.record_count = 1;
+        row.operand_count = 2;
+        row.operand_classes[0] = computed;
+        row.operand_classes[1] = computed;
+        row.result_class = computed;
+        const uint32_t operation = check_lower_operation_index(writer, &row);
+        const uint32_t operands[2] = { check_lower_temporary_of(writer, stream->argument_conversions[first].type),
+                                       check_lower_temporary_of(writer, stream->argument_conversions[first + 1].type) };
+        const uint32_t out = check_lower_temporary_of(writer, result);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+        for (uint32_t i = shape.lanes; i-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET, stored, 0);
+            if (stored != computed)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_X86, computed, operation);
+            for (uint32_t a = 2; a-- > 0;)
+            {
+                if (stored != computed)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computed, 0);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, 0);
+                check_lower_element_address(writer, operands[a], i * shape.element);
+            }
+            check_lower_element_address(writer, out, i * shape.element);
+        }
+        for (uint32_t a = 2; a-- > 0;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[a]);
+            check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+        }
+        writer->vectors = true;
+    }
+}
+
+// The floating elementwise builtins clang -O0's code computes by instructions (check_vector_floating_instructions) and
+// __builtin_elementwise_ldexp: of vectors of floats or doubles, check_vector_floating_row's or check_vector_ldexp_row's
+// row, its constants after the arguments; of float or double scalars, check_vector_floating_scalar_row's, ldexp's
+// exponent first converted from its promoted type, taken as the signed integer of its width as llvm.ldexp takes it, to
+// the value's type; of long doubles, the C library's function clang's code calls (floorl ... roundl, fmaxl for maxnum,
+// fminl for minnum and ldexpl, of an int's exponent), and the others, which clang's code computes with x87 instructions,
+// refused by name.
+static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const TypeId result = stream->values[node].type;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const uint32_t bytes = check_lower_vector_of(writer, result);
+    const uint8_t class = check_lower_class(writer, result);
+    const bool ldexp = builtin == CBUILTIN_ELEMENTWISE_LDEXP;
+    const TypeId exponent = ldexp ? stream->argument_conversions[first + 1].type : 0;
+    Tier0Operation row;
+    CheckVectorConstants constants = { 0 };
+    const char* reason = NULL;
+    if (bytes != 0)
+    {
+        reason = ldexp && check_lower_vector_of(writer, exponent) == 0 ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
+                 ldexp ? check_vector_ldexp_row(types, &writer->target, result, exponent, &row) :
+                         check_vector_floating_row(types, builtin, result, &row, &constants);
+        if (reason == NULL)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &row));
+            check_lower_row_constants(writer, &row, &constants, arguments);
+            for (uint32_t a = arguments; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+            writer->vectors = true;
+        }
+    }
+    else if (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)
+    {
+        // An exponent wider than 64 bits (an __int128's, a _BitInt's) has no instruction's conversion.
+        const uint64_t width = ldexp ? type_size(types, exponent) : 0;
+        reason = ldexp && width != 4 && width != 8 ? "ldexp of exponents wider than 64 bits" : check_vector_floating_scalar_row(&writer->target, builtin, class, &row, &constants);
+        if (reason == NULL)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &row));
+            check_lower_row_constants(writer, &row, &constants, arguments);
+            if (ldexp)
+            {
+                const TypeId integer = width == 8 ? BUSTER_TYPE_LONG : BUSTER_TYPE_INT;
+                check_lower_convert(writer, integer, result);
+                check_lower_convert(writer, exponent, integer);
+            }
+            for (uint32_t a = arguments; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+            writer->vectors = true;
+        }
+    }
+    else if (class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+                                                 (ldexp && type_size(types, exponent) == 4)))
+    {
+        const CheckLowerRuntime runtime = builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
+                                          builtin == CBUILTIN_ELEMENTWISE_MAXNUM ? CHECK_LOWER_RUNTIME_FMAXL :
+                                          builtin == CBUILTIN_ELEMENTWISE_MINNUM ? CHECK_LOWER_RUNTIME_FMINL :
+                                                                                   CHECK_LOWER_RUNTIME_LDEXPL;
+        const TypeId parameters[2] = { result, ldexp ? BUSTER_TYPE_INT : result };
+        const uint32_t call = check_lower_runtime_call(writer, runtime, result, parameters, arguments, BUSTER_CHECK_NONE);
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, class, call);
+        for (uint32_t a = arguments; a-- > 0;)
+        {
+            const TypeId argument = stream->argument_conversions[first + a].type;
+            check_lower_convert(writer, argument, parameters[a]);
+            check_lower_operand(writer, node, a + 3, false, argument);
+        }
+    }
+    else
+    {
+        reason = class == BUSTER_TYPED_CLASS_F80 ? "elementwise builtins of long double values that clang computes with x87 instructions" :
+                                                   "elementwise builtins of half-precision, bf16 or __float128 values";
+    }
+    if (reason != NULL)
+    {
+        check_lower_unsupported(writer, reason);
+    }
+}
+
+// Pushes a reduction's vector operand, `source`, and where its elements don't fill it, the row that gives the lanes past
+// them the reduction's identity (check_vector_reduce_fill_row) with its two constants, which run after the operand.
+static void check_lower_reduce_operand(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, TypeId source)
+{
+    Tier0Operation row;
+    uint64_t keep[8];
+    uint64_t fill[8];
+    if (check_vector_reduce_fill_row(writer->program->types, builtin, source, &row, keep, fill))
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &row));
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, fill, row.result_bytes));
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, keep, row.result_bytes));
+    }
+    check_lower_operand(writer, node, 3, false, source);
+}
+
 // The generic vector builtins' X86 entries (c_check_program_vector_builtins.c), or their refusal by name. A row's
 // operands are the builtin's vector arguments at their types, whose tasks run before its entry's (the tasks run in the
 // reverse of their pushes):
@@ -7830,7 +8236,72 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             writer->vectors = true;
         }
     }
-    else if (builtin >= CBUILTIN_ELEMENTWISE_ABS && builtin <= CBUILTIN_ELEMENTWISE_SUB_SAT)
+    else if (check_lower_libm_builtin(builtin) || check_lower_strict_round(graph, node, builtin))
+    {
+        check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
+    }
+    else if (check_vector_floating_instructions(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP)
+    {
+        check_lower_vector_floating(writer, node, builtin, effect->evaluated_argument_count);
+    }
+    else if (builtin == CBUILTIN_REDUCE_IN_ORDER_FADD)
+    {
+        check_lower_reduce_in_order(writer, node);
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_PDEP || builtin == CBUILTIN_ELEMENTWISE_PEXT)
+    {
+        check_lower_vector_deposit(writer, node, builtin);
+    }
+    else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE)
+    {
+        // A masked builtin's mask is a vector of bools, which the lowering has no class for; a matrix builtin's call is
+        // an error before it (no unit has a matrix type).
+        reason = "masked vector memory builtins, whose masks are vectors of bools";
+    }
+    else if (builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD)
+    {
+        // The rows run first to last, each but the first taking the one before's vector; a maximum's or minimum's each take
+        // its mask, a constant, after it; a sum's last its start value (-0.0 without one), evaluated after the vector.
+        const TypeId source = stream->argument_conversions[first].type;
+        const bool sum = builtin == CBUILTIN_REDUCE_ASSOC_FADD;
+        Tier0Operation floating[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS];
+        reason = check_lower_vector_of(writer, source) == 0 ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
+                                                                check_vector_reduce_floating_rows(types, builtin, source, floating, &row_count);
+        if (reason == NULL && row_count != 0)
+        {
+            const CheckVectorShape shape = check_vector_builtin_shape(types, source);
+            const bool d = shape.element == 8;
+            const uint8_t class = d ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+            for (uint32_t r = row_count; r-- > 0;)
+            {
+                const Tier0Operation* row = floating + r;
+                check_lower_instruction(writer, BUSTER_TYPED_X86, row->result_class, check_lower_operation_index(writer, row));
+                if (!sum)
+                {
+                    uint64_t words[8] = { 0 };
+                    const uint64_t mask = builtin == CBUILTIN_REDUCE_MAXIMUM ? check_vector_floating_sign(d) - 1 : check_vector_floating_sign(d);
+                    for (uint32_t w = 0; w < 8; w += 1)
+                    {
+                        words[w] = d ? mask : mask | mask << 32;
+                    }
+                    const uint32_t bytes = row->operand_bytes[1];
+                    memset((uint8_t*)words + bytes, 0, 64 - bytes);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, words, bytes));
+                }
+                else if (r == row_count - 1 && count == 2)
+                {
+                    check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+                }
+                else if (r == row_count - 1)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, class, check_vector_floating_sign(d));
+                }
+            }
+            check_lower_reduce_operand(writer, node, builtin, source);
+            writer->vectors = true;
+        }
+    }
+    else if (check_builtin_vector_elementwise(builtin))
     {
         // Of vectors, or of float or double scalars of one class.
         const uint32_t arguments = effect->evaluated_argument_count;
@@ -7846,21 +8317,14 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const uint32_t negated = vectors && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && check_vector_lower_brain(types, result) ?
                                      check_lower_brain_negations(program, first, result) :
                                      0;
-        uint8_t splats[BUSTER_CHECK_VECTOR_ELEMENTWISE_SPLATS] = { 0 };
-        uint32_t splat_count = 0;
-        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, splats, &splat_count) :
+        CheckVectorConstants constants = { 0 };
+        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                            "elementwise builtins of scalars";
         if (reason == NULL)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
-            for (uint32_t s = splat_count; s-- > 0;)
-            {
-                uint64_t words[8] = { 0 };
-                const uint32_t byte_count = check_lower_vector_of(writer, result);
-                memset(words, splats[s], byte_count);
-                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_constant(writer, words, byte_count));
-            }
+            check_lower_row_constants(writer, rows, &constants, arguments);
             for (uint32_t a = arguments; a-- > 0;)
             {
                 // A negated operand's negation is the row's form's: its operand in its place.
@@ -7870,7 +8334,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             writer->vectors = true;
         }
     }
-    else if (builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR)
+    else if ((builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) || builtin == CBUILTIN_REDUCE_XOR)
     {
         const TypeId source = stream->argument_conversions[first].type;
         reason = check_lower_vector_of(writer, source) == 0 ? "vector types of other than 4, 8, 16, 32 or 64 bytes" :
@@ -7883,7 +8347,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             {
                 check_lower_instruction(writer, BUSTER_TYPED_X86, rows[r].result_class, check_lower_operation_index(writer, rows + r));
             }
-            check_lower_operand(writer, node, 3, false, source);
+            check_lower_reduce_operand(writer, node, builtin, source);
             writer->vectors = true;
         }
     }
@@ -7949,8 +8413,16 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     }
 }
 
+// Whether a type is a complex half-precision one (_Complex _Float16, or the _Complex __bf16 the usual arithmetic
+// conversions make): four bytes of its two parts' bits, an aggregate's value.
+static bool check_lower_complex_half(const TypeTable* types, TypeId type)
+{
+    const TypeId element = check_lower_complex_element(types, type);
+    return element == BUSTER_TYPE_FLOAT16 || element == BUSTER_TYPE_BF16;
+}
+
 // A __builtin_bit_cast side's class where its bits are the value of a register: an integer's, an enum's or a pointer's, a
-// float's or a double's, or a vector's, and a half-precision value's bits, a U16's. A complex binary16 value's four
+// float's or a double's, or a vector's, and a half-precision value's bits, a U16's. A complex half-precision value's four
 // bytes have U32's bits, read from or written to its frame object (check_lower_bit_cast); UINT8_MAX for any other
 // (other aggregates, arrays, long double and 128-bit integers), whose bits the lowering doesn't move.
 static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId type)
@@ -7962,7 +8434,7 @@ static uint8_t check_lower_bit_cast_class(const CheckLowerWriter* writer, TypeId
     const bool real = kind == BUSTER_TYPE_KIND_FLOATING && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64);
     const bool vector = class == BUSTER_TYPED_CLASS_VECTOR && check_lower_vector_of(writer, type) != 0;
     const bool half = check_lower_class_half(class) != CHECK_HALF_NONE;
-    const bool complex_half = check_lower_complex_element(writer->program->types, type) == BUSTER_TYPE_FLOAT16;
+    const bool complex_half = check_lower_complex_half(writer->program->types, type);
     return integer || real || vector ? class : half ? BUSTER_TYPED_CLASS_U16 : complex_half ? BUSTER_TYPED_CLASS_U32 : UINT8_MAX;
 }
 
@@ -7979,20 +8451,20 @@ static void check_lower_bit_cast(CheckLowerWriter* writer, uint32_t node)
     const TypeId result = stream->values[node].type;
     const uint8_t from = effect != NULL ? check_lower_bit_cast_class(writer, effect->source_type) : UINT8_MAX;
     const uint8_t to = result != 0 ? check_lower_bit_cast_class(writer, result) : UINT8_MAX;
-    const bool source_complex = effect != NULL && check_lower_complex_element(writer->program->types, effect->source_type) == BUSTER_TYPE_FLOAT16;
-    const bool target_complex = result != 0 && check_lower_complex_element(writer->program->types, result) == BUSTER_TYPE_FLOAT16;
+    const bool source_complex = effect != NULL && check_lower_complex_half(writer->program->types, effect->source_type);
+    const bool target_complex = result != 0 && check_lower_complex_half(writer->program->types, result);
     if (effect == NULL)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (from == UINT8_MAX || to == UINT8_MAX)
     {
-        check_lower_unsupported(writer, "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, _Complex _Float16 and vectors");
+        check_lower_unsupported(writer, "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors");
     }
     else if (target_complex)
     {
-        // A complex binary16 result is its own four-byte object, never a U32 value mistaken for an address. SET_LOCAL
-        // writes the source's representation directly, so even signaling NaNs and signed zeros retain every bit.
+        // A complex half-precision result is its own four-byte object, never a U32 value mistaken for an address.
+        // SET_LOCAL writes the source's representation directly, so even signaling NaNs and signed zeros retain every bit.
         const uint32_t local = check_lower_object(writer, 4, type_alignment_log2(writer->program->types, result));
         const uint8_t stored = from == BUSTER_TYPED_CLASS_VECTOR || source_complex || effect->folded ? BUSTER_TYPED_CLASS_U32 : from;
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
@@ -10111,6 +10583,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     uint32_t builtin_count = 0;
     uint32_t atomic_capacity = 0;
     uint32_t integer_builtin_count = 0;
+    // A libm builtin of a vector (check_lower_vector_calls) calls the C library's function once an element, past what the
+    // per-node bounds below give a node (#934's review): its lanes' calls and their arguments, and each call's entries, its
+    // SET and CALL, an argument's LOAD, and the element addresses of each argument and of the result (up to 13 with two
+    // arguments).
+    uint64_t lane_calls = 0;
+    uint64_t lane_arguments = 0;
     for (uint32_t node = 0; node < nodes; node += 1)
     {
         integer_builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
@@ -10124,6 +10602,15 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
                            (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
                            (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
+        const uint8_t kind = type != 0 ? type_kind(types, type_strip_aligned(types, type)) : BUSTER_TYPE_KIND_NONE;
+        const CBuiltinId member = (CBuiltinId)input->graph.members[node];
+        if (op == CHECK_OP_BUILTIN_VECTOR && (check_lower_libm_builtin(member) || check_lower_strict_round(&input->graph, node, member)) &&
+            (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
+        {
+            const uint64_t lanes = check_vector_builtin_shape(types, type).lanes;
+            lane_calls += lanes;
+            lane_arguments += lanes * input->graph.argument_counts[node];
+        }
     }
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
@@ -10145,7 +10632,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
                                                                                                                                 (CheckLowerLimbRoom){ 0 };
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
-                                limb_room.entries + 32;
+                                limb_room.entries + lane_calls * 13 + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
@@ -10222,9 +10709,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
     // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
     // the helpers'.
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls + 1;
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
+                                    lane_calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
-                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + 1 : 0;
+                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
     lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;

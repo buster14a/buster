@@ -9,8 +9,88 @@
 
 #include <cpuid.h>
 
+// The planner without room (#929's review): a statement of x87 operands and a template of no instructions, one of an
+// x87 operand and an instruction, and one refused at its first operand (a flag output's) before its x87 operand, whose
+// later places the planner never writes. check_program_asm_plan of them, by both paths, with the output arena's room cut
+// to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
+// (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
+// places; then the plans must be the whole arena's: a helper each for the first two, and the third refused by name.
+static void check_test_program_asm_room(CheckTest* test)
+{
+    static const char source[] =
+        "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
+        "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "int flagged(int a, float x){int z;__asm__(\"cmpl $0, %2\" : \"=@ccz\"(z), \"+t\"(x) : \"r\"(a));return z+(int)x;}";
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PredefinesOptions predefines = check_test_program_predefines();
+    bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                        pp_run_source(&pp, "asm-room", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "asm room: source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                     parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                     check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                     check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                     check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 3;
+        char description[256];
+        snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
+        check_test_expect(test, ready, description);
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        const uint64_t capacity = output.capacity;
+        CheckProgramAsms planned = { 0 };
+        CheckProgramHelpers helpers = { 0 };
+        bool done = false;
+        bool kept = true;
+        uint32_t failures = 0;
+        for (uint64_t room = 0; ready && !done && room <= (UINT64_C(1) << 20); room += 8)
+        {
+            helpers = (CheckProgramHelpers){ 0 };
+            output.capacity = output_mark + room;
+            done = check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch);
+            output.capacity = capacity;
+            failures += !done;
+            kept &= done || (planned.status == CHECK_PROGRAM_RESOURCE && output.length == output_mark && scratch.length == scratch_mark && helpers.count == 0);
+        }
+        snprintf(description, sizeof(description), "asm room, %s: %u runs without room fail with the arenas as they were, then one plans", path == 0 ? "scalar" : "vector",
+                 failures);
+        check_test_expect(test, ready && done && kept && failures != 0, description);
+        const bool plans_right = done && planned.plans != NULL && planned.plans[0].reason == NULL && planned.plans[0].helper != BUSTER_CHECK_NONE &&
+                                 planned.plans[1].reason == NULL && planned.plans[1].helper != BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
+                                 strcmp(planned.plans[2].reason, "inline assembly flag outputs") == 0 && helpers.count == 2;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements have helpers, and the flag output is refused by name", path == 0 ? "scalar" : "vector");
+        check_test_expect(test, plans_right, description);
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
+    check_test_program_asm_room(test);
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
     // operands substituted into it assembles to nothing too.
     check_test_program_source(test,
@@ -358,6 +438,172 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"testl %1,%1; sete %b0; movzbl %b0,%0\" : \"=r\"(z) : \"r\"(n) : \"cc\");\n"
         "#endif\n"
         "return z;}", "asm-flag-output-fallback", clang);
+    // The forms of musl's x86_64 atomics (arch/x86_64/atomic_arch.h), in functions of this test's own: lock prefixes as
+    // statements of their own before cmpxchg, xadd, and, or, xor, inc and dec on memory outputs (an "=m" one beside
+    // an "m" input of its object, and "+m"), xchg, a store fenced by a locked or of the stack, pause, the bit scans
+    // (of operands never zero, whose result the scans leave undefined), and a load of the thread pointer through %fs.
+    // hlt is compiled, assembled and linked, never run.
+    check_test_program_source(test,
+        "static int swap_if(volatile int* slot, int expected, int wanted){int seen;__asm__ __volatile__(\"lock ; cmpxchg %3, %1\" : \"=a\"(seen), \"=m\"(*slot) : \"a\"(expected), \"r\"(wanted) : \"memory\");return seen;}"
+        "static void* swap_pointer_if(void* volatile* slot, void* expected, void* wanted){__asm__(\"lock ; cmpxchg %3, %1\" : \"=a\"(expected), \"=m\"(*slot) : \"a\"(expected), \"r\"(wanted) : \"memory\");return expected;}"
+        "static long swap_long_if(volatile long* slot, long expected, long wanted){__asm__ __volatile__(\"lock ; cmpxchgq %2, %1\" : \"+a\"(expected), \"+m\"(*slot) : \"r\"(wanted) : \"memory\", \"cc\");return expected;}"
+        "static int trade(volatile int* slot, int value){int old;__asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(value) : \"memory\");return old;}"
+        "static int add_returning_old(volatile int* slot, int amount){int old;__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(amount) : \"memory\");return old;}"
+        "static long add_long_returning_old(volatile long* slot, long amount){__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"+r\"(amount), \"+m\"(*slot) : : \"memory\", \"cc\");return amount;}"
+        "static void keep_bits(volatile unsigned* slot, unsigned bits){__asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void set_bits(volatile unsigned* slot, unsigned bits){__asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void keep_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void set_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile__(\"lock ; or %1, %0\" : \"+m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void flip_wide_bits(volatile unsigned long* slot, unsigned long bits){__asm__ __volatile__(\"lock ; xor %1, %0\" : \"+m\"(*slot) : \"r\"(bits) : \"memory\");}"
+        "static void count_up(volatile int* slot){__asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*slot) : \"m\"(*slot) : \"memory\");}"
+        "static void count_down(volatile int* slot){__asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*slot) : \"m\"(*slot) : \"memory\");}"
+        "static void count_down_long(volatile long* slot){__asm__ __volatile__(\"lock ; decq %0\" : \"+m\"(*slot) : : \"memory\");}"
+        "static void fenced_store(volatile long* slot, long value){__asm__ __volatile__(\"movq %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*slot) : \"r\"(value) : \"memory\");}"
+        "static void wait_a_little(void){__asm__ __volatile__(\"pause\" : : : \"memory\");}"
+        "static int lowest_set(unsigned long bits){__asm__(\"bsf %1,%0\" : \"=r\"(bits) : \"r\"(bits));return (int)bits;}"
+        "static int highest_set(unsigned long bits){__asm__(\"bsr %1,%0\" : \"=r\"(bits) : \"r\"(bits));return (int)bits;}"
+        "static unsigned long thread_pointer(void){unsigned long here;__asm__(\"mov %%fs:0,%0\" : \"=r\"(here));return here;}"
+        "void stop_here(void){__asm__ __volatile__(\"hlt\" : : : \"memory\");}"
+        "int tested(int n){volatile int word=n*7;int r=swap_if(&word,n*7,n+3);r=r*5+swap_if(&word,-1,9)+word*3;"
+        "void* volatile cell=&r;void* before=swap_pointer_if(&cell,&r,(void*)&word);r+=(before==(void*)&r)*2+(cell==(void*)&word)*4;"
+        "volatile long big=(long)n<<36;long previous=swap_long_if(&big,(long)n<<36,-n);r+=(int)(previous>>36)+(int)big;"
+        "r=r*3+trade(&word,n-1)+word;r=r*7+add_returning_old(&word,n*5)+word;volatile long total=1000;r+=(int)add_long_returning_old(&total,n)+(int)total;"
+        "volatile unsigned mask=0xf0f0u+n;keep_bits(&mask,0x3c3cu);set_bits(&mask,(unsigned)n<<8);"
+        "volatile unsigned long flags=(unsigned long)n*0x100000001ul;keep_wide_bits(&flags,0xffff0000fffful);set_wide_bits(&flags,(unsigned long)n<<44);flip_wide_bits(&flags,0x11);"
+        "volatile int tally=n;count_up(&tally);count_up(&tally);count_down(&tally);volatile long countdown=n*4;count_down_long(&countdown);"
+        "volatile long stored=0;fenced_store(&stored,(long)r*2);wait_a_little();unsigned long probe=((unsigned long)n*2654435761u+1)<<(n&15);"
+        "return r+(int)mask*11+(int)(flags>>20)+(int)flags+tally*13+(int)countdown*17+(int)stored+lowest_set(probe)*19+highest_set(probe)*23+"
+        "(thread_pointer()!=0);}",
+        "asm-lock-prefix-statements", clang);
+    // The forms of musl's x86_64 math (src/math/x86_64), in functions of this test's own: sqrtsd and sqrtss, cvtsd2si and
+    // cvtss2si into 64- and 32-bit registers under MXCSR's rounding, and a magnitude's mask, all ones (pcmpeqd) shifted
+    // right (psrlq, psrld), and-ed in (andps).
+    check_test_program_source(test,
+        "static double root(double v){double r;__asm__(\"sqrtsd %1, %0\" : \"=x\"(r) : \"x\"(v));return r;}"
+        "static float root_float(float v){float r;__asm__(\"sqrtss %1, %0\" : \"=x\"(r) : \"x\"(v));return r;}"
+        "static long to_long(double v){long r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static long float_to_long(float v){long r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static int to_int(double v){int r;__asm__(\"cvtsd2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static int float_to_int(float v){int r;__asm__(\"cvtss2si %1, %0\" : \"=r\"(r) : \"x\"(v));return r;}"
+        "static double magnitude_mask(void){double m;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(m));__asm__(\"psrlq   $1, %0\" : \"+x\"(m));return m;}"
+        "static double magnitude(double v){double m=magnitude_mask();__asm__(\"andps   %1, %0\" : \"+x\"(v) : \"x\"(m));return v;}"
+        "static float float_magnitude_mask(void){float m;__asm__(\"pcmpeqd %0, %0\" : \"=x\"(m));__asm__(\"psrld   $1, %0\" : \"+x\"(m));return m;}"
+        "static float float_magnitude(float v){float m=float_magnitude_mask();__asm__(\"andps   %1, %0\" : \"+x\"(v) : \"x\"(m));return v;}"
+        "int tested(int n){double d=n*0.625-3.5;float f=(float)n*-0.875f+1.5f;double a=magnitude(d);float b=float_magnitude(f);"
+        "return (int)(root(a)*1000)+(int)(root_float(b)*100)*3+(int)(to_long(d*1e11/9)%100000)+(int)float_to_long(f*5)*5+to_int(d*27)*7+float_to_int(f*19)*11+"
+        "(int)(a*8)+(int)(b*4)*13;}",
+        "asm-sse-scalar-math", clang);
+    // dr_flac's lzcnt, `rep; bsr` in GCC's dialect alternatives (the AT&T one, `bsrq %1, %0`), and tzcnt so: their bytes
+    // (F3 0F BD and BC), which run as the scans where the processor has no LZCNT or BMI (of operands never zero, alike).
+    check_test_program_source(test,
+        "static unsigned long clz(unsigned long x){unsigned long r;__asm__ __volatile__(\"rep; bsr{q %1, %0| %0, %1}\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "static unsigned clz32(unsigned x){unsigned r;__asm__ __volatile__(\"rep; bsr{l %1, %0| %0, %1}\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "static unsigned long ctz(unsigned long x){unsigned long r;__asm__ __volatile__(\"rep\\n\\tbsfq %1, %0\" : \"=r\"(r) : \"r\"(x) : \"cc\");return r;}"
+        "int tested(int n){unsigned long x=(unsigned long)(n*n*1000003+1)<<(n&15);return (int)clz(x)*100+(int)clz32((unsigned)x|1)*10+(int)ctz(x);}",
+        "asm-rep-bsr", clang);
+    // FMA3's scalar forms, as musl's fma and fmaf take them where the target has FMA, in functions of this test's own:
+    // compiled and linked everywhere, run where the host has FMA.
+    const bool fused_native = (native.features & BUSTER_X86_FEATURE(FMA)) != 0;
+    if (!fused_native)
+    {
+        printf("test-checker: asm-fma-scalar: FMA unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static double fused(double a,double b,double c){__asm__(\"vfmadd132sd %1, %2, %0\" : \"+x\"(a) : \"x\"(b), \"x\"(c));return a;}"
+        "static float fused_float(float a,float b,float c){__asm__(\"vfmadd132ss %1, %2, %0\" : \"+x\"(a) : \"x\"(b), \"x\"(c));return a;}"
+        "int tested(int n){double x=n*0.3+1/7.0,y=n-0.4,z=3e-17*n;float u=n*0.7f+1/7.0f,v=n-0.4f,w=3e-8f*n;"
+        "double r=fused(x,y,z)-x*y;float s=fused_float(u,v,w)-u*v;return (int)(r*1e18)+(int)(s*1e9f)*7+(int)fused(y,y,x)*3;}",
+        "asm-fma-scalar", clang, fused_native);
+    // Explicit register variables as operands, in the shape of musl's syscall wrappers (arch/x86_64/syscall_arch.h), in
+    // functions of this test's own: the fourth to sixth arguments in r10, r8 and r9 (`register long fourth __asm__("r10")
+    // = d;` and "r"(fourth)), beside the fixed registers of the others. getppid, getuid, prctl's PR_GET_NAME,
+    // rt_sigprocmask's mask and two pages mapped, written and unmapped, each the same in clang's build in the same
+    // process.
+    check_test_program_source(test,
+        "static long call0(long number){long result;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"0\"(number) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call2(long number, long first, long second){long result;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(first),"
+        " \"S\"(second) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call4(long number, long a, long b, long c, long d){long result;register long fourth __asm__(\"r10\") = d;"
+        "__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(a), \"S\"(b), \"d\"(c), \"r\"(fourth) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "static long call6(long number, long a, long b, long c, long d, long e, long f){long result;register long fourth __asm__(\"r10\") = d;"
+        "register long fifth __asm__(\"r8\") = e;register long sixth __asm__(\"r9\") = f;__asm__ __volatile__(\"syscall\" : \"=a\"(result) : \"a\"(number), \"D\"(a),"
+        " \"S\"(b), \"d\"(c), \"r\"(fourth), \"r\"(fifth), \"r\"(sixth) : \"rcx\", \"r11\", \"memory\");return result;}"
+        "int tested(int n){long parent=call0(110);long user=call0(102);char name[16]={0};long named=call2(157,16,(long)name);"
+        "unsigned long old_mask[2]={0,0};long masked=call4(14,0,0,(long)old_mask,8);long page=call6(9,0,8192,3,0x22,-1,0);"
+        "if(page>0)((volatile char*)page)[4096]=(char)n;long gone=call2(11,page,8192);"
+        "return (parent>0)+(user>=0)*2+(named==0)*3+(name[0]!=0)*5+(int)masked*7+(page>0&&(page&4095)==0)*11+(int)gone*13+n;}",
+        "asm-register-variables-syscalls", clang);
+    // Each shape of a register variable's operand, as clang places it: an input in the variable's register whatever its
+    // letters ("a"), through a cast that keeps its width, by a 32-bit name of a 64-bit register and as an int's 32-bit
+    // name; outputs in their variables' registers, a memory output's among them; a `+` operand in a callee-saved one; a
+    // matching input in its variable's register, not its output's; an XMM register's; and a template of no instructions.
+    check_test_program_source(test,
+        "int tested(int n){register long a __asm__(\"r10\")=n*3;long o1;__asm__(\"movq %%r10, %0\" : \"=r\"(o1) : \"a\"(a));"
+        "register unsigned long b __asm__(\"r9\")=(unsigned long)n<<33;long o2;__asm__(\"movq %%r9, %0\" : \"=r\"(o2) : \"r\"((long)b));"
+        "register long c __asm__(\"ebx\")=n-7;long o3;__asm__(\"movq %%rbx, %0\" : \"=r\"(o3) : \"r\"(c));"
+        "register int d __asm__(\"r12\")=n*5;int o4;__asm__(\"movl %1, %0\" : \"=r\"(o4) : \"r\"(d));"
+        "register long e __asm__(\"r11\");__asm__(\"movq $42, %%r11\" : \"=r\"(e));register long f __asm__(\"r8\");__asm__(\"movq $7, %%r8\" : \"=m\"(f));"
+        "register long g __asm__(\"rbx\")=n;__asm__(\"addq $5, %%rbx\" : \"+r\"(g));"
+        "register long h __asm__(\"r13\")=n*9;long o5;__asm__(\"movq %%r13, %0\" : \"=r\"(o5) : \"0\"(h));"
+        "register double x __asm__(\"xmm5\")=n*0.5;double o6;__asm__(\"movaps %%xmm5, %0\" : \"=x\"(o6) : \"x\"(x));"
+        "register long i __asm__(\"r10\")=n+100;__asm__(\"\" : \"+r\"(i));"
+        "return (int)o1+(int)(o2>>33)*3+(int)o3*5+o4*7+(int)e+(int)f*11+(int)g*13+(int)o5*17+(int)(o6*4)*19+(int)i*23;}",
+        "asm-register-variables", clang);
+    // The forms of musl's long double functions (src/math/x86_64), in functions of this test's own: fabs, fsqrt and
+    // frndint on a `+t` operand; fprem's and fprem1's loops with y in st(1) and the status word through fnstsw %ax ("=a"),
+    // whose st(1) the helper pops after it stores x; a remainder's quotient bits from that word (C0, C3 and C1, its bits
+    // 2, 1 and 0); fistpll's store of a "t" input it pops (its "st" clobber); and "X" operands of a template of no
+    // instructions.
+    check_test_program_source(test,
+        "static long double absolute(long double v){__asm__(\"fabs\" : \"+t\"(v));return v;}"
+        "static long double square_root(long double v){__asm__(\"fsqrt\" : \"+t\"(v));return v;}"
+        "static long double rounded(long double v){__asm__(\"frndint\" : \"+t\"(v));return v;}"
+        "static long double truncated_remainder(long double x, long double y){unsigned short status;"
+        "do __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(status) : \"u\"(y));while((status>>10)&1);return x;}"
+        "static long double nearest_remainder(long double x, long double y, int* quotient){unsigned short status;long double r=x;"
+        "const void* inputs[2]={&x,&y};__asm__(\"\" :: \"X\"(inputs[0]), \"X\"(inputs[1]));"
+        "do __asm__(\"fprem1\\n\\tfnstsw %%ax\" : \"+t\"(r), \"=a\"(status) : \"u\"(y));while((status>>10)&1);"
+        "int low=((status>>8)&1)<<2|((status>>14)&1)<<1|((status>>9)&1);*quotient=(x<0)!=(y<0) ? -low : low;return r;}"
+        "static long whole(long double v){long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(v) : \"st\");return r;}"
+        "static long long whole_long_long(long double v){long long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(v) : \"st\");return r;}"
+        "int tested(int n){long double a=n*1.25L-4,b=n%6+0.75L;int q=0;long double r=nearest_remainder(a*9,b,&q);"
+        "return (int)(square_root(absolute(a))*1000)+(int)(rounded(a*3.5L)*3)+(int)(truncated_remainder(a*13,b)*100)*5+(int)(r*100)*7+q*11+"
+        "(int)whole(a*2.2L)*13+(int)whole_long_long(a*-2.75L)*17;}",
+        "asm-x87-library-shapes", clang);
+    // Each shape of the x87's operands, by the rules clang's code follows (LLVM's stackifier): two outputs from st(0)
+    // (fsincos), a matching input popped with st(1)'s clobbered input (fyl2x) and with st(1)'s kept one, which the helper
+    // pops (fscale), outputs of a template that pushes them (fld1, fldpi into a double), a float's and a double's
+    // operands, and templates of no instructions.
+    check_test_program_source(test,
+        "static long double x_sincos(long double x, long double* s){long double c,t;__asm__(\"fsincos\" : \"=t\"(c), \"=u\"(t) : \"0\"(x));*s=t;return c;}"
+        "static long double x_yl2x(long double x, long double y){long double r;__asm__(\"fyl2x\" : \"=t\"(r) : \"0\"(x), \"u\"(y) : \"st(1)\");return r;}"
+        "static long double x_scale(long double x, long double y){long double r;__asm__(\"fscale\" : \"=t\"(r) : \"0\"(x), \"u\"(y));return r;}"
+        "static double x_one(void){double r;__asm__(\"fld1\" : \"=t\"(r));return r;}"
+        "static double x_pi(void){double r;__asm__(\"fldpi\" : \"=t\"(r));return r;}"
+        "static float x_sqrtf(float x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "static double x_sqrt(double x){double r;__asm__(\"fsqrt\" : \"=t\"(r) : \"0\"(x));return r;}"
+        "static long double x_keep(long double x){__asm__(\"\" : \"+t\"(x));return x;}"
+        "static long double x_copy(long double x){long double r;__asm__(\"\" : \"=t\"(r) : \"0\"(x));return r;}"
+        "int tested(int n){long double s=0;long double c=x_sincos(n*0.25L,&s);"
+        "return (int)(c*10000)+(int)(s*10000)*3+(int)(x_yl2x(n*n+1.5L,n+0.5L)*1000)*5+(int)(x_scale(1.5L,n%7)*64)*7+(int)(x_one()*11)+(int)(x_pi()*1e6)+"
+        "(int)(x_sqrtf(n*n+2.f)*1000)*13+(int)(x_sqrt(n+5.0)*1e6)%100000+(int)(x_keep(n*0.5L)*4)*17+(int)(x_copy(n*0.75L)*4)*19;}",
+        "asm-x87-shapes", clang);
+    // A float's and a double's signaling NaNs through `+t` in templates of no instructions: their helper passes them
+    // through the x87's stack as clang's code does, whose fld quiets them and raises the invalid operation (masked). The
+    // results' bits and the status word's flag after fnclex, and a long double's value, must be clang's build's.
+    check_test_program_source(test,
+        "static float through_float(float v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static double through_double(double v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static long double through_long_double(long double v){__asm__ volatile(\"\" : \"+t\"(v));return v;}"
+        "static unsigned short status_word(void){unsigned short word;__asm__ volatile(\"fnstsw %0\" : \"=m\"(word));return word;}"
+        "static void clear_exceptions(void){__asm__ volatile(\"fnclex\");}"
+        "int tested(int n){unsigned bits=0x7f800001u|((unsigned)n&0xffu)<<8;float f;__builtin_memcpy(&f,&bits,4);"
+        "clear_exceptions();float g=through_float(f);unsigned short after_float=status_word();unsigned out;__builtin_memcpy(&out,&g,4);"
+        "unsigned long long wide=0x7ff0000000000001ull|((unsigned long long)n&0xffu)<<20;double d;__builtin_memcpy(&d,&wide,8);"
+        "clear_exceptions();double e=through_double(d);unsigned short after_double=status_word();unsigned long long wide_out;__builtin_memcpy(&wide_out,&e,8);"
+        "long double x=n*0.5L;clear_exceptions();long double y=through_long_double(x);unsigned short after_long_double=status_word();"
+        "return (int)(out>>8)+(int)(wide_out>>40)*3+(after_float&1)*5+(after_double&1)*7+(after_long_double&1)*11+(int)(y*4)*13;}",
+        "asm-x87-empty-signaling", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
@@ -365,12 +611,36 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){_Bool z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
                                        "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
-    check_test_program_boundary_reason(test, "int tested(int n){double d=n;__asm__(\"fsqrt\" : \"+t\"(d));return (int)d;}",
-                                       "asm-x87-operand", true, false, 0, 1, "inline assembly operands in x87 registers");
+    // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
+    // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
+    // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
+    // which the assembler doesn't parse.
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"f\"(x));return n;}",
+                                       "asm-x87-any", true, false, 0, 1, "inline assembly operands in x87 registers the compiler chooses");
+    check_test_program_boundary_reason(test, "int tested(int n){int i=n;__asm__(\"\" : \"+t\"(i));return i;}",
+                                       "asm-x87-integer", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"u\"(x));return n;}",
+                                       "asm-x87-gap", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n,y=n;__asm__ volatile(\"\" : : \"t\"(x), \"t\"(y));return n;}",
+                                       "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
+                                       "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__(\"fsqrt # %0\" : \"+t\"(x));return (int)x;}",
+                                       "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
-    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__(\"\" : \"+r\"(r));return (int)r;}",
-                                       "asm-register-variable", true, false, 0, 1, "explicit register variables as inline assembly operands");
+    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
+    // past XMM15; an input of a memory constraint, which clang's code refuses too; and an integer in an XMM register.
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",
+                                       "asm-register-variable-rsp", true, false, 0, 0, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\"\" : : \"q\"(r));return n;}",
+                                       "asm-register-variable-high", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
+                                       "asm-register-variable-xmm16", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__ volatile(\"\" : : \"m\"(r));return n;}",
+                                       "asm-register-variable-memory", true, false, 0, 1, "explicit register variables as inline assembly memory inputs");
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"xmm3\")=n;__asm__ volatile(\"\" : : \"x\"(r));return n;}",
+                                       "asm-register-variable-integer-xmm", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     // #554 rejects ordinary statements and parameter operands before lowering. An uninitialized named-register VLA
     // passes that constraint, but evaluating its bound still gives the naked planner a non-asm control to refuse.
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(int n){register int x[n] asm(\"rax\");__asm__(\"ret\");}int tested(int n){return n;}",

@@ -1756,6 +1756,57 @@ static void check_test_program_intrinsic_features(CheckTest* test)
     check_test_expect(test, advertised > 100, "native intrinsic capabilities are not an empty or helper-only list");
 }
 
+// Constrained packed compares keep all five predicate bits, operand order and the explicit SAE form. These expected
+// forms are independent of the rules' round_form cells, including FP16 where native execution isn't available.
+static void check_test_program_x86_float_predicates(CheckTest* test)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    static const uint64_t rounds[] = { 4, 8, 12 };
+    uint32_t rules = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool packed = rule->fixed == CHECK_X86_PREDICATE_FCMP &&
+                            (rule->family == CHECK_X86_LOWER_COMPARE || rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE);
+        if (packed)
+        {
+            rules += 1;
+            const bool masked = rule->family == CHECK_X86_LOWER_COMPARE;
+            const uint32_t record = masked ? 1 : 0;
+            const uint32_t controls = rule->rounding == CHECK_X86_ROUND_NONE ? 1 : BUSTER_ARRAY_LENGTH(rounds);
+            for (uint32_t c = 0; c < controls; c += 1)
+            {
+                const bool sae = rounds[c] != 4;
+                const uint16_t form = !sae ? rule->form : rule->element == 2 ? X86_FORM_VCMPPH_K_Z_Z_SAE_IMM8 :
+                                                        rule->element == 4 ? X86_FORM_VCMPPS_K_Z_Z_SAE_IMM8 : X86_FORM_VCMPPD_K_Z_Z_SAE_IMM8;
+                for (uint32_t predicate = 0; predicate < 32; predicate += 1)
+                {
+                    Tier0Operation row;
+                    const bool made = check_x86_lower_row_of(&every, rule, predicate, rounds[c], 0, true, &row) == NULL;
+                    for (uint32_t j = 0; made && j < row.operand_count; j += 1)
+                    {
+                        row.operand_classes[j] = row.operand_classes[j] == BUSTER_TYPED_CLASS_VECTOR ? row.operand_classes[j] :
+                                                                                                        check_lower_x86_operand_class(row.operand_classes[j]);
+                    }
+                    check_test_expect(test, made && row.records[record].immediate == predicate && row.records[record].form == form &&
+                                           row.records[record].vvvv == BUSTER_TIER0_ROLE_VECTOR(0) &&
+                                           row.records[record].rm == BUSTER_TIER0_ROLE_VECTOR(1) && tier0_operation_valid(&row),
+                                      "strict packed compare retains its predicate, order and SAE in a valid Tier 0 row");
+                }
+                Tier0Operation ordinary;
+                check_test_expect(test, check_x86_lower_row_of(&every, rule, 16, rounds[c], 0, false, &ordinary) == NULL &&
+                                       ordinary.records[record].immediate == 0 && ordinary.records[record].form == rule->form,
+                                  "unconstrained packed compare retains its quiet canonical predicate and ignores SAE");
+                check_test_expect(test, check_x86_lower_row_of(&every, rule, 9, rounds[c], 0, false, &ordinary) == NULL &&
+                                       ordinary.records[record].immediate == 6 && ordinary.records[record].vvvv == BUSTER_TIER0_ROLE_VECTOR(1) &&
+                                       ordinary.records[record].rm == BUSTER_TIER0_ROLE_VECTOR(0),
+                                  "unconstrained packed greater-than retains its canonical predicate and swapped operands");
+            }
+        }
+    }
+    check_test_expect(test, rules == 13, "all four vector and nine masked packed float-compare rules have strict controls");
+}
+
 // Every rule's row, with every feature and at immediates around its fields' edges, is one Tier 0 places and emits
 // (tier0_operation_valid: each field's role of its register's kind, and the record placed one x86_validate takes), the
 // rows main.c's builtins don't reach among them, its integer operands widened as the lowering widens its arguments'
@@ -1769,6 +1820,7 @@ static void check_test_program_x86_rows(CheckTest* test)
     const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
     // tier0_operation_valid asks the effects tables (#760).
     check_test_expect(test, x86_encoder_initialize() && tier0_initialize(), "the encoder's, the effects' and Tier 0's tables");
+    check_test_program_x86_float_predicates(test);
     uint32_t rows = 0;
     uint32_t invalid = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
@@ -1782,7 +1834,7 @@ static void check_test_program_x86_rows(CheckTest* test)
             const uint64_t mask = k >= BUSTER_ARRAY_LENGTH(immediates) * BUSTER_ARRAY_LENGTH(rounds) ? UINT64_MAX : 0;
             Tier0Operation row;
             if ((round == 4 || rule->rounding != CHECK_X86_ROUND_NONE) && (mask == 0 || masks) &&
-                check_x86_lower_row_of(&every, rule, immediate, round, mask, &row) == NULL)
+                check_x86_lower_row_of(&every, rule, immediate, round, mask, false, &row) == NULL)
             {
                 for (uint32_t j = 0; j < row.operand_count; j += 1)
                 {
@@ -1825,8 +1877,8 @@ static void check_test_program_x86_rows(CheckTest* test)
         X86Target without = every;
         without.features &= ~immediate_features[i].feature;
         Tier0Operation row;
-        check_test_expect(test, rule != NULL && check_x86_lower_row_of(&every, rule, 1, 4, 0, &row) == NULL &&
-                                check_x86_lower_row_of(&without, rule, 1, 4, 0, &row) != NULL,
+        check_test_expect(test, rule != NULL && check_x86_lower_row_of(&every, rule, 1, 4, 0, false, &row) == NULL &&
+                                check_x86_lower_row_of(&without, rule, 1, 4, 0, false, &row) != NULL,
                           "immediate rule requires its VEX instruction's target feature");
     }
 }

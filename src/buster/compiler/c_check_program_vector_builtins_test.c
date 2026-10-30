@@ -6,8 +6,10 @@
 // stores and the bit casts, called directly on inputs from the call's argument and in the forms clang's headers write the
 // floating intrinsics in, with every defined result folded into the program's hash (a shuffle's undefined elements
 // aren't). The programs run where the host has the features their rows take (AVX-512F, BW, CD, DQ, VL, VBMI,
-// VBMI2, BITALG and VPOPCNTDQ, by x86_target_native's CPUID and XCR0); elsewhere they compile and link, as clang's
-// builds do, and don't run. Include after c_check_program_x86_test.c, whose helpers' style it follows.
+// VBMI2, BITALG, VPOPCNTDQ, GFNI and BMI2, by x86_target_native's CPUID and XCR0); elsewhere they compile and link, as
+// clang's builds do, and don't run. The floating functions past sqrt and fma run on inputs with both zeros,
+// infinities, NaNs of their own payloads and a signaling one among them, so that their NaN payloads and zeros' signs are
+// compared too. Include after c_check_program_x86_test.c, whose helpers' style it follows.
 
 static const char check_test_vector_builtin_types[] =
     "typedef signed char v16qs __attribute__((vector_size(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -38,6 +40,24 @@ static const char check_test_vector_builtin_types[] =
     "typedef double v2df __attribute__((vector_size(16)));typedef double v8df __attribute__((vector_size(64)));" \
     "static void modest(void*p,unsigned long n,unsigned s,int d,int positive){for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;" \
     "double v=((double)(int)((s>>8)&0xffff)-(positive?0.0:32768.0))/97.0;if(d)((double*)p)[i]=v;else((float*)p)[i]=(float)v;}}\n"
+
+// The floating functions' programs' inputs: n floats (d 0) or doubles (d 1), each a modest value or, with a chance of 24
+// in 40, one of those whose results the functions treat apart: halves and their neighbours, both zeros, a denormal, the
+// infinities, quiet NaNs of payloads and signs of their own, a signaling NaN, values past the last fraction bit, 1.0
+// and -3.0. FOLD hashes a long double's 10 bytes (its 6 more are padding), as LFOLD does.
+#define BUSTER_CHECK_TEST_FLOATING_SPECIALS \
+    "typedef float v2sf __attribute__((vector_size(8)));\n" \
+    "static const unsigned fbits[]={0x3f000000u,0xbf000000u,0x3fc00000u,0xbfc00000u,0x40200000u,0xc0200000u,0u,0x80000000u,0x3effffffu,0xbeffffffu," \
+    "0x501502f9u,0xd01502f9u,1u,0x80000123u,0x7f800000u,0xff800000u,0x7fc00123u,0xffc00456u,0x7f800001u,0x4b000001u,0xcb000001u,0x3f800000u," \
+    "0xc0400000u,0x3f7fffffu};\n" \
+    "static const unsigned long long dbits[]={0x3fe0000000000000ull,0xbfe0000000000000ull,0x3ff8000000000000ull,0xbff8000000000000ull," \
+    "0x4004000000000000ull,0xc004000000000000ull,0ull,0x8000000000000000ull,0x3fdfffffffffffffull,0xbfdfffffffffffffull,0x4202a05f20000000ull," \
+    "0xc202a05f20000000ull,1ull,0x8000000000000123ull,0x7ff0000000000000ull,0xfff0000000000000ull,0x7ff8000000000123ull,0xfff8000000000456ull," \
+    "0x7ff0000000000001ull,0x4330000000000001ull,0xc330000000000001ull,0x3ff0000000000000ull,0xc008000000000000ull,0x3fefffffffffffffull};\n" \
+    "static void specials(void*p,unsigned long n,unsigned s,int d){for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;unsigned k=(s>>16)%40;" \
+    "if(k<24){if(d)__builtin_memcpy((double*)p+i,dbits+k,8);else __builtin_memcpy((float*)p+i,fbits+k,4);}" \
+    "else{double v=((double)(int)((s>>8)&0xffff)-32768.0)/97.0;if(d)((double*)p)[i]=v;else((float*)p)[i]=(float)v;}}}\n" \
+    "#define LFOLD(v) h=fold(h,&(v),10)\n"
 
 static void check_test_program_vector_builtin_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
@@ -396,6 +416,169 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // The roundings and canonicalize of floats and doubles at each width, and of float, double and long double
+            // scalars (a long double's by the C library's floorl ... roundl, as clang's code calls them).
+            "vector-floating-roundings",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "#define U(f,v) {__typeof__(v) r=__builtin_elementwise_##f(v);FOLD(r);}\n"
+            "#define ALL(f) U(f,a2)U(f,a4)U(f,a8)U(f,a16)U(f,d2)U(f,d4)U(f,d8)U(f,x)U(f,y)\n"
+            "#define L(f) {long double r=__builtin_elementwise_##f(l);LFOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v2sf a2;v4sf a4;v8sf a8;v16sf a16;v2df d2;v4df d4;v8df d8;float x;double y;"
+            "specials(&a2,2,n,0);specials(&a4,4,n+1,0);specials(&a8,8,n+2,0);specials(&a16,16,n+3,0);specials(&d2,2,n+4,1);specials(&d4,4,n+5,1);"
+            "specials(&d8,8,n+6,1);specials(&x,1,n+7,0);specials(&y,1,n+8,1);long double l=(long double)y;"
+            "ALL(floor)ALL(ceil)ALL(trunc)ALL(rint)ALL(nearbyint)ALL(roundeven)ALL(round)ALL(canonicalize)"
+            "L(floor)L(ceil)L(trunc)L(rint)L(nearbyint)L(roundeven)L(round)"
+            "return (int)h;}",
+        },
+        {
+            // copysign and the maximum and minimum functions of floats and doubles at each width and of scalars, of
+            // inputs with zeros of both signs, infinities and NaNs among them, an operand against itself too; and maxnum
+            // and minnum of long doubles (fmaxl and fminl).
+            "vector-floating-minmax",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "#define B(f,v,w) {__typeof__(v) r=__builtin_elementwise_##f(v,w);FOLD(r);}\n"
+            "#define ALL(f) B(f,a2,b2)B(f,a4,b4)B(f,a8,b8)B(f,a16,b16)B(f,d2,e2)B(f,d4,e4)B(f,d8,e8)B(f,x,u)B(f,y,v)B(f,a4,a4)B(f,d2,d2)B(f,b8,a8)\n"
+            "int tested(int n){unsigned h=2166136261u;v2sf a2,b2;v4sf a4,b4;v8sf a8,b8;v16sf a16,b16;v2df d2,e2;v4df d4,e4;v8df d8,e8;float x,u;double y,v;"
+            "specials(&a2,2,n,0);specials(&b2,2,n+1,0);specials(&a4,4,n+2,0);specials(&b4,4,n+3,0);specials(&a8,8,n+4,0);specials(&b8,8,n+5,0);"
+            "specials(&a16,16,n+6,0);specials(&b16,16,n+7,0);specials(&d2,2,n+8,1);specials(&e2,2,n+9,1);specials(&d4,4,n+10,1);specials(&e4,4,n+11,1);"
+            "specials(&d8,8,n+12,1);specials(&e8,8,n+13,1);specials(&x,1,n+14,0);specials(&u,1,n+15,0);specials(&y,1,n+16,1);specials(&v,1,n+17,1);"
+            "ALL(copysign)ALL(maxnum)ALL(minnum)ALL(maximum)ALL(minimum)ALL(maximumnum)ALL(minimumnum)"
+            "long double l=(long double)y,m=(long double)v,r=__builtin_elementwise_maxnum(l,m),s=__builtin_elementwise_minnum(l,m);LFOLD(r);LFOLD(s);"
+            "return (int)h;}",
+        },
+        {
+            // The functions clang's code calls the C library for, an element at a time: of floats and doubles at each
+            // width, and of float, double and long double scalars, with errno after each scalar's call (a vector's
+            // calls are in clang's scheduler's order, which the code around them changes: errno after them is
+            // unspecified).
+            "vector-floating-library",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "extern int*__errno_location(void);\n"
+            "#define U(f,v) {__typeof__(v) r=__builtin_elementwise_##f(v);FOLD(r);}\n"
+            "#define B(f,v,w) {__typeof__(v) r=__builtin_elementwise_##f(v,w);FOLD(r);}\n"
+            "#define E(T,c,F) {*__errno_location()=0;T r=c;F(r);int e=*__errno_location();FOLD(e);}\n"
+            "#define ALL1(f) U(f,a2)U(f,a4)U(f,a8)U(f,a16)U(f,d2)U(f,d4)U(f,d8)E(float,__builtin_elementwise_##f(x),FOLD)"
+            "E(double,__builtin_elementwise_##f(y),FOLD)E(long double,__builtin_elementwise_##f(l),LFOLD)\n"
+            "#define ALL2(f) B(f,a2,b2)B(f,a4,b4)B(f,a8,b8)B(f,a16,b16)B(f,d2,e2)B(f,d4,e4)B(f,d8,e8)E(float,__builtin_elementwise_##f(x,u),FOLD)"
+            "E(double,__builtin_elementwise_##f(y,v),FOLD)E(long double,__builtin_elementwise_##f(l,m),LFOLD)\n"
+            "int tested(int n){unsigned h=2166136261u;v2sf a2,b2;v4sf a4,b4;v8sf a8,b8;v16sf a16,b16;v2df d2,e2;v4df d4,e4;v8df d8,e8;float x,u;double y,v;"
+            "specials(&a2,2,n,0);specials(&b2,2,n+1,0);specials(&a4,4,n+2,0);specials(&b4,4,n+3,0);specials(&a8,8,n+4,0);specials(&b8,8,n+5,0);"
+            "specials(&a16,16,n+6,0);specials(&b16,16,n+7,0);specials(&d2,2,n+8,1);specials(&e2,2,n+9,1);specials(&d4,4,n+10,1);specials(&e4,4,n+11,1);"
+            "specials(&d8,8,n+12,1);specials(&e8,8,n+13,1);specials(&x,1,n+14,0);specials(&u,1,n+15,0);specials(&y,1,n+16,1);specials(&v,1,n+17,1);"
+            "long double l=(long double)y,m=(long double)v;"
+            "ALL1(acos)ALL1(asin)ALL1(atan)ALL1(cos)ALL1(cosh)ALL1(exp)ALL1(exp10)ALL1(exp2)ALL1(log)ALL1(log10)ALL1(log2)ALL1(sin)ALL1(sinh)"
+            "ALL1(tan)ALL1(tanh)ALL2(atan2)ALL2(fmod)ALL2(pow)"
+            "return (int)h;}",
+        },
+        {
+            // ldexp of floats and doubles at each width by vectors of 8-, 16-, 32- and 64-bit exponents of either
+            // signedness (their bits taken as signed), and of scalars by each integer type's exponent (promoted, then as
+            // the signed integer of its width) and of long doubles by int's: small exponents, and ones far past the
+            // formats' ranges.
+            "vector-ldexp",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "typedef unsigned char v4qu __attribute__((vector_size(4)));typedef unsigned short v4hu __attribute__((vector_size(8)));\n"
+            "static void exps(void*p,unsigned long n,unsigned s,int bytes){static const long long big[]={0,1,-1,127,-128,1000,-1000,32767,-32768,"
+            "2147483647,-2147483647-1,4294967295ll,-4294967296ll};for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;unsigned k=(s>>16)%20;"
+            "long long v=k<13?big[k]:(long long)((s>>8)%321)-160;__builtin_memcpy((char*)p+i*bytes,&v,bytes);}}\n"
+            "#define E(v,e) {__typeof__(v) r=__builtin_elementwise_ldexp(v,e);FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;v2sf a2;v4sf a4;v8sf a8;v16sf a16;v2df d2;v4df d4;v8df d8;float x;double y;"
+            "specials(&a2,2,n,0);specials(&a4,4,n+1,0);specials(&a8,8,n+2,0);specials(&a16,16,n+3,0);specials(&d2,2,n+4,1);specials(&d4,4,n+5,1);"
+            "specials(&d8,8,n+6,1);specials(&x,1,n+7,0);specials(&y,1,n+8,1);long double l=(long double)y;"
+            "v2ss i2;v4ss i4;v8ss i8;v16ss i16;v4su u4;v4hs w4;v4hu z4;v8hs w8;v16hs w16;v4qs c4;v4qu k4;v8qs c8;v16qs c16;v2ds q2;v4ds q4;v8ds q8;"
+            "exps(&i2,2,n,4);exps(&i4,4,n+1,4);exps(&i8,8,n+2,4);exps(&i16,16,n+3,4);exps(&u4,4,n+4,4);exps(&w4,4,n+5,2);exps(&z4,4,n+6,2);"
+            "exps(&w8,8,n+7,2);exps(&w16,16,n+8,2);exps(&c4,4,n+9,1);exps(&k4,4,n+10,1);exps(&c8,8,n+11,1);exps(&c16,16,n+12,1);exps(&q2,2,n+13,8);"
+            "exps(&q4,4,n+14,8);exps(&q8,8,n+15,8);"
+            "E(a2,i2)E(a2,q2)E(a4,i4)E(a4,u4)E(a4,w4)E(a4,z4)E(a4,c4)E(a4,k4)E(a4,q4)E(a8,i8)E(a8,w8)E(a8,c8)E(a8,q8)E(a16,i16)E(a16,w16)E(a16,c16)"
+            "E(d2,i2)E(d2,q2)E(d4,i4)E(d4,u4)E(d4,w4)E(d4,c4)E(d4,q4)E(d8,i8)E(d8,w8)E(d8,c8)E(d8,q8)"
+            "int ei=i4[0];unsigned eu=u4[1];short es=w4[2];unsigned char ec=k4[3];long el=q2[0];unsigned long ev=(unsigned long)q2[1];_Bool eb=n&1;"
+            "E(x,ei)E(x,eu)E(x,es)E(x,ec)E(x,el)E(x,ev)E(x,eb)E(y,ei)E(y,eu)E(y,el)E(y,ev)E(y,es)"
+            "{long double r=__builtin_elementwise_ldexp(l,ei);LFOLD(r);}{long double r=__builtin_elementwise_ldexp(l,es);LFOLD(r);}"
+            "{long double r=__builtin_elementwise_ldexp(l,eu);LFOLD(r);}"
+            "return (int)h;}",
+        },
+        {
+            // The floating reductions of floats and doubles at each width: maximum and minimum, the sum in any order
+            // (clang's tree) without a start value and with one of the vector's type and of another, and the sum in
+            // order from a start value.
+            "vector-floating-reductions",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "#define RF(f,v) {float r=__builtin_reduce_##f(v);FOLD(r);}\n"
+            "#define RD(f,v) {double r=__builtin_reduce_##f(v);FOLD(r);}\n"
+            "#define SF(f,v,s) {float r=__builtin_reduce_##f(v,s);FOLD(r);}\n"
+            "#define SD(f,v,s) {double r=__builtin_reduce_##f(v,s);FOLD(r);}\n"
+            "#define ALL(f) RF(f,a2)RF(f,a4)RF(f,a8)RF(f,a16)RD(f,d2)RD(f,d4)RD(f,d8)\n"
+            "#define START(f) SF(f,a2,x)SF(f,a4,x)SF(f,a8,y)SF(f,a16,x)SD(f,d2,y)SD(f,d4,x)SD(f,d8,y)\n"
+            "int tested(int n){unsigned h=2166136261u;v2sf a2;v4sf a4;v8sf a8;v16sf a16;v2df d2;v4df d4;v8df d8;float x;double y;"
+            "for(int round=0;round<2;round++){if(round){modest(&a2,2,n,0,0);modest(&a4,4,n+1,0,0);modest(&a8,8,n+2,0,0);modest(&a16,16,n+3,0,0);"
+            "modest(&d2,2,n+4,1,0);modest(&d4,4,n+5,1,0);modest(&d8,8,n+6,1,0);}else{specials(&a2,2,n,0);specials(&a4,4,n+1,0);specials(&a8,8,n+2,0);"
+            "specials(&a16,16,n+3,0);specials(&d2,2,n+4,1);specials(&d4,4,n+5,1);specials(&d8,8,n+6,1);}specials(&x,1,n+7,0);specials(&y,1,n+8,1);"
+            "ALL(maximum)ALL(minimum)ALL(assoc_fadd)START(assoc_fadd)START(in_order_fadd)}"
+            "return (int)h;}",
+        },
+        {
+            // Reductions of vectors their elements don't fill (ext_vector_type's of 3, 5, 6, 7, 10 and 12 elements, padded
+            // to a power of two), every byte of them written first, the padding's too: those lanes take no part, as
+            // clang's code gives them the operation's identity. The integer ones and the floating sums: a floating maximum
+            // or minimum of such a vector is refused by name (check_test_program_vector_builtin_refusals).
+            "vector-padded-reductions",
+            BUSTER_CHECK_TEST_FLOATING_TYPES
+            BUSTER_CHECK_TEST_FLOATING_SPECIALS
+            "typedef signed char c3 __attribute__((ext_vector_type(3)));typedef unsigned char u10 __attribute__((ext_vector_type(10)));"
+            "typedef short s6 __attribute__((ext_vector_type(6)));typedef unsigned short w7 __attribute__((ext_vector_type(7)));"
+            "typedef int i3 __attribute__((ext_vector_type(3)));typedef unsigned u5 __attribute__((ext_vector_type(5)));"
+            "typedef long long l3 __attribute__((ext_vector_type(3)));typedef unsigned long long q5 __attribute__((ext_vector_type(5)));"
+            "typedef float f3 __attribute__((ext_vector_type(3)));typedef float f7 __attribute__((ext_vector_type(7)));"
+            "typedef float f12 __attribute__((ext_vector_type(12)));typedef double e3 __attribute__((ext_vector_type(3)));"
+            "typedef double e5 __attribute__((ext_vector_type(5)));\n"
+            "#define R(f,v) {__typeof__(v[0]) r=__builtin_reduce_##f(v);FOLD(r);}\n"
+            "#define INT(v) R(add,v)R(mul,v)R(and,v)R(or,v)R(xor,v)R(min,v)R(max,v)\n"
+            "#define SUM(v) R(assoc_fadd,v){__typeof__(v[0]) r=__builtin_reduce_assoc_fadd(v,1.5f);FOLD(r);}\n"
+            "int tested(int n){unsigned h=2166136261u;c3 a;u10 b;s6 c;w7 d;i3 e;u5 f;l3 g;q5 k;f3 x;f7 y;f12 z;e3 p;e5 q;"
+            "fill(&a,sizeof a,n);fill(&b,sizeof b,n+1);fill(&c,sizeof c,n+2);fill(&d,sizeof d,n+3);fill(&e,sizeof e,n+4);fill(&f,sizeof f,n+5);"
+            "fill(&g,sizeof g,n+6);fill(&k,sizeof k,n+7);INT(a)INT(b)INT(c)INT(d)INT(e)INT(f)INT(g)INT(k)"
+            "for(int round=0;round<2;round++){if(round){modest(&x,sizeof x/4,n+8,0,0);modest(&y,sizeof y/4,n+9,0,0);modest(&z,sizeof z/4,n+10,0,0);"
+            "modest(&p,sizeof p/8,n+11,1,0);modest(&q,sizeof q/8,n+12,1,0);}else{specials(&x,sizeof x/4,n+8,0);specials(&y,sizeof y/4,n+9,0);"
+            "specials(&z,sizeof z/4,n+10,0);specials(&p,sizeof p/8,n+11,1);specials(&q,sizeof q/8,n+12,1);}SUM(x)SUM(y)SUM(z)SUM(p)SUM(q)}"
+            "return (int)h;}",
+        },
+        {
+            // Bit reversal and the integer functions past the 23 observed spellings: trailing zero counts (of nonzero
+            // elements alone with one operand, which clang leaves undefined for zero, and with zeros among them with
+            // two), bit deposits and extractions, of every element size at each width, and xor reductions.
+            "vector-integer-bits",
+            "typedef unsigned char v4qu __attribute__((vector_size(4)));typedef unsigned char v8qu __attribute__((vector_size(8)));"
+            "typedef unsigned short v2hu __attribute__((vector_size(4)));typedef unsigned short v4hu __attribute__((vector_size(8)));"
+            "typedef unsigned v2su __attribute__((vector_size(8)));\n"
+            "#define U(f,v) {__typeof__(v) r=__builtin_elementwise_##f(v);FOLD(r);}\n"
+            "#define B(f,v,w) {__typeof__(v) r=__builtin_elementwise_##f(v,w);FOLD(r);}\n"
+            "#define X(v) {__typeof__(v[0]) r=__builtin_reduce_xor(v);FOLD(r);}\n"
+            "#define T(v,m) {__typeof__(v) a=v|m;__typeof__(v) r=__builtin_elementwise_ctzg(a);FOLD(r);__typeof__(v) z=v&w##v;z[0]=0;"
+            "__typeof__(v) s=__builtin_elementwise_ctzg(z,w##v);FOLD(s);}\n"
+            "#define EACH(M) M(b4)M(b8)M(b16)M(b32)M(b64)M(s2)M(s4)M(s8)M(s16)M(s32)M(i2)M(i4)M(i8)M(i16)M(q2)M(q4)M(q8)\n"
+            "#define REV(v) U(bitreverse,v)\n"
+            "#define DEP(v) B(pdep,v,w##v)B(pext,v,w##v)B(pdep,w##v,v)\n"
+            "#define XOR(v) X(v)\n"
+            "int tested(int n){unsigned h=2166136261u;v4qu b4,wb4;v8qu b8,wb8;v16qu b16,wb16;v32qu b32,wb32;v64qu b64,wb64;v2hu s2,ws2;v4hu s4,ws4;"
+            "v8hu s8,ws8;v16hu s16,ws16;v32hu s32,ws32;v2su i2,wi2;v4su i4,wi4;v8su i8,wi8;v16su i16,wi16;v2du q2,wq2;v4du q4,wq4;v8du q8,wq8;"
+            "fill(&b4,4,n);fill(&wb4,4,n+1);fill(&b8,8,n+2);fill(&wb8,8,n+3);fill(&b16,16,n+4);fill(&wb16,16,n+5);fill(&b32,32,n+6);fill(&wb32,32,n+7);"
+            "fill(&b64,64,n+8);fill(&wb64,64,n+9);fill(&s2,4,n+10);fill(&ws2,4,n+11);fill(&s4,8,n+12);fill(&ws4,8,n+13);fill(&s8,16,n+14);fill(&ws8,16,n+15);"
+            "fill(&s16,32,n+16);fill(&ws16,32,n+17);fill(&s32,64,n+18);fill(&ws32,64,n+19);fill(&i2,8,n+20);fill(&wi2,8,n+21);fill(&i4,16,n+22);"
+            "fill(&wi4,16,n+23);fill(&i8,32,n+24);fill(&wi8,32,n+25);fill(&i16,64,n+26);fill(&wi16,64,n+27);fill(&q2,16,n+28);fill(&wq2,16,n+29);"
+            "fill(&q4,32,n+30);fill(&wq4,32,n+31);fill(&q8,64,n+32);fill(&wq8,64,n+33);"
+            "EACH(REV)EACH(DEP)EACH(XOR)"
+            "T(b4,0x80)T(b8,0x80)T(b16,0x80)T(b32,0x80)T(b64,0x80)T(s2,0x8000)T(s4,0x8000)T(s8,0x8000)T(s16,0x8000)T(s32,0x8000)"
+            "T(i2,0x80000000u)T(i4,0x80000000u)T(i8,0x80000000u)T(i16,0x80000000u)T(q2,1ull<<63)T(q4,1ull<<63)T(q8,1ull<<63)"
+            "{v16qs t=__builtin_elementwise_bitreverse((v16qs)b16);FOLD(t);v8ds c=__builtin_elementwise_ctzg((v8ds)q8|1);FOLD(c);"
+            "v8hs e=__builtin_elementwise_pext((v8hs)s8,(v8hs)ws8);FOLD(e);}"
+            "return (int)h;}",
+        },
+        {
             "vector-nondeterministic",
             "int tested(int n){unsigned h=2166136261u;v8ds a;fill(&a,64,n);v8ds z=__builtin_nondeterministic_value(a);for(int i=0;i<8;i++)z[i]=(long long)i*n;FOLD(z);"
             "int k=__builtin_nondeterministic_value(n);k=n+1;FOLD(k);"
@@ -458,6 +641,60 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, target, native);
             free(source);
         }
+    }
+    // #934's review: a libm builtin of a wide vector calls the C library's function once an element, which the lowering's
+    // tables have room for whatever the unit's other code: 64 nested __builtin_elementwise_sin of a 64-byte float vector,
+    // 1,024 calls, and 64 of __builtin_elementwise_pow's two operands, a unit of its own.
+    char nested[8192];
+    int at = snprintf(nested, sizeof(nested), "%s" BUSTER_CHECK_TEST_FLOATING_TYPES "v16sf nested(v16sf x){return ", check_test_vector_builtin_types);
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, "__builtin_elementwise_sin(");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ? snprintf(nested + at, sizeof(nested) - (size_t)at, "x") : 0;
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, ")");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ? snprintf(nested + at, sizeof(nested) - (size_t)at, ";}v16sf powers(v16sf x){v16sf y=x;") : 0;
+    for (uint32_t i = 0; i < 64 && at > 0 && (size_t)at < sizeof(nested); i += 1)
+    {
+        at += snprintf(nested + at, sizeof(nested) - (size_t)at, "y=__builtin_elementwise_pow(y,x);");
+    }
+    at += at > 0 && (size_t)at < sizeof(nested) ?
+              snprintf(nested + at, sizeof(nested) - (size_t)at,
+                       "return y;}int tested(int n){unsigned h=2166136261u;v16sf v;for(int i=0;i<16;i++)v[i]=(float)(n+i)*0.125f;"
+                       "v16sf s=nested(v);FOLD(s);v16sf w;for(int i=0;i<16;i++)w[i]=1.0f+(float)((n+i)&3)*0.001f;v16sf p=powers(w);FOLD(p);return (int)h;}") :
+              0;
+    check_test_expect(test, at > 0 && (size_t)at < sizeof(nested), "the nested libm calls' source fits");
+    if (at > 0 && (size_t)at < sizeof(nested))
+    {
+        check_test_program_source_native_limits(test, nested, "vector-nested-libm-calls", clang, false, -1, 0, target, run_native);
+    }
+    // #934's review: __builtin_elementwise_round under FENV_ACCESS is the C library's round, an element at a time, as
+    // clang's constrained round is, right in each of MXCSR's rounding modes, which the caller sets: the rows' expansion
+    // adds the half below 0.5 in MXCSR's mode, so 0.5 rounds to 0 under FE_DOWNWARD. Each mode's results and its
+    // exception flags, cleared before the calls, by each width of a float and of a double.
+    static const char strict_round[] = BUSTER_CHECK_TEST_FLOATING_TYPES
+        "#pragma STDC FENV_ACCESS ON\n"
+        "static float round_f(float x){return __builtin_elementwise_round(x);}static double round_d(double x){return __builtin_elementwise_round(x);}"
+        "static v4sf round_v4(v4sf x){return __builtin_elementwise_round(x);}static v16sf round_v16(v16sf x){return __builtin_elementwise_round(x);}"
+        "static v8df round_w(v8df x){return __builtin_elementwise_round(x);}"
+        "int tested(int n){unsigned h=2166136261u;unsigned saved;__asm__ volatile(\"stmxcsr %0\" : \"=m\"(saved));"
+        "for(unsigned mode=0;mode<4;mode++){unsigned m=(saved&~0x603fu)|(mode<<13);__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(m));"
+        "float f=round_f(0.5f+(float)(n&1));FOLD(f);double d=round_d(-2.5+(double)(n&3));FOLD(d);"
+        "v4sf q;v16sf v;v8df w;for(int i=0;i<4;i++)q[i]=(float)i+0.5f;for(int i=0;i<16;i++)v[i]=(float)(i-8)*0.5f+(float)(n&1)*0.25f;"
+        "for(int i=0;i<8;i++)w[i]=(double)(i-4)*0.5+(double)(n&3)*0.125;"
+        "v4sf rq=round_v4(q);FOLD(rq);v16sf rv=round_v16(v);FOLD(rv);v8df rw=round_w(w);FOLD(rw);"
+        "unsigned after;__asm__ volatile(\"stmxcsr %0\" : \"=m\"(after));after&=0x3fu;FOLD(after);}"
+        "__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(saved));return (int)h;}";
+    char* strict = malloc(strlen(check_test_vector_builtin_types) + sizeof(strict_round));
+    check_test_expect(test, strict != 0, "the strict round program's source");
+    if (strict != 0)
+    {
+        snprintf(strict, strlen(check_test_vector_builtin_types) + sizeof(strict_round), "%s%s", check_test_vector_builtin_types, strict_round);
+        check_test_program_source_native_limits(test, strict, "vector-strict-round", clang, false, -1, 0, target, run_native);
+        free(strict);
     }
     if (run_native && !has_mwaitx)
     {
@@ -536,7 +773,7 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int x){return __builtin_elementwise_abs(x);}", "elementwise builtins of scalars", 0 },
         { "x86-64", "float tested(float x){return __builtin_elementwise_sqrt(x);}", "elementwise builtins of scalars without AVX-512F", 0 },
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
-          "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, _Complex _Float16 and vectors", 0 },
+          "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
         { "znver5", "int tested(int n){v8hs a={(short)n};v8hs c=__builtin_elementwise_clzg(a);return c[0];}",
           "vector leading zero counts of 8- and 16-bit elements", 2 },
@@ -544,10 +781,47 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "saturating vector arithmetic of 32- and 64-bit elements", 3 },
         { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
           "elementwise vector builtins of floating elements", 3 },
-        { "znver5", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal", 2 },
-        { "znver5", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}",
-          "vector bit reversal of bytes without AVX512-BMM", 2 },
+        { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_bitreverse(a);return (int)c[0];}", "vector bit reversal without GFNI", 2 },
+        { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_bitreverse(a);return c[0];}", "vector bit reversal without GFNI",
+          2 },
+        { "znver5", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
+          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
+        { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
+          "vector carry-less multiplication, whose VPCLMULQDQ no Tier 0 row takes", 3 },
+        { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_ctzg(a);return c[0];}",
+          "vector trailing zero counts of 8- and 16-bit elements without AVX-512 BITALG", 2 },
+        { "x86-64-v4", "int tested(int n){v4su a={(unsigned)n};v4su c=__builtin_elementwise_ctzg(a);return (int)c[0];}",
+          "vector trailing zero counts of 32- and 64-bit elements without AVX-512 VPOPCNTDQ", 2 },
+        { "znver5", "int tested(int n){return __builtin_elementwise_ctzg(n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "unsigned tested(unsigned n){return __builtin_elementwise_pdep(n,n);}", "elementwise builtins of scalars", 0 },
+        { "znver5", "void tested(v8hf* p){*p=__builtin_elementwise_floor(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
+        { "znver5", "void tested(v8bf* p){*p=__builtin_elementwise_sin(*p);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
+        { "znver5", "void tested(v8hf* p,v8hf* q){*p=__builtin_elementwise_maximum(*p,*q);}", "elementwise vector builtins of half-precision or bf16 elements", 0 },
+        { "znver5", "_Float16 tested(_Float16 x){return __builtin_elementwise_sin(x);}", "elementwise builtins of half-precision, bf16 or __float128 values", 0 },
+        { "znver5", "_Float16 tested(_Float16 x){return __builtin_elementwise_ceil(x);}", "elementwise builtins of half-precision, bf16 or __float128 values", 0 },
+        { "znver5", "long double tested(long double x,long double y){return __builtin_elementwise_copysign(x,y);}",
+          "elementwise builtins of long double values that clang computes with x87 instructions", 0 },
+        { "znver5", "long double tested(long double x){return __builtin_elementwise_canonicalize(x);}",
+          "elementwise builtins of long double values that clang computes with x87 instructions", 0 },
+        { "znver5", "long double tested(long double x,long n){return __builtin_elementwise_ldexp(x,n);}",
+          "elementwise builtins of long double values that clang computes with x87 instructions", 0 },
+        { "znver5", "float tested(float x,__int128 n){return __builtin_elementwise_ldexp(x,n);}", "ldexp of exponents wider than 64 bits", 0 },
+        { "x86-64", "float tested(float x){return __builtin_elementwise_floor(x);}", "elementwise builtins of scalars without AVX-512F", 0 },
+        { "x86-64", "double tested(double x,double y){return __builtin_elementwise_maximum(x,y);}", "elementwise builtins of scalars without AVX-512F", 0 },
+        { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_maximum(*p);}", "vector reductions of half-precision or bf16 elements", 0 },
+        { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_in_order_fadd(*p,(_Float16)0);}", "vector reductions of half-precision or bf16 elements", 0 },
+        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
+                    "void tested(b4* m,float* p,e4* r){*r=__builtin_masked_load(*m,p);}",
+          "masked vector memory builtins, whose masks are vectors of bools", 0 },
+        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
+                    "void tested(b4* m,float* p,e4* v){__builtin_masked_scatter(*m,(v4ss){0,1,2,3},*v,p);}",
+          "masked vector memory builtins, whose masks are vectors of bools", 0 },
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
+        // A floating maximum or minimum of a vector its elements don't fill, which LLVM reduces in an order of its width's.
+        { "znver5", "typedef float f7 __attribute__((ext_vector_type(7)));int tested(int n){f7 a={(float)n};float c=__builtin_reduce_minimum(a);return (int)c;}",
+          "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
+        { "znver5", "typedef double e3 __attribute__((ext_vector_type(3)));int tested(int n){e3 a={(double)n};double c=__builtin_reduce_maximum(a);return (int)c;}",
+          "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements without XOP", 3 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshr(a,b,b);return c[0];}",
@@ -645,7 +919,8 @@ static __attribute__((noinline)) void check_test_program_vector_builtins(CheckTe
         // The features the programs' rows take, which the host must have and save to run them.
         const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) |
                                   BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512VBMI) |
-                                  BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
+                                  BUSTER_X86_FEATURE(AVX512VBMI2) | BUSTER_X86_FEATURE(AVX512BITALG) | BUSTER_X86_FEATURE(AVX512VPOPCNTDQ) |
+                                  BUSTER_X86_FEATURE(GFNI) | BUSTER_X86_FEATURE(BMI2);
         const X86Target native = x86_target_native();
         const bool run_native = (native.features & required) == required;
         if (!run_native)

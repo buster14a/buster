@@ -101,13 +101,13 @@ unset CPATH C_INCLUDE_PATH
 # #129: each source the checker accepts is written as -c writes it, and must define what clang -O0 -c's object
 # does, but for the four documented reasons (docs/c-lowering.md); a file the backend refuses is counted with the
 # feature it names. Its acceptance against clang -fsyntax-only is compared too, as for any corpus. These eight
-# directories' 354 files that the backend lowers, with every explained difference of musl's (math's), must all
+# directories' 542 files that the backend lowers, with every explained difference of musl's (math's), must all
 # be compared: a backend that came to refuse them would otherwise pass by comparing none.
 unset CPATH C_INCLUDE_PATH
 export SOURCE_DATE_EPOCH=1792454400
 corpus=$BUSTER_CORPUS
 musl="$corpus/libc/musl"
-./build/compiler test-checker-corpus --clang clang --symbols-minimum 354 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+./build/compiler test-checker-corpus --clang clang --symbols-minimum 542 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
   -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
   "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
 == Compare main.c's checking and its functions and objects with clang's
@@ -202,6 +202,7 @@ rm -r "$objects"
 ./build/compiler test-ir
 ./build/compiler test-ir-simd
 ./build/compiler test-ir-lowering
+./build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c
 ./build/compiler test-ir-parse
 ./build/compiler test-ir-reduce
 ./build/compiler test-ir-metamorphic --seed 731 --count 6

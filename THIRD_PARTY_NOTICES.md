@@ -17,6 +17,23 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The VECTOR/X86 typed adapter integration, sparse shared-interpreter SIMD storage,
+`ir_simd_lower_test.c`, `ir_interpreter_simd_test.c` and the real-C
+`tests/ir/vector-i32.c` fixture (#732) are original project material under the
+default terms. They consume this repository's #717 producer, exact-form semantic
+decoder and existing IR/action-model contracts. The independent lane expectations
+are ordinary C arithmetic; no external implementation, fixtures or metadata are
+imported. Native Tier 0 runs are a separate gated execution oracle.
+
+`c_builtin_intrinsic_filter.c`, `c_builtin_intrinsic_filter_hash.h`,
+`c_builtin_intrinsic_filter_test.c` and `tools/generate_builtin_intrinsic_filter.c`
+(#893) are original project code under the default terms. The generated
+`generated/clang_builtin_intrinsic_filter_23_1_1.inc` is a projection of the
+existing reviewed Clang metadata's LLVM name facts and retains its
+Apache-2.0 WITH LLVM-exception terms and provenance. No external implementation
+is imported. Exact initial input and reproduction are recorded in
+`docs/builtin-intrinsic-filter.md`; the underlying LLVM notices remain applicable.
+
 The AMX value transport, per-unit instruction leaves and original oracle fixtures
 in `c_builtin_amx_helpers.c`, `c_builtin_amx_leaves.inc`,
 `c_check_program_amx_test.c` and their lowering/target integration (#126, #136,
@@ -441,7 +458,9 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
   `-fshort-wchar` and `-fdefine-target-os-macros`.
 
 SQLite, musl, Lua and the system's headers are test oracle inputs only (the
-tests read them where they are installed): none of their code is included.
+tests read them where they are installed): none of their code is included, but
+for the copies of musl's code in the history of #929, which the next section
+describes.
 
 The `ext_vector_type` attribute-table entry was added for the frozen #125
 corpus after querying Clang 23.1.1 (the recorded 9700X reference) in C99,
@@ -451,6 +470,37 @@ inputs and queries are described in `docs/preprocessor-oracle.md`; the entry
 retains the existing LLVM terms. The pragma-printer correction follows
 observable Clang 23.1.1 behavior, with its source references recorded there;
 no Clang or corpus implementation is copied.
+
+## musl, in #929's history (#147)
+
+[#929](https://github.com/buster14a/buster/pull/929)'s first commits
+(`dfb9aca9`, `659883cf` and `6a210867`, and `07a5ae89` after them) held native
+fixtures in `src/buster/compiler/c_check_program_asm_test.c` that copied musl
+1.2.5's code, as Zig 0.14.1's `lib/libc` tree has it (the frozen corpus of
+[the preprocessor oracle](docs/preprocessor-oracle.md)), with local changes
+(names, test harness, compared results):
+
+- `arch/x86_64/atomic_arch.h`'s `a_cas`, `a_cas_p`, `a_swap`, `a_fetch_add`,
+  `a_inc`, `a_dec`, `a_and`, `a_or`, `a_and_64`, `a_or_64`, `a_store`,
+  `a_spin`, `a_crash`, `a_ctz_64` and `a_clz_64`;
+- `arch/x86_64/pthread_arch.h`'s `__get_tp`;
+- `arch/x86_64/syscall_arch.h`'s `__syscall0`, `__syscall2`, `__syscall4`,
+  `__syscall5` and `__syscall6`;
+- `src/math/x86_64`'s `fabs`, `fabsf`, `fabsl`, `fma`, `fmaf`, `sqrt`,
+  `sqrtf`, `sqrtl`, `rintl`, `fmodl`, `remainderl`, `remquol`, `lrint`,
+  `lrintf`, `lrintl` and `llrintl`.
+
+musl is **Copyright © 2005-2020 Rich Felker, et al.**, under the standard MIT
+license, and its x86_64 port, by Nicholas J. Kain, is under the same terms.
+Its `COPYRIGHT` file at that release (SHA-256
+`f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af`, the same
+in Zig 0.14.1's tree) is retained verbatim as
+[LICENSES/musl.txt](LICENSES/musl.txt), for those copies, which the pull
+request's history keeps. They are not first-party material.
+
+`ae10833c` replaced them with programs of the test's own in the shapes of
+musl's: they exercise the same instructions, constraints and operand shapes,
+and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
 
@@ -521,3 +571,13 @@ and helper records without importing implementation. The intrinsic query also
 instantiates the already-reviewed
 `generated/clang_builtin_own_main_23_1_1.inc` name inventory; that file's LLVM
 provenance and license remain unchanged. No new upstream data was imported.
+
+### Implicit library declarations (#804)
+
+The original `c_check_implicit_input.c`, `c_check_implicit_library_test.c` and
+related declaration, option and diagnostic changes use the existing frozen
+Clang 23.1.1 builtin catalogue; its provenance and licensing are unchanged.
+Clang 23.1.4 was run externally on original fixtures as a diagnostic, type
+and execution oracle. `Builtins.cpp`, `SemaDecl.cpp`, `ASTContext.cpp`,
+`CompilerInvocation.cpp` and driver `Clang.cpp` at `llvmorg-23.1.4` were read
+as behavior references. No LLVM implementation or test fixtures were copied.

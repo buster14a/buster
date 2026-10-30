@@ -484,9 +484,14 @@ static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* tes
             1, 0, 1, { 0 }, true,
         },
         {
-            "unrepresented reference descriptor stays unsupported",
-            "void f(void){__addressof(0);}\n",
+            "unrepresented intrinsic reference descriptor stays unsupported",
+            "void f(void){__builtin_addressof(0);}\n",
             1, 0, 1, { 0 }, true,
+        },
+        {
+            "C++ library names are left to ordinary C declarations, not intrinsic descriptors",
+            "void f(void){__addressof(0);}\n",
+            0, 0, 0, { 0 }, true,
         },
         {
             "near spellings are exact misses",

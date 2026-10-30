@@ -71,6 +71,10 @@ struct IrInterpreterTestNumber
 static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const IrInterpreterTestNumber cases[] = {
+        { IR_NOT, IR_M8, IR_M8, { 1, 0 }, { 0, 0 }, 0, { 254, 0 }, INTERPRETER_OK, "m8 complement stays bounded" },
+        { IR_NOT, IR_M16, IR_M16, { 1, 0 }, { 0, 0 }, 0, { 65534, 0 }, INTERPRETER_OK, "m16 complement stays bounded" },
+        { IR_XOR, IR_M32, IR_M32, { UINT32_MAX, 0 }, { 1, 0 }, 0, { UINT32_MAX - 1, 0 }, INTERPRETER_OK, "m32 logic stays bounded" },
+        { IR_AND, IR_M64, IR_M64, { UINT64_MAX, 0 }, { UINT64_C(1) << 63, 0 }, 0, { UINT64_C(1) << 63, 0 }, INTERPRETER_OK, "m64 logic retains bit 63" },
         { IR_ADD, IR_I128, IR_I128, { UINT64_MAX, UINT64_MAX }, { 1, 0 }, 0, { 0, 0 }, INTERPRETER_OK, "i128 addition wraps" },
         { IR_SUB, IR_I128, IR_I128, { 0, 0 }, { 1, 0 }, 0, { UINT64_MAX, UINT64_MAX }, INTERPRETER_OK, "i128 subtraction wraps" },
         { IR_MUL, IR_I128, IR_I128, { 0, 1ull << 63 }, { 2, 0 }, 0, { 0, 0 }, INTERPRETER_OK, "i128 multiplication wraps" },
@@ -748,6 +752,7 @@ static void ir_interpreter_test_generated(IrInterpreterTestTally* tally, uint64_
 }
 
 #include "buster/compiler/ir_interpreter_abi_test.c"
+#include "buster/compiler/ir_interpreter_simd_test.c"
 
 static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** argv)
 {
@@ -787,6 +792,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
         ir_interpreter_test_expect(&tally, memory.base != 0 && execution.base != 0, "fixture arenas");
         if (memory.base != 0 && execution.base != 0)
         {
+            ir_interpreter_test_simd(&tally, &memory, &execution);
             ir_interpreter_test_numbers(&tally, &memory, &execution);
             ir_interpreter_test_control(&tally, &memory, &execution);
             ir_interpreter_test_dominance(&tally, &memory, &execution);

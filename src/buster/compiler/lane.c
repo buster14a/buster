@@ -59,6 +59,8 @@
 #include <limits.h>
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 
 // OS-dependent includes
 #include <pthread.h>
@@ -473,15 +475,17 @@ static bool arena_test_reservation_allowed(uint64_t bytes)
 #endif
 
 // What the process's lanes keep (#905): the threads the compiler has created in it (a session's, a team's and a cold
-// group's, joined or not), for the tests' accounting; and a test's hook, in every build: a session's lane of index
-// `fail_at` fails to be created, as pthread_create fails when the process may start no more threads (UINT32_MAX for
-// none). Process-wide, as main.c's units share it, and in .data rather than .bss, as its initializer isn't zero: the
-// first write to a 2 MB region of the executable's .bss clears a transparent huge page, which a compile that touched
-// nothing else there paid for (2 MB of peak RSS, on the 9700X).
+// group's, joined or not), for the tests' accounting; and two tests' hooks, in every build: a directory of CPU topology
+// files that lane_core_count reads in place of sysfs' (0 for sysfs'), and a session's lane of index `fail_at` that
+// fails to be created, as pthread_create fails when the process may start no more threads (UINT32_MAX for none).
+// Process-wide, as main.c's units share it, and in .data rather than .bss, as its initializer isn't zero: the first
+// write to a 2 MB region of the executable's .bss clears a transparent huge page, which a compile that touched nothing
+// else there paid for (2 MB of peak RSS, on the 9700X).
 typedef struct LaneProcess LaneProcess;
 struct LaneProcess
 {
     uint64_t threads_created;
+    const char* topology;
     uint32_t fail_at;
 };
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
@@ -642,18 +646,24 @@ struct LaneSession
     // The start's gate, which the created lanes wait at until lane 0 knows every lane exists: BUSTER_LANE_GATE_RUN or
     // BUSTER_LANE_GATE_CANCEL.
     uint32_t gate;
-    // The lanes asked for, the lanes that run (1 after a failed start), and the lanes that existed (lane 0's among them).
+    // The lanes the command may take (its capacity); of them, the lanes the session asks for, at most one per core with
+    // BUSTER_LANE_SESSION_PER_CORE, shifted left by one for lane_publish's bit 0 (0 until a lazy session's lane 1 has
+    // counted the cores, lane_session_asked); the lanes that run (1 after a failed start); and the lanes that existed
+    // (lane 0's among them).
     uint32_t capacity;
+    uint32_t asked;
     uint32_t count;
     uint32_t created;
     pid_t process;
     void (*entry)(void* argument);
     void* argument;
     // Whether the lanes stay parked when the flow ends, for the process's exit to end (a terminal command's), rather than
-    // being joined; whether lane 1 creates the lanes after it while lane 0 runs (BUSTER_LANE_SESSION_LAZY); and whether
-    // lane 0 knows how its lanes' start went (lane_session_settle), which only lane 0 reads and writes.
+    // being joined; whether lane 1 creates the lanes after it while lane 0 runs (BUSTER_LANE_SESSION_LAZY); whether the
+    // session runs on a lane per core at most (BUSTER_LANE_SESSION_PER_CORE); and whether lane 0 knows how its lanes'
+    // start went (lane_session_settle), which only lane 0 reads and writes.
     bool park_at_end;
     bool lazy;
+    bool per_core;
     bool settled;
     bool has_cpus;
     // Lane 0's thread, the one that settles.
@@ -1246,15 +1256,20 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 // terminal command's, whose process exits next), but in sanitizer builds, which join them always; the session must then
 // outlive the process. LAZY: lane 0 creates lane 1 alone and runs the flow at once, while lane 1 creates the others; lane
 // 0 learns how their start went with lane_session_settle, which it must call before it meets any other lane or counts on
-// them (but for lane_count, which says the lanes asked for until then). Without LAZY, or with a CPU list, lane 0 creates
-// every lane before the flow.
+// them (but for lane_count, which says the capacity until then, and lane_session_asked). Without LAZY, or with a CPU
+// list, lane 0 creates every lane before the flow. PER_CORE: the session asks for no more lanes than the cores of the
+// CPUs the process may run on (lane_core_count), as two lanes on one core's SMT siblings share its pipes, caches and
+// power: lazily, from 2 lanes on, lane 1 counts them while lane 0 runs, before it creates the lanes after it, and an
+// eager session's lane 0 counts them before it creates any. Ignored with a CPU list.
 #define BUSTER_LANE_SESSION_PARK_AT_END 1u
 #define BUSTER_LANE_SESSION_LAZY 2u
+#define BUSTER_LANE_SESSION_PER_CORE 4u
 
 // Runs entry(argument) on every lane of a new session of `capacity` lanes (#905), the process's outer flow: the calling
-// thread is lane 0, and the session creates capacity - 1 threads (none for one) with the asynchronous signals blocked,
-// so that a signal sent to the process reaches lane 0, and an explicit stack size. With `cpus`, each lane pins itself to
-// its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
+// thread is lane 0, and the session creates capacity - 1 threads (none for one; with BUSTER_LANE_SESSION_PER_CORE, one
+// fewer than the lanes it asks for, but lazily lane 1 where one core leaves it none) with the asynchronous signals
+// blocked, so that a signal sent to the process reaches lane 0, and an explicit stack size. With `cpus`, each lane pins
+// itself to its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
 // BUSTER_LANE_SESSION_LAZY for lane 1's alone. A failed creation or pin cancels every lane created, which the session
 // joins, and runs the flow on lane 0 alone: one lane, never a retry. Returns how many lanes ran it (0 if a session of
 // the calling thread's is live: sessions don't nest). The lanes are joined when the flow ends, but with
@@ -1262,9 +1277,21 @@ static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void*
 static __attribute__((unused)) uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument),
                                                          void* argument, uint32_t flags);
 // The lanes the calling thread's session runs on: for lane 0 of a lazy session, once lane 1 has said how their start
-// went, which it waits for the first time; on a failed start, lane 0's lane in the session's group becomes a lane alone,
-// and the session's count 1. 1 outside a session.
+// went, which it waits for the first time; lane 0's lane in the session's group then counts them, and on a failed start
+// becomes a lane alone, the session's count 1. 1 outside a session.
 static __attribute__((unused)) uint32_t lane_session_settle(void);
+// The lanes the calling thread's session asks for: its capacity, at most one per core with BUSTER_LANE_SESSION_PER_CORE.
+// Lane 0 of a lazy session waits only for lane 1 to have counted the cores, not for their lanes' start
+// (lane_session_settle), which may still leave it on one. 1 outside a session.
+static __attribute__((unused)) uint32_t lane_session_asked(void);
+// The cores of the CPUs in `mask`, `words` 64-bit words of a sched_getaffinity mask, at least 1: each CPU's core is the
+// set of its siblings that `topology`'s cpuN/topology/core_cpus_list gives ("0,8", "0-1" or "5", sysfs' format), read
+// for one CPU of each core, the others skipped. A CPU whose list can't be read, doesn't parse or leaves it out counts as
+// a core of its own.
+static __attribute__((unused)) uint32_t lane_cores(const char* topology, const uint64_t* mask, uint32_t words);
+// The cores of the CPUs this process may run on, at least 1: lane_cores of sched_getaffinity's mask, in sysfs (or in a
+// test's LaneProcess.topology).
+static __attribute__((unused)) uint32_t lane_core_count(void);
 // The session the calling thread is a lane of, or 0. A child forked from a lane of a session forgets it here, and runs as
 // one lane: its other lanes don't exist in the child.
 static __attribute__((unused)) LaneSession* lane_session_current(void);
@@ -1713,6 +1740,87 @@ static LaneSession* lane_session_current(void)
     return session;
 }
 
+// lane_cores' number at text[*at], of the decimal digits there, which *at passes and *digits counts; past the most CPUs
+// a mask holds, it stays at BUSTER_LANE_CORES_SATURATED.
+#define BUSTER_LANE_CORES_SATURATED (1u << 24)
+static uint32_t lane_cores_number(const char* text, ssize_t length, ssize_t* at, uint32_t* digits)
+{
+    uint32_t value = 0;
+    *digits = 0;
+    while (*at < length && text[*at] >= '0' && text[*at] <= '9')
+    {
+        value = value < BUSTER_LANE_CORES_SATURATED ? value * 10 + (uint32_t)(text[*at] - '0') : BUSTER_LANE_CORES_SATURATED;
+        *digits += 1;
+        *at += 1;
+    }
+    return value;
+}
+
+// A list's read is its open, kernfs' formatting and the close: on the 9700X 9.4 µs for its 8 cores, and 19 to 55 µs as
+// a process's first count; on a 16-CPU Zen 4 31 µs, and 50 to 65 µs. The time is the system calls', with no vector path
+// to take, and a session counts on lane 1, off lane 0's path (BUSTER_LANE_SESSION_PER_CORE).
+static uint32_t lane_cores(const char* topology, const uint64_t* mask, uint32_t words)
+{
+    const uint32_t cpus = (words < BUSTER_LANE_CPU_MASK_WORDS ? words : BUSTER_LANE_CPU_MASK_WORDS) * 64;
+    uint64_t counted[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint32_t cores = 0;
+    for (uint32_t cpu = 0; cpu < cpus; cpu += 1)
+    {
+        const uint64_t bit = UINT64_C(1) << (cpu % 64);
+        if ((mask[cpu / 64] & bit) != 0 && (counted[cpu / 64] & bit) == 0)
+        {
+            char path[256];
+            char text[512];
+            const int written = snprintf(path, sizeof(path), "%s/cpu%u/topology/core_cpus_list", topology, cpu);
+            const int fd = written > 0 && (uint32_t)written < sizeof(path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+            const ssize_t length = fd >= 0 ? read(fd, text, sizeof(text)) : -1;
+            if (fd >= 0)
+            {
+                close(fd);
+            }
+            // The list's items, "a" or "a-b", up to a newline or its end; a list the buffer cuts, or with anything else,
+            // is none. Its CPUs past the mask's don't count.
+            uint64_t siblings[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+            bool valid = length > 0 && length < (ssize_t)sizeof(text);
+            ssize_t at = 0;
+            bool more = valid;
+            while (more)
+            {
+                uint32_t digits = 0;
+                const uint32_t first = lane_cores_number(text, length, &at, &digits);
+                // A range's second number follows its dash.
+                const bool range = digits != 0 && at < length && text[at] == '-';
+                at += range ? 1 : 0;
+                uint32_t last_digits = digits;
+                const uint32_t last = range ? lane_cores_number(text, length, &at, &last_digits) : first;
+                valid = digits != 0 && last_digits != 0 && first <= last;
+                for (uint32_t sibling = first; valid && sibling <= last && sibling < cpus; sibling += 1)
+                {
+                    siblings[sibling / 64] |= UINT64_C(1) << (sibling % 64);
+                }
+                more = valid && at < length && text[at] == ',';
+                at += more ? 1 : 0;
+            }
+            valid = valid && (at == length || text[at] == '\n') && (siblings[cpu / 64] & bit) != 0;
+            for (uint32_t word = 0; valid && word < cpus / 64; word += 1)
+            {
+                counted[word] |= siblings[word];
+            }
+            counted[cpu / 64] |= bit;
+            cores += 1;
+        }
+    }
+    return cores != 0 ? cores : 1;
+}
+
+static uint32_t lane_core_count(void)
+{
+    uint64_t mask[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const long written = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+    const char* topology = lane_process.topology != 0 ? lane_process.topology : "/sys/devices/system/cpu";
+    return written > 0 ? lane_cores(topology, mask, (uint32_t)((uint64_t)written / 8)) : 1;
+}
+
 static void* lane_session_thread_main(void* parameter);
 
 // Creates the session's lanes from `first` to `end` (their start records' and threads' slots), with the calling
@@ -1745,7 +1853,9 @@ static uint32_t lane_session_create(LaneSession* session, uint32_t first, uint32
 }
 
 // A created lane: it pins itself if asked, waits at the gate until lane 0 (or, in a lazy session, lane 1) knows every
-// lane exists, and runs the flow. A lazy session's lane 1 creates the lanes after it first, and opens the gate.
+// lane exists, and runs the flow. A lazy session's lane 1 creates the lanes after it first, and opens the gate: with
+// BUSTER_LANE_SESSION_PER_CORE, once it has counted the cores and published the lanes it asks for, which may leave it
+// none to create, or itself none to run (one core).
 static void* lane_session_thread_main(void* parameter)
 {
     LaneSessionStart* start = parameter;
@@ -1757,9 +1867,15 @@ static void* lane_session_thread_main(void* parameter)
     }
     if (session->lazy && start->index == 1)
     {
-        const uint32_t created = 2 + lane_session_create(session, 2, session->capacity);
-        const bool started = created == session->capacity;
-        session->count = started ? session->capacity : 1;
+        const uint32_t cores = session->per_core ? lane_core_count() : session->capacity;
+        const uint32_t asked = cores < session->capacity ? cores : session->capacity;
+        if (session->per_core)
+        {
+            lane_publish(&session->asked, asked << 1);
+        }
+        const uint32_t created = 2 + lane_session_create(session, 2, asked);
+        const bool started = asked > 1 && created == asked;
+        session->count = started ? asked : 1;
         session->created = created;
         lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
     }
@@ -1795,7 +1911,7 @@ static void* lane_session_thread_main(void* parameter)
 static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument), void* argument,
                                  uint32_t flags)
 {
-    const uint32_t lanes = capacity == 0 ? 1 : capacity < BUSTER_LANE_MAX_COUNT ? capacity : BUSTER_LANE_MAX_COUNT;
+    uint32_t lanes = capacity == 0 ? 1 : capacity < BUSTER_LANE_MAX_COUNT ? capacity : BUSTER_LANE_MAX_COUNT;
     uint32_t result = 0;
     if (lane_session_current() == 0 && thread_context.team == 0 && !thread_context.running && entry != 0)
     {
@@ -1806,7 +1922,16 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         session->entry = entry;
         session->argument = argument;
         session->park_at_end = (flags & BUSTER_LANE_SESSION_PARK_AT_END) != 0 && !BUSTER_SANITIZER_RESOURCES;
-        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && cpus == 0 && lanes > 2;
+        session->per_core = (flags & BUSTER_LANE_SESSION_PER_CORE) != 0 && cpus == 0 && lanes > 1;
+        // Lazily from 3 lanes, or from 2 counting the cores, which lane 1 then does.
+        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && cpus == 0 && (lanes > 2 || session->per_core);
+        if (session->per_core && !session->lazy)
+        {
+            const uint32_t cores = lane_core_count();
+            lanes = cores < lanes ? cores : lanes;
+        }
+        // A lazy session counting the cores asks for its lanes once lane 1 has (lane_session_asked).
+        session->asked = session->per_core && session->lazy ? 0 : lanes << 1;
         session->has_cpus = cpus != 0;
         if (cpus != 0)
         {
@@ -1846,16 +1971,17 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const 
         bool started = valid && created == lanes;
         if (session->lazy && created == 2)
         {
-            // Lane 1 opens the gate; lane 0 runs on the lanes asked for until it settles (lane_session_settle).
+            // Lane 1 opens the gate; lane 0 runs on the capacity until it settles (lane_session_settle).
             started = true;
         }
         else
         {
             // The created lanes read `lazy` as they start: it changes only for a lazy session whose lane 1 didn't start,
-            // which has no other lane.
+            // which has no other lane, and never counted the cores: the session asked for its capacity.
             if (session->lazy)
             {
                 session->lazy = false;
+                session->asked = lanes << 1;
             }
             session->count = started ? lanes : 1;
             session->created = created;
@@ -1910,13 +2036,21 @@ static uint32_t lane_session_settle(void)
         {
             pthread_join(session->threads[i], 0);
         }
-        if (!run && thread_context.lane.group == &session->group)
+        // The lanes that run: with one per core, fewer than the capacity lane 0 started on.
+        if (thread_context.lane.group == &session->group)
         {
-            thread_context.lane = (Lane){ .count = 1 };
+            thread_context.lane = run ? (Lane){ .index = 0, .count = session->count, .group = &session->group } : (Lane){ .count = 1 };
         }
     }
     result = session != 0 ? session->count : 1;
     return result;
+}
+
+static uint32_t lane_session_asked(void)
+{
+    LaneSession* session = lane_session_current();
+    // A lazy session's lane 1 publishes it before it creates the lanes after it, which read it after the gate.
+    return session != 0 ? lane_sleep(&session->asked, 0) >> 1 : 1;
 }
 
 static void lane_flow_begin(LaneFlow* flow)
@@ -1926,29 +2060,35 @@ static void lane_flow_begin(LaneFlow* flow)
     flow->argument = 0;
 }
 
-// Whether the flow has lanes besides lane 0 to run its rounds on.
-static bool lane_flow_shared(const LaneFlow* flow)
+// The flow's group, which lane 0 kept before its session settled (lane_flow_begin), as settled: a lazy session's lane 0
+// learns here how its lanes started, and a group of the session's then counts the lanes that run, with one per core
+// (BUSTER_LANE_SESSION_PER_CORE) fewer than lane 0 started on; one without other lanes to run the flow's rounds on.
+static Lane lane_flow_group(const LaneFlow* flow)
 {
-    return lane_session_settle() > 1 && flow->group.count > 1;
+    const uint32_t lanes = lane_session_settle();
+    LaneSession* session = lane_session_current();
+    const bool grouped = session != 0 && flow->group.group == &session->group;
+    const Lane group = grouped ? (Lane){ .index = flow->group.index, .count = lanes, .group = flow->group.group } : flow->group;
+    return lanes > 1 && group.count > 1 ? group : (Lane){ .count = 1 };
 }
 
 static uint32_t lane_flow_lanes(const LaneFlow* flow)
 {
-    return lane_flow_shared(flow) ? flow->group.count : 1;
+    return lane_flow_group(flow).count;
 }
 
 static void lane_flow_round_begin(LaneFlow* flow, uint32_t kind, void* argument, uint32_t lanes)
 {
     assert(kind != 0);
     flow->argument = argument;
-    const bool shared = lane_flow_shared(flow);
+    const Lane group = lane_flow_group(flow);
     flow->alone = lane_alone();
-    if (shared)
+    if (group.count > 1)
     {
-        lane_restore(flow->group);
+        lane_restore(group);
         lane_park_broadcast((uint64_t)kind << 32 | lanes, 0);
     }
-    lane_narrow(shared ? lanes : 1);
+    lane_narrow(group.count > 1 ? lanes : 1);
 }
 
 static void lane_flow_round_end(LaneFlow* flow)
@@ -1971,9 +2111,10 @@ static uint32_t lane_flow_next(LaneFlow* flow, void** argument)
 
 static void lane_flow_end(LaneFlow* flow)
 {
-    if (lane_flow_shared(flow))
+    const Lane group = lane_flow_group(flow);
+    if (group.count > 1)
     {
-        lane_restore(flow->group);
+        lane_restore(group);
         lane_park_broadcast(0, 0);
     }
 }

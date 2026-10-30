@@ -50,8 +50,10 @@ every lane busy.
 
 The driver runs a lane per unit, and past the units one per 32 KB of their
 sources (`BUSTER_CHECK_UNITS_LANE_BYTES`), whose only work is the units'
-functions' parts (#777, below); by default no more than one per CPU the
-process may run on, and with `--lanes N` no more than N; and the worker budget (#673:
+functions' parts (#777, below); by default no more than one per core of the
+CPUs the process may run on (#905: its session's lane 1 counts them,
+`BUSTER_LANE_SESSION_PER_CORE`), and with `--lanes N` no more than N, at most
+one per CPU; and the worker budget (#673:
 `--worker-budget`, GNU make's jobserver) limits the lanes past the calling
 thread's own as it limits #151's. Each of the command's wide parts takes its
 own lease and gives its slots back as it ends, before any serial work: the

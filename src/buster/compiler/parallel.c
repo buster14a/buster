@@ -44,7 +44,7 @@
 // (ParallelList, parallel_title_cpus, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary,
 // ParallelEnvironment, parallel_start, the report's parts: parallel_render, parallel_render_summary and parallel_part,
 // ParallelOutput and parallel_output_write, parallel_reap, parallel_stop, parallel_run), and the command
-// (parallel_core_count, run_parallel_command).
+// (run_parallel_command).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1044,53 +1044,6 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-// The first CPU of a core's siblings' list ("2,10", "0-1" or "5"), or `cpu` itself when the list can't be read.
-static uint64_t parallel_core_first(uint64_t cpu)
-{
-    char path[96];
-    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%llu/topology/core_cpus_list", (unsigned long long)cpu);
-    char text[64];
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
-    const ssize_t length = fd >= 0 ? read(fd, text, sizeof(text)) : -1;
-    if (fd >= 0)
-    {
-        close(fd);
-    }
-    uint64_t first = 0;
-    ssize_t digits = 0;
-    while (digits < length && text[digits] >= '0' && text[digits] <= '9' && first < BUSTER_PARALLEL_CPUS)
-    {
-        first = first * 10 + (uint64_t)(text[digits] - '0');
-        digits += 1;
-    }
-    return digits != 0 && first < BUSTER_PARALLEL_CPUS ? first : cpu;
-}
-
-// The cores of the CPUs this process may run on, at least 1: --jobs' default. Two commands on a core's two SMT siblings
-// slow each other down, and so do the lanes' waits, which spin while their group's other lanes don't run. On the
-// 9700X (8 cores, 15 CPUs online) the job's tests took 21.3 to 22.4 s with 8 jobs, and 22.9 to 23.3 s with 15, in
-// which test-lanes took 2.3 to 2.9 s rather than 0.2.
-static uint64_t parallel_core_count(void)
-{
-    uint64_t mask[BUSTER_PARALLEL_CPUS / 64] = { 0 };
-    uint64_t cores[BUSTER_PARALLEL_CPUS / 64] = { 0 };
-    const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask) > 0;
-    for (uint64_t cpu = 0; known && cpu < BUSTER_PARALLEL_CPUS; cpu += 1)
-    {
-        if (((mask[cpu / 64] >> (cpu % 64)) & 1) != 0)
-        {
-            const uint64_t first = parallel_core_first(cpu);
-            cores[first / 64] |= 1ull << (first % 64);
-        }
-    }
-    uint64_t count = 0;
-    for (uint64_t i = 0; i < BUSTER_PARALLEL_CPUS / 64; i += 1)
-    {
-        count += (uint64_t)__builtin_popcountll(cores[i]);
-    }
-    return count != 0 ? count : 1;
-}
-
 // A count option's value: decimal digits alone, from 1 to `limit`.
 static bool parallel_count(const char* text, uint64_t limit, uint64_t* value)
 {
@@ -1196,7 +1149,11 @@ static int run_parallel_command(int argc, char** argv)
             }
             else
             {
-                options.jobs = options.jobs != 0 ? options.jobs : parallel_core_count();
+                // By default a command per core of the CPUs this process may use (lane_core_count). Two commands on a core's
+                // two SMT siblings slow each other down, and so do the lanes' waits, which spin while their group's other
+                // lanes don't run. On the 9700X (8 cores, 15 CPUs online) the job's tests took 21.3 to 22.4 s with 8 jobs,
+                // and 22.9 to 23.3 s with 15, in which test-lanes took 2.3 to 2.9 s rather than 0.2.
+                options.jobs = options.jobs != 0 ? options.jobs : lane_core_count();
                 fflush(stdout);
                 result = parallel_run(&arena, &list, &options, results).succeeded ? 0 : 1;
             }
