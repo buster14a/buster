@@ -96,9 +96,12 @@ lanes are a board instead (`CheckEmitBoard`, `c_check_program_emit.c`):
 
 A take is a compare-and-swap of the share's ticket, the epoch's next part beside
 the epoch, whose epoch must be the share's limit's: a lane that read one epoch's
-ticket takes no part of the next. The last part done publishes the epoch
-complete, which the sharing lane waits for before its emission goes on, so no
-lane reads an epoch's run after its emission. An emission that starts while
+ticket takes no part of the next. Each part finishes every access to the run
+before incrementing the done count. The last part publishes the epoch complete,
+which the sharing lane always acquires before its emission goes on or it opens
+the next epoch: reaching the done count alone can precede that publication.
+Thus no lane reads an epoch's run after its emission, and no previous epoch's
+completion can overwrite the next's. An emission that starts while
 every lane still takes units runs alone, its bodies one part, as before: a
 command of many units pays for the board only once its units run out, when its
 last units' emissions share their parts.
