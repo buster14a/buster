@@ -219,7 +219,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             // A name of its scope already, an enumeration constant's or (in a parameter list) a parameter's, as clang
             // reports `int f(int K, enum E { K } e)` at the second K.
             const uint32_t identifier = parser->tokens.names[name];
-            const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+            const uint32_t old = check_input_library_binding(reader, identifier, i);
             const uint32_t depth = check_input_declaration_depth(reader);
             valid = old == 0 || reader->bindings.depth[old - 1] != depth;
             if (!valid)

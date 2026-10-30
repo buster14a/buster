@@ -12,17 +12,18 @@ static bool pp_test_source_feature_matrix(void)
         { "c_static_assert", 2011 }, { "c_thread_local", 2011 }, { "c_fixed_enum", 2023 },
     };
     static const char* const attributes[] = {
-        "aligned", "cleanup", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "mode", "naked",
-        "overloadable", "packed", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak",
+        "alias", "aligned", "cleanup", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "ifunc", "mode", "naked",
+        "overloadable", "packed", "retain", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
     };
     static const char* const refused[] = {
-        "alias", "ifunc", "weakref", "retain", "common",
+        "common",
         "always_inline", "noinline", "format", "unused", "noreturn", "nodiscard", "maybe_unused", "deprecated", "not_an_attribute",
     };
     static const struct { const char* name; uint32_t value; } c_attributes[] = {
         { "fallthrough", 201910 }, { "gnu::aligned", 1 }, { "gnu::packed", 1 }, { "gnu::vector_size", 1 },
         { "gnu::section", 1 }, { "gnu::visibility", 1 }, { "clang::ext_vector_type", 1 },
         { "gnu::cleanup", 1 }, { "gnu::constructor", 1 }, { "gnu::destructor", 1 }, { "gnu::weak", 1 }, { "clang::overloadable", 1 },
+        { "gnu::alias", 1 }, { "gnu::ifunc", 1 }, { "gnu::weakref", 1 }, { "gnu::retain", 1 },
         { "nodiscard", 0 }, { "maybe_unused", 0 }, { "deprecated", 0 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };
@@ -103,7 +104,7 @@ static bool pp_test_source_feature_matrix(void)
         { "__builtin_assume", true }, { "__builtin_unpredictable", true }, { "__builtin_ia32_selectd_512", true },
         { "__builtin_ia32_palignr256", true }, { "__builtin_ia32_pblendw128", true }, { "__builtin_ia32_permdi256", true },
         { "__builtin_ia32_pshufd256", true }, { "__builtin_ia32_shufpd", true },
-        { "__builtin_ia32_pblendw256", false }, { "__builtin_ia32_pshufd257", false },
+        { "__builtin_ia32_pblendw256", true }, { "__builtin_ia32_pshufd257", false },
         // EMMS has both a shared SYSTEM lowering row and a declaration in the frozen source scope.
         { "__builtin_ia32_emms", true }, { "__builtin_ia32_tilezero", false }, { "__rdtscx", false },
     };
@@ -241,8 +242,8 @@ static bool pp_test_builtin_targets(const char* directory)
         free(clang_text);
         arena_release(&arena);
     }
-    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the immediate names',
-    // whose features c_builtin_immediate_scope.inc writes out) and each catalog name's language modes.
+    // The gates' facts against clang's table: each source scope's row (the frozen inventory's and the supplementary
+    // names', whose features c_builtin_supplementary_scope.inc writes out) and each catalog name's language modes.
     uint32_t facts = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {

@@ -31,11 +31,27 @@ static const CheckProgramHelper* check_lower_atomic_leaf(const CheckLowerWriter*
     return found;
 }
 
+// Whether a value of `type` is a vector narrower than a plan's buffers, which have 16 bytes at least
+// (check_lower_atomic_prepare): one of 4 or 8 bytes, which Tier 0's LOCAL and SET_LOCAL of a VECTOR would take as one
+// of its object's 16 bytes, so that it is read and written through the buffer's address at its own bytes instead.
+static bool check_lower_atomic_narrow_vector(const CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_class(writer, type) == BUSTER_TYPED_CLASS_VECTOR && check_lower_vector_bytes(writer->program->types, type) < 16;
+}
+
 static void check_lower_atomic_buffer_value(CheckLowerWriter* writer, const CheckLowerAtomic* plan, uint32_t buffer)
 {
     const bool aggregate = check_lower_aggregate(writer, plan->value_type);
-    check_lower_emit(writer, aggregate ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_LOCAL,
-                     aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, plan->value_type), buffer);
+    if (check_lower_atomic_narrow_vector(writer, plan->value_type))
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, buffer);
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_bytes(writer->program->types, plan->value_type));
+    }
+    else
+    {
+        check_lower_emit(writer, aggregate ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_LOCAL,
+                         aggregate ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, plan->value_type), buffer);
+    }
     if (plan->value_type == BUSTER_TYPE_BOOL)
     {
         check_lower_scalar_conversion(writer, BUSTER_TYPE_UCHAR, BUSTER_TYPE_BOOL);
@@ -537,6 +553,13 @@ static void check_lower_atomic_store_operand(CheckLowerWriter* writer, uint32_t 
     if (aggregate)
     {
         check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_COPY, .value = type_size(writer->program->types, type)});
+        check_lower_operand(writer, node, operand, false, type);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, buffer);
+    }
+    else if (check_lower_atomic_narrow_vector(writer, type))
+    {
+        // (check_lower_atomic_narrow_vector: through the buffer's address, as the tasks run in reverse.)
+        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, check_lower_vector_bytes(writer->program->types, type));
         check_lower_operand(writer, node, operand, false, type);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, buffer);
     }

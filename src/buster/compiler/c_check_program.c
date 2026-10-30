@@ -145,6 +145,81 @@ struct CheckProgramCase
     bool range;
 };
 
+// GNU's alias, ifunc and weakref attributes (#147, c_check_program_alias.c): what a file-scope declaration with one makes
+// its object. An alias is a symbol of its own name at another definition of the unit's, an ifunc an STT_GNU_IFUNC symbol
+// at its resolver function's, and a weakref, whose own name names no symbol, makes its references weak ones to its
+// target's name. Clang ignores the first two on a block-scope declaration.
+typedef enum CheckProgramAliasKind
+{
+    CHECK_PROGRAM_ALIAS,
+    CHECK_PROGRAM_IFUNC,
+    CHECK_PROGRAM_WEAKREF,
+} CheckProgramAliasKind;
+
+// An alias's or ifunc's error, as clang's code generation reports it (CodeGenModule::checkAliases), at -c and when it
+// links but not at -fsyntax-only, or a shape the emission refuses by name (THREAD_LOCAL). A weakref has none.
+typedef enum CheckProgramAliasError
+{
+    CHECK_PROGRAM_ALIAS_OK,
+    // "alias must point to a defined variable or function", "ifunc must point to a defined function", with a note that
+    // the name must be the mangled one: its name names nothing the unit defines (a weakref's name is none, nor is an
+    // inline function's that the unit doesn't emit: BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED).
+    CHECK_PROGRAM_ALIAS_UNDEFINED,
+    // An ifunc's resolver that is a definition but not a function's (a variable's, or another ifunc's): the same error,
+    // without the note.
+    CHECK_PROGRAM_ALIAS_NOT_FUNCTION,
+    // "alias definition is part of a cycle", "ifunc definition is part of a cycle".
+    CHECK_PROGRAM_ALIAS_CYCLE,
+    // A function's alias of a variable, "cannot alias a variable with a function", and a variable's of a function,
+    // "cannot alias a function with a variable", each with a note at the aliasee's definition.
+    CHECK_PROGRAM_ALIAS_TO_VARIABLE,
+    CHECK_PROGRAM_ALIAS_TO_FUNCTION,
+    // "ifunc resolver function must return a pointer".
+    CHECK_PROGRAM_ALIAS_RESOLVER,
+    // Refused: an alias declared thread-local of a definition that isn't, or the other way, whose references the code
+    // would reach as its own declaration says and the symbol isn't (clang's code is as wrong).
+    CHECK_PROGRAM_ALIAS_THREAD_LOCAL,
+    // Refused: an alias variable that the unit also defines tentatively, which the static data would define too: after it
+    // (`extern int w __attribute__((alias("v"))); int w;`), which clang takes as the alias's declaration, or before it,
+    // clang's error "alias definition of 'w' after tentative definition", which the reader doesn't make.
+    CHECK_PROGRAM_ALIAS_DEFINED,
+} CheckProgramAliasError;
+
+// An object's alias, ifunc or weakref, from its first declaration with one (in token order), whose attributes give the
+// kind (weakref first, then ifunc, then alias) and the name: weakref's argument, or the alias attribute's beside it.
+typedef struct CheckProgramAlias CheckProgramAlias;
+struct CheckProgramAlias
+{
+    uint32_t object;
+    // The declaration, and the attribute's name token, where clang reports its errors.
+    uint32_t token;
+    uint32_t attribute;
+    String8 target;
+    // The unit's object whose symbol the name is (an asm label's or else an identifier's, of a file-scope declaration that
+    // isn't a weakref's), or 0 for none; but for a weakref whose name names none, the object of the name's first such
+    // weakref, whose symbol it takes (0 for that one, whose own symbol is named after its target).
+    uint32_t target_object;
+    // Clang's aliasee: the first object along the chain of aliases from the target that isn't an alias (a function, a
+    // variable or an ifunc), or 0 for none or a cycle. And the definition the symbol is at: the aliasee, or an aliased
+    // ifunc's resolver; 0 where it has an error.
+    uint32_t aliasee;
+    uint32_t base;
+    // The aliasee's definition, for the error's note, or BUSTER_CHECK_NONE; and its name, the last alias's target along
+    // the chain, whose spelling an undefined one's notes look for among the program's identifiers.
+    uint32_t definition;
+    String8 aliasee_name;
+    uint8_t kind;
+    // The symbol's type (BUSTER_LINK_SYMBOL_*): an ifunc's and an alias of one's IFUNC, else its definition's.
+    uint8_t type;
+    uint8_t error;
+};
+
+// CheckProgram.alias_states, a byte per entry: a weakref's target is referenced through weakrefs alone, which makes its
+// undefined symbol weak; an alias's or ifunc's definition isn't emitted (an inline function's, which the selection
+// doesn't select), clang's error that it isn't defined.
+#define BUSTER_CHECK_PROGRAM_ALIAS_WEAK 1u
+#define BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED 2u
+
 typedef struct CheckProgram CheckProgram;
 struct CheckProgram
 {
@@ -176,6 +251,15 @@ struct CheckProgram
     // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
     // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
     uint32_t* object_naked;
+    // GNU's alias, ifunc and weakref attributes (#147, check_program_aliases): an entry per object a file-scope declaration
+    // gives one, in object order; null in a unit without one, the usual one. A selection shares them, but for their states
+    // (BUSTER_CHECK_PROGRAM_ALIAS_*, a byte each), which are each program's: its own references and selection decide them.
+    // An alias's or ifunc's object has a symbol, which the emission defines at its base's definition once the static
+    // data's atoms exist (check_program_sections), and a referenced weakref's object has its target's (object_symbols),
+    // or one of its own, named as its target, where no object of the unit has that name.
+    CheckProgramAlias* aliases;
+    uint8_t* alias_states;
+    uint32_t alias_count;
     uint32_t control_count;
     uint32_t switch_count;
     uint32_t body_count;
@@ -330,11 +414,12 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED 1u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE 4u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS 8u
 
 // Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
-// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and one of a
+// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), one of a
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
-// CheckProgram.attribute_keys).
+// CheckProgram.attribute_keys), and an alias, ifunc or weakref attribute (#147, CheckProgram.aliases).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -346,6 +431,7 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
                              kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
                              kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN || kind == CHECK_ATTRIBUTE_NORETURN ?
                                  BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE :
+                             kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS :
                                  0;
         bits |= attribute->ignored ? 0 : bit;
     }
@@ -357,7 +443,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // object's declarations' order, in `scratch`, which grows them by doubling. A unit without one, the usual one, has none.
 // Beside them, the declarations with an always_inline, flatten or noreturn attribute, as keys of the same form, which
 // only code generation's check of target features reads, and only in a unit with a target attribute (#775,
-// CheckProgram.attribute_keys).
+// CheckProgram.attribute_keys); and the file-scope declarations with an alias, ifunc or weakref attribute, which
+// check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -368,6 +455,9 @@ struct CheckProgramTargetEvents
     uint64_t* callee_keys;
     uint32_t callee_count;
     uint32_t callee_capacity;
+    uint64_t* alias_keys;
+    uint32_t alias_count;
+    uint32_t alias_capacity;
     bool room;
 };
 
@@ -488,11 +578,11 @@ static uint32_t check_program_argument_mask(CheckProgram* program, uint32_t node
     {
         index = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
         const uint32_t count = index != BUSTER_CHECK_NONE ? stream->vectors[index].evaluated_argument_count : 0;
-        if (count > 3 || count > program->input->graph.argument_counts[node])
+        if (count > BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS || count > program->input->graph.argument_counts[node])
         {
             check_program_fail(program, CHECK_PROGRAM_INVALID, program->input->graph.tokens[node]);
         }
-        mask = count <= 3 ? (1u << count) - 1 : 0;
+        mask = count <= BUSTER_CHECK_BUILTIN_VECTOR_ARGUMENTS ? (1u << count) - 1 : 0;
     }
     else if (op == CHECK_OP_BUILTIN_X86)
     {
@@ -2348,10 +2438,10 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
 }
 
 // A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
-// declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
-// function's declaration with a target or target_clones attribute, or an always_inline, flatten or noreturn one
-// (`events`), all found by one pass over its attributes. Returns whether the column had room, `room` again unless
-// making it failed.
+// declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), a
+// function's declaration with a target or target_clones attribute, or an always_inline, flatten or noreturn one, and a
+// file-scope declaration with an alias, ifunc or weakref attribute (`events`), all found by one pass over its
+// attributes. Returns whether the column had room, `room` again unless making it failed.
 static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
 {
     const CheckInput* input = program->input;
@@ -2370,6 +2460,11 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_CALLEE) != 0)
         {
             check_program_event_push(events, &events->callee_keys, &events->callee_count, &events->callee_capacity, object, token);
+        }
+        // An alias's, ifunc's or weakref's: clang's code generation takes them at file scope alone (EmitGlobal).
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
+        {
+            check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
         }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
         {
@@ -2617,6 +2712,7 @@ static void check_program_needed_number(const uint8_t* needed, uint32_t objects,
 
 #include "c_check_x86_diagnostic.c"
 #include "c_check_target_feature.c"
+#include "c_check_program_alias.c"
 
 // The entries that cleanups add at most (#147): a CHECK_CONTROL_CLEANUP at each exit from a variable's scope, its end and
 // each jump inside it (whose keywords have the role RETURN), counted from a running count of those tokens, and a RESULT
@@ -3041,13 +3137,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
             }
         }
-        program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(options.scalar));
-        program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
-        valid = naked_room && (program->symbol_count == 0 || program->symbol_objects != 0);
-        if (valid && program->symbol_count != 0)
-        {
-            check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, BUSTER_SCALAR_PATH(options.scalar));
-        }
+        // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
+        // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
+        const bool aliased = target_events.alias_count == 0 ||
+                             check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch);
+        valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))
     {

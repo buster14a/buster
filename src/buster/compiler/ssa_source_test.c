@@ -250,12 +250,17 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
     const uint32_t count = file->count;
     Arena arena = arena_reserve(UINT64_C(1) << 32);
     IrFunction* copies = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, IrFunction, count) : 0;
-    IrInterpreterFunction* table = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, IrInterpreterFunction, count) : 0;
+    // Each function's symbols: its own, and every other function's symbol defined at its atom, an alias's (#147,
+    // check_program_define_aliases), which calls and addresses reach as its own (the function of each atom, plus one, in
+    // `bodies`).
+    IrInterpreterFunction* table = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, IrInterpreterFunction, original->symbols.count) : 0;
     InterpreterLinkExternal* externals = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, InterpreterLinkExternal, original->symbols.count) : 0;
     InterpreterNativeBinding* natives = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, InterpreterNativeBinding, original->symbols.count) : 0;
-    ready = arena.base != 0 && copies != 0 && table != 0 && externals != 0 && natives != 0;
+    uint32_t* bodies = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, original->atoms.count) : 0;
+    ready = arena.base != 0 && copies != 0 && table != 0 && externals != 0 && natives != 0 && bodies != 0 && count <= original->symbols.count;
     uint32_t external_count = 0;
     uint32_t native_count = 0;
+    uint32_t function_count = count;
     for (uint32_t f = 0; ready && f < count; f += 1)
     {
         copies[f] = functions[f];
@@ -275,6 +280,31 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
         if (ready)
         {
             externals[external_count++] = (InterpreterLinkExternal){ .input = 0, .symbol = file->functions[f].symbol, .address = (uintptr_t)&copies[f] };
+        }
+    }
+    if (ready)
+    {
+        memset(bodies, 0, (uint64_t)original->atoms.count * sizeof(uint32_t));
+    }
+    for (uint32_t f = 0; ready && f < count; f += 1)
+    {
+        const AtomId atom = original->symbols.atom[file->functions[f].symbol];
+        if (atom != 0 && atom < original->atoms.count)
+        {
+            bodies[atom] = f + 1;
+        }
+    }
+    for (SymbolId symbol = 1; ready && symbol < original->symbols.count; symbol += 1)
+    {
+        const AtomId atom = original->symbols.atom[symbol];
+        const uint32_t body = atom != 0 && atom < original->atoms.count ? bodies[atom] : 0;
+        const bool alias = body != 0 && file->functions[body - 1].symbol != symbol &&
+                           (original->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
+        ready = !alias || (function_count < original->symbols.count && external_count < original->symbols.count);
+        if (ready && alias)
+        {
+            table[function_count++] = (IrInterpreterFunction){ .symbol = symbol, .function = &copies[body - 1], .labels = file->functions[body - 1].labels };
+            externals[external_count++] = (InterpreterLinkExternal){ .input = 0, .symbol = symbol, .address = (uintptr_t)&copies[body - 1] };
         }
     }
     // Each label's symbol, at its token (IrFunction.labels' entry, which br_indirect reads).
@@ -354,7 +384,7 @@ static void ssa_source_child(const IrSourceFile* file, const IrFunction* functio
         bindings[binding_count + 2] = (InterpreterBinding){ .symbol = original->symbols.count + 2, .bytes = (uint8_t*)name, .size = 8, .writable = true };
         const IrInterpreterProgram program = {
             .functions = table,
-            .function_count = count,
+            .function_count = function_count,
             .bindings = bindings,
             .binding_count = binding_count + 3,
             .natives = natives,
@@ -769,6 +799,9 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         bool recorded;
         InterpreterStatus result;
         bool passed;
+        // The program's functions, 1 for 0; and whether the file is left out, with no run.
+        uint32_t functions;
+        bool left_out;
     };
     const SsaSourceControl controls[] = {
         {
@@ -814,6 +847,28 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
             .exit_status = 255,
             .passed = true,
         },
+        // Aliases (#147) whose names the C library has too: called, through a pointer and read, each must reach the
+        // unit's definition, not the library's getpagesize and opterr, in every form.
+        {
+            .name = "alias-host-collision",
+            .source = "static int own_pages(void) { return 123; }\nint getpagesize(void) __attribute__((alias(\"own_pages\")));\n"
+                      "static int counter = 41;\nextern int opterr __attribute__((alias(\"counter\")));\n"
+                      "int main(void) { int (*page)(void) = getpagesize; return (getpagesize() != 123) + (page() != 123) * 2 + (opterr != 41) * 4; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .exit_status = 0,
+            .recorded = true,
+            .result = INTERPRETER_OK,
+            .passed = true,
+            .functions = 2,
+        },
+        // An ifunc, whose resolver the interpreter doesn't call: the file left out, with no run.
+        {
+            .name = "ifunc-left-out",
+            .source = "static int one(void) { return 1; }\nstatic int (*resolve(void))(void) { return one; }\n"
+                      "int dispatched(void) __attribute__((ifunc(\"resolve\")));\nint main(void) { return dispatched() - 1; }\n",
+            .limits = { .timeout = 10, .steps = BUSTER_SSA_SOURCE_STEPS },
+            .left_out = true,
+        },
     };
     bool passed = true;
     for (uint32_t control = 0; control < sizeof(controls) / sizeof(controls[0]); control += 1)
@@ -833,10 +888,13 @@ static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work
         if (checked)
         {
             ssa_source_file(&totals, source, 0, 0, 0, arenas, directory, &test->limits, true, statuses);
-            checked = totals.files == 1 && totals.failed_files == 0 && totals.failures == 0 && totals.functions == 1 && totals.programs == 1 &&
+            const uint64_t functions = test->left_out ? 0 : test->functions != 0 ? test->functions : 1;
+            // A file the preparation leaves out is counted as left out alone.
+            checked = totals.files == (test->left_out ? 0 : 1) && totals.left_out == (uint64_t)test->left_out && totals.failed_files == 0 &&
+                      totals.failures == 0 && totals.functions == functions && totals.programs == (test->left_out ? 0 : 1) &&
                       totals.passed == (uint64_t)test->passed;
         }
-        for (uint32_t form = 0; checked && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+        for (uint32_t form = 0; checked && !test->left_out && form < BUSTER_SSA_SOURCE_FORMS; form += 1)
         {
             char record[PATH_MAX];
             snprintf(record, sizeof(record), "%s/run-0-%s/ssa-source.record", directory, ssa_source_forms[form]);

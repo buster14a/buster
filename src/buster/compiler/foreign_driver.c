@@ -25,9 +25,9 @@
 // (foreign_driver_lanes), which the command line's first inputs decide: lane 0 opens them, as one lane's open phase
 // would, until their objects come to the bytes that pay for the most lanes (foreign_open_first), and the lanes open the
 // rest. A link of a few objects so runs on one lane, as fast as with --lanes 1; only --lanes 1 (or one CPU) creates no
-// thread. The resolution, the conversion and the writer are regions of lane 0's (lane_run) on the session's lanes, which
-// serve them (lane_serve), keep their scratch arenas from one to the next (#501) and stay parked when the link is done,
-// for the process's exit to end. A session whose threads can't start runs the link on one lane, --lanes or not.
+// thread. The resolution, the conversion and the writer are rounds of the link's flow (a LaneFlow) on the session's lanes,
+// which keep their scratch arenas from one to the next (#501) and stay parked when the link is done, for the process's
+// exit to end. A session whose threads can't start runs the link on one lane, --lanes or not.
 // --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
 // session's start, the first inputs' opening with their objects' bytes, the resolution's phases (the slowest lane's),
 // the conversion, the optional passes and the writer's phases (lane 0's).
@@ -564,7 +564,8 @@ static uint32_t foreign_driver_lanes(uint64_t bytes, uint32_t most)
 
 // The CPUs this process may run on, at least 1. Lanes past them share CPUs, and each of their syncs waits for a lane the
 // scheduler has set aside: on the 9700X, eight lanes on one CPU took a hello world's link from 0.6 ms to 342 ms, each
-// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU.
+// pass of the conversion about 28 ms of it (#87). The command runs at most a lane per CPU, and without --lanes one per
+// core (BUSTER_LANE_SESSION_PER_CORE).
 static uint32_t foreign_driver_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -701,6 +702,8 @@ struct ForeignDriverRun
     bool succeeded;
     uint32_t most;
     uint32_t session_lanes;
+    // The link's flow of rounds (#905): the resolution's, the conversion's and the write's (ForeignFlowRound).
+    LaneFlow flow;
     int result;
 };
 
@@ -749,11 +752,11 @@ static int foreign_driver_link(ForeignDriverRun* run)
         }
     }
     ends[FOREIGN_DRIVER_STAGE_OPEN] = foreign_driver_now();
-    // The session's lanes, which lane 1 has been starting meanwhile (#905): lane 0 learns how they started, and serves
-    // the stages' regions on them from here.
-    lane_session_settle();
-    lanes = lanes < lane_count() ? lanes : lane_count();
-    lane_serve_begin();
+    // The session's lanes, which lane 1 has been starting meanwhile (#905): lane 0 learns how they started
+    // (lane_flow_lanes), and the resolution, the conversion and the write are rounds of the link's flow on them.
+    const uint32_t flow_lanes = lane_flow_lanes(&run->flow);
+    lanes = lanes < flow_lanes ? lanes : flow_lanes;
+    foreign.flow = &run->flow;
     if (succeeded && !driver.help)
     {
         foreign_run_lanes(&foreign, lanes, 0);
@@ -870,7 +873,10 @@ static int foreign_driver_link(ForeignDriverRun* run)
             .strip_all = driver.strip_all,
             .symbols_ready = true,
         };
-        succeeded = lane_run(lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
+        lane_flow_round_begin(&run->flow, FOREIGN_FLOW_WRITE, &write, lanes);
+        foreign_driver_write_lane(&write);
+        lane_flow_round_end(&run->flow);
+        succeeded = write.succeeded;
         written = write.result;
         if (!succeeded)
         {
@@ -895,40 +901,54 @@ static int foreign_driver_link(ForeignDriverRun* run)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        // The session's lanes, which lane 0 knows since it began serving them.
-        foreign_driver_report(lanes, lane_session_settle(), run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
+        // The session's lanes, which lane 0 knows since it began serving them, and those it asked for: by default one per
+        // core, at most.
+        const uint32_t asked = lane_session_current() != NULL ? lane_session_asked() : run->most;
+        foreign_driver_report(lanes, lane_session_settle(), asked < run->most ? asked : run->most, driver.lanes == 0, object_bytes, resolve, convert, begin, ends,
+                              write_begin, &written);
     }
     return succeeded ? 0 : 1;
 }
 
-// The link's flow, which every lane of its session runs (#905): lane 0 links, and the other lanes serve its stages'
-// regions (lane_serve), a transitional shape until the stages are the lanes' own flow.
+// The link's flow, which every lane of its session runs (#905), a LaneFlow: lane 0 links alone, and each of its stages'
+// wide parts is a round, which lane 0 runs its part of itself and the other lanes follow by its kind (ForeignFlowRound).
 static void foreign_driver_flow(void* argument)
 {
     ForeignDriverRun* run = argument;
     if (lane_index() == 0)
     {
-        // The lanes asked for, which lane 1 starts while lane 0 opens the first inputs: lane 0 learns how they started,
-        // and starts serving them, before the resolution (foreign_driver_link), or here to end a link that never got
-        // there.
+        // The lanes asked for, which lane 1 starts while lane 0 opens the first inputs: lane 0 learns how they started
+        // before the resolution (foreign_driver_link).
         run->session_lanes = lane_count();
         run->lanes_end = foreign_driver_now();
+        lane_flow_begin(&run->flow);
         run->result = foreign_driver_link(run);
-        if (!lane_serving())
-        {
-            lane_serve_begin();
-        }
-        lane_serve_end();
+        lane_flow_end(&run->flow);
     }
     else
     {
-        lane_serve();
+        void* operation = 0;
+        for (uint32_t round = lane_flow_next(&run->flow, &operation); round != FOREIGN_FLOW_END; round = lane_flow_next(&run->flow, &operation))
+        {
+            if (operation != 0)
+            {
+                switch ((ForeignFlowRound)round)
+                {
+                    case FOREIGN_FLOW_RESOLVE: foreign_lane_main(operation); break;
+                    case FOREIGN_FLOW_CONVERT: foreign_link_lane(operation); break;
+                    case FOREIGN_FLOW_WRITE: foreign_driver_write_lane(operation); break;
+                    case FOREIGN_FLOW_END: break;
+                }
+            }
+            lane_widen();
+        }
     }
 }
 
-// The command's arguments, then its session, before any input is opened (#905): as many lanes as it may take, which
-// stay parked for the process's exit once the link is done. A session whose threads can't start runs the link on one
-// lane, --lanes or not; --time reports the lanes it ran on.
+// The command's arguments, then its session, before any input is opened (#905): as many lanes as it may take, without
+// --lanes at most one per core of its CPUs, which lane 1 counts while lane 0 opens the first inputs
+// (BUSTER_LANE_SESSION_PER_CORE), and which stay parked for the process's exit once the link is done. A session whose
+// threads can't start runs the link on one lane, --lanes or not; --time reports the lanes it ran on.
 static int run_foreign_link(int argc, char** argv)
 {
     ForeignDriverRun run = { .begin = foreign_driver_now(), .result = 1 };
@@ -947,13 +967,17 @@ static int run_foreign_link(int argc, char** argv)
     // which the process's exit releases with the lanes parked on it.
     Arena memory = arena_reserve(sizeof(LaneSession) + _Alignof(LaneSession));
     LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
-    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END;
+    const uint32_t per_core = run.driver.lanes == 0 ? BUSTER_LANE_SESSION_PER_CORE : 0;
+    const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_PARK_AT_END | per_core;
     if (session == NULL || lane_session_run(session, run.succeeded && !run.driver.help ? run.most : 1, NULL, foreign_driver_flow, &run, flags) == 0)
     {
         run.session_lanes = 1;
         run.lanes_end = foreign_driver_now();
+        const Lane group = lane_alone();
+        lane_flow_begin(&run.flow);
         run.result = foreign_driver_link(&run);
-        lane_serve_end();
+        lane_flow_end(&run.flow);
+        lane_restore(group);
     }
     return run.result;
 }

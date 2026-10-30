@@ -145,9 +145,13 @@ existing C compiler. Constexpr additionally requires source constant evaluation.
 
 The preprocessor uses this inventory in its normal implemented mode and keeps
 its separate Clang compatibility mode. The catalog now explicitly advertises the implemented source paths; recognized
-but refused names (elementwise bit reversal, for one) remain zero.
-clang's sized legacy atomics (`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog resolves
-each to its family's builtin, with its capabilities (`cbuiltin_sized_entry`).
+but refused names would remain zero (none is now), and the vector builtins
+the checker checks but no lowering takes (`__builtin_elementwise_clmul`, the
+masked memory builtins and the matrix ones) have `BUSTER_CBUILTIN_CAP_CHECKER`
+alone, so `__has_builtin` answers 0 for them. clang's sized legacy atomics
+(`__sync_fetch_and_add_4` and the others) aren't catalog entries: the catalog
+resolves each to its family's builtin, with its capabilities
+(`cbuiltin_sized_entry`).
 `test-preprocessor` checks the exact catalog and the advertised list, including
 raw macro names, unknown bounded names and guarded input boundaries. An
 advertised name also needs clang's own conditions for the unit, as clang's
@@ -834,11 +838,11 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds 222 audited SemaX86 constraint facts for 220
-affected names in the frozen 1,492-name own-main target-builtin scope and five
-additional names: 87
-rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
-error as clang's `CheckBuiltinGatherScatterScale` has it) and 68 direct ranges.
+`c_check_builtin_x86.c` adds 450 audited SemaX86 constraint facts for 422
+affected names in the frozen 1,492-name own-main target-builtin scope and the
+supplementary scope: 87
+rounding sets, 90 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 267 direct ranges.
 #126 added the 26 x86 names this compiler's build calls that the first
 inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
 among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
@@ -852,11 +856,16 @@ ranges: `pshufd`, `pshufhw`, `pshuflw` and `shufps` (0 to 255),
 `psrldqi128_byteshift` and `palignr128` (0 to 255), `vec_ext_v8hi` and
 `vec_set_v8hi` (0 to 7). Their target features (SSE2, and SSSE3 for
 `palignr128`) are no more checked than any x86 builtin's.
-The separately attested #799 scope adds `shufpd` (immediate 0 to 3), and
-`pblendw128`, `pshufd256`, `permdi256` and `palignr256` (0 to 255). Their
-lowering uses VEX forms and requires AVX or AVX2; the existing vector backend
-also requires AVX-512F and AVX-512VL. The attestation does not change the frozen
-own-main inventory or admit other catalogue entries.
+The separately attested supplementary scope (`c_builtin_supplementary_scope.inc`,
+each name with its required target features in clang's metadata, in strcmp's
+order for its lookups' binary searches) holds the x86 names past the inventory.
+#799 added `shufpd` (immediate 0 to 3), and `pblendw128`, `pshufd256`,
+`permdi256` and `palignr256` (0 to 255). Their lowering uses VEX forms and
+requires AVX or AVX2; the existing vector backend also requires AVX-512F and
+AVX-512VL. The attestation does not change the frozen own-main inventory or
+admit other catalogue entries; `test-builtin-intrinsic-catalog` checks that
+each supplementary name is an x86 record of the catalogue the inventory hasn't,
+and that the names are sorted.
 `builtin_intrinsic_own_main_prototype_in_scope` also admits
 the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
@@ -893,6 +902,88 @@ under each of MXCSR's four rounding modes, set and restored around it, and throu
 znver5. The program that includes the header lowers only what its roots reach,
 as `-c` does (`check_test_program_includes`), since the header's MMX functions
 call builtins no row takes.
+
+#148's rest of clang's x86 builtins, which no build of this compiler calls, join
+the supplementary scope by family, each with its SemaX86 facts and the rows of
+the existing families or of new ones:
+
+- the unsigned compares of quadwords and words at 16 and 32 bytes
+  (`ucmpq128_mask` to `ucmpw256_mask`), whose rows the compares' family had; a
+  quadword's extract and the insertions of a byte and a quadword
+  (`vec_ext_v2di`, `vec_set_v16qi`, `vec_set_v2di`), which had rows too;
+- the rotates by an immediate at each width (`prold`, `prolq`, `prord` and
+  `prorq` of 128, 256 and 512 bits), VPROL's and VPROR's: the count is the
+  immediate's whole byte, which the instruction takes modulo the elements' bits
+  as clang's funnel shifts take theirs;
+- one vector or two by an immediate at the widths the inventory lacked: the
+  aligns (`alignd`, `alignq`), the shuffles of 128-bit lanes (`shuf_f32x4` to
+  `shuf_i64x2_256`), of floats and doubles (`shufps256` to `shufpd512`) and of
+  words (`pshufhw256` to `pshuflw512`), the byte shifts and align of each lane
+  (`pslldqi256_byteshift` to `psrldqi512_byteshift`, `palignr512`), the
+  permutes by an immediate (`permdf256`, `permdf512`, `permdi512`, `vpermilpd`
+  to `vpermilps512`, and VEX's `vperm2f128_*` and `permti256`) and VEX's blends
+  (`blendps`, `blendpd`, `pblendd`, `pblendw256`). The immediate is the
+  instruction's whole byte, which reads the bits clang's code reads: an align's
+  low bits, a shuffle's and a blend's bit per element, a permute's bits 3 and
+  7, which zero its lanes, and a byte shift past its lane, which gives zeros;
+- the rest of the elements and lanes: the elements of 256-bit vectors and of
+  8-byte ones (`vec_ext_v8si` to `vec_set_v32qi`, `vec_ext_v4hi` and
+  `vec_set_v4hi`) at the index's low bits, a 256-bit vector's lane taken out
+  into another register around an insertion and put back (VINSERTI32X4: an
+  insertion into 16 bytes zeroes its register past them), and a float's
+  (`vec_ext_v4sf`) into the floating result by VPERMILPS, its bits a float's
+  where an integer result would be converted by its value; the lanes of 128
+  and 256 bits inserted (`insertf32x4` to `inserti64x2_512`, and VEX's
+  `vinsertf128` builtins as VINSERTF32X4) and extracted, under a mask into w
+  (`extractf32x4_mask` to `extracti64x2_512_mask`) or not (`extract128i256`),
+  at the index's low bits; and `insertps128`, INSERTPS's element of b into a
+  under its zero mask;
+- the ternary logic of 16 and 32 bytes merged under a mask, and zeroed under one
+  at every width (`pternlogd128_mask` to `pternlogq512_maskz`); the
+  concatenating shifts by an immediate (`vpshldd128` to `vpshrdw512`, VPSHLD's
+  and VPSHRD's: a's and b's elements joined, as clang's funnel shifts join
+  them, the count modulo the elements' bits); the sums of absolute differences
+  (`dbpsadbw128` to `dbpsadbw512`, and VEX's `mpsadbw128` and `mpsadbw256` and
+  AVX10.2's `mpsadbw512`), the carry-less products (`pclmulqdq128`, VEX's with
+  PCLMUL, to `pclmulqdq512`) and the affine transforms of GF(2^8)
+  (`vgf2p8affineqb_v16qi` to `vgf2p8affineinvqb_v64qi`), each with the
+  immediate's whole byte; and the masks' other shifts (`kshiftliqi` to
+  `kshiftridi`), whose count past the mask's bits gives 0;
+- the rest of AVX-512's operations of floats by an immediate: the mantissas
+  (`getmantps128_mask` to `getmantsd_round_mask`), the reductions
+  (`reduceps128_mask` to `reducesd_mask`) and the roundings to a scale
+  (`rndscaleps_128_mask` to `rndscalesd_round_mask`) into w under a mask, the
+  ranges of two vectors (`rangeps128_mask` to `rangesd128_round_mask`) merged
+  into w, the classes into a mask (`fpclassps128_mask` to `fpclasssd_mask`,
+  the mask family's of an immediate) and the fix-ups (`fixupimmps128_mask` to
+  `fixupimmsd_maskz`, the ternary family's, merged into a or zeroed). The
+  64-byte and scalar ones take the exceptions' suppression their last argument
+  asks for; a scalar one's immediate follows its mask (but getmant's), which
+  the lowering finds past it;
+- the compares of floats by a predicate: into vectors (`cmpps`, `cmppd`,
+  `cmpss`, `cmpsd`, `cmpps256`, `cmppd256`, VEX's VCMPPS to VCMPSD), into masks
+  under masks (`cmpps128_mask` to `cmpsd_mask`, and AVX512-FP16's
+  `cmpph128_mask` to `cmpsh_mask`) and into ints (`vcomiss` and `vcomisd`, as
+  `vcomish`: VCMPSS's and VCMPSD's opmask bit). A packed one's predicate is
+  clang's code's: CGBuiltin's fcmp of the immediate's low 4 bits ignores the
+  predicate's signaling, and LLVM selects that fcmp with the operands swapped
+  for a greater-than (ULT as NLE, ULE as NLT, OGE as LE, OGT as LT), so the
+  lowering does the same (`check_x86_lower_float_predicate`; FALSE and TRUE,
+  which clang's code makes constants, are the instruction's predicates of
+  them), and clang's code ignores a 64-byte one's rounding control. A scalar
+  one's predicate is the immediate's whole byte, as clang's code passes it
+  (`vcomiss`'s and `vcomisd`'s its low 5 bits, as `vcomish`'s, all the
+  instruction reads), with the exceptions' suppression it asks for.
+
+`test-checker`'s programs of them (`c_check_program_x86_rest_test.c`) call each
+at its immediate's edges, and past them, where a pragma turns off clang's
+`-Wargument-outside-range` and both compilers' code takes the immediate's low
+bits (an index's, a predicate's), against clang -O0's code for znver5, run
+where the host has the features. `test-check-builtins-x86` compiles every
+supplementary fact's edges with clang (`check_builtin_x86_test_clang_supplementary`):
+a function per value of the constrained argument, the others at values their
+facts accept, declared at the prototype's types as clang spells them. Clang
+must refuse exactly the values the fact refuses, with the fact's bounds.
 
 Direct range failures are deferred diagnostic events of warning class with
 default error severity. Source constant-evaluated context skips only these
@@ -957,7 +1048,39 @@ exercise both driver schedules, nested selections, dead statements, unevaluated
 contexts and pragma/`-w` policy; storage tests cover every allocation cut.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
-shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
+shuffle, conversion, nondeterministic and nontemporal spellings, and the 52
+other generic vector builtins of clang 23 (#148), at catalog identities from
+0x320 on (`cbuiltin_vector`):
+
+- the floating elementwise functions of one operand (acos ... tanh, the
+  roundings and canonicalize) take sqrt's rule, a floating scalar or a vector
+  of floating elements, and those of two (atan2, fmod, pow, copysign and the
+  maximum and minimum functions) the min/max rule restricted to floating ones:
+  operands of one element type and lanes, a GNU vector and an
+  `ext_vector_type` one alike, but in copysign, which compares its operands'
+  types whole as clang's does;
+- ldexp takes a floating value and an integer exponent of its lanes, a scalar
+  one with the integer promotions, a vector one of any element size;
+- ctzg takes clzg's rule, and clmul, pdep and pext two integer operands of one
+  element type and lanes;
+- reduce_xor takes a vector of integers, reduce_maximum and _minimum one of
+  floating elements, and reduce_assoc_fadd (with an optional start value) and
+  _in_order_fadd (with a required one) a vector of floating elements and a
+  floating scalar start, converted to the element type as by assignment;
+- the masked builtins take a mask of bools (an `ext_vector_type`'s), a pointer
+  to a scalar, neither volatile nor atomic nor, for a store, const, and a load's
+  passthru of exactly its result type, the `ext_vector_type` of the pointer's
+  type and the mask's lanes; clang's vectors of pointers, structs, arrays,
+  functions and void here are refused as unsupported, the type table having
+  none;
+- the matrix builtins are an error at every call, as clang's are without
+  `-fenable-matrix`, which buster hasn't: no unit has a matrix type.
+
+`test-checker` compares each family's valid calls and one error each with
+clang's acceptance and first error line (`c_check_builtin_vector_graph_test.c`),
+and `test-check-builtins-vector` their type relations with independent
+expectations that clang confirms. Their lowering is in the checker guide's
+"Generic vector builtins". The module's exact
 type relations are separate from #147's ordinary vector operators. Shuffle
 indices use the full bounded source slice; conversion carries a separate type
 operand. Nondeterministic values inspect their argument's type without

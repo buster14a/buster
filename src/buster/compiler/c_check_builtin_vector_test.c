@@ -135,6 +135,224 @@ static void check_builtin_vector_test_names(CheckBuiltinVectorTest* test, TypeTa
     }
 }
 
+// Clang 23's builtins past the 23 observed spellings, each against its independently stated type relations: the
+// floating functions of one and two operands (copysign's operands compared whole), ldexp's exponents, the integer ones,
+// the xor, floating maximum and minimum and floating sum reductions (a start value converted to the element), the
+// masked ones' masks, pointers and passthru vectors, and the matrix ones, every call of which is an error without matrix
+// types. Each family's floating environment effects are explicit: copysign's alone moves bits without them.
+static void check_builtin_vector_test_added(CheckBuiltinVectorTest* test, TypeTable* table)
+{
+    const TypeId vf = type_vector(table, BUSTER_TYPE_FLOAT, 4, false);
+    const TypeId ef = type_vector(table, BUSTER_TYPE_FLOAT, 4, true);
+    const TypeId vd = type_vector(table, BUSTER_TYPE_DOUBLE, 4, false);
+    const TypeId vi = type_vector(table, BUSTER_TYPE_INT, 4, false);
+    const TypeId vu = type_vector(table, BUSTER_TYPE_UINT, 4, false);
+    const TypeId vs = type_vector(table, BUSTER_TYPE_SHORT, 8, false);
+    const TypeId vl = type_vector(table, BUSTER_TYPE_LLONG, 4, false);
+    const TypeId mask = type_vector(table, BUSTER_TYPE_BOOL, 4, true);
+    const TypeId fp = type_pointer(table, BUSTER_TYPE_FLOAT);
+    const TypeId cfp = type_pointer(table, type_qualify(table, BUSTER_TYPE_FLOAT, BUSTER_TYPE_CONST));
+    const TypeId vfp = type_pointer(table, type_qualify(table, BUSTER_TYPE_FLOAT, BUSTER_TYPE_VOLATILE));
+    const TypeId ip = type_pointer(table, BUSTER_TYPE_INT);
+    const TypeId efp = type_pointer(table, ef);
+    static const CBuiltinId unary[] = {
+        CBUILTIN_ELEMENTWISE_ACOS, CBUILTIN_ELEMENTWISE_ASIN, CBUILTIN_ELEMENTWISE_ATAN, CBUILTIN_ELEMENTWISE_COS, CBUILTIN_ELEMENTWISE_COSH,
+        CBUILTIN_ELEMENTWISE_EXP, CBUILTIN_ELEMENTWISE_EXP10, CBUILTIN_ELEMENTWISE_EXP2, CBUILTIN_ELEMENTWISE_LOG, CBUILTIN_ELEMENTWISE_LOG10,
+        CBUILTIN_ELEMENTWISE_LOG2, CBUILTIN_ELEMENTWISE_SIN, CBUILTIN_ELEMENTWISE_SINH, CBUILTIN_ELEMENTWISE_TAN, CBUILTIN_ELEMENTWISE_TANH,
+        CBUILTIN_ELEMENTWISE_CEIL, CBUILTIN_ELEMENTWISE_FLOOR, CBUILTIN_ELEMENTWISE_TRUNC, CBUILTIN_ELEMENTWISE_RINT, CBUILTIN_ELEMENTWISE_NEARBYINT,
+        CBUILTIN_ELEMENTWISE_ROUNDEVEN, CBUILTIN_ELEMENTWISE_ROUND, CBUILTIN_ELEMENTWISE_CANONICALIZE,
+    };
+    static const CBuiltinId binary[] = {
+        CBUILTIN_ELEMENTWISE_ATAN2, CBUILTIN_ELEMENTWISE_FMOD, CBUILTIN_ELEMENTWISE_POW, CBUILTIN_ELEMENTWISE_COPYSIGN, CBUILTIN_ELEMENTWISE_MAXIMUM,
+        CBUILTIN_ELEMENTWISE_MINIMUM, CBUILTIN_ELEMENTWISE_MAXNUM, CBUILTIN_ELEMENTWISE_MINNUM, CBUILTIN_ELEMENTWISE_MAXIMUMNUM,
+        CBUILTIN_ELEMENTWISE_MINIMUMNUM,
+    };
+    CheckValue arguments[4] = { 0 };
+    CheckBuiltinVectorResult result;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unary); i += 1)
+    {
+        arguments[0] = check_builtin_vector_test_value(vf);
+        result = check_builtin_vector_test_action(table, unary[i], arguments, 1);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == vf && result.reads_fp_environment &&
+                                                   result.may_raise_fp_exceptions && result.runtime_builtin == unary[i] && result.constant_evaluation_unmodeled &&
+                                                   check_graph_builtin_op(unary[i]) == CHECK_OP_BUILTIN_VECTOR,
+                                         "a floating function of a vector of floats is of its type, in the floating environment");
+        arguments[0] = check_builtin_vector_test_value(BUSTER_TYPE_LONG_DOUBLE);
+        result = check_builtin_vector_test_action(table, unary[i], arguments, 1);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_LONG_DOUBLE,
+                                         "a floating function of a scalar is of its type");
+        arguments[0] = check_builtin_vector_test_value(vi);
+        result = check_builtin_vector_test_action(table, unary[i], arguments, 1);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a floating function of integers is an error");
+        arguments[1] = check_builtin_vector_test_value(vf);
+        result = check_builtin_vector_test_action(table, unary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a floating function of one operand takes one");
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(binary); i += 1)
+    {
+        const bool copysign = binary[i] == CBUILTIN_ELEMENTWISE_COPYSIGN;
+        arguments[0] = check_builtin_vector_test_value(vf);
+        arguments[1] = check_builtin_vector_test_value(vf);
+        result = check_builtin_vector_test_action(table, binary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == vf &&
+                                                   result.reads_fp_environment == !copysign && result.may_raise_fp_exceptions == !copysign,
+                                         "a floating function of two operands is of their type; copysign alone moves bits without the environment");
+        arguments[1] = check_builtin_vector_test_value(ef);
+        result = check_builtin_vector_test_action(table, binary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, (result.action.diagnostic == CHECK_DIAG_NONE) == !copysign,
+                                         "GNU and ext_vector_type operands of one element and lanes match but in copysign, which compares them whole");
+        arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_FLOAT);
+        result = check_builtin_vector_test_action(table, binary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a vector and a scalar are of different types");
+        arguments[0] = check_builtin_vector_test_value(BUSTER_TYPE_DOUBLE);
+        result = check_builtin_vector_test_action(table, binary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a double and a float are of different types");
+        arguments[0] = check_builtin_vector_test_value(vi);
+        arguments[1] = check_builtin_vector_test_value(vi);
+        result = check_builtin_vector_test_action(table, binary[i], arguments, 2);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a floating function of integers is an error");
+    }
+    // ldexp: a scalar exponent takes the integer promotions, a vector one none, the lanes the value's.
+    arguments[0] = check_builtin_vector_test_value(vf);
+    arguments[1] = check_builtin_vector_test_value(vi);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == vf && result.argument_conversions[1].type == vi &&
+                                               result.reads_fp_environment,
+                                     "ldexp of a vector by a vector of its lanes' exponents");
+    arguments[1] = check_builtin_vector_test_value(vl);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE, "ldexp's exponents may be of any integer size");
+    arguments[1] = check_builtin_vector_test_value(vs);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "ldexp's exponents have the value's lanes");
+    arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_INT);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a vector's ldexp takes no scalar exponent");
+    arguments[1] = check_builtin_vector_test_value(vf);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "ldexp's exponents are integers");
+    arguments[0] = check_builtin_vector_test_value(BUSTER_TYPE_FLOAT);
+    arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_SHORT);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_FLOAT &&
+                                               result.argument_conversions[1].type == BUSTER_TYPE_INT &&
+                                               (result.argument_conversions[1].flags & BUSTER_CHECK_CONVERT_PROMOTION) != 0,
+                                     "a scalar exponent takes the integer promotions");
+    arguments[0] = check_builtin_vector_test_value(BUSTER_TYPE_INT);
+    arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_INT);
+    result = check_builtin_vector_test_action(table, CBUILTIN_ELEMENTWISE_LDEXP, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "ldexp's value is floating");
+    // The integer functions: bitreverse, ctzg (with clzg's optional fallback), clmul, pdep and pext.
+    static const CBuiltinId integer[] = { CBUILTIN_ELEMENTWISE_BITREVERSE, CBUILTIN_ELEMENTWISE_CTZG, CBUILTIN_ELEMENTWISE_CLMUL, CBUILTIN_ELEMENTWISE_PDEP,
+                                          CBUILTIN_ELEMENTWISE_PEXT };
+    static const uint32_t counts[] = { 1, 2, 2, 2, 2 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(integer); i += 1)
+    {
+        arguments[0] = check_builtin_vector_test_value(vu);
+        arguments[1] = check_builtin_vector_test_value(type_vector(table, BUSTER_TYPE_UINT, 4, true));
+        result = check_builtin_vector_test_action(table, integer[i], arguments, counts[i]);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == vu && !result.reads_fp_environment,
+                                         "an integer function of vectors of one element and lanes is of the first's type");
+        arguments[1] = check_builtin_vector_test_value(vi);
+        result = check_builtin_vector_test_action(table, integer[i], arguments, counts[i]);
+        check_builtin_vector_test_expect(test, (result.action.diagnostic == CHECK_DIAG_NONE) == (counts[i] == 1),
+                                         "an integer function's second operand has the first's elements");
+        arguments[0] = check_builtin_vector_test_value(vf);
+        result = check_builtin_vector_test_action(table, integer[i], arguments, 1);
+        check_builtin_vector_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE, "an integer function of floats is an error");
+    }
+    // The reductions: xor of integers, maximum and minimum of floating elements, the sums with their start values.
+    arguments[0] = check_builtin_vector_test_value(vi);
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_XOR, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT && result.lane_count == 4,
+                                     "an xor reduction is of the element type");
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_MAXIMUM, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a maximum reduction takes floating elements alone");
+    arguments[0] = check_builtin_vector_test_value(vd);
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_XOR, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INTEGER_REQUIRED, "an xor reduction takes integers alone");
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_MINIMUM, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_DOUBLE && result.reads_fp_environment,
+                                     "a minimum reduction is of the floating element type");
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_ASSOC_FADD, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_DOUBLE,
+                                     "a sum reduction's start value is optional");
+    arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_FLOAT);
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_ASSOC_FADD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.argument_conversions[1].type == BUSTER_TYPE_DOUBLE &&
+                                               result.converted_arguments[1].type == BUSTER_TYPE_DOUBLE,
+                                     "a sum reduction's start value converts to the element type");
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_IN_ORDER_FADD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_DOUBLE,
+                                     "an ordered sum reduction takes its start value");
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_IN_ORDER_FADD, arguments, 1);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "an ordered sum reduction requires its start value");
+    arguments[1] = check_builtin_vector_test_value(BUSTER_TYPE_INT);
+    result = check_builtin_vector_test_action(table, CBUILTIN_REDUCE_ASSOC_FADD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a sum reduction's start value is floating");
+    // The masked builtins.
+    arguments[0] = check_builtin_vector_test_value(mask);
+    arguments[1] = check_builtin_vector_test_value(fp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_LOAD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == ef && result.reads_memory &&
+                                               result.memory_type == BUSTER_TYPE_FLOAT,
+                                     "a masked load is the ext_vector_type of its pointer's type and its mask's lanes");
+    arguments[1] = check_builtin_vector_test_value(cfp);
+    arguments[2] = check_builtin_vector_test_value(ef);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_EXPAND_LOAD, arguments, 3);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == ef,
+                                     "a masked load reads through a const pointer, its passthru the result's type");
+    arguments[2] = check_builtin_vector_test_value(vf);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_LOAD, arguments, 3);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a masked load's passthru is the ext_vector_type itself");
+    arguments[1] = check_builtin_vector_test_value(vfp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_LOAD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a masked load refuses a volatile pointer");
+    arguments[1] = check_builtin_vector_test_value(efp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_LOAD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a masked load's pointer is to a scalar");
+    arguments[0] = check_builtin_vector_test_value(vi);
+    arguments[1] = check_builtin_vector_test_value(fp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_LOAD, arguments, 2);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a masked builtin's mask is a vector of bools");
+    arguments[0] = check_builtin_vector_test_value(mask);
+    arguments[1] = check_builtin_vector_test_value(vf);
+    arguments[2] = check_builtin_vector_test_value(fp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_STORE, arguments, 3);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_VOID && result.writes_memory,
+                                     "a masked store of a vector of the pointer's type");
+    arguments[2] = check_builtin_vector_test_value(ip);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_COMPRESS_STORE, arguments, 3);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a masked store's vector has the pointer's type");
+    arguments[1] = check_builtin_vector_test_value(vi);
+    arguments[2] = check_builtin_vector_test_value(ef);
+    arguments[3] = check_builtin_vector_test_value(fp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_SCATTER, arguments, 4);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.writes_memory, "a scatter by integer indices of the mask's lanes");
+    arguments[1] = check_builtin_vector_test_value(vf);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_SCATTER, arguments, 4);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a scatter's indices are integers");
+    arguments[1] = check_builtin_vector_test_value(vi);
+    arguments[2] = check_builtin_vector_test_value(fp);
+    result = check_builtin_vector_test_action(table, CBUILTIN_MASKED_GATHER, arguments, 3);
+    check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == ef && result.reads_memory,
+                                     "a gather is the ext_vector_type of its pointer's type");
+    // The matrix builtins: an error whatever their operands, with their counts' own.
+    static const CBuiltinId matrix[] = { CBUILTIN_MATRIX_TRANSPOSE, CBUILTIN_MATRIX_COLUMN_MAJOR_LOAD, CBUILTIN_MATRIX_COLUMN_MAJOR_STORE };
+    static const uint32_t matrix_counts[] = { 1, 4, 3 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(matrix); i += 1)
+    {
+        for (uint32_t a = 0; a < 4; a += 1)
+        {
+            arguments[a] = check_builtin_vector_test_value(a == 0 ? vf : BUSTER_TYPE_INT);
+        }
+        result = check_builtin_vector_test_action(table, matrix[i], arguments, matrix_counts[i]);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a matrix builtin's call is an error without matrix types");
+        result = check_builtin_vector_test_action(table, matrix[i], arguments, matrix_counts[i] - 1);
+        check_builtin_vector_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a matrix builtin's count is its own");
+    }
+}
+
 static void check_builtin_vector_test_math(CheckBuiltinVectorTest* test, TypeTable* table)
 {
     CheckValue arguments[3] = { check_test_integer(BUSTER_TYPE_SCHAR, 2), check_test_integer(BUSTER_TYPE_SCHAR, 3), check_test_integer(BUSTER_TYPE_SCHAR, 1) };
@@ -938,6 +1156,24 @@ static void check_builtin_vector_test_clang(CheckBuiltinVectorTest* test, const 
         { "void f(vi a){ (void)__builtin_shufflevector(a,a,1 << -1); }", NULL, false },
         { "void f(vi a){ (void)__builtin_shufflevector(a,a,1 << -1); }", "-Werror=shift-count-negative", true },
         { "void f(vi a){ (void)__builtin_shufflevector(a,a,0); }", "-Werror=shift-count-negative", false },
+        { "void f(vf a,long double l){ (void)__builtin_elementwise_sin(a); (void)__builtin_elementwise_pow(a,a); (void)__builtin_elementwise_round(l); }", NULL, false },
+        { "void f(vf a,ef b){ (void)__builtin_elementwise_copysign(a,b); }", NULL, true },
+        { "void f(vf a,ef b){ (void)__builtin_elementwise_maximumnum(a,b); }", NULL, false },
+        { "void f(vi a){ (void)__builtin_elementwise_floor(a); }", NULL, true },
+        { "void f(vf a,vs b){ (void)__builtin_elementwise_ldexp(a,b); }", NULL, true },
+        { "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_elementwise_ldexp(1.0f,(short)2)),float),\"ldexp\");", NULL, false },
+        { "_Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_reduce_assoc_fadd((vf){0},1.0)),float),\"start\");", NULL, false },
+        { "void f(vf a){ (void)__builtin_reduce_in_order_fadd(a); }", NULL, true },
+        { "void f(vf a){ (void)__builtin_reduce_assoc_fadd(a,1); }", NULL, true },
+        { "void f(vi a){ (void)__builtin_reduce_maximum(a); }", NULL, true },
+        { "void f(vi a,ei b){ (void)__builtin_reduce_xor(a); (void)__builtin_elementwise_ctzg(a,b); (void)__builtin_elementwise_pdep(a,b); }", NULL, false },
+        { "void f(vi a,vs b){ (void)__builtin_elementwise_pext(a,b); }", NULL, true },
+        { "void f(eb m,const float*p,ef v){ ef r=__builtin_masked_load(m,p,v); (void)r; }", NULL, false },
+        { "void f(eb m,volatile float*p){ (void)__builtin_masked_load(m,p); }", NULL, true },
+        { "void f(eb m,int*p,ef v){ __builtin_masked_store(m,v,p); }", NULL, true },
+        { "void f(vi m,float*p){ (void)__builtin_masked_load(m,p); }", NULL, true },
+        { "void f(float x){ (void)__builtin_matrix_transpose(x); }", NULL, true },
+        { "void f(float*p){ (void)__builtin_matrix_column_major_load(p,2,2,2); }", NULL, true },
     };
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {
@@ -1026,6 +1262,7 @@ static __attribute__((unused)) int run_check_builtin_vector_tests(int argc, char
         {
             check_builtin_vector_test_names(&test, &types.table);
             check_builtin_vector_test_math(&test, &types.table);
+            check_builtin_vector_test_added(&test, &types.table);
             check_builtin_vector_test_shuffle(&test, &types.table);
             check_builtin_vector_test_shuffle_ice(&test, &types.table);
             check_builtin_vector_test_memory(&test, &types.table);

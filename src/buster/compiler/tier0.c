@@ -997,15 +997,19 @@ static bool tier0_x87_result_valid(AbiReturn result, uint32_t size)
 }
 
 // Whether `result` returns an aggregate of `size` bytes in registers: as eightbytes (16 bytes at most), in two result
-// registers at most, 8-byte parts or a 16-, 32- or 64-byte one in a vector register whole; or in x87 registers
-// (tier0_x87_result_valid), a struct of a long double's in st0.
+// registers at most, 8-byte parts or a 16-, 32- or 64-byte one in a vector register whole, or a value of fewer than 8
+// bytes alone in one register, an eightbyte's part as any other (an _Atomic vector of 4 bytes, which LLVM returns as its
+// value in xmm0, its part_bytes its size, #137); or in x87 registers (tier0_x87_result_valid), a struct of a long
+// double's in st0.
 static bool tier0_aggregate_result_valid(AbiReturn result, uint32_t size)
 {
     const bool high = (result.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool vector = tier0_vector_bytes_valid(result.part_bytes) && result.registers[1] == BUSTER_ABI_REGISTER_NONE &&
                         (result.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0 && !high && size == result.part_bytes;
-    const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || vector) && result.registers[2] == BUSTER_ABI_REGISTER_NONE &&
-                            result.registers[3] == BUSTER_ABI_REGISTER_NONE && tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
+    const bool narrow = result.part_bytes != 0 && result.part_bytes < 8 && result.registers[1] == BUSTER_ABI_REGISTER_NONE && !high && size <= 8;
+    const bool eightbytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.part_bytes == 8 || narrow || vector) &&
+                            result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
+                            tier0_parts_valid(result.registers, high, false, size, BUSTER_TIER0_RESULT_REGISTERS);
     return eightbytes || (size != 0 && tier0_x87_result_valid(result, size));
 }
 

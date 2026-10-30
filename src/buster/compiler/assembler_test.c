@@ -912,6 +912,33 @@ static void asm_test_code(AsmTest* test)
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
     asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
+    // musl's templates (#147): its atomics' lock prefixes, as statements of their own (past a semicolon and a line) and
+    // on the instruction's line, the exchanges, the bit scans, hlt and the thread pointer's load; its math's SSE
+    // instructions, FMA3's and the x87's, fnstsw into %ax and fistpll among them. Each locked instruction is a record of
+    // its prefixed form.
+    const AsmCode atomics = asm_test_code_pair(test, "lock ; cmpxchg %ecx, (%rdx)\nlock cmpxchgq %rcx, 8(%rdx)\nxchg %eax, (%rdx)\nlock ; xadd %eax, (%rdx)\n"
+                                                      "lock ; and %eax, (%rdx)\nlock ; or %rax, (%rdx)\nlock\n\n\tincl (%rdx)\nlock ; decl (%rdx)\n"
+                                                      "movl %eax, (%rdx) ; lock ; orl $0,(%rsp)\nbsf %rax,%rcx\nbsr %rax,%rcx ; xor $63,%rcx\nhlt\nmov %fs:0,%rax",
+                                               15, "inline code: musl's atomics");
+    asm_test_check(test, atomics.count == 15 && (atomics.records[0].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M32_R32 &&
+                         (atomics.records[1].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_CMPXCHG_M64_R64 &&
+                         (atomics.records[6].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_INC_M32 &&
+                         (atomics.records[9].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LOCK_OR_M32_IMM8,
+                   "inline code: lock prefixes make the locked forms", 0);
+    asm_test_code_pair(test, "sqrtsd %xmm1, %xmm0\nsqrtss %xmm1, %xmm0\ncvtsd2si %xmm0, %rax\ncvtss2si %xmm0, %eax\nvfmadd132sd %xmm1, %xmm2, %xmm0\n"
+                             "vfmadd132ss %xmm1, %xmm2, %xmm0\npcmpeqd %xmm0, %xmm0\npsrlq $1, %xmm0\npsrld $1, %xmm0\nandps %xmm1, %xmm0\n"
+                             "fsqrt\nfabs\nfrndint\nfprem; fnstsw %ax\nfprem1; fnstsw %ax\nfistpll (%rax)",
+                       18, "inline code: musl's math");
+    // dr_flac's lzcnt, `rep; bsr`, and tzcnt so: rep as a statement of its own (past a semicolon and a line) and on the
+    // line, each lzcnt's or tzcnt's form, whose bytes they are.
+    const AsmCode scans = asm_test_code_pair(test, "rep; bsrq %rcx, %rax\nrep\nbsfl %ecx, %eax\nrepz bsr %rax, %rbx\n.intel_syntax noprefix\nrep; bsr rax, rcx\n"
+                                                    ".att_syntax prefix\nlzcnt %rcx, %rax\ntzcntw %cx, %ax",
+                                             6, "inline code: dr_flac's rep bsr");
+    asm_test_check(test, scans.count == 6 && (scans.records[0].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LZCNT_R64_RM64 &&
+                         (scans.records[1].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_TZCNT_R32_RM32 &&
+                         (scans.records[2].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LZCNT_R64_RM64 &&
+                         (scans.records[3].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_LZCNT_R64_RM64,
+                   "inline code: rep bsr and rep bsf are lzcnt's and tzcnt's forms", 0);
     // asm_assemble_code has no section or label directives; the same instruction corpus remains valid as a template.
     asm_test_code_pair(test, asm_test_kmov, 40, "inline code: every mask move form in both syntaxes");
     const AsmCode intel = asm_test_code_pair(test, ".intel_syntax noprefix\nvmovdqu64 zmm0, zmmword ptr [rdi + 192]\nvmovdqa64 zmmword ptr [rdi], zmm15\n"
@@ -936,6 +963,16 @@ static void asm_test_code(AsmTest* test)
         "jmp 9f",
         ".intel_syntax noprefix\nrep movsl",
         "fstp (%rax)",
+        "fistp (%rax)",
+        "lock",
+        "lock ;",
+        "lock\nx: incl (%rdx)",
+        "lock incl %eax",
+        "lock ; movl %eax, (%rdx)",
+        "rep",
+        "rep ;\n.intel_syntax noprefix",
+        "repne bsr %rax, %rcx",
+        "rep bsrb %al, %cl",
         "bogus %eax",
         "pause %eax",
         "rdtsc %eax",
@@ -1477,6 +1514,36 @@ static int run_assembler_tests(int count, char** arguments)
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
                 asm_test_oracle(&test, asm_test_kmov, directory, X86_ARCH_V4);
+                // And musl's (#147): the lock prefix on the instruction's line and as a statement of its own, past a
+                // semicolon and a line (but before a 16-bit instruction, whose 66 GNU as then writes after the lock it
+                // emits alone: our joined form's bytes are the line's, 66 f0), on every locked form's operations;
+                // the exchanges, bit scans and hlt; SSE's scalar, conversion, logic and shift instructions; FMA3's
+                // scalar forms; and the x87's operations on the stack's top, fnstsw into %ax and its integer loads and
+                // stores by each suffix.
+                asm_test_oracle(&test, ".text\nmusl: lock ; cmpxchg %ecx,(%rdx)\nlock ; cmpxchg %rcx,8(%rdx)\nlock cmpxchgb %cl,(%rdx)\nlock cmpxchgw %cx,(%rdx)\n"
+                                       "lock ; xadd %eax,(%rdx)\nlock ; xaddq %rax,(%r12)\nlock ; xaddb %al,(%rdx)\nlock ; and %eax,(%rdx)\nlock ; or %rax,(%rdx)\n"
+                                       "lock ; addl $1,(%rdx)\nlock ; subq $-128,(%rdx)\nlock adcw $300,(%rdx)\nlock ; sbbb $1,(%rdx)\nlock ; xorl %esi,(%rdi)\n"
+                                       "lock\nincl (%rdx)\nlock ; decq (%rdx)\nlock notw (%rdx)\nlock ; negb (%rdx)\nlock ; andq $0xfffffffffffffff0,(%r9)\n"
+                                       "movl %eax,(%rdx) ; lock ; orl $0,(%rsp)\ncmpxchg %ecx,%edx\nxadd %rax,(%rdi)\nxchg %eax,(%rdx)\n"
+                                       "bsf %rax,%rcx\nbsr %rax,%rcx ; xor $63,%rcx\nbsfl (%rdi),%eax\nbsrw %dx,%si\nhlt\nmov %fs:0,%rax\n"
+                                       "sqrtsd %xmm1,%xmm0\nsqrtss (%rax),%xmm9\ncvtsd2si %xmm0,%rax\ncvtsd2si %xmm2,%eax\ncvtss2si %xmm0,%rcx\ncvtss2si 4(%rsp),%r8d\n"
+                                       "cvttsd2si %xmm3,%rdx\ncvttss2si %xmm4,%esi\nandps %xmm1,%xmm0\nandpd 16(%rax),%xmm2\nandnps %xmm3,%xmm4\nandnpd %xmm5,%xmm6\n"
+                                       "orps %xmm7,%xmm8\norpd %xmm9,%xmm10\npcmpeqd %xmm0,%xmm0\npsrlq $1,%xmm0\npsrld $1,%xmm11\npsllq $63,%xmm1\npslld $31,%xmm2\n"
+                                       "psrlq %xmm1,%xmm2\npsrld (%rax),%xmm3\n"
+                                       "vfmadd132sd %xmm1,%xmm2,%xmm0\nvfmadd132ss %xmm1,%xmm2,%xmm0\nvfmadd213sd (%rax),%xmm9,%xmm10\nvfmadd231ss %xmm11,%xmm12,%xmm13\n"
+                                       "vfmsub132sd %xmm1,%xmm2,%xmm3\nvfmsub231ss %xmm1,%xmm2,%xmm3\nvfnmadd132sd %xmm4,%xmm5,%xmm6\nvfnmadd213ss 4(%rsp),%xmm5,%xmm6\n"
+                                       "vfnmsub213ss %xmm7,%xmm8,%xmm9\nvfnmsub231sd %xmm7,%xmm8,%xmm15\n"
+                                       "fsqrt\nfabs\nfchs\nfrndint\nfprem\nfprem1\nfscale\nfxtract\nf2xm1\nfyl2x\nfyl2xp1\nfpatan\nfptan\nfsin\nfcos\nfsincos\n"
+                                       "fld1\nfldz\nfldpi\nfldl2e\nfldl2t\nfldlg2\nfldln2\nfxam\nftst\nfnstsw %ax\n"
+                                       "fistpll (%rax)\nfistpq 8(%rsp)\nfistpl (%rdx)\nfistps (%rdx)\nfildll (%rax)\nfildq (%rax)\nfildl (%rax)\nfilds (%rax)\n"
+                                       "fistl (%rcx)\nfists (%rcx)\nfisttpll (%rax)\nfisttpq (%rax)\nfisttpl (%rax)\nfisttps (%rax)\n"
+                                       "rep; bsrq %rcx,%rax\nrep; bsrl %ecx,%eax\nrep bsfq (%rdi),%rdx\nrep\nbsf %r8,%r9\nrepz bsr %rax,%rbx\nrepe bsfl %esi,%edi\n"
+                                       "rep bsrw %cx,%ax\nlzcnt %rax,%rcx\ntzcntl %eax,%ecx\n"
+                                       ".intel_syntax noprefix\nlock cmpxchg dword ptr [rdx],ecx\nlock\nxadd qword ptr [rdx],rax\nlock add dword ptr [rsp],0\n"
+                                       "lock inc word ptr [rdx]\nbsf rcx,rax\nbsr ecx,dword ptr [rdi]\nhlt\nsqrtsd xmm0,xmm1\ncvtsd2si rax,xmm0\nandps xmm0,xmm1\n"
+                                       "psrlq xmm0,1\nvfmadd132sd xmm0,xmm2,xmm1\nfnstsw ax\nfistp qword ptr [rax]\nfild word ptr [rax]\nfisttp dword ptr [rax]\nfsqrt\n"
+                                       "rep; bsr rax,rcx\nrep bsf ecx,dword ptr [rdi]\nlzcnt rcx,rax\n",
+                                directory, X86_ARCH_V3);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);

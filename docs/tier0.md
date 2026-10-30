@@ -283,7 +283,9 @@ without aggregates:
 
 **Parts.** The registers come from `abi_assign`'s locations alone: eightbyte k (at 0 and 8, or the high one alone with
 `BUSTER_ABI_FLAG_HIGH`) in `registers[k]`, a general or an XMM register of the convention's (above), each part in a
-register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A STACK location with
+register of its own, an XMM one taking all 16 bytes when it is a 16-byte aggregate's only part. A result whose
+`part_bytes` is its size, fewer than 8 bytes, alone in one register (an `_Atomic` vector of 4 bytes, which LLVM returns
+as its value in xmm0, #137) is such a part too, an eightbyte's (`tier0_aggregate_result_valid`). A STACK location with
 `BUSTER_ABI_FLAG_HIGH` or `BUSTER_ABI_FLAG_LOW` is one part too, the high or the low eightbyte alone, in its 8-byte
 slot: a copy of the aggregate's bytes would run into the next argument's slot (#137). A part loads only the
 aggregate's own bytes, which may end at a page's end:

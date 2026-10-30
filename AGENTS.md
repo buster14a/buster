@@ -326,7 +326,9 @@ designs and the compilers already built this way.
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
   assembles it, by the checker's path, into records, branch columns,
   references and labels. The statement's code calls the result, a per-unit
-  helper; a template of no instructions, a barrier's, is no code at all. A
+  helper; a template of no instructions, a barrier's, is no code at all, but
+  one with x87 operands, whose helper passes them through the x87's stack as
+  clang's code does. A
   naked function's templates are its whole code. Templates' labels are local
   symbols, and the other names they refer to are the unit's symbols of those
   link names or undefined globals (`check_program_emit_asm_symbols`). A
@@ -385,15 +387,17 @@ designs and the compilers already built this way.
   [unwind guide](docs/unwind.md)'s "The C driver's unwind tables"). Either
   output's functions compile on lanes (#151, `check_program_emit_lanes`, the
   [lanes guide](docs/function-lanes.md)): by default as many as the bodies'
-  tokens pay for, up to one per CPU the process may run on, and with
-  `--lanes N` N of them; the output is one lane's, byte for byte. Those lanes
-  are the command's session's (#905, `lane_session_run`, `check_driver_run`):
-  started once, after the options and before any source is read, as many as
-  the command may take (one per CPU, or `--lanes N`, at most `--worker-budget
-  N`), none for one source without code to emit (`-fsyntax-only`), lane 1
-  creating the others while lane 0 starts the command
-  (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns how they started at its first
-  wide part, `lane_session_settle`), and kept parked until the process exits;
+  tokens pay for, up to one per core of the CPUs the process may run on, and
+  with `--lanes N` N of them, at most one per CPU; the output is one lane's,
+  byte for byte. Those lanes are the command's session's (#905,
+  `lane_session_run`, `check_driver_run`): started once, after the options and
+  before any source is read, as many as the command may take (one per core of
+  its CPUs, or `--lanes N`, at most `--worker-budget N`), none for one source
+  without code to emit (`-fsyntax-only`), lane 1 counting the cores in sysfs
+  (`BUSTER_LANE_SESSION_PER_CORE`, `lane_core_count`) and creating the others
+  while lane 0 starts the command (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns
+  how many it asks for at its first wide part, `lane_session_asked`, and how
+  they started, `lane_session_settle`), and kept parked until the process exits;
   the jobserver's slots are taken per wide region, never at the start, and
   lanes that can't start leave the command on one. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
   `-g`, its DWARF units' functions'). With several source files (#152,
@@ -923,19 +927,20 @@ designs and the compilers already built this way.
   inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
   It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
-  and one more per 3 MB of its objects, at most 8 and one per CPU it may run
-  on, which lane 0 decides by opening the command line's first inputs
+  and one more per 3 MB of its objects, at most 8 and one per core of the CPUs
+  it may run on, which lane 0 decides by opening the command line's first inputs
   (`foreign_open_first`), so that a link of a few objects runs on one lane; or
   with `--lanes N` on N, at most one per CPU. Its session (#905, `lane.c`)
   creates the most lanes it may take once, after its arguments and before any
-  input is opened, none for `--lanes 1` or one CPU, and runs it on one lane if
-  they can't start, `--lanes` or not.
+  input is opened, none for `--lanes 1` or one CPU, its lane 1 counting the
+  cores without `--lanes` (`BUSTER_LANE_SESSION_PER_CORE`), and runs it on one
+  lane if they can't start, `--lanes` or not.
   On more than one lane on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
   #87), into the exact path's link; the resolution, the conversion and the
-  write are regions of lane 0's on the session's lanes, which serve them and
-  keep their scratch arenas from one to the next (#501), and `--time` reports
+  write are rounds of the link's flow (a `LaneFlow`) on the session's lanes,
+  which keep their scratch arenas from one to the next (#501), and `--time` reports
   the lanes, the session's start, the first inputs' opening with their
   objects' bytes and the resolution's, the conversion's and the writer's
   phases.
@@ -2740,15 +2745,35 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   process's threads) and joined after, none for one lane; in the flow, the created lanes' asynchronous signals blocked
   and the synchronous ones not, a signal sent to the process handled on lane
   0, parked broadcasts, narrowings to 1, 2, 3, every lane and more, nested,
-  each narrowed group syncing, broadcasting and taking parts, lane 0 serving
-  regions of 1, 3, every lane and more, and regions whose lane 0 serves the
-  region's lanes, after which it serves the session's again, a run, a team, a
+  each narrowed group syncing, broadcasting and taking parts, a flow of rounds
+  (`LaneFlow`) of 1, 3, every lane and more, of two kinds, lane 0 running its
+  part itself and the others theirs by kind, a nested run in a round refused,
+  a run, a team, a
   cold group and a session of several refused where they would create a
   thread, and a child forked from lane 0, which forgets the session; then
   sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
   and lazily, and a lazy
   one whose second does, the lanes created joined and the flow on lane 0
-  alone, and in a child, a session that leaves its lanes parked at its end;
+  alone; sessions of a lane per core (`BUSTER_LANE_SESSION_PER_CORE`), eager,
+  lazy and lazy with a flow of rounds begun before lane 0 settles, of 2 and 8
+  lanes, on test topologies of the process's CPUs (`LaneProcess.topology`) in
+  pairs, in fours and all one core, as many lanes as the capacity and the cores allow,
+  each round on them and each lane's `lane_session_asked` as many, a lazy
+  session's lane 1 created though it runs alone on one core; and in a
+  child, a session that leaves its lanes parked at its end;
+- cores (#905): `lane_cores` on a test topology of SMT siblings n and n + 8,
+  adjacent pairs, single threads, CPUs without a list, lists that don't parse,
+  leave their CPU out or overrun the read's buffer, a newline, a CPU whose
+  sibling's bad list must be skipped, siblings past the mask's words and an
+  empty mask, against counts worked out by hand; and `lane_core_count` against
+  `/proc/cpuinfo`'s cores of the process's CPUs, then on a core's two siblings
+  (one) and CPUs of two cores (two). That oracle (`lane_test_cpuinfo`, which
+  test-check-lanes, test-foreign and test-parallel share) reads only the
+  `processor`, `physical id` and `core id` lines, each value one bounded
+  decimal; its reader is checked first on texts of `/proc/cpuinfo`'s shape:
+  four processors' blocks whose flags lines hold 1,024 names with digits,
+  values at and past their bounds and past 64 bits, malformed values and keys
+  that only start like those three;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -2779,10 +2804,16 @@ input, the calling thread lane 0, as many as the command may take, none for
 one lane, which run the command's flow together until it ends. Their sessions
 are lazy (`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts
 the command, while lane 1 creates the others and says how their start went,
-which lane 0 learns (`lane_session_settle`) before it first meets them. Under a session
-nothing creates a thread: `lane_run` runs a region of lane 0's on the lanes
-that serve it, or a lane's alone, and a team, a cold group of several or a
-second session is refused. A session whose lanes can't start runs on one lane,
+which lane 0 learns (`lane_session_settle`) before it first meets them. By
+default a session asks for no more lanes than the cores of the CPUs the process
+may run on (`BUSTER_LANE_SESSION_PER_CORE`): lane 1 counts them from sysfs'
+sibling lists first (`lane_core_count`), a read per core (9.4 µs for the 9700X's
+8, 19 to 55 µs as a process's first count), off lane 0's path,
+and says how many lanes the session asks for (`lane_session_asked`), on a core's
+two siblings one, itself then joined. Under a session
+nothing creates a thread: a command's wide parts are rounds of its flow
+(`LaneFlow`), `lane_run` runs on a lane alone, and a team, a cold group of
+several or a second session is refused. A session whose lanes can't start runs on one lane,
 never retrying. A terminal command's lanes stay parked for the process's exit
 (but in sanitizer builds), a test's are joined. Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
@@ -2950,7 +2981,9 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
-  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
+  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC` or
+  a section has `SHF_GNU_RETAIN`, as the named sections' descriptors give a
+  third of `.data`'s named atoms);
   and it is compared with the representation, from which the test works out
   every section, symbol and relocation again, with its own tables of section
   formats and relocation types. Among them, every local-exec TLS reference
@@ -5270,12 +5303,14 @@ that address space can't be reserved; each other lane
 has its own (`CheckProgramLanes.arenas`), which the caller keeps until it is
 done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
-the caller allows (the driver: one per CPU it may run on, or `--lanes N`). In
+the caller allows (the driver: one per core of the CPUs it may run on, or
+`--lanes N`). In
 the C driver they are its session's (#905): every lane runs the command's flow
 (`check_driver_flow`), lane 0 the unit's stages alone, and an emission that
-pays for more than one lane is a round of the flow (`CheckEmitFlow`), which
-lane 0 announces and every lane runs, the first of them the bodies' parts, a
-direct call (`check_program_emit_wide`); the worker budget's slots are taken
+pays for more than one lane is a round of the flow (a `LaneFlow`, `lane.c`),
+which lane 0 announces and every lane runs, the first of them the bodies'
+parts, a direct call (`check_program_emit_round` and
+`check_program_emit_follow`); the worker budget's slots are taken
 before the round, without waiting, and given back after it. Elsewhere
 (`CheckProgramLanes.flow` null) the emission's lanes are a `lane_run`.
 
@@ -5310,17 +5345,19 @@ that don't start, and the failing programs' exit statuses and diagnostics by
 driver's session (#905): a library preloaded into the driver counts its calls
 of `pthread_create`: none for `--lanes 1`, `--worker-budget=1`, a source's
 `-fsyntax-only` and an object compiled on one CPU, one per lane past the first
-of `--lanes 3` and by default of the CPUs it may run on, for an object, an
-executable and two sources' objects, and with its second lane failing to start
-(`BUSTER_TEST_LANE_FAIL_AT`) the one created, the object `--lanes 1`'s, each
-with `--time-stages`' lanes asked for and run on (3 and 3, 4 and 1); and
+of `--lanes 3` and by default of the cores of the CPUs it may run on (by
+`/proc/cpuinfo`), for an object, an executable and two sources' objects; where
+the process has a core's two siblings, on them by default one lane (its lane 1
+created to count the core) and by `--lanes 2` two, and on CPUs of two cores
+two; and with its second lane failing to start (`BUSTER_TEST_LANE_FAIL_AT`) the
+one created, the object `--lanes 1`'s, each with `--time-stages`' lanes asked
+for and run on (3 and 3, the cores' by default, 4 and 1); and
 commands in one process, on a session of 4 lanes: a failing command, objects
 on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
 each (`run_check_command`'s collective call), each lane the same thread
-throughout, no thread created, each object `--lanes 1`'s; then the same from
-lane 0 alone, the others serving its regions, lane 0 serving the session's
-lanes again after each (two sources' command serves its own region's).
+throughout, no thread created, each object `--lanes 1`'s; then the same on a
+lazy session.
 `./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
@@ -5359,7 +5396,9 @@ three arenas (`arena_poison`), so that a compile that read a byte it didn't
 write would show. Each lane releases what its units shared, into its pool and
 then the pool itself, on the lane once it takes no more units, and the
 command's session's lanes (#905) run the units, the merge, `link_check` and the
-executable's write (#778), each a region of lane 0's that they serve. A link keeps each
+executable's write (#778), each a round of the command's flow (`CheckUnitsFlow`)
+that lane 0 announces and every lane runs, with a worker-budget lease of its
+own. A link keeps each
 unit's link (`check_units_keep`) and merges them in the command line's order
 (`check_units_merge`: a global name once, each unit's locals its own, a name
 two units define an error) before `check_driver_executable` binds and writes
@@ -5659,13 +5698,15 @@ and the program runs: each side checks every argument, result, hidden pointer,
 this compiler on our side: a world of what its C passes (integers to 64 bits,
 `_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
 and `unsigned __int128`, enums, pointers,
-`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types
-(and `_Complex __float128` in clang's),
+`nullptr_t` in clang's, `_Float16`, `__bf16`, `float`, `double`, `long double`,
+their complex types (`_Complex __bf16`, which the usual arithmetic conversions
+make, and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
-`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of those
-scalars and records (themselves, records holding them and aligned typedefs of
-them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
-AVX-512, and the
+`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of every type C
+makes atomic, but `_BitInt`s (themselves, records holding them and aligned
+typedefs of them, as in the record runs), at 64 bytes the vectors of 4, 8, 16,
+32 and 64 bytes the producer lowers with AVX-512 (no vector of 1 or 2 bytes or
+of `bool`, which it refuses by name), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a

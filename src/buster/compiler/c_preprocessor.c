@@ -254,6 +254,7 @@ struct PPOptions
 {
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
+    uint8_t implicit_library_diagnostic;
     bool implicit_function_system;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
@@ -265,6 +266,10 @@ struct PPOptions
     // Retained independently for the future scheduler; it cannot enable an ISA feature.
     X86Architecture tune;
     bool freestanding;
+    // Plain library names only: explicit __builtin_ spellings remain available. Names borrow command-line storage.
+    bool no_builtin;
+    const char* const* no_builtin_functions;
+    uint32_t no_builtin_function_count;
     // The target's and the other options' predefined macros (c_predefines.c): -march, the -m feature flags, -O, -f...,
     // -g. All zero is clang's defaults with no option.
     PredefinesOptions predefines;
@@ -16698,6 +16703,7 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 // Feature dates are language-mode gates; __has_extension asks about the same implemented syntax in older modes.
 // Sorted for binary search. __has_warning remains the diagnostic vocabulary, not a promise to emit each warning.
 static const PPFeature pp_implemented_attribute[] = {
+    { "alias", 1 },
     { "aligned", 1 },
     { "cleanup", 1 },
     { "constructor", 1 },
@@ -16705,10 +16711,12 @@ static const PPFeature pp_implemented_attribute[] = {
     { "ext_vector_type", 1 },
     { "fallthrough", 1 },
     { "gnu_inline", 1 },
+    { "ifunc", 1 },
     { "mode", 1 },
     { "naked", 1 },
     { "overloadable", 1 },
     { "packed", 1 },
+    { "retain", 1 },
     { "section", 1 },
     { "target", 1 },
     { "transparent_union", 1 },
@@ -16716,20 +16724,24 @@ static const PPFeature pp_implemented_attribute[] = {
     { "vector_size", 1 },
     { "visibility", 1 },
     { "weak", 1 },
+    { "weakref", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
     { "clang::ext_vector_type", 1 },
     { "clang::overloadable", 1 },
     { "fallthrough", 201910 },
+    { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
     { "gnu::cleanup", 1 },
     { "gnu::constructor", 1 },
     { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
     { "gnu::gnu_inline", 1 },
+    { "gnu::ifunc", 1 },
     { "gnu::mode", 1 },
     { "gnu::naked", 1 },
     { "gnu::packed", 1 },
+    { "gnu::retain", 1 },
     { "gnu::section", 1 },
     { "gnu::target", 1 },
     { "gnu::transparent_union", 1 },
@@ -16737,6 +16749,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::vector_size", 1 },
     { "gnu::visibility", 1 },
     { "gnu::weak", 1 },
+    { "gnu::weakref", 1 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
@@ -20143,6 +20156,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     // Fold this diagnostic's option mappings in source order for both possible language defaults. The final -std
     // chooses one: disabling then enabling a default error leaves a warning, while enabling an error preserves it.
     uint8_t implicit_before_c99 = 1;
+    uint8_t implicit_library_before_c99 = 2;
     uint8_t implicit_since_c99 = 3;
     bool implicit_mapped = false;
     bool implicit_no_error = false;
@@ -20213,6 +20227,24 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             options->clang_features = true;
         }
+        else if (strcmp(argument, "-fno-builtin") == 0 || strcmp(argument, "-fbuiltin") == 0)
+        {
+            options->no_builtin = strcmp(argument, "-fno-builtin") == 0;
+        }
+        else if (strncmp(argument, "-fno-builtin-", 13) == 0)
+        {
+            const char** names = (const char**)options->no_builtin_functions;
+            if (names == NULL)
+            {
+                names = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
+                options->no_builtin_functions = names;
+            }
+            result = names != NULL;
+            if (result)
+            {
+                names[options->no_builtin_function_count++] = argument + 13;
+            }
+        }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {
             options->freestanding = true;
@@ -20280,6 +20312,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
         {
             implicit_before_c99 = 1;
+            implicit_library_before_c99 = 1;
             implicit_since_c99 = 1;
             implicit_mapped = true;
             implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
@@ -20288,6 +20321,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Wno-error-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=all") == 0)
         {
             implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
+            implicit_library_before_c99 = implicit_library_before_c99 == 3 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
             implicit_no_error = true;
         }
@@ -20295,12 +20329,14 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
                  strcmp(argument, "-Werror-implicit-function-declaration") == 0 || strcmp(argument, "-Werror=all") == 0)
         {
             implicit_before_c99 = 3;
+            implicit_library_before_c99 = 3;
             implicit_since_c99 = 3;
             implicit_mapped = true;
         }
         else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
         {
             implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
+            implicit_library_before_c99 = implicit_library_before_c99 == 1 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
             implicit_mapped = true;
         }
@@ -20405,6 +20441,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     uint8_t implicit = options->language.standard >= 1999 ? implicit_since_c99 : implicit_before_c99;
     implicit = implicit == 1 && !implicit_mapped && implicit_everything ? 2 : implicit;
     options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
+    const uint8_t library = implicit_library_before_c99 == 2 && !implicit_no_error && warning_errors ? 3 : implicit_library_before_c99;
+    options->implicit_library_diagnostic = options->language.standard >= 1999 ? options->implicit_function_diagnostic : library;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;

@@ -3773,12 +3773,13 @@ with the target's offset in its section added to the addend:
     for an absolute reference without an addend: `lea rax, [rip + .LC0]`'s
     addend is −4, which would land in the string before.
 
-An object that defines an IFUNC is `ELFOSABI_GNU`, as GNU as and LLVM mark
-it, and the others `ELFOSABI_SYSV`. An absolute symbol is in no unit, so no
-object could define it as the link does: `object_prepare` refuses a link
-that has one, rather than write objects that leave it undefined. The
-program's units have none; only imported objects (the static runtime's) do,
-and no object is written for them.
+An object that defines an IFUNC, or has a section whose descriptor's flags
+have `SHF_GNU_RETAIN` (a retain attribute's, #147), is `ELFOSABI_GNU`, as
+GNU as and LLVM mark it, and the others `ELFOSABI_SYSV`. An absolute symbol
+is in no unit, so no object could define it as the link does:
+`object_prepare` refuses a link that has one, rather than write objects
+that leave it undefined. The program's units have none; only imported
+objects (the static runtime's) do, and no object is written for them.
 
 The scalar kernels decide the per-record costs. Writing `Elf64_Rela` from
 columns takes 0.18 ns per record in L1 and 0.61 ns from DRAM, and the AVX-512
@@ -4818,16 +4819,20 @@ the calling thread lane 0, as many as the command may take, none for one; every
 lane runs the command's flow, lane 0 its serial parts while the others sleep at
 once on the futex (`lane_park`), and each wide part on the lanes it pays for and
 the worker budget gives (`lane_narrow`), which meet at the narrowed group's sync.
-Under a session nothing creates a thread: `lane_run` runs a region of lane 0's
-on the lanes that serve it (`lane_serve`, for a flow that is still serial code
-with `lane_run` calls), or a lane's operation alone, and a team, a cold group of
-several or a second session is refused. Its lanes start with the asynchronous
+Under a session nothing creates a thread: a command's wide parts are rounds of
+its flow (`LaneFlow`), which lane 0 announces and every lane runs; `lane_run`
+runs a lane's operation alone, and a team, a cold group of several or a second
+session is refused. Its lanes start with the asynchronous
 signals blocked, so a signal sent to the process reaches lane 0. A lazy session
 (`BUSTER_LANE_SESSION_LAZY`, the compiler's commands') takes the threads'
 creation off lane 0's path: lane 0 creates lane 1 alone and runs the flow, and
 lane 1 creates the others and opens the gate they wait at, or closes it if one
 can't start; lane 0 learns which (`lane_session_settle`) before it first meets
-them. A session whose
+them. The compiler's commands ask by default for no more lanes than the cores of
+the CPUs they may run on (`BUSTER_LANE_SESSION_PER_CORE`), which lane 1 counts
+from sysfs' sibling lists before it creates the others, a read per core off
+lane 0's path; lane 0 reads the count when a wide part first needs it
+(`lane_session_asked`). A session whose
 lanes can't start runs the flow on lane 0 alone and never tries again; a
 terminal command's lanes stay parked when its flow ends, for the process's exit
 to end them (a sanitizer build joins them), and a test's are joined. The
