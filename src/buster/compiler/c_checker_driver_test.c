@@ -4318,6 +4318,59 @@ static void check_test_driver_late_attributes(CheckTest* test, const char* clang
     unlink(source);
 }
 
+// Syntax-only: alias symbol emission is separate. Literal note coordinates distinguish the alias/body definitions
+// from every intervening prototype, across repeated ignored attributes and independent linked entities.
+static void check_test_driver_alias_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char source_text[] =
+        "int g(void){return 1;}\n"
+        "int h(void) __attribute__((alias(\"g\")));\n"
+        "int h(void);\n"
+        "int h(void);\n"
+        "int h(void) __attribute__((used));\n"
+        "int h(void);\n"
+        "int h(void) __attribute__((used));\n"
+        "int body(void){return 2;}\n"
+        "int body(void);\n"
+        "int body(void) __attribute__((used));\n";
+    static const char* const messages[] = {
+        ":5:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":7:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":10:31: warning: attribute declaration must precede definition [-Wignored-attributes]",
+        ":2:5: note: previous definition is here",
+        ":8:5: note: previous definition is here",
+        ": note: previous definition is here",
+    };
+    static const uint32_t counts[] = { 1, 1, 1, 2, 1, 3 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(messages) == BUSTER_ARRAY_LENGTH(counts), "every diagnostic has an expected count");
+    char source[256];
+    snprintf(source, sizeof(source), "%s/alias-late-attributes.c", directory);
+    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
+                              "-fsyntax-only", source, NULL };
+        char* text = NULL;
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        bool match = status == 0 && text != NULL;
+        for (uint32_t i = 0; match && i < BUSTER_ARRAY_LENGTH(messages); i += 1)
+        {
+            uint32_t found = 0;
+            const char* occurrence = text;
+            while ((occurrence = strstr(occurrence, messages[i])) != NULL)
+            {
+                found += 1;
+                occurrence += strlen(messages[i]);
+            }
+            match = found == counts[i];
+        }
+        check_test_expect(test, match, route == 0 ? "clang alias and body definition note origins" : route == 1 ?
+                          "scalar alias and body definition note origins" : "vector alias and body definition note origins");
+        free(text);
+    }
+    unlink(source);
+}
+
 // Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
 static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -5404,6 +5457,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_implicit(&test, clang, executable, directory);
             check_test_driver_inline_modes(&test, clang, executable, directory);
             check_test_driver_late_attributes(&test, clang, executable, directory);
+            check_test_driver_alias_late_attributes(&test, clang, executable, directory);
             check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_fortify(&test, clang, executable, directory);

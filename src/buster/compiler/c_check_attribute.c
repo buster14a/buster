@@ -1370,7 +1370,7 @@ static bool check_input_attribute_alias_definition(const CheckInputAttributes* a
 static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
 {
     const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
-    const bool after = attributes != 0 && reader->definition_seen[previous] && !reader->defined[token];
+    const bool after = attributes != 0 && reader->definition_origins[previous] && !reader->defined[token];
     bool late = false;
     for (uint32_t i = 0; after && i < attributes->count; i += 1)
     {
@@ -1432,7 +1432,7 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                 };
                 const CheckWarningNote note = {
                     .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
-                    .token = previous,
+                    .token = reader->definition_origins[previous] - 1,
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                     .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };

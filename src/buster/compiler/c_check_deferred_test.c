@@ -171,6 +171,12 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // to replay rather than accessing another body's mutable declarations.
     { "block-scope-late-attribute", "static int h(void){return 1;}\nint f(void){int h(void) __attribute__((used)); return h();}\n"
       "int g(void){return 2;}\n", false },
+    { "block-scope-late-alias-through-prototypes",
+      "int g(void){return 1;}\nint h(void) __attribute__((alias(\"g\")));\nint h(void);\nint h(void);\n"
+      "int first(void){int h(void) __attribute__((used));return h();}\nint second(void){return 2;}\n", false },
+    { "block-scope-late-body-through-prototype",
+      "int h(void){return 1;}\nint h(void);\nint first(void){int h(void) __attribute__((used));return h();}\n"
+      "int second(void){return 2;}\n", false },
     { "block-scope-late-weak", "static int h(void){return 1;}\nint f(void){int h(void) __attribute__((weak)); return h();}\n"
       "int g(void){return 2;}\n", false },
     { "block-scope-prior-attribute", "int h(void);\nint f(void){int h(void) __attribute__((used)); return h();}\n"
