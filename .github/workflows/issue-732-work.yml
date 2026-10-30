@@ -14,52 +14,40 @@ jobs:
       BUSTER_DEBUG_INFO: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-      - name: Apply and publish checked source transport
+      - name: Apply final handoff and failure-path guard
         shell: bash
         run: |
           set -euo pipefail
-          if test -f .github/issue732-target.b64; then
-            base64 -d .github/issue732-target.b64 | gzip -d > "$RUNNER_TEMP/implementation.patch"
-            echo "ea4e841d51b118d4d402179ed81a71e67b1ed5c6ae79bdff9e3e64bc2f92f056  $RUNNER_TEMP/implementation.patch" | sha256sum --check
+          if test -f .github/issue732-final.part0; then
+            cat .github/issue732-final.part* | base64 -d | gzip -d > "$RUNNER_TEMP/implementation.patch"
+            echo "d6b5183130178fcff21068478f4b5aa7b703ef8bddc9c257ff1fa35cbc814062  $RUNNER_TEMP/implementation.patch" | sha256sum --check
             git apply --check "$RUNNER_TEMP/implementation.patch"
             git apply "$RUNNER_TEMP/implementation.patch"
-            git rm .github/issue732-target.b64
-            git add src/buster/compiler/ir_source_test.c
-            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'fix(ir): pass explicit target to source producer'
+            git rm .github/issue732-final.part*
+            git add src/buster/compiler/ir_source_test.c docs/ir.md docs/tier1.md
+            git -c user.name=ChatGPT -c user.email=noreply@openai.com commit -m 'docs(ir): finalize SIMD consumer handoff and source failure safety'
             git push origin HEAD:chatgpt/issue-732-vector-integration
           fi
           git diff --check
           git archive --format=tar.gz --output="$RUNNER_TEMP/issue-732-source.tar.gz" HEAD
       - name: Install qualified hosted toolchain
         run: bash tools/ci/setup-hosted.sh
-      - name: Build
-        shell: bash
-        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-732-build.log"
-      - name: Focused regression tests
+      - name: Build and test baseline and sanitizers
         shell: bash
         run: |
           set -uo pipefail
           failed=0
-          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter test-ssa; do
-            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$test.log" || failed=1
+          for mode in none address; do
+            export BUSTER_SANITIZER="$mode" BUSTER_SANITIZER_OPTIMIZATION=1
+            if ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-732-$mode-build.log"; then
+              for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter test-ssa; do
+                build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-$mode-$test.log" || failed=1
+              done
+              build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c 2>&1 | tee "$RUNNER_TEMP/issue-732-$mode-source-test.log" || failed=1
+            else
+              failed=1
+            fi
           done
-          build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c 2>&1 | tee "$RUNNER_TEMP/issue-732-source-test.log" || failed=1
-          exit "$failed"
-      - name: Sanitized build
-        if: ${{ !cancelled() }}
-        env:
-          BUSTER_SANITIZER: address
-          BUSTER_SANITIZER_OPTIMIZATION: 1
-        run: set -o pipefail; ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-732-sanitized-build.log"
-      - name: Sanitized regression tests
-        shell: bash
-        run: |
-          set -uo pipefail
-          failed=0
-          for test in test-ir test-ir-parse test-ir-simd test-ir-lowering test-ir-interpreter; do
-            build/compiler "$test" 2>&1 | tee "$RUNNER_TEMP/issue-732-sanitized-$test.log" || failed=1
-          done
-          build/compiler test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c 2>&1 | tee "$RUNNER_TEMP/issue-732-sanitized-source-test.log" || failed=1
           exit "$failed"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
