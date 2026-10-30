@@ -5580,13 +5580,15 @@ and the program runs: each side checks every argument, result, hidden pointer,
 this compiler on our side: a world of what its C passes (integers to 64 bits,
 `_BitInt`s of every width (past 128 bits in memory, a limb at a time), `__int128`
 and `unsigned __int128`, enums, pointers,
-`nullptr_t` in clang's, `float`, `double`, `long double`, their complex types
-(and `_Complex __float128` in clang's),
+`nullptr_t` in clang's, `_Float16`, `__bf16`, `float`, `double`, `long double`,
+their complex types (`_Complex __bf16`, which the usual arithmetic conversions
+make, and `_Complex __float128` in clang's),
 GNU's complex integer types (of `__int128` too) and in clang's complex
-`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of those
-scalars and records (themselves, records holding them and aligned typedefs of
-them, as in the record runs), at 64 bytes the vectors of 16, 32 and 64 bytes the producer lowers with
-AVX-512, and the
+`_BitInt`s of every width, `__float128`, in clang's `_Atomic`s of every type C
+makes atomic, but `_BitInt`s (themselves, records holding them and aligned
+typedefs of them, as in the record runs), at 64 bytes the vectors of 4, 8, 16,
+32 and 64 bytes the producer lowers with AVX-512 (no vector of 1 or 2 bytes or
+of `bool`, which it refuses by name), and the
 records, arrays and aligned typedefs of them, aligned to 64 as the clang
 worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
