@@ -459,6 +459,45 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "register long i __asm__(\"r10\")=n+100;__asm__(\"\" : \"+r\"(i));"
         "return (int)o1+(int)(o2>>33)*3+(int)o3*5+o4*7+(int)e+(int)f*11+(int)g*13+(int)o5*17+(int)(o6*4)*19+(int)i*23;}",
         "asm-register-variables", clang);
+    // musl's long double functions (src/math/x86_64): fabs, fsqrt and frndint on a `+t` operand; fprem's and fprem1's loops
+    // with y in st(1) and the status word through fnstsw %ax ("=a"), whose st(1) the helper pops after it stores x;
+    // fistpll's store of a "t" input it pops (its "st" clobber); and remquol's whole, its "X" operands of a template of no
+    // instructions among it.
+    check_test_program_source(test,
+        "static long double m_fabsl(long double x){__asm__(\"fabs\" : \"+t\"(x));return x;}"
+        "static long double m_sqrtl(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "static long double m_rintl(long double x){__asm__(\"frndint\" : \"+t\"(x));return x;}"
+        "static long double m_fmodl(long double x, long double y){unsigned short fpsr;do __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(fpsr) : \"u\"(y));"
+        "while(fpsr & 0x400);return x;}"
+        "static long double m_remainderl(long double x, long double y){unsigned short fpsr;do __asm__(\"fprem1; fnstsw %%ax\" : \"+t\"(x), \"=a\"(fpsr) : \"u\"(y));"
+        "while(fpsr & 0x400);return x;}"
+        "static long m_lrintl(long double x){long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(x) : \"st\");return r;}"
+        "static long long m_llrintl(long double x){long long r;__asm__(\"fistpll %0\" : \"=m\"(r) : \"t\"(x) : \"st\");return r;}"
+        "static long double m_remquol(long double x, long double y, int *quo){signed char *cx=(void *)&x, *cy=(void *)&y;__asm__(\"\" :: \"X\"(cx), \"X\"(cy));"
+        "long double t=x;unsigned fpsr;do __asm__(\"fprem1; fnstsw %%ax\" : \"+t\"(t), \"=a\"(fpsr) : \"u\"(y));while(fpsr & 0x400);"
+        "unsigned char i=fpsr>>8;i=i>>4|i<<4;unsigned qbits=0x7575313164642020>>(i&60);qbits&=7;*quo=(cx[9]^cy[9])<0 ? -qbits : qbits;return t;}"
+        "int tested(int n){long double a=n*1.75L-3,b=n%5+1.5L;int q=0;long double r=m_remquol(a*7,b,&q);"
+        "return (int)(m_sqrtl(m_fabsl(a))*1000)+(int)(m_rintl(a*2.5L)*3)+(int)(m_fmodl(a*11,b)*100)*5+(int)(m_remainderl(a*13,b)*100)*7+(int)m_lrintl(a*3.3L)*11+"
+        "(int)m_llrintl(a*-2.2L)*13+(int)(r*100)*17+q*19;}",
+        "asm-musl-x87", clang);
+    // Each shape of the x87's operands, by the rules clang's code follows (LLVM's stackifier): two outputs from st(0)
+    // (fsincos), a matching input popped with st(1)'s clobbered input (fyl2x) and with st(1)'s kept one, which the helper
+    // pops (fscale), outputs of a template that pushes them (fld1, fldpi into a double), a float's and a double's
+    // operands, and templates of no instructions.
+    check_test_program_source(test,
+        "static long double x_sincos(long double x, long double* s){long double c,t;__asm__(\"fsincos\" : \"=t\"(c), \"=u\"(t) : \"0\"(x));*s=t;return c;}"
+        "static long double x_yl2x(long double x, long double y){long double r;__asm__(\"fyl2x\" : \"=t\"(r) : \"0\"(x), \"u\"(y) : \"st(1)\");return r;}"
+        "static long double x_scale(long double x, long double y){long double r;__asm__(\"fscale\" : \"=t\"(r) : \"0\"(x), \"u\"(y));return r;}"
+        "static double x_one(void){double r;__asm__(\"fld1\" : \"=t\"(r));return r;}"
+        "static double x_pi(void){double r;__asm__(\"fldpi\" : \"=t\"(r));return r;}"
+        "static float x_sqrtf(float x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
+        "static double x_sqrt(double x){double r;__asm__(\"fsqrt\" : \"=t\"(r) : \"0\"(x));return r;}"
+        "static long double x_keep(long double x){__asm__(\"\" : \"+t\"(x));return x;}"
+        "static long double x_copy(long double x){long double r;__asm__(\"\" : \"=t\"(r) : \"0\"(x));return r;}"
+        "int tested(int n){long double s=0;long double c=x_sincos(n*0.25L,&s);"
+        "return (int)(c*10000)+(int)(s*10000)*3+(int)(x_yl2x(n*n+1.5L,n+0.5L)*1000)*5+(int)(x_scale(1.5L,n%7)*64)*7+(int)(x_one()*11)+(int)(x_pi()*1e6)+"
+        "(int)(x_sqrtf(n*n+2.f)*1000)*13+(int)(x_sqrt(n+5.0)*1e6)%100000+(int)(x_keep(n*0.5L)*4)*17+(int)(x_copy(n*0.75L)*4)*19;}",
+        "asm-x87-shapes", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
@@ -466,8 +505,22 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){_Bool z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
                                        "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
-    check_test_program_boundary_reason(test, "int tested(int n){double d=n;__asm__(\"fsqrt\" : \"+t\"(d));return (int)d;}",
-                                       "asm-x87-operand", true, false, 0, 1, "inline assembly operands in x87 registers");
+    // The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
+    // stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
+    // top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
+    // which the assembler doesn't parse.
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"f\"(x));return n;}",
+                                       "asm-x87-any", true, false, 0, 1, "inline assembly operands in x87 registers the compiler chooses");
+    check_test_program_boundary_reason(test, "int tested(int n){int i=n;__asm__(\"\" : \"+t\"(i));return i;}",
+                                       "asm-x87-integer", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"u\"(x));return n;}",
+                                       "asm-x87-gap", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n,y=n;__asm__ volatile(\"\" : : \"t\"(x), \"t\"(y));return n;}",
+                                       "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
+                                       "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
+    check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__(\"fsqrt # %0\" : \"+t\"(x));return (int)x;}",
+                                       "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
