@@ -15,13 +15,21 @@
 // its lanes once and runs the whole program on them), in this repository's style. Three things differ, each measured
 // by benchmark-lanes: the calling thread is lane 0 rather than waiting for the others, so one lane starts no thread; a
 // broadcast is one barrier rather than two (see LaneGroup); and the barrier spins and then waits in mwaitx before it
-// sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
+// sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait. Its GUI's
+// asynchronous lanes are one group for the process's life too, which lane_session_run is, without its unconditional
+// helper threads: a session of one lane creates none.
 //
 // Each translation unit that includes this file owns its thread context and any command-long team, but for main.c's
 // units, which share one (thread_context): a command runs in its own unit's code and in the homes of the modules it
-// calls (main.c). A team must therefore be started in the command's code, not in main.c's dispatcher, which also runs
-// the benchmarks' units, whose contexts are their own. Each part declares its interface first, then defines it. In this
-// order:
+// calls (main.c). A team or a session must therefore be started in the command's code, not in main.c's dispatcher,
+// which also runs the benchmarks' units, whose contexts are their own.
+//
+// The compiler's commands (the C driver's and link-foreign's) run on a session (#905): the process's lanes, created once,
+// right after the command's options and before any of its inputs is read, the calling thread lane 0, with as many lanes
+// as the command may take (one creates no thread). Every lane runs the command's flow (lane_session_run's entry), lane
+// 0 its serial parts while the others park (lane_park), and each wide part on as many lanes as it pays for and the
+// worker budget gives (lane_narrow), so that nothing in the command creates or joins a thread after its start. Each
+// part declares its interface first, then defines it. In this order:
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
@@ -29,12 +37,14 @@
 //     (arena_pool) keeps the arenas it releases for its next reservations.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
-//   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
-//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, parts_by_cost, lane_take,
-//     lane_alone and lane_restore.
+//   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
+//     lane_range, lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost,
+//     parts_by_cost, lane_take, lane_alone, lane_restore, lane_park, lane_park_broadcast, lane_narrow and lane_widen.
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
-//     team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
+//     team or a session, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
+//   - Sessions: lane_session_run, lane_session_current, and lane_serve_begin, lane_serve_end, lane_serve and
+//     lane_serving, with which lane 0 runs the regions of a flow that is still serial code with lane_run calls.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -52,6 +62,7 @@
 
 // OS-dependent includes
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #include <time.h>
 #include <sys/mman.h>
@@ -368,6 +379,10 @@ static void arena_poison(Arena* arena, uint8_t value)
 
 typedef struct LaneGroup LaneGroup;
 typedef struct LaneTeam LaneTeam;
+typedef struct LaneSession LaneSession;
+
+// How deep lane_narrow's narrowings nest.
+#define BUSTER_LANE_NARROW_DEPTH 8
 
 // A thread's place in its group: its index and the group's size. A thread outside any group, or one that has made
 // itself a group of one with lane_alone, is lane 0 of 1, without a group.
@@ -379,12 +394,31 @@ struct Lane
     LaneGroup* group;
 };
 
+// A narrowing's record on its lane (lane_narrow): the lane and the single-lane counter it narrowed from, and whether the
+// lane is one of the narrowed lanes.
+typedef struct LaneNarrowing LaneNarrowing;
+struct LaneNarrowing
+{
+    Lane outer;
+    uint64_t taken;
+    bool inside;
+};
+
 typedef struct ThreadContext ThreadContext;
 struct ThreadContext
 {
     Lane lane;
     // A command's fixed team, or 0 for standalone calls. running also guards calls made after lane_alone.
     LaneTeam* team;
+    // The process's lane session the thread is a lane of (#905), or 0. Under a session nothing creates a thread.
+    LaneSession* session;
+    // Lane 0 serving its group's other lanes (lane_serve_begin): the group its lane_run regions run on, while lane 0
+    // itself runs alone between them.
+    Lane served;
+    bool serving;
+    // lane_narrow's narrowings, innermost last.
+    LaneNarrowing narrowing[BUSTER_LANE_NARROW_DEPTH];
+    uint32_t narrow_depth;
     bool running;
     Arena scratch[BUSTER_SCRATCH_ARENA_COUNT];
     // How many times the thread has slept on a futex, waiting for its group: for the tests and the benchmark.
@@ -440,6 +474,21 @@ static bool arena_test_reservation_allowed(uint64_t bytes)
 {
     return !lane_test_resources.arena_limited || bytes <= lane_test_resources.arena_limit;
 }
+#endif
+
+// The threads the compiler has created in this process (#905): a session's, a team's and a cold group's, joined or not,
+// for the tests' accounting. And a test's hook, in every build: when nonzero, a session's lane of that index fails to be
+// created, as pthread_create fails when the process may start no more threads. Process-wide, as main.c's units share
+// them.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern uint64_t lane_threads_created;
+extern uint32_t lane_session_fail_at;
+#elif defined(BUSTER_UNIT)
+uint64_t lane_threads_created;
+uint32_t lane_session_fail_at;
+#else
+static uint64_t lane_threads_created;
+static uint32_t lane_session_fail_at;
 #endif
 
 typedef struct Scratch Scratch;
@@ -567,6 +616,51 @@ struct LaneGroup
     _Alignas(BUSTER_LANE_LINE_PAIR_BYTES) uint64_t taken;
 };
 
+// A session's lane start (lane_session_run): its session and index, and with a CPU list whether its thread pinned
+// itself, which it publishes in `ready`.
+typedef struct LaneSessionStart LaneSessionStart;
+struct LaneSessionStart
+{
+    LaneSession* session;
+    uint32_t index;
+    uint32_t ready;
+    bool pinned;
+};
+
+// A process's lanes (#905): the calling thread as lane 0 and capacity - 1 threads, created once, before the command's
+// work, which run its outer flow (entry) together, every lane calling it, until it ends. A session of one creates no
+// thread. Under a session nothing creates a thread: lane_run runs its regions on the session's lanes.
+struct LaneSession
+{
+    // Every lane's group: the outer flow's rendezvous and the announcements of lane 0's regions (lane_serve).
+    LaneGroup group;
+    // lane_narrow's groups, one per depth. A narrowing's lanes leave its group as they found it (every sync complete,
+    // the take counter back at 0), so the next narrowing at its depth takes it as it is.
+    LaneGroup narrowed[BUSTER_LANE_NARROW_DEPTH];
+    // The start's gate, which the created lanes wait at until lane 0 knows every lane exists: BUSTER_LANE_GATE_RUN or
+    // BUSTER_LANE_GATE_CANCEL.
+    uint32_t gate;
+    // The lanes asked for, the lanes that run (1 after a failed start), and the lanes that existed (lane 0's among them).
+    uint32_t capacity;
+    uint32_t count;
+    uint32_t created;
+    pid_t process;
+    void (*entry)(void* argument);
+    void* argument;
+    // Whether the lanes stay parked when the flow ends, for the process's exit to end (a terminal command's), rather than
+    // being joined; whether lane 1 creates the lanes after it while lane 0 runs (BUSTER_LANE_SESSION_LAZY); and whether
+    // lane 0 knows how its lanes' start went (lane_session_settle), which only lane 0 reads and writes.
+    bool park_at_end;
+    bool lazy;
+    bool settled;
+    bool has_cpus;
+    // Lane 0's thread, the one that settles.
+    pthread_t owner;
+    uint32_t cpus[BUSTER_LANE_MAX_COUNT];
+    pthread_t threads[BUSTER_LANE_MAX_COUNT];
+    LaneSessionStart starts[BUSTER_LANE_MAX_COUNT];
+};
+
 // The calling thread's lane: its index, and the group's size.
 static __attribute__((unused)) uint32_t lane_index(void);
 static __attribute__((unused)) uint32_t lane_count(void);
@@ -618,6 +712,18 @@ static __attribute__((unused)) uint64_t lane_take(uint64_t parts);
 // its group does something else, and returns its lane for lane_restore.
 static __attribute__((unused)) Lane lane_alone(void);
 static __attribute__((unused)) void lane_restore(Lane lane);
+// lane_sync and lane_broadcast for lanes that wait out a long stretch, such as lane 0's serial work (#905): a lane that
+// waits sleeps on the futex at once, as a team's workers wait between operations, rather than spinning and waiting in
+// mwaitx first. With one lane, they return at once.
+static __attribute__((unused)) void lane_park(void);
+static __attribute__((unused)) uint64_t lane_park_broadcast(uint64_t value, uint32_t source_lane);
+// Narrows the group to its first `lanes` lanes for a region (#905): each of them becomes a lane of a group of that many,
+// the session's group for the narrowing's depth, and gets true; the others get false and nothing changes for them.
+// lane_widen ends the region: the narrowed lanes meet at their group's sync, and every lane gets its lane back. Every
+// lane of the group calls both. Only a session's groups narrow to more than one lane, nesting to
+// BUSTER_LANE_NARROW_DEPTH.
+static __attribute__((unused)) bool lane_narrow(uint32_t lanes);
+static __attribute__((unused)) void lane_widen(void);
 
 static uint32_t lane_index(void)
 {
@@ -1000,6 +1106,91 @@ static void lane_restore(Lane lane)
     thread_context.lane = lane;
 }
 
+// lane_arrive for a lane that waits out a long stretch: it sleeps at once (lane_sleep).
+static void lane_arrive_parked(LaneGroup* group, uint32_t count, uint32_t generation)
+{
+    if (__atomic_add_fetch(&group->arrived, 1, __ATOMIC_ACQ_REL) == count)
+    {
+        __atomic_store_n(&group->arrived, 0, __ATOMIC_RELAXED);
+        group->value = group->offered;
+        lane_publish(&group->generation, generation + 2);
+    }
+    else
+    {
+        lane_sleep(&group->generation, generation);
+    }
+}
+
+static void lane_park(void)
+{
+    const Lane lane = thread_context.lane;
+    if (lane.count > 1)
+    {
+        const uint32_t generation = __atomic_load_n(&lane.group->generation, __ATOMIC_RELAXED) & ~1u;
+        lane_arrive_parked(lane.group, lane.count, generation);
+    }
+}
+
+static uint64_t lane_park_broadcast(uint64_t value, uint32_t source_lane)
+{
+    const Lane lane = thread_context.lane;
+    uint64_t result = value;
+    assert(source_lane < lane.count);
+    if (lane.count > 1)
+    {
+        // As lane_broadcast's: `offered` was last read by the last lane to arrive at the previous sync.
+        const uint32_t generation = __atomic_load_n(&lane.group->generation, __ATOMIC_RELAXED) & ~1u;
+        if (lane.index == source_lane)
+        {
+            lane.group->offered = value;
+        }
+        lane_arrive_parked(lane.group, lane.count, generation);
+        result = lane.group->value;
+    }
+    return result;
+}
+
+static bool lane_narrow(uint32_t lanes)
+{
+    const Lane outer = thread_context.lane;
+    const uint32_t depth = thread_context.narrow_depth;
+    const uint32_t count = lanes == 0 ? 1 : lanes < outer.count ? lanes : outer.count;
+    const bool inside = outer.index < count;
+    assert(depth < BUSTER_LANE_NARROW_DEPTH);
+    assert(count == 1 || thread_context.session != 0);
+    thread_context.narrowing[depth] = (LaneNarrowing){
+        .outer = outer,
+        .taken = thread_context.taken,
+        .inside = inside,
+    };
+    thread_context.narrow_depth = depth + 1;
+    if (inside)
+    {
+        thread_context.lane = (Lane){
+            .index = outer.index,
+            .count = count,
+            .group = count > 1 ? &thread_context.session->narrowed[depth] : 0,
+        };
+        thread_context.taken = 0;
+    }
+    return inside;
+}
+
+// The narrowed lanes' sync ends the region for them; the others never entered it, and go on to the outer group's next
+// rendezvous, which the narrowed lanes reach after this.
+static void lane_widen(void)
+{
+    const uint32_t depth = thread_context.narrow_depth - 1;
+    const LaneNarrowing narrowing = thread_context.narrowing[depth];
+    if (narrowing.inside)
+    {
+        lane_sync();
+    }
+    thread_context.narrow_depth = depth;
+    thread_context.lane = narrowing.outer;
+    thread_context.taken = narrowing.taken;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Starting lanes
 
@@ -1020,7 +1211,48 @@ static void lane_restore(Lane lane)
 //
 // Without a team, starts count - 1 threads and joins them before returning, preserving the standalone and cold-start
 // path. A failed thread creation runs no entry; a pinning failure on this path runs unpinned and returns false.
+//
+// Under a session (#905) it creates no thread. Lane 0 serving its group (lane_serve_begin) announces the operation as a
+// region, which the first count lanes of the group run and the others skip; a lane alone (lane 0's serial work between
+// regions, a session of one) runs it on its own; and a lane of a group of several that serves nothing is refused, as a
+// nested run is. cpus must be null or a prefix of the session's.
 static __attribute__((unused)) bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
+
+// lane_session_run's flags. PARK_AT_END: the lanes stay parked when the flow ends, for the process's exit to end them (a
+// terminal command's, whose process exits next), but in sanitizer builds, which join them always; the session must then
+// outlive the process. LAZY: lane 0 creates lane 1 alone and runs the flow at once, while lane 1 creates the others; lane
+// 0 learns how their start went with lane_session_settle, which it must call before it meets any other lane or counts on
+// them (but for lane_count, which says the lanes asked for until then). Without LAZY, or with a CPU list, lane 0 creates
+// every lane before the flow.
+#define BUSTER_LANE_SESSION_PARK_AT_END 1u
+#define BUSTER_LANE_SESSION_LAZY 2u
+
+// Runs entry(argument) on every lane of a new session of `capacity` lanes (#905), the process's outer flow: the calling
+// thread is lane 0, and the session creates capacity - 1 threads (none for one) with the asynchronous signals blocked,
+// so that a signal sent to the process reaches lane 0, and an explicit stack size. With `cpus`, each lane pins itself to
+// its CPU, and lane 0 waits for the pins; without, it waits for nothing but each thread's creation, or with
+// BUSTER_LANE_SESSION_LAZY for lane 1's alone. A failed creation or pin cancels every lane created, which the session
+// joins, and runs the flow on lane 0 alone: one lane, never a retry. Returns how many lanes ran it (0 if a session of
+// the calling thread's is live: sessions don't nest). The lanes are joined when the flow ends, but with
+// BUSTER_LANE_SESSION_PARK_AT_END (`flags`).
+static __attribute__((unused)) uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument),
+                                                         void* argument, uint32_t flags);
+// The lanes the calling thread's session runs on: for lane 0 of a lazy session, once lane 1 has said how their start
+// went, which it waits for the first time; on a failed start, lane 0's lane in the session's group becomes a lane alone,
+// and the session's count 1. 1 outside a session.
+static __attribute__((unused)) uint32_t lane_session_settle(void);
+// The session the calling thread is a lane of, or 0. A child forked from a lane of a session forgets it here, and runs as
+// one lane: its other lanes don't exist in the child.
+static __attribute__((unused)) LaneSession* lane_session_current(void);
+// Lane 0 of a session's group serves the others' regions (lane_run) from its serial work: lane_serve_begin, which settles
+// a lazy session first (lane_session_settle), makes it run alone between them, and lane_serve_end ends the serving
+// lanes' lane_serve. The other lanes of the group call
+// lane_serve meanwhile: a transitional shape (#905) for the flows that are still serial code with lane_run calls.
+static __attribute__((unused)) void lane_serve_begin(void);
+static __attribute__((unused)) void lane_serve_end(void);
+static __attribute__((unused)) void lane_serve(void);
+// Whether the calling thread is lane 0 serving its group's other lanes.
+static __attribute__((unused)) bool lane_serving(void);
 
 typedef struct LaneTeamWorker LaneTeamWorker;
 struct LaneTeamWorker
@@ -1179,7 +1411,8 @@ static void lane_team_join(LaneTeam* team, uint32_t created)
 
 static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* cpus)
 {
-    bool result = team != 0 && capacity >= 1 && capacity <= BUSTER_LANE_MAX_COUNT && thread_context.team == 0 && !thread_context.running;
+    bool result = team != 0 && capacity >= 1 && capacity <= BUSTER_LANE_MAX_COUNT && thread_context.team == 0 && !thread_context.running &&
+                  lane_session_current() == 0;
 #if BUSTER_SANITIZER_RESOURCES
     result = result && (capacity == 1 || !lane_test_resources.no_threads);
 #endif
@@ -1214,6 +1447,7 @@ static bool lane_team_start(LaneTeam* team, uint32_t capacity, const uint32_t* c
             result = pthread_create(&worker->thread, 0, lane_team_thread_main, worker) == 0;
             created += result ? 1 : 0;
         }
+        __atomic_add_fetch(&lane_threads_created, created - 1, __ATOMIC_RELAXED);
         for (uint32_t i = 1; i < created; i += 1)
         {
             lane_wait(&team->workers[i].completed, 0);
@@ -1333,7 +1567,8 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     };
     LaneStart starts[BUSTER_LANE_MAX_COUNT];
     pthread_t threads[BUSTER_LANE_MAX_COUNT];
-    bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0;
+    // A session's lanes are the only threads under a session: a cold group of several is refused there.
+    bool valid = count >= 1 && count <= BUSTER_LANE_MAX_COUNT && entry != 0 && (count == 1 || lane_session_current() == 0);
 #if BUSTER_SANITIZER_RESOURCES
     valid = valid && (count == 1 || !lane_test_resources.no_threads);
 #endif
@@ -1349,6 +1584,7 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
         };
         created += pthread_create(&threads[i], 0, lane_thread_main, &starts[i]) == 0 ? 1 : 0;
     }
+    __atomic_add_fetch(&lane_threads_created, created - 1, __ATOMIC_RELAXED);
     const bool started = valid && created == count;
     lane_publish(&group.gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
     bool pinned = true;
@@ -1384,7 +1620,319 @@ static bool lane_run_cold(uint32_t count, void (*entry)(void* argument), void* a
     return started && pinned;
 }
 
+// lane_run under a session: a region of lane 0's announced to the lanes that serve it, or an operation of a lane alone.
+static bool lane_session_region(LaneSession* session, uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
+{
+    const uint32_t served = thread_context.serving ? thread_context.served.count : thread_context.lane.count;
+    const uint32_t lanes = count < served ? count : served;
+    bool result = count >= 1 && entry != 0 && (cpus == 0 || session->has_cpus);
+    for (uint32_t i = 0; result && cpus != 0 && i < lanes; i += 1)
+    {
+        result = cpus[i] == session->cpus[i];
+    }
+    const uint64_t taken = thread_context.taken;
+    if (result && thread_context.serving && thread_context.served.count > 1)
+    {
+        // The region's operation goes on the served group's line of lane_run's (each group served at its own depth has
+        // its own), which the serving lanes read before they arrive at the next announcement, the earliest lane 0
+        // writes it again.
+        const Lane alone = thread_context.lane;
+        thread_context.lane = thread_context.served;
+        thread_context.serving = false;
+        thread_context.lane.group->entry = entry;
+        thread_context.lane.group->argument = argument;
+        lane_park_broadcast(lanes, 0);
+        if (lane_narrow(lanes))
+        {
+            entry(argument);
+        }
+        lane_widen();
+        thread_context.serving = true;
+        thread_context.lane = alone;
+    }
+    else if (result && thread_context.lane.count == 1)
+    {
+        // A lane alone, or lane 0 serving a group of one, which is alone too.
+        const Lane previous = thread_context.lane;
+        thread_context.lane = (Lane){ .count = 1 };
+        thread_context.taken = 0;
+        entry(argument);
+        thread_context.lane = previous;
+    }
+    else
+    {
+        result = false;
+    }
+    thread_context.taken = taken;
+    return result;
+}
+
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus)
 {
-    return thread_context.team != 0 ? lane_team_run(thread_context.team, count, entry, argument, cpus) : lane_run_cold(count, entry, argument, cpus);
+    LaneSession* session = lane_session_current();
+    return session != 0                ? lane_session_region(session, count, entry, argument, cpus) :
+           thread_context.team != 0 ? lane_team_run(thread_context.team, count, entry, argument, cpus) :
+                                        lane_run_cold(count, entry, argument, cpus);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Sessions (#905)
+
+// The stack each of a session's lanes has, whatever RLIMIT_STACK says: glibc's default where that is 8 MB, of which a
+// lane touches what its deepest phase takes.
+#define BUSTER_LANE_STACK_BYTES (8ull << 20)
+
+static LaneSession* lane_session_current(void)
+{
+    LaneSession* session = thread_context.session;
+    if (session != 0 && session->process != getpid())
+    {
+        // fork copied this lane but not the others, as with a team (lane_team_stop): there is no group to meet here.
+        thread_context.session = 0;
+        thread_context.lane = (Lane){ .count = 1 };
+        thread_context.serving = false;
+        thread_context.narrow_depth = 0;
+        thread_context.running = false;
+        thread_context.taken = 0;
+        session = 0;
+    }
+    return session;
+}
+
+static void* lane_session_thread_main(void* parameter);
+
+// Creates the session's lanes from `first` to `end` (their start records' and threads' slots), with the calling
+// thread's signal mask, which has every asynchronous signal blocked, and the lanes' stack size: lane 0's creations, or a
+// lazy session's lane 1's. Returns how many it created, stopping at the first that fails.
+static uint32_t lane_session_create(LaneSession* session, uint32_t first, uint32_t end)
+{
+    pthread_attr_t attributes;
+    const bool attributed = pthread_attr_init(&attributes) == 0;
+    bool valid = attributed && pthread_attr_setstacksize(&attributes, BUSTER_LANE_STACK_BYTES) == 0;
+#if BUSTER_SANITIZER_RESOURCES
+    valid = valid && !lane_test_resources.no_threads;
+#endif
+    uint32_t created = 0;
+    for (uint32_t i = first; valid && i < end; i += 1)
+    {
+        session->starts[i] = (LaneSessionStart){
+            .session = session,
+            .index = i,
+        };
+        valid = i != lane_session_fail_at && pthread_create(&session->threads[i], &attributes, lane_session_thread_main, &session->starts[i]) == 0;
+        created += valid ? 1 : 0;
+    }
+    if (attributed)
+    {
+        pthread_attr_destroy(&attributes);
+    }
+    __atomic_add_fetch(&lane_threads_created, created, __ATOMIC_RELAXED);
+    return created;
+}
+
+// A created lane: it pins itself if asked, waits at the gate until lane 0 (or, in a lazy session, lane 1) knows every
+// lane exists, and runs the flow. A lazy session's lane 1 creates the lanes after it first, and opens the gate.
+static void* lane_session_thread_main(void* parameter)
+{
+    LaneSessionStart* start = parameter;
+    LaneSession* session = start->session;
+    if (session->has_cpus)
+    {
+        start->pinned = lane_pin(session->cpus[start->index]);
+        lane_publish(&start->ready, BUSTER_LANE_GATE_RUN);
+    }
+    if (session->lazy && start->index == 1)
+    {
+        const uint32_t created = 2 + lane_session_create(session, 2, session->capacity);
+        const bool started = created == session->capacity;
+        session->count = started ? session->capacity : 1;
+        session->created = created;
+        lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
+    }
+    // Asleep at once: the lanes after this one are created before the gate opens, and a lane that spun meanwhile would
+    // take the CPU time they are created with.
+    if (lane_sleep(&session->gate, 0) == BUSTER_LANE_GATE_RUN)
+    {
+        // Read before the flow: once it ends, a lane that stays parked reads nothing of the session's.
+        const bool park = session->park_at_end;
+        thread_context.session = session;
+        thread_context.lane = (Lane){
+            .index = start->index,
+            .count = session->count,
+            .group = &session->group,
+        };
+        thread_context.taken = 0;
+        thread_context.running = true;
+        session->entry(session->argument);
+        // Lane 0 doesn't join a lane that stays parked; the process's exit ends it.
+        uint32_t never = 0;
+        while (park)
+        {
+            lane_sleep(&never, 0);
+        }
+        thread_context.running = false;
+        thread_context.lane = (Lane){ .count = 1 };
+        thread_context.session = 0;
+    }
+    scratch_release();
+    return 0;
+}
+
+static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const uint32_t* cpus, void (*entry)(void* argument), void* argument,
+                                 uint32_t flags)
+{
+    const uint32_t lanes = capacity == 0 ? 1 : capacity < BUSTER_LANE_MAX_COUNT ? capacity : BUSTER_LANE_MAX_COUNT;
+    uint32_t result = 0;
+    if (lane_session_current() == 0 && thread_context.team == 0 && !thread_context.running && entry != 0)
+    {
+        memset(session, 0, sizeof(*session));
+        session->capacity = lanes;
+        session->process = getpid();
+        session->owner = pthread_self();
+        session->entry = entry;
+        session->argument = argument;
+        session->park_at_end = (flags & BUSTER_LANE_SESSION_PARK_AT_END) != 0 && !BUSTER_SANITIZER_RESOURCES;
+        session->lazy = (flags & BUSTER_LANE_SESSION_LAZY) != 0 && cpus == 0 && lanes > 2;
+        session->has_cpus = cpus != 0;
+        if (cpus != 0)
+        {
+            memcpy(session->cpus, cpus, lanes * sizeof(*cpus));
+        }
+        uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS];
+        const bool saved = cpus != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
+        bool valid = cpus == 0 || (saved && lane_pin(cpus[0]));
+        uint32_t created = 1;
+        if (lanes > 1)
+        {
+            // The lanes start with every asynchronous signal blocked, which they keep; the synchronous ones stay as they
+            // are, for the handlers of tests that fault on purpose. Lazily, lane 0 creates lane 1 alone, which creates
+            // the others while lane 0 goes on, and decides the gate.
+            sigset_t blocked;
+            sigset_t previous;
+            sigfillset(&blocked);
+            const int synchronous[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS };
+            for (uint32_t i = 0; i < sizeof(synchronous) / sizeof(synchronous[0]); i += 1)
+            {
+                sigdelset(&blocked, synchronous[i]);
+            }
+            const bool masked = pthread_sigmask(SIG_BLOCK, &blocked, &previous) == 0;
+            // Lazily, the session's count is the lanes asked for until lane 1 opens the gate.
+            session->count = lanes;
+            created += masked && valid ? lane_session_create(session, 1, session->lazy ? 2 : lanes) : 0;
+            if (masked)
+            {
+                pthread_sigmask(SIG_SETMASK, &previous, 0);
+            }
+            for (uint32_t i = 1; cpus != 0 && i < created; i += 1)
+            {
+                lane_wait(&session->starts[i].ready, 0);
+                valid = valid && session->starts[i].pinned;
+            }
+        }
+        bool started = valid && created == lanes;
+        if (session->lazy && created == 2)
+        {
+            // Lane 1 opens the gate; lane 0 runs on the lanes asked for until it settles (lane_session_settle).
+            started = true;
+        }
+        else
+        {
+            session->lazy = false;
+            session->count = started ? lanes : 1;
+            session->created = created;
+            lane_publish(&session->gate, started ? BUSTER_LANE_GATE_RUN : BUSTER_LANE_GATE_CANCEL);
+            for (uint32_t i = 1; !started && i < created; i += 1)
+            {
+                pthread_join(session->threads[i], 0);
+            }
+        }
+        session->settled = !session->lazy;
+        const uint32_t count = started ? lanes : 1;
+        const Lane previous = thread_context.lane;
+        const uint64_t taken = thread_context.taken;
+        thread_context.session = session;
+        thread_context.lane = (Lane){
+            .count = count,
+            .group = count > 1 ? &session->group : 0,
+        };
+        thread_context.taken = 0;
+        thread_context.running = true;
+        entry(argument);
+        // A lazy flow that never met its lanes: they are lane 1's to start, and the session's to end.
+        lane_session_settle();
+        thread_context.running = false;
+        thread_context.taken = taken;
+        thread_context.lane = previous;
+        thread_context.session = 0;
+        for (uint32_t i = 1; session->count > 1 && !session->park_at_end && i < session->created; i += 1)
+        {
+            pthread_join(session->threads[i], 0);
+        }
+        if (saved)
+        {
+            syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity);
+        }
+        result = session->count;
+    }
+    return result;
+}
+
+static uint32_t lane_session_settle(void)
+{
+    LaneSession* session = lane_session_current();
+    uint32_t result = 1;
+    if (session != 0 && !session->settled && pthread_equal(session->owner, pthread_self()))
+    {
+        // Lane 1 publishes the count and the lanes it created before it opens the gate.
+        const bool run = lane_sleep(&session->gate, 0) == BUSTER_LANE_GATE_RUN;
+        session->settled = true;
+        for (uint32_t i = 1; !run && i < session->created; i += 1)
+        {
+            pthread_join(session->threads[i], 0);
+        }
+        if (!run && thread_context.lane.group == &session->group)
+        {
+            thread_context.lane = (Lane){ .count = 1 };
+        }
+    }
+    result = session != 0 ? session->count : 1;
+    return result;
+}
+
+static bool lane_serving(void)
+{
+    return thread_context.serving;
+}
+
+static void lane_serve_begin(void)
+{
+    // The lanes it serves must exist: a lazy session's lane 0 learns first how they started, and with none serves a group
+    // of one.
+    lane_session_settle();
+    thread_context.served = thread_context.lane;
+    thread_context.serving = true;
+    thread_context.lane = (Lane){ .count = 1 };
+}
+
+static void lane_serve_end(void)
+{
+    thread_context.lane = thread_context.served;
+    thread_context.serving = false;
+    lane_park_broadcast(0, 0);
+}
+
+// Each announcement is a region's lanes, or 0 for the end; the region's operation is on the group's lane_run line.
+static void lane_serve(void)
+{
+    LaneGroup* group = thread_context.lane.group;
+    for (uint64_t lanes = lane_park_broadcast(0, 0); lanes != 0; lanes = lane_park_broadcast(0, 0))
+    {
+        void (*entry)(void* argument) = group->entry;
+        void* argument = group->argument;
+        if (lane_narrow((uint32_t)lanes))
+        {
+            entry(argument);
+        }
+        lane_widen();
+    }
 }

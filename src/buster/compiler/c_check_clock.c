@@ -23,6 +23,9 @@ typedef enum CheckStage
 {
     // The options, and the intern table's, the preprocessor's and the parser's initialization.
     CHECK_STAGE_SETUP,
+    // The command's session's start (#905): its lanes created, before any source is read; for a command run on a
+    // session already, its flow's dispatch.
+    CHECK_STAGE_LANES_START,
     // pp_run: the files read, lexed, refined and their directive tables built (PPOptions.timing's phases), and the
     // main loop's expansion.
     CHECK_STAGE_PREPROCESS,
@@ -90,6 +93,7 @@ typedef enum CheckStage
 
 static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_SETUP] = "setup",
+    [CHECK_STAGE_LANES_START] = "lanes-start",
     [CHECK_STAGE_PREPROCESS] = "preprocess",
     [CHECK_STAGE_PARSE] = "parse",
     [CHECK_STAGE_TYPE_TABLE] = "type-table",

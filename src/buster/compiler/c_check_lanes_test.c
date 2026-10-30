@@ -49,6 +49,16 @@
 //   the same status; in a child limited as above, the first and the last of them by --lanes 8, each one lane's; each
 //   failing program by --lanes 8, with lanes, with the ids in another order and in such a child, by each path: the exit
 //   status and diagnostics of --lanes 1; and --lanes', --worker-budget's and --id-order's values it refuses.
+// - The driver's session's threads (#905): a library preloaded into the driver counts its calls of pthread_create,
+//   which its session makes once, before any source is read: none for --lanes 1, --worker-budget=1 and a source's
+//   -fsyntax-only; one per lane past the first of --lanes 3 and, by default, of the CPUs it may run on, for an object,
+//   an executable and two sources' objects, whatever lanes their emissions take; and when its second lane fails to start
+//   (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one lane, writing --lanes 1's object.
+// - Commands in one process (#905): a session of 4 lanes whose flow runs, three times, a command that fails, one that
+//   writes an object on 4 lanes, one on 2 by --worker-budget 2 and a -fsyntax-only, every lane calling each
+//   (run_check_command's collective call): each lane the same thread throughout, the session's barrier advancing, no
+//   thread created, the failure's status and each object --lanes 1's in a process of its own. Then the same commands from
+//   lane 0 alone while the others serve its regions (a test's serial code), with the same results.
 
 #include "worker_budget_test.c"
 
@@ -1665,6 +1675,327 @@ static void check_lanes_test_benchmark_sections(CheckLanesTestTally* tally, cons
     }
 }
 
+// The driver's session's threads (see the file's comment): `executable`'s calls of pthread_create, counted by a library
+// preloaded into it, for commands on `directory`'s generated programs, each command's object compared with --lanes 1's.
+static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const char* executable, const char* directory)
+{
+    static const char counter[] = "#define _GNU_SOURCE\n"
+                                  "#include <dlfcn.h>\n"
+                                  "#include <pthread.h>\n"
+                                  "#include <stdio.h>\n"
+                                  "#include <stdlib.h>\n"
+                                  "typedef int (*Create)(pthread_t*, const pthread_attr_t*, void* (*)(void*), void*);\n"
+                                  "static unsigned created;\n"
+                                  "int pthread_create(pthread_t* thread, const pthread_attr_t* attributes, void* (*start)(void*), void* argument)\n"
+                                  "{\n"
+                                  "    Create create = (Create)dlsym(RTLD_NEXT, \"pthread_create\");\n"
+                                  "    __atomic_add_fetch(&created, 1, __ATOMIC_RELAXED);\n"
+                                  "    return create != 0 ? create(thread, attributes, start, argument) : 11;\n"
+                                  "}\n"
+                                  "__attribute__((destructor)) static void report(void)\n"
+                                  "{\n"
+                                  "    const char* path = getenv(\"CHECK_LANES_THREADS\");\n"
+                                  "    FILE* file = path != 0 ? fopen(path, \"w\") : 0;\n"
+                                  "    if (file != 0)\n"
+                                  "    {\n"
+                                  "        fprintf(file, \"%u\\n\", created);\n"
+                                  "        fclose(file);\n"
+                                  "    }\n"
+                                  "}\n";
+    char source[PATH_MAX];
+    char library[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/session_threads.c", directory);
+    snprintf(library, sizeof(library), "%s/session_threads.so", directory);
+    snprintf(errors, sizeof(errors), "%s/session_threads.errors", directory);
+    char* compile[] = { (char*)"cc", (char*)"-shared", (char*)"-fPIC", (char*)"-O1", source, (char*)"-o", library, NULL };
+    FILE* file = fopen(source, "w");
+    const bool written = file != NULL && fwrite(counter, 1, sizeof(counter) - 1, file) == sizeof(counter) - 1;
+    const bool closed = file != NULL && fclose(file) == 0;
+    const bool built = written && closed && object_test_run(compile, "/dev/null", errors) == 0;
+    check_lanes_test_expect(tally, built, "compile the preloaded counter of pthread_create", source);
+    char program[PATH_MAX];
+    char second[PATH_MAX];
+    char reference[PATH_MAX];
+    snprintf(program, sizeof(program), "%s/program_3.c", directory);
+    snprintf(second, sizeof(second), "%s/program_2.c", directory);
+    snprintf(reference, sizeof(reference), "%s/session_threads_reference.o", directory);
+    char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
+    const bool referenced = built && check_lanes_test_run(reference_arguments, errors) == 0;
+    check_lanes_test_expect(tally, !built || referenced, "the driver writes the reference object on one lane", program);
+    const uint32_t cpus = check_driver_cpus();
+    // The commands: their options, their sources, whether they write an object to compare, the lane of the session that
+    // fails to start (0 for none), and the threads they create.
+    typedef struct CheckLanesSessionCommand CheckLanesSessionCommand;
+    struct CheckLanesSessionCommand
+    {
+        const char* options[4];
+        bool object;
+        bool link;
+        bool two;
+        const char* fail_at;
+        uint32_t threads;
+    };
+    const CheckLanesSessionCommand commands[] = {
+        { .options = { "--lanes", "1", "-c" }, .object = true, .threads = 0 },
+        { .options = { "--worker-budget=1", "-c" }, .object = true, .threads = 0 },
+        { .options = { "-fsyntax-only" }, .threads = 0 },
+        { .options = { "--lanes", "3", "-c" }, .object = true, .threads = 2 },
+        { .options = { "-c" }, .object = true, .threads = cpus - 1 },
+        { .options = { "-o" }, .link = true, .threads = cpus - 1 },
+        { .options = { "-c" }, .two = true, .threads = cpus - 1 },
+        { .options = { "--lanes", "4", "-c" }, .object = true, .fail_at = "2", .threads = 1 },
+    };
+    uint64_t inherited = 0;
+    for (char** entry = environ; entry != NULL && *entry != NULL; entry += 1)
+    {
+        inherited += 1;
+    }
+    char** environment = calloc(inherited + 4, sizeof(char*));
+    char preload[PATH_MAX + 16];
+    char count_path[PATH_MAX + 32];
+    char failing[64];
+    for (uint32_t c = 0; referenced && environment != NULL && c < BUSTER_ARRAY_LENGTH(commands); c += 1)
+    {
+        const CheckLanesSessionCommand* command = commands + c;
+        char object[PATH_MAX];
+        char counted[PATH_MAX];
+        char executable_path[PATH_MAX];
+        snprintf(object, sizeof(object), "%s/session_threads_%u.o", directory, c);
+        snprintf(counted, sizeof(counted), "%s/session_threads_%u.count", directory, c);
+        snprintf(executable_path, sizeof(executable_path), "%s/session_threads_%u", directory, c);
+        snprintf(preload, sizeof(preload), "LD_PRELOAD=%s", library);
+        snprintf(count_path, sizeof(count_path), "CHECK_LANES_THREADS=%s", counted);
+        snprintf(failing, sizeof(failing), "BUSTER_TEST_LANE_FAIL_AT=%s", command->fail_at != NULL ? command->fail_at : "0");
+        uint64_t used = 0;
+        for (uint64_t i = 0; i < inherited; i += 1)
+        {
+            if (strncmp(environ[i], "LD_PRELOAD=", 11) != 0 && strncmp(environ[i], "CHECK_LANES_THREADS=", 20) != 0 &&
+                strncmp(environ[i], "BUSTER_TEST_LANE_FAIL_AT=", 25) != 0)
+            {
+                environment[used] = environ[i];
+                used += 1;
+            }
+        }
+        environment[used] = preload;
+        environment[used + 1] = count_path;
+        environment[used + 2] = failing;
+        environment[used + 3] = NULL;
+        char* arguments[12] = { (char*)executable };
+        uint32_t count = 1;
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(command->options) && command->options[o] != NULL; o += 1)
+        {
+            arguments[count++] = (char*)command->options[o];
+        }
+        if (command->object)
+        {
+            arguments[count++] = (char*)"-o";
+            arguments[count++] = object;
+        }
+        if (command->link)
+        {
+            arguments[count++] = executable_path;
+        }
+        arguments[count++] = program;
+        if (command->two)
+        {
+            arguments[count++] = second;
+        }
+        arguments[count] = NULL;
+        unlink(counted);
+        // The two sources' objects are written in the current directory, as clang names them: run them in `directory`.
+        char saved[PATH_MAX];
+        const bool moved = !command->two || (getcwd(saved, sizeof(saved)) != NULL && chdir(directory) == 0);
+        const int status = moved ? object_test_run_environment(arguments, "/dev/null", errors, environment) : -1;
+        const bool returned = !command->two || (moved && chdir(saved) == 0);
+        char text[32] = { 0 };
+        FILE* report = fopen(counted, "r");
+        const bool read = report != NULL && fgets(text, sizeof(text), report) != NULL;
+        if (report != NULL)
+        {
+            fclose(report);
+        }
+#if __has_feature(thread_sanitizer)
+        // ThreadSanitizer starts a thread of its own with the process's first other one, through the same call.
+        const uint32_t detector = command->threads != 0 ? 1 : 0;
+#else
+        const uint32_t detector = 0;
+#endif
+        char expected[32];
+        snprintf(expected, sizeof(expected), "%u\n", command->threads + detector);
+        char detail[PATH_MAX + 96];
+        snprintf(detail, sizeof(detail), "command %u: %s thread(s) created, %u expected", c, read ? text : "no count, ", command->threads + detector);
+        check_lanes_test_expect(tally, status == 0 && returned && read && strcmp(text, expected) == 0, "the driver's session creates its lanes once, none for one lane",
+                                detail);
+        check_lanes_test_expect(tally, !command->object || check_test_driver_same_files(object, reference), "the driver's object on its session is one lane's",
+                                detail);
+    }
+    free(environment);
+}
+
+// The commands of check_lanes_test_session_commands: their arguments (but the executable's), and what each must return.
+#define BUSTER_CHECK_LANES_SESSION_COMMANDS 4
+#define BUSTER_CHECK_LANES_SESSION_ROUNDS 3
+#define BUSTER_CHECK_LANES_SESSION_LANES 4
+typedef struct CheckLanesSession CheckLanesSession;
+struct CheckLanesSession
+{
+    char* arguments[BUSTER_CHECK_LANES_SESSION_COMMANDS][12];
+    uint32_t counts[BUSTER_CHECK_LANES_SESSION_COMMANDS];
+    int expected[BUSTER_CHECK_LANES_SESSION_COMMANDS];
+    // The object each command writes, or NULL, and --lanes 1's.
+    const char* objects[BUSTER_CHECK_LANES_SESSION_COMMANDS];
+    const char* reference;
+    pid_t threads[BUSTER_CHECK_LANES_SESSION_ROUNDS][BUSTER_CHECK_LANES_SESSION_COMMANDS][BUSTER_CHECK_LANES_SESSION_LANES];
+    uint64_t failures;
+    uint64_t created;
+    uint32_t lanes;
+};
+
+// Lane 0's checks of a command's result, after it: its status, its object, and no thread created since the session
+// started.
+static void check_lanes_test_session_result(CheckLanesSession* session, uint32_t c, int status)
+{
+    session->failures += status != session->expected[c] ? 1 : 0;
+    session->failures += session->objects[c] != NULL && !check_test_driver_same_files(session->objects[c], session->reference) ? 1 : 0;
+    session->failures += lane_threads_created != session->created ? 1 : 0;
+}
+
+// The commands' rounds, every lane calling each command (a collective call): each lane the same thread throughout, and
+// the session's barrier advancing.
+static void check_lanes_test_session_flow(void* argument)
+{
+    CheckLanesSession* session = argument;
+    const uint32_t index = lane_index();
+    if (index == 0)
+    {
+        session->lanes = lane_count();
+    }
+    uint32_t generation = 0;
+    for (uint32_t round = 0; round < BUSTER_CHECK_LANES_SESSION_ROUNDS; round += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
+        {
+            session->threads[round][c][index] = (pid_t)syscall(SYS_gettid);
+            const int status = run_check_command((int)session->counts[c], session->arguments[c], true);
+            lane_park();
+            if (index == 0)
+            {
+                const uint32_t now = __atomic_load_n(&thread_context.session->group.generation, __ATOMIC_ACQUIRE) & ~1u;
+                session->failures += round + c != 0 && now == generation ? 1 : 0;
+                generation = now;
+                check_lanes_test_session_result(session, c, status);
+            }
+        }
+    }
+}
+
+// The same commands from lane 0 alone while the others serve its regions, as a test's serial code calls them.
+static void check_lanes_test_session_served(void* argument)
+{
+    CheckLanesSession* session = argument;
+    if (lane_index() == 0)
+    {
+        lane_serve_begin();
+        for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
+        {
+            check_lanes_test_session_result(session, c, run_check_command((int)session->counts[c], session->arguments[c], true));
+        }
+        lane_serve_end();
+    }
+    else
+    {
+        lane_serve();
+    }
+}
+
+// Commands in one process (see the file's comment).
+static void check_lanes_test_session_commands(CheckLanesTestTally* tally, const char* executable, const char* directory)
+{
+    static CheckLanesSession session;
+    memset(&session, 0, sizeof(session));
+    char program[PATH_MAX];
+    char broken[PATH_MAX];
+    char reference[PATH_MAX];
+    char four[PATH_MAX];
+    char two[PATH_MAX];
+    char errors[PATH_MAX];
+    snprintf(program, sizeof(program), "%s/program_3.c", directory);
+    snprintf(broken, sizeof(broken), "%s/session_broken.c", directory);
+    snprintf(reference, sizeof(reference), "%s/session_reference.o", directory);
+    snprintf(four, sizeof(four), "%s/session_four.o", directory);
+    snprintf(two, sizeof(two), "%s/session_two.o", directory);
+    snprintf(errors, sizeof(errors), "%s/session.errors", directory);
+    FILE* file = fopen(broken, "w");
+    const bool written = file != NULL && fputs("int broken(void) { return ; }\nint missing(void) { return }\n", file) >= 0;
+    const bool closed = file != NULL && fclose(file) == 0;
+    char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
+    const bool referenced = written && closed && check_lanes_test_run(reference_arguments, errors) == 0;
+    check_lanes_test_expect(tally, referenced, "the session's reference object and failing source", program);
+    char* commands[BUSTER_CHECK_LANES_SESSION_COMMANDS][8] = {
+        { (char*)"-c", (char*)"-o", (char*)"/dev/null", broken, NULL },
+        { (char*)"--lanes", (char*)"4", (char*)"-c", (char*)"-o", four, program, NULL },
+        { (char*)"--lanes", (char*)"4", (char*)"--worker-budget", (char*)"2", (char*)"-c", (char*)"-o", two, program },
+        { (char*)"-fsyntax-only", program, NULL },
+    };
+    const int expected[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { 1, 0, 0, 0 };
+    const char* objects[BUSTER_CHECK_LANES_SESSION_COMMANDS] = { NULL, four, two, NULL };
+    for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
+    {
+        uint32_t count = 0;
+        while (count < 8 && commands[c][count] != NULL)
+        {
+            session.arguments[c][count] = commands[c][count];
+            count += 1;
+        }
+        session.counts[c] = count;
+        session.expected[c] = expected[c];
+        session.objects[c] = objects[c];
+    }
+    session.reference = reference;
+    // The failing command's diagnostics would go to the test's standard error.
+    fflush(stderr);
+    const int saved = dup(STDERR_FILENO);
+    const int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const bool silenced = saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO;
+    static LaneSession lanes;
+    const uint64_t before = lane_threads_created;
+    session.created = before + BUSTER_CHECK_LANES_SESSION_LANES - 1;
+    const uint32_t ran = referenced && silenced ? lane_session_run(&lanes, BUSTER_CHECK_LANES_SESSION_LANES, NULL, check_lanes_test_session_flow, &session, 0) : 0;
+    const uint64_t flow_failures = session.failures;
+    session.failures = 0;
+    const uint32_t served = ran != 0 ? lane_session_run(&lanes, BUSTER_CHECK_LANES_SESSION_LANES, NULL, check_lanes_test_session_served, &session, BUSTER_LANE_SESSION_LAZY) : 0;
+    fflush(stderr);
+    if (saved >= 0)
+    {
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (quiet >= 0)
+    {
+        close(quiet);
+    }
+    uint64_t moved = 0;
+    for (uint32_t round = 0; round < BUSTER_CHECK_LANES_SESSION_ROUNDS; round += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_CHECK_LANES_SESSION_COMMANDS; c += 1)
+        {
+            for (uint32_t lane = 0; lane < BUSTER_CHECK_LANES_SESSION_LANES; lane += 1)
+            {
+                moved += session.threads[round][c][lane] != session.threads[0][0][lane] ? 1 : 0;
+                moved += lane != 0 && session.threads[round][c][lane] == session.threads[round][c][lane - 1] ? 1 : 0;
+            }
+        }
+    }
+    char detail[128];
+    snprintf(detail, sizeof(detail), "%u and %u lanes ran, %llu flow failures, %llu served failures, %llu thread changes", ran, served,
+             (unsigned long long)flow_failures, (unsigned long long)session.failures, (unsigned long long)moved);
+    check_lanes_test_expect(tally, ran == BUSTER_CHECK_LANES_SESSION_LANES && session.lanes == BUSTER_CHECK_LANES_SESSION_LANES && flow_failures == 0 && moved == 0,
+                            "commands in one process run on one session's lanes, collectively", detail);
+    check_lanes_test_expect(tally, served == BUSTER_CHECK_LANES_SESSION_LANES && session.failures == 0 && lane_threads_created == before + 2 * (BUSTER_CHECK_LANES_SESSION_LANES - 1),
+                            "commands in one process run as regions of lane 0's served lanes", detail);
+}
+
 static int run_check_lanes_tests(int argc, char** argv)
 {
     CheckLanesTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -1733,6 +2064,8 @@ static int run_check_lanes_tests(int argc, char** argv)
         check_lanes_test_rule(&tally, directory);
         check_lanes_test_driver(&tally, executable, directory, programs, id_order);
         check_lanes_test_driver_failing(&tally, executable, directory, id_order);
+        check_lanes_test_session_threads(&tally, executable, directory);
+        check_lanes_test_session_commands(&tally, executable, directory);
         check_lanes_test_benchmark_sections(&tally, executable, directory);
         if (!keep && tally.failures == 0)
         {

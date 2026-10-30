@@ -51,6 +51,17 @@
 //     with lane_team_keep_scratch kept, emptied, and released when the team stops.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
 //     forked child refuses the inherited team without waiting for workers that exist only in its parent.
+//   - Sessions (#905): sessions of 1, 2, 3 and 8 lanes, each lane running the flow once, lane 0 on the calling thread,
+//     with capacity - 1 threads created (lane_threads_created, and the process's threads) and joined after; a session of
+//     one creates none. In the flow: every lane but lane 0 with the asynchronous signals blocked and the synchronous
+//     ones not; a signal sent to the process handled on lane 0; parked
+//     broadcasts from each lane; narrowings to 1, 2, 3, every lane and more, nested, each narrowed group syncing,
+//     broadcasting and taking parts, the others untouched; lane 0 serving regions of 1, 3, every lane and more lanes,
+//     each region's lanes running it once, a nested run in a region refused; a lane alone running lane_run on itself;
+//     a run, a team, a cold group and a session of several refused where they would create a thread; and a child forked
+//     from lane 0, which forgets the session and runs as one lane. Then a session whose third lane fails to start
+//     (lane_session_fail_at): the two lanes created joined, the flow on lane 0 alone; and in a child, a session that
+//     leaves its lanes parked at its end (but in sanitizer builds, which join them).
 //
 // A watchdog ends a group that makes no progress for BUSTER_LANE_TEST_TIMEOUT_SECONDS. Syncs may take longer when
 // the lanes share CPUs, so completed rounds renew their watchdog; a stalled collective still times out. The other
@@ -1093,8 +1104,8 @@ static bool lane_test_unwatch(void)
 static void lane_test_report_hang(int signal_number)
 {
     (void)signal_number;
-    static const char* const names[] = { "ranges", "syncs", "alone", "scratch", "exchange", "parts", "team lifetime" };
-    static const uint8_t lengths[] = { 6, 5, 5, 7, 8, 5, 13 };
+    static const char* const names[] = { "ranges", "syncs", "alone", "scratch", "exchange", "parts", "advance", "team lifetime", "sessions" };
+    static const uint8_t lengths[] = { 6, 5, 5, 7, 8, 5, 7, 13, 8 };
     static const char digits[] = "012345678";
     static const char middle[] = " on ";
     static const char elapsed[] = " lanes didn't finish in " BUSTER_LANE_TEST_STRINGIFY(BUSTER_LANE_TEST_TIMEOUT_SECONDS) " s\n";
@@ -1786,6 +1797,302 @@ static uint64_t lane_test_teams(void)
     return failures;
 }
 
+// The parts a session check's narrowed lanes take.
+#define BUSTER_LANE_TEST_SESSION_PARTS 29
+
+// What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
+// counted.
+typedef struct LaneSessionTest LaneSessionTest;
+struct LaneSessionTest
+{
+    pid_t caller;
+    uint32_t expected;
+    uint32_t calls[BUSTER_LANE_TEST_MAX_LANES];
+    pid_t threads[BUSTER_LANE_TEST_MAX_LANES];
+    uint64_t failures[BUSTER_LANE_TEST_MAX_LANES];
+    uint32_t region_calls[BUSTER_LANE_TEST_MAX_LANES];
+    uint32_t region_lanes;
+    uint32_t parts[BUSTER_LANE_TEST_SESSION_PARTS];
+    uint32_t forbidden_calls;
+    // Whether lane 0 forks a child in the flow.
+    bool forks;
+};
+
+// The thread that handled the sessions check's signal.
+static pid_t lane_test_signalled;
+
+static void lane_test_session_signal(int signal_number)
+{
+    (void)signal_number;
+    lane_test_signalled = (pid_t)syscall(SYS_gettid);
+}
+
+static void lane_test_session_forbidden(void* argument)
+{
+    LaneSessionTest* test = argument;
+    __atomic_add_fetch(&test->forbidden_calls, 1, __ATOMIC_RELAXED);
+}
+
+// A flow or an operation that each of its lanes counts itself in.
+static void lane_test_session_count(void* argument)
+{
+    LaneSessionTest* test = argument;
+    if (lane_index() < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[lane_index()] += 1;
+    }
+}
+
+// An operation on a lane alone: it must run there, as lane 0 of 1.
+static void lane_test_session_alone(void* argument)
+{
+    uint32_t* calls = argument;
+    *calls += lane_count() == 1 && lane_index() == 0 ? 1 : 100;
+}
+
+// A region's operation: each of its lanes records itself, then they sync and broadcast, and a nested run of several
+// lanes inside it is refused.
+static void lane_test_session_region(void* argument)
+{
+    LaneSessionTest* test = argument;
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    uint64_t failures = lanes != test->region_lanes || index >= lanes ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->region_calls[index] += 1;
+    }
+    lane_sync();
+    failures += lane_broadcast(index + 7, lanes - 1) != lanes - 1 + 7 ? 1 : 0;
+    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->failures[index] += failures;
+    }
+}
+
+// A narrowing of every lane of the current group to `lanes` of them: the narrowed lanes sync, broadcast and take every
+// part once in their own group, and the others don't enter; then every lane has its lane back.
+static uint64_t lane_test_session_narrow(LaneSessionTest* test, uint32_t lanes)
+{
+    const Lane outer = thread_context.lane;
+    const uint32_t expected = lanes == 0 ? 1 : lanes < outer.count ? lanes : outer.count;
+    uint64_t failures = 0;
+    if (lane_narrow(lanes))
+    {
+        failures += lane_count() != expected || lane_index() != outer.index ? 1 : 0;
+        lane_sync();
+        failures += lane_broadcast(lane_index() * 3, expected - 1) != (expected - 1) * 3 ? 1 : 0;
+        for (uint64_t part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS); part < BUSTER_LANE_TEST_SESSION_PARTS; part = lane_take(BUSTER_LANE_TEST_SESSION_PARTS))
+        {
+            __atomic_add_fetch(&test->parts[part], 1, __ATOMIC_RELAXED);
+        }
+    }
+    else
+    {
+        failures += outer.index < expected ? 1 : 0;
+    }
+    lane_widen();
+    failures += thread_context.lane.index != outer.index || thread_context.lane.count != outer.count || thread_context.lane.group != outer.group ? 1 : 0;
+    // The narrowed lanes took every part once: lane 0 checks once every lane is past them, and clears them before the
+    // next narrowing.
+    lane_park();
+    if (lane_index() == 0)
+    {
+        for (uint32_t part = 0; part < BUSTER_LANE_TEST_SESSION_PARTS; part += 1)
+        {
+            failures += test->parts[part] != 1 ? 1 : 0;
+            test->parts[part] = 0;
+        }
+    }
+    lane_park();
+    return failures;
+}
+
+// A session's flow (see the file's comment), which every lane runs.
+static void lane_test_session_main(void* argument)
+{
+    LaneSessionTest* test = argument;
+    // A lazy session's lane 0 learns how its lanes started before it counts on them; the others exist only once they did.
+    lane_session_settle();
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    uint64_t failures = lanes != test->expected || index >= lanes || lane_session_current() == 0 ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[index] += 1;
+        test->threads[index] = (pid_t)syscall(SYS_gettid);
+        failures += (index == 0) != (test->threads[index] == test->caller) ? 1 : 0;
+    }
+    sigset_t mask;
+    failures += pthread_sigmask(SIG_SETMASK, 0, &mask) != 0 ? 1 : 0;
+    failures += index != 0 && (sigismember(&mask, SIGUSR1) != 1 || sigismember(&mask, SIGTERM) != 1 || sigismember(&mask, SIGSEGV) != 0) ? 1 : 0;
+    failures += index == 0 && sigismember(&mask, SIGUSR1) != 0 ? 1 : 0;
+    lane_park();
+    // A signal sent to the process, while the other lanes are parked: lane 0 alone takes it.
+    if (index == 0)
+    {
+        lane_test_signalled = 0;
+        failures += kill(getpid(), SIGUSR1) != 0 || lane_test_signalled != test->threads[0] ? 1 : 0;
+    }
+    lane_park();
+    for (uint32_t source = 0; source < lanes; source += 1)
+    {
+        failures += lane_park_broadcast(index * 11 + 5, source) != source * 11 + 5 ? 1 : 0;
+    }
+    static const uint32_t narrowings[] = { 1, 2, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 5, 0 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(narrowings); i += 1)
+    {
+        failures += lane_test_session_narrow(test, narrowings[i]);
+    }
+    if (lane_narrow(lanes))
+    {
+        failures += lane_test_session_narrow(test, 2);
+    }
+    lane_widen();
+    // lane_run from a group of several that serves nothing is refused; on a lane alone, it runs there. A team, a cold
+    // group of several and a session of its own would create threads: refused.
+    failures += lanes > 1 && lane_run(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    const Lane group = lane_alone();
+    uint32_t alone_calls = 0;
+    failures += lane_run(4, lane_test_session_alone, &alone_calls, 0) && alone_calls == 1 ? 0 : 1;
+    LaneTeam team = { 0 };
+    failures += lane_team_start(&team, 2, 0) ? 1 : 0;
+    lane_team_stop(&team);
+    failures += lane_run_cold(2, lane_test_session_forbidden, test, 0) ? 1 : 0;
+    LaneSession nested;
+    failures += lane_session_run(&nested, 2, 0, lane_test_session_forbidden, test, 0) != 0 ? 1 : 0;
+    lane_restore(group);
+    // Lane 0 serves regions of 1, 3, every lane and more lanes than the session has; each region's lanes run it once.
+    static const uint32_t regions[] = { 1, 3, BUSTER_LANE_TEST_MAX_LANES, BUSTER_LANE_TEST_MAX_LANES + 9 };
+    if (index == 0)
+    {
+        lane_serve_begin();
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(regions); i += 1)
+        {
+            test->region_lanes = regions[i] < lanes ? regions[i] : lanes;
+            memset(test->region_calls, 0, sizeof(test->region_calls));
+            failures += lane_run(regions[i], lane_test_session_region, test, 0) ? 0 : 1;
+            for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+            {
+                failures += test->region_calls[lane] != (lane < test->region_lanes ? 1u : 0u) ? 1 : 0;
+            }
+        }
+        lane_serve_end();
+    }
+    else
+    {
+        lane_serve();
+    }
+    // A child forked from lane 0 while the others park: it forgets the session, is one lane, and may start a cold group
+    // of its own, which no session forbids there.
+    if (index == 0 && test->forks)
+    {
+        fflush(stdout);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+            const bool forgot = lane_session_current() == 0 && lane_count() == 1 && lane_index() == 0;
+            LaneSessionTest own = { 0 };
+            const bool ran = lane_run(2, lane_test_session_count, &own, 0) && own.calls[0] == 1 && own.calls[1] == 1;
+            _exit(forgot && ran ? 0 : 1);
+        }
+        int status = 0;
+        const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+        failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+    }
+    lane_park();
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->failures[index] += failures;
+    }
+}
+
+// Sessions (#905): see the file's comment.
+static uint64_t lane_test_sessions(void)
+{
+    lane_test_watch(BUSTER_ARRAY_LENGTH(lane_test_check_names) + 1, BUSTER_LANE_TEST_MAX_LANES, false);
+    alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+    struct sigaction action = { .sa_handler = lane_test_session_signal };
+    struct sigaction previous_action;
+    const bool handled = sigaction(SIGUSR1, &action, &previous_action) == 0;
+    uint64_t failures = handled ? 0 : 1;
+    const uint32_t threads_before = lane_test_thread_count();
+    const pid_t caller = (pid_t)syscall(SYS_gettid);
+    static LaneSession session;
+    // Each capacity eagerly, then lazily (lane 1 creating the lanes after it).
+    static const uint32_t capacities[] = { 1, 2, 3, BUSTER_LANE_TEST_MAX_LANES, 1, 3, BUSTER_LANE_TEST_MAX_LANES };
+    for (uint32_t i = 0; handled && i < BUSTER_ARRAY_LENGTH(capacities); i += 1)
+    {
+        LaneSessionTest test = {
+            .caller = caller,
+            .expected = capacities[i],
+            .forks = i == 2,
+        };
+        const uint64_t created = lane_threads_created;
+        const uint32_t flags = i >= 4 ? BUSTER_LANE_SESSION_LAZY : 0;
+        const uint32_t ran = lane_session_run(&session, capacities[i], 0, lane_test_session_main, &test, flags);
+        failures += ran != capacities[i] || lane_threads_created != created + capacities[i] - 1 ? 1 : 0;
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test.calls[lane] != (lane < capacities[i] ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+            for (uint32_t earlier = 0; lane < capacities[i] && earlier < lane; earlier += 1)
+            {
+                failures += test.threads[lane] == test.threads[earlier] ? 1 : 0;
+            }
+        }
+        failures += test.forbidden_calls != 0 || lane_session_current() != 0 ? 1 : 0;
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // Sessions whose third lane fails to start, eagerly and lazily, and a lazy one whose lane 1 does: the lanes created are
+    // joined, and the flow runs on lane 0 alone.
+    static const uint32_t failing[] = { 3, 3, 1 };
+    for (uint32_t i = 0; handled && i < BUSTER_ARRAY_LENGTH(failing); i += 1)
+    {
+        LaneSessionTest failed = {
+            .caller = caller,
+            .expected = 1,
+        };
+        const uint64_t created = lane_threads_created;
+        lane_session_fail_at = failing[i];
+        const uint32_t ran = lane_session_run(&session, BUSTER_LANE_TEST_MAX_LANES, 0, lane_test_session_main, &failed, i == 0 ? 0 : BUSTER_LANE_SESSION_LAZY);
+        lane_session_fail_at = 0;
+        failures += ran != 1 || lane_threads_created != created + failing[i] - 1 || failed.calls[0] != 1 || failed.failures[0] != 0 ? 1 : 0;
+        for (uint32_t lane = 1; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += failed.calls[lane] != 0 ? 1 : 0;
+        }
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // In a child, a session that leaves its lanes parked at its end, for the child's exit to end; a sanitizer build joins
+    // them.
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        alarm(BUSTER_LANE_TEST_TIMEOUT_SECONDS);
+        static LaneSession parked;
+        LaneSessionTest test = { 0 };
+        const uint32_t before = lane_test_thread_count();
+        const uint32_t lanes = lane_session_run(&parked, 4, 0, lane_test_session_count, &test, BUSTER_LANE_SESSION_PARK_AT_END);
+        const bool joined = BUSTER_SANITIZER_RESOURCES != 0;
+        const bool kept = joined ? lane_test_threads_stopped(before) : lane_test_thread_count() == before + 3;
+        _exit(lanes == 4 && kept && test.calls[0] == 1 ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    failures += waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+    if (handled)
+    {
+        sigaction(SIGUSR1, &previous_action, 0);
+    }
+    failures += lane_test_unwatch() ? 0 : 1;
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, one whose lanes didn't start and one parked at its end, %lu wrong\n", BUSTER_LANE_TEST_MAX_LANES,
+           (unsigned long)failures);
+    return failures;
+}
+
 static int run_lane_tests(int argc, char** argv)
 {
     uint64_t rounds = BUSTER_LANE_TEST_DEFAULT_ROUNDS;
@@ -1860,6 +2167,7 @@ static int run_lane_tests(int argc, char** argv)
         bool passed = lane_test_watchdog();
         passed = lane_test_arenas() && passed;
         passed = lane_test_teams() == 0 && passed;
+        passed = lane_test_sessions() == 0 && passed;
         fflush(stdout);
 
         uint64_t state = seed * BUSTER_LANE_TEST_GOLDEN_RATIO + 1;

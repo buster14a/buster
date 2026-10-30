@@ -209,6 +209,36 @@ says why it ran again (`CheckProgramAgain`): lanes that didn't start
 ran out of room in its lowering (or whose lane had none for its writer), in a
 body's Tier 0 code or in a body's code after Tier 0.
 
+### The command's session (#905)
+
+In the C driver the lanes are the command's session's (`lane_session_run`,
+`check_driver_run`), started once, after the options and before any source is
+read: as many as the command may take (one per CPU it may run on, or
+`--lanes N`, at most `--worker-budget N`), none for one source without code to
+emit (`-fsyntax-only`), the calling thread lane 0. The session is lazy
+(`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts the
+command, and lane 1 creates the others while lane 0 runs the front end, so that
+the threads' creation is off lane 0's path; lane 0 learns how their start went
+at its first round or at the flow's end (`lane_session_settle`), and a round
+whose lanes didn't start runs its bodies on one lane (`CHECK_PROGRAM_AGAIN_START`). Every lane runs the
+command's flow (`check_driver_flow`): lane 0 the unit's stages alone, while the
+others park on the futex (`lane_park`), and each emission that pays for more
+than one lane is a round of the flow (`CheckEmitFlow`), which lane 0 announces
+with its run and its lanes; every lane runs the round's wide part
+(`check_program_emit_wide`), the first of them the bodies' parts on a group of
+their own (`lane_narrow`), a direct call rather than a `lane_run` of the
+emission's own. A round's lanes are those the lane rule and the worker budget
+give it: lane 0 takes the jobserver's slots before the round, without waiting,
+and gives them back after the round's lanes have met, before any serial work,
+so no slot is held through the front end, and no lane waits on the jobserver.
+Lanes that can't start leave the session on one lane, which no round retries;
+a terminal command's lanes stay parked until the process exits. Lane 0's
+stages stay one call chain, its frames holding the unit's state across the
+rounds (an executable's emission takes another round when binding finds the
+runtime's snapshot damaged); several units and `link-foreign` run their
+existing operations as regions of lane 0's that the session's lanes serve
+(`lane_serve`), until their flows are converted.
+
 ### Memory
 
 Lane 0 is the calling thread, with the caller's arenas but for its writer's
@@ -262,10 +292,10 @@ protocol.
 
 One lane, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the bodies'
 tokens beyond twice the largest body's, no more than the bodies (a part has at
-least one) or the lanes the caller allows. A lane costs its thread's start,
-its writer's columns and its arenas' first pages, which its share of the
-bodies must pay for; and the lane that takes the largest body takes at least
-as long as it. #113's deferred reader sizes its lanes the same way
+least one) or the lanes the caller allows. A lane costs its wake-up (its
+thread's start, outside the driver's session), its writer's columns and its
+arenas' first pages, which its share of the bodies must pay for; and the lane
+that takes the largest body takes at least as long as it. #113's deferred reader sizes its lanes the same way
 ([docs/c-deferred-bodies.md](c-deferred-bodies.md)).
 
 ## Tests and measurements
