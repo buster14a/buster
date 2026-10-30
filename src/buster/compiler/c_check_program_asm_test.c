@@ -224,6 +224,25 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
         "asm-naked-intel-avx512", clang, wide_native);
+    // The semantics harness saves all eight masks at offsets 2240..2296. Compile/link this regression on every
+    // host; execute only with the AVX-512BW state support KMOVQ requires, including k0 as an ordinary operand.
+    const bool masks_native = wide_native && (native.features & BUSTER_X86_FEATURE(AVX512BW)) != 0;
+    if (!masks_native)
+    {
+        printf("test-checker: asm-naked-kmov: AVX-512BW unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static __attribute__((naked,noinline,target(\"avx512f,avx512bw\"))) void copy_masks(const unsigned long long* p,unsigned long long* q){"
+        "__asm__(\".intel_syntax noprefix\\n"
+        "kmovq k0,qword ptr [rdi+2240]\\nkmovq k1,qword ptr [rdi+2248]\\nkmovq k2,qword ptr [rdi+2256]\\nkmovq k3,qword ptr [rdi+2264]\\n"
+        "kmovq k4,qword ptr [rdi+2272]\\nkmovq k5,qword ptr [rdi+2280]\\nkmovq k6,qword ptr [rdi+2288]\\nkmovq k7,qword ptr [rdi+2296]\\n"
+        "kmovq qword ptr [rsi],k0\\nkmovq qword ptr [rsi+8],k1\\nkmovq qword ptr [rsi+16],k2\\nkmovq qword ptr [rsi+24],k3\\n"
+        "kmovq qword ptr [rsi+32],k4\\nkmovq qword ptr [rsi+40],k5\\nkmovq qword ptr [rsi+48],k6\\nkmovq qword ptr [rsi+56],k7\\n"
+        "ret\\n.att_syntax prefix\\n\");}"
+        "int tested(int n){unsigned long long p[288],q[8];for(int i=0;i<8;i++){p[280+i]=((unsigned long long)(unsigned)n<<32)^"
+        "(0xfedcba9876543210ULL+(unsigned)i*0x0101010101010101ULL);q[i]=0;}copy_masks(p,q);int r=0;"
+        "for(int i=0;i<8;i++)r+=q[i]==p[280+i];return r+n;}",
+        "asm-naked-kmov", clang, masks_native);
     // Vectors in vector registers' constraints in templates of no instructions, main.c's compiler barriers (c_lexer.c's
     // and x86_64_encoder.c's `__asm__("" : "+v"(x))`): a `+` operand keeps its value, an output through a call's pointer
     // is evaluated once, and an input's value is evaluated once and dropped, a call's that returns a vector and one loaded
