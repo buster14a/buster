@@ -1,0 +1,20 @@
+name: Issue 802 branch preparation
+on:
+  push:
+    branches: [codex/issue-802-lazy-arenas]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - run: git archive --format=tar HEAD > "$RUNNER_TEMP/source.tar"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue-802-source
+          path: ${{ runner.temp }}/source.tar
+          retention-days: 1
