@@ -39,6 +39,11 @@
 // BUSTER_TIER1_CFG_SPILL + spill_count + class for the class's temporary slot, which temp_slots marks where a move
 // uses it. A move whose source is BUSTER_TIER1_CFG_REMATERIALIZE recomputes move_values[m] into its destination.
 //
+// The classes are tier1_allocate.c's: general, vector and opmask registers (#179). The mask class's scratch register
+// is one of k0 to k7 outside its `registers`: k0 for the producers here, since it can't be a write mask, which leaves
+// the seven others to the values. A consumer moves, spills and reloads a mask at its width; calls clobber every opmask
+// register (the System V convention passes none and preserves none), which the producer's fixed ranges say.
+//
 // tier1_cfg_verify is an independent oracle for tests and qualification, not the production path. It computes
 // liveness its own way (each use walked back to its definition), simulates every block's locations as the emitter
 // would run the fragments and splits (stores, then a split's moves, then loads and rematerializations, at each
@@ -55,7 +60,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#define BUSTER_TIER1_CFG_SPILL 64u
+#define BUSTER_TIER1_CFG_SPILL (32u * BUSTER_TIER1_ALLOCATE_CLASSES)
 #define BUSTER_TIER1_CFG_REMATERIALIZE 0x80000000u
 #define BUSTER_TIER1_CFG_NONE UINT32_MAX
 
@@ -178,7 +183,8 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
     {
         valid = input->scratch_registers[c] < 32 && ((input->registers[c] >> input->scratch_registers[c]) & 1) == 0;
     }
-    valid = valid && (input->registers[0] & 0xffff0000u) == 0 && input->scratch_registers[0] < 16;
+    valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
+    valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
     valid = valid && input->block_starts[0] == 0 && input->block_starts[input->block_count] == input->position_count;
     valid = valid && input->fixed.count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
     for (uint32_t r = 0; valid && r < input->fixed.count; r += 1)
@@ -953,8 +959,9 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
                     .value_count = values,
                     .position_count = input->position_count,
                     .registers = {
-                        input->registers[0],
-                        input->registers[1],
+                        input->registers[BUSTER_TIER1_ALLOCATE_GPR],
+                        input->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+                        input->registers[BUSTER_TIER1_ALLOCATE_MASK],
                     },
                     .fixed = input->fixed,
                 };

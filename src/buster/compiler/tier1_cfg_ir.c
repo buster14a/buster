@@ -10,14 +10,17 @@
 //   predecessors (Tier1CfgInput's entry has none). A non-phi instruction occupies two positions, its uses' and its
 //   result's. A call, an integer division or remainder and a shift by a count that isn't a constant occupy three, the
 //   middle one clobbering what the instruction clobbers, so that a value live across it keeps out of those registers:
-//   a call the caller-saved general registers and every vector register, a division rax and rdx, a shift rcx. A phi
-//   occupies none: it is defined at its block's start.
-// - A value per instruction whose result is an integer of up to 64 bits or a pointer (general registers), or a float,
-//   a double or a vector of 16, 32 or 64 bytes (vector registers). A function with a 128-bit integer, a long double or
-//   a mask value is refused: the two classes don't model them.
+//   a call the caller-saved general registers and every vector and opmask register, a division rax and rdx, a shift
+//   rcx. A phi occupies none: it is defined at its block's start.
+// - A value per instruction whose result is an integer of up to 64 bits or a pointer (general registers), a float, a
+//   double or a vector of 16, 32 or 64 bytes (vector registers), or a mask of 8 to 64 bits (opmask registers, #179). A
+//   function with a 128-bit integer or a long double is refused: the classes don't model them.
 // - Constants, symbol and slot addresses and undefined values are rematerializable.
 // - Every use but a phi's: one in operand a, or a store's value, needs a register; any other may be a memory operand.
-// - Registers: every general register but rsp and r11, the scratch; xmm0 to xmm14, xmm15 the scratch.
+//   A mask's every use needs one: the opmask instructions have no memory operand but kmov's, and a write mask is a
+//   register.
+// - Registers: every general register but rsp and r11, the scratch; xmm0 to xmm14, xmm15 the scratch; k1 to k7, k0
+//   the scratch (it can't be a write mask).
 //
 // This is test and measurement tooling outside the compile path, with no vector path of its own.
 
@@ -25,6 +28,12 @@
 #define BUSTER_TIER1_CFG_IR_GPR_SCRATCH 11
 #define BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS 0x7fffu
 #define BUSTER_TIER1_CFG_IR_VECTOR_SCRATCH 15
+#define BUSTER_TIER1_CFG_IR_MASK_REGISTERS 0xfeu
+#define BUSTER_TIER1_CFG_IR_MASK_SCRATCH 0
+// tier1_cfg_ir_class's answers past the allocator's classes: an instruction without a value, and a value of a type the
+// model has no class for.
+#define BUSTER_TIER1_CFG_IR_NO_VALUE BUSTER_TIER1_ALLOCATE_CLASSES
+#define BUSTER_TIER1_CFG_IR_NO_CLASS (BUSTER_TIER1_ALLOCATE_CLASSES + 1)
 // rax, rcx, rdx, rsi, rdi, r8, r9 and r10: r11, the other caller-saved one, is the scratch.
 #define BUSTER_TIER1_CFG_IR_CALL_CLOBBERS 0x07c7u
 
@@ -49,46 +58,60 @@ struct Tier1CfgIrProblem
     uint32_t added_entry;
 };
 
-// An IR type's class: 0 general, 1 vector, 2 no value, 3 none the model has.
+// An IR type's class: the allocator's (general, vector, mask), BUSTER_TIER1_CFG_IR_NO_VALUE, or
+// BUSTER_TIER1_CFG_IR_NO_CLASS for a type the model has none for.
 static uint32_t tier1_cfg_ir_class(uint8_t type)
 {
-    uint32_t class = 3;
+    uint32_t class = BUSTER_TIER1_CFG_IR_NO_CLASS;
     if (type == IR_VOID)
     {
-        class = 2;
+        class = BUSTER_TIER1_CFG_IR_NO_VALUE;
     }
     else if (type == IR_I1 || type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR)
     {
-        class = 0;
+        class = BUSTER_TIER1_ALLOCATE_GPR;
     }
     else if (type == IR_F32 || type == IR_F64 || type == IR_V4I32 || type == IR_V8I32 || type == IR_V16I32)
     {
-        class = 1;
+        class = BUSTER_TIER1_ALLOCATE_VECTOR;
+    }
+    else if (type == IR_M8 || type == IR_M16 || type == IR_M32 || type == IR_M64)
+    {
+        class = BUSTER_TIER1_ALLOCATE_MASK;
     }
     return class;
 }
 
-// The general registers instruction i clobbers between its uses and its result, and in *vector the vector ones.
-static uint32_t tier1_cfg_ir_clobbers(const IrFunction* function, uint32_t i, uint32_t* vector)
+// Each class's registers instruction i clobbers between its uses and its result: a call every caller-saved one (all of
+// the vector and opmask registers), a division rax and rdx, a shift by a register rcx. Whether it clobbers any.
+static bool tier1_cfg_ir_clobbers(const IrFunction* function, uint32_t i, uint32_t* clobbers)
 {
     const uint8_t op = function->op[i];
-    const bool scalar = tier1_cfg_ir_class(function->type[i]) == 0;
-    uint32_t general = 0;
-    *vector = 0;
+    const bool scalar = tier1_cfg_ir_class(function->type[i]) == BUSTER_TIER1_ALLOCATE_GPR;
+    clobbers[BUSTER_TIER1_ALLOCATE_GPR] = 0;
+    clobbers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0;
+    clobbers[BUSTER_TIER1_ALLOCATE_MASK] = 0;
     if (op == IR_CALL || op == IR_CALL_INDIRECT)
     {
-        general = BUSTER_TIER1_CFG_IR_CALL_CLOBBERS;
-        *vector = BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS;
+        clobbers[BUSTER_TIER1_ALLOCATE_GPR] = BUSTER_TIER1_CFG_IR_CALL_CLOBBERS;
+        clobbers[BUSTER_TIER1_ALLOCATE_VECTOR] = BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS;
+        clobbers[BUSTER_TIER1_ALLOCATE_MASK] = BUSTER_TIER1_CFG_IR_MASK_REGISTERS;
     }
     else if (scalar && (op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM))
     {
-        general = 0x5u;
+        clobbers[BUSTER_TIER1_ALLOCATE_GPR] = 0x5u;
     }
     else if (scalar && (op == IR_SHL || op == IR_LSHR || op == IR_ASHR) && function->op[function->b[i]] != IR_CONST)
     {
-        general = 0x2u;
+        clobbers[BUSTER_TIER1_ALLOCATE_GPR] = 0x2u;
     }
-    return general;
+    return (clobbers[BUSTER_TIER1_ALLOCATE_GPR] | clobbers[BUSTER_TIER1_ALLOCATE_VECTOR] | clobbers[BUSTER_TIER1_ALLOCATE_MASK]) != 0;
+}
+
+// A class's allocatable registers in the model.
+static uint32_t tier1_cfg_ir_registers(uint32_t class)
+{
+    return class == BUSTER_TIER1_ALLOCATE_GPR ? BUSTER_TIER1_CFG_IR_GPR_REGISTERS : class == BUSTER_TIER1_ALLOCATE_VECTOR ? BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS : BUSTER_TIER1_CFG_IR_MASK_REGISTERS;
 }
 
 static bool tier1_cfg_ir_rematerializable(uint8_t op)
@@ -127,9 +150,9 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
     for (uint32_t i = 0; ready && i < count; i += 1)
     {
         const uint32_t class = tier1_cfg_ir_class(function->type[i]);
-        status = class == 3 ? TIER1_CFG_IR_UNSUPPORTED : status;
-        values[i] = class < 2 ? value_count : BUSTER_TIER1_CFG_NONE;
-        value_count += class < 2;
+        status = class == BUSTER_TIER1_CFG_IR_NO_CLASS ? TIER1_CFG_IR_UNSUPPORTED : status;
+        values[i] = class < BUSTER_TIER1_ALLOCATE_CLASSES ? value_count : BUSTER_TIER1_CFG_NONE;
+        value_count += class < BUSTER_TIER1_ALLOCATE_CLASSES;
     }
     ready = ready && status == TIER1_CFG_IR_OK;
     if (ready)
@@ -149,12 +172,14 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
                 }
                 else
                 {
-                    uint32_t vector = 0;
-                    const uint32_t general = tier1_cfg_ir_clobbers(function, i, &vector);
-                    const uint32_t width = general != 0 || vector != 0 ? 3 : 2;
+                    uint32_t clobbers[BUSTER_TIER1_ALLOCATE_CLASSES];
+                    const uint32_t width = tier1_cfg_ir_clobbers(function, i, clobbers) ? 3 : 2;
                     use_positions_of[i] = (uint32_t)position;
                     definitions_of[i] = (uint32_t)position + width - 1;
-                    fixed_count += (general != 0) + (vector != 0);
+                    for (uint32_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+                    {
+                        fixed_count += clobbers[class] != 0;
+                    }
                     position += width;
                 }
             }
@@ -202,7 +227,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
             if (v != BUSTER_TIER1_CFG_NONE)
             {
                 classes[v] = (uint8_t)tier1_cfg_ir_class(function->type[i]);
-                allowed[v] = classes[v] == 0 ? BUSTER_TIER1_CFG_IR_GPR_REGISTERS : BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS;
+                allowed[v] = tier1_cfg_ir_registers(classes[v]);
                 definitions[v] = definitions_of[i];
                 rematerializable[v] = tier1_cfg_ir_rematerializable(function->op[i]);
                 use_offsets[v] = use;
@@ -212,21 +237,23 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
                     if (function->op[user] != IR_PHI)
                     {
                         use_positions[use] = use_positions_of[user];
-                        use_required[use] = uses.uses[u].operand == 0 || function->op[user] == IR_STORE;
+                        use_required[use] = uses.uses[u].operand == 0 || function->op[user] == IR_STORE || classes[v] == BUSTER_TIER1_ALLOCATE_MASK;
                         use += 1;
                     }
                 }
             }
-            uint32_t vector = 0;
-            const uint32_t general = function->op[i] != IR_PHI ? tier1_cfg_ir_clobbers(function, i, &vector) : 0;
+            uint32_t clobbers[BUSTER_TIER1_ALLOCATE_CLASSES] = { 0 };
+            if (function->op[i] != IR_PHI)
+            {
+                tier1_cfg_ir_clobbers(function, i, clobbers);
+            }
             for (uint32_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
             {
-                const uint32_t clobbered = class == 0 ? general : vector;
-                if (clobbered != 0)
+                if (clobbers[class] != 0)
                 {
                     fixed_starts[fixed] = use_positions_of[i] + 1;
                     fixed_ends[fixed] = use_positions_of[i] + 2;
-                    fixed_registers[fixed] = clobbered;
+                    fixed_registers[fixed] = clobbers[class];
                     fixed_classes[fixed] = (uint8_t)class;
                     fixed += 1;
                 }
@@ -324,10 +351,12 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
             .registers = {
                 BUSTER_TIER1_CFG_IR_GPR_REGISTERS,
                 BUSTER_TIER1_CFG_IR_VECTOR_REGISTERS,
+                BUSTER_TIER1_CFG_IR_MASK_REGISTERS,
             },
             .scratch_registers = {
                 BUSTER_TIER1_CFG_IR_GPR_SCRATCH,
                 BUSTER_TIER1_CFG_IR_VECTOR_SCRATCH,
+                BUSTER_TIER1_CFG_IR_MASK_SCRATCH,
             },
             .fixed = {
                 .starts = fixed_starts,

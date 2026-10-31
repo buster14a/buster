@@ -3,9 +3,10 @@
 //
 // test-tier1-cfg: tier1_cfg.c's allocation over CFGs. Include after tier1_cfg.c and dominators.c. A builder states
 // blocks of instructions (a use phase and a definition phase each), edges, values, uses, phis and clobbers; fixtures
-// give the diamond, the loop, the phi swap, the critical edge and the one-register cases, and a generator gives random
-// SSA over random CFGs (loops, irreducible regions, several latches), every value defined in a block that dominates
-// its uses. Both entry points must give results that tier1_cfg_verify accepts, and tier1_allocation_verify where the
+// give the diamond, the loop, the phi swap, the critical edge and the one-register cases, and the opmask class's
+// (#179: a phi swap through k0, a slot swap through its temporary slot, masks across a call and eight masks in seven
+// registers), and a generator gives random SSA over random CFGs (loops, irreducible regions, several latches) of the
+// three classes, every value defined in a block that dominates its uses. Both entry points must give results that tier1_cfg_verify accepts, and tier1_allocation_verify where the
 // case is small enough for its quadratic check. Mutants of the published moves and fragments must fail the checker.
 
 #define BUSTER_TIER1_CFG_TEST_BLOCKS 32
@@ -64,6 +65,10 @@ struct Tier1CfgTestTally
     uint64_t split_edges;
     uint64_t spills;
     uint64_t temp_slot_cases;
+    // The opmask class's share: moves of masks, spilled masks, and moves of masks at splits (around calls).
+    uint64_t mask_moves;
+    uint64_t mask_spills;
+    uint64_t mask_split_moves;
     // Two values given one register where their fragments overlap, and two dependent moves of an edge swapped: every
     // one must fail the checker.
     uint64_t interference_mutants;
@@ -278,12 +283,14 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .phi_count = phi,
             .position_count = block_starts[blocks],
             .registers = {
-                builder->registers[0],
-                builder->registers[1],
+                builder->registers[BUSTER_TIER1_ALLOCATE_GPR],
+                builder->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+                builder->registers[BUSTER_TIER1_ALLOCATE_MASK],
             },
             .scratch_registers = {
-                builder->scratch[0],
-                builder->scratch[1],
+                builder->scratch[BUSTER_TIER1_ALLOCATE_GPR],
+                builder->scratch[BUSTER_TIER1_ALLOCATE_VECTOR],
+                builder->scratch[BUSTER_TIER1_ALLOCATE_MASK],
             },
             .fixed = {
                 .starts = fixed_starts,
@@ -338,6 +345,12 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                 const uint32_t class = input->classes[result.move_values[m]];
                 const uint32_t conduit = class * 32 + input->scratch_registers[class];
                 tally->scratch_moves += result.move_sources[m] == conduit || result.move_destinations[m] == conduit;
+                tally->mask_moves += class == BUSTER_TIER1_ALLOCATE_MASK;
+                tally->mask_split_moves += class == BUSTER_TIER1_ALLOCATE_MASK && m >= result.edge_move_offsets[input->edge_count];
+            }
+            for (uint32_t k = 0; k < result.allocation.spill_count; k += 1)
+            {
+                tally->mask_spills += input->classes[result.allocation.spill_values[k]] == BUSTER_TIER1_ALLOCATE_MASK;
             }
             tally->temp_slot_cases += result.temp_slots != 0;
             tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
@@ -462,10 +475,18 @@ static uint64_t tier1_cfg_test_random(uint64_t* state)
     return *state >> 33;
 }
 
+// A random value's class: a half general, a quarter vector and a quarter opmask.
+static uint8_t tier1_cfg_test_class(uint64_t* random)
+{
+    const uint64_t draw = tier1_cfg_test_random(random) % 8;
+    return draw < 2 ? BUSTER_TIER1_ALLOCATE_VECTOR : draw < 4 ? BUSTER_TIER1_ALLOCATE_MASK : BUSTER_TIER1_ALLOCATE_GPR;
+}
+
 // A random SSA program over a random CFG: a chain through every block, so that all are reachable, and extra edges
 // forward, backward and to itself, none into the entry. Values are used in their own block after their definition
 // or in blocks their definition's block dominates; phis at joins take a same-class value available at the end of
-// each predecessor.
+// each predecessor. The opmask class has one to seven of k1 to k7 and k0 its scratch, and some of its fixed ranges
+// clobber every mask, as a call does.
 static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed, Arena* arena, Arena* scratch)
 {
     uint64_t random = seed * 2 + 1;
@@ -513,6 +534,12 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
     {
         builder->registers[1] |= 1u << r;
     }
+    const uint32_t mask_size = 1 + (uint32_t)(tier1_cfg_test_random(&random) % 7);
+    builder->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    for (uint32_t r = 1; r <= mask_size; r += 1)
+    {
+        builder->registers[BUSTER_TIER1_ALLOCATE_MASK] |= 1u << r;
+    }
     // Dominance, for available values.
     uint32_t successor_offsets[BUSTER_TIER1_CFG_TEST_BLOCKS + 1];
     uint32_t successors[BUSTER_TIER1_CFG_TEST_EDGES];
@@ -552,10 +579,10 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
     options.path = DOMINATOR_SCALAR;
     Dominators dominance;
     bool valid = dominators_analyze(arena, scratch, &cfg, options, &dominance) == DOMINATOR_OK;
-    // Parameters at the entry's first instruction: two general and one vector value.
-    for (uint32_t p = 0; valid && p < 3; p += 1)
+    // Parameters at the entry's first instruction: two general values, a vector one and a mask.
+    for (uint32_t p = 0; valid && p < 4; p += 1)
     {
-        const uint8_t class = p < 2 ? 0 : 1;
+        const uint8_t class = p < 2 ? BUSTER_TIER1_ALLOCATE_GPR : p == 2 ? BUSTER_TIER1_ALLOCATE_VECTOR : BUSTER_TIER1_ALLOCATE_MASK;
         tier1_cfg_test_value(builder, 0, 0, class, builder->registers[class]);
     }
     // Phis at joins, in block order, before the instructions: their operands come from predecessors' ends, which
@@ -567,7 +594,7 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
         const uint32_t phis = count >= 2 ? (uint32_t)(tier1_cfg_test_random(&random) % 4) : 0;
         for (uint32_t k = 0; k < phis && builder->phi_count < 32; k += 1)
         {
-            const uint8_t class = tier1_cfg_test_random(&random) % 4 == 0 ? 1 : 0;
+            const uint8_t class = tier1_cfg_test_class(&random);
             const uint32_t v = tier1_cfg_test_value(builder, b, UINT32_MAX, class, builder->registers[class]);
             builder->phi_value[builder->phi_count] = v;
             phi_blocks[builder->phi_count] = b;
@@ -604,7 +631,7 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
             {
                 if (tier1_cfg_test_random(&random) % 5 != 0 && builder->value_count < BUSTER_TIER1_CFG_TEST_VALUES - 1)
                 {
-                    const uint8_t class = tier1_cfg_test_random(&random) % 4 == 0 ? 1 : 0;
+                    const uint8_t class = tier1_cfg_test_class(&random);
                     uint32_t mask = builder->registers[class];
                     if (tier1_cfg_test_random(&random) % 8 == 0)
                     {
@@ -619,13 +646,16 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
             const uint32_t fixed_before = builder->fixed_count;
             if (tier1_cfg_test_random(&random) % 9 == 0 && builder->fixed_count < BUSTER_TIER1_CFG_TEST_FIXED)
             {
-                const uint8_t class = tier1_cfg_test_random(&random) % 3 == 0 ? 1 : 0;
+                const uint64_t draw = tier1_cfg_test_random(&random) % 6;
+                const uint8_t class = draw < 2 ? BUSTER_TIER1_ALLOCATE_VECTOR : draw == 2 ? BUSTER_TIER1_ALLOCATE_MASK : BUSTER_TIER1_ALLOCATE_GPR;
                 uint32_t pick = builder->registers[class];
                 for (uint32_t skip = (uint32_t)(tier1_cfg_test_random(&random) % 4); skip > 0 && (pick & (pick - 1)) != 0; skip -= 1)
                 {
                     pick &= pick - 1;
                 }
                 pick &= (uint32_t)-(int32_t)pick;
+                // Half the opmask class's: a call's, which clobbers every mask.
+                pick = class == BUSTER_TIER1_ALLOCATE_MASK && tier1_cfg_test_random(&random) % 2 == 0 ? builder->registers[class] : pick;
                 builder->fixed_block[builder->fixed_count] = b;
                 builder->fixed_instruction[builder->fixed_count] = i;
                 builder->fixed_class[builder->fixed_count] = class;
@@ -648,7 +678,7 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
         {
             const uint32_t p = predecessors[predecessor_offsets[b] + j];
             // A parameter of the class, or a random value available there.
-            uint32_t chosen = class == 0 ? 0 : 2;
+            uint32_t chosen = class == BUSTER_TIER1_ALLOCATE_GPR ? 0 : class == BUSTER_TIER1_ALLOCATE_VECTOR ? 2 : 3;
             bool found = false;
             for (uint32_t attempt = 0; !found && attempt < 16; attempt += 1)
             {
@@ -665,7 +695,7 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
 
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
-    static Tier1CfgTestBuilder builders[7];
+    static Tier1CfgTestBuilder builders[11];
     Tier1CfgTestBuilder* diamond = &builders[0];
     // Diamond: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3; x in 1 and y in 2 meet in phi z at 3, beside a, live through.
     memset(diamond, 0, sizeof(*diamond));
@@ -854,6 +884,113 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
     across->fixed_register[0] = 0x000f;
     across->fixed_count = 1;
     tier1_cfg_test_use(across, d, 0, 2, true);
+    // The opmask class (#179), its registers k1 to k7 at most and k0 its scratch. Mask swap: the phi swap with k1 and k2
+    // alone, whose back edge's cycle goes through k0.
+    Tier1CfgTestBuilder* mask_swap = &builders[7];
+    memset(mask_swap, 0, sizeof(*mask_swap));
+    mask_swap->block_count = 3;
+    mask_swap->instructions[0] = 2;
+    mask_swap->instructions[1] = 2;
+    mask_swap->instructions[2] = 1;
+    tier1_cfg_test_edge(mask_swap, 0, 1);
+    tier1_cfg_test_edge(mask_swap, 1, 1);
+    tier1_cfg_test_edge(mask_swap, 1, 2);
+    mask_swap->registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x0003;
+    mask_swap->registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0x0001;
+    mask_swap->registers[BUSTER_TIER1_ALLOCATE_MASK] = 0x06;
+    mask_swap->scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    mask_swap->scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+    mask_swap->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    const uint32_t k_first = tier1_cfg_test_value(mask_swap, 0, 0, BUSTER_TIER1_ALLOCATE_MASK, 0x06);
+    const uint32_t k_second = tier1_cfg_test_value(mask_swap, 0, 1, BUSTER_TIER1_ALLOCATE_MASK, 0x06);
+    const uint32_t mask_swap_a_operands[] = {
+        k_first,
+        mask_swap->value_count + 1,
+    };
+    const uint32_t mask_swap_a = tier1_cfg_test_phi(mask_swap, 1, BUSTER_TIER1_ALLOCATE_MASK, mask_swap_a_operands);
+    const uint32_t mask_swap_b_operands[] = {
+        k_second,
+        mask_swap_a,
+    };
+    const uint32_t mask_swap_b = tier1_cfg_test_phi(mask_swap, 1, BUSTER_TIER1_ALLOCATE_MASK, mask_swap_b_operands);
+    tier1_cfg_test_use(mask_swap, mask_swap_a, 1, 0, true);
+    tier1_cfg_test_use(mask_swap, mask_swap_b, 1, 1, true);
+    tier1_cfg_test_use(mask_swap, mask_swap_a, 2, 0, true);
+    tier1_cfg_test_use(mask_swap, mask_swap_b, 2, 0, true);
+    // Mask memory swap: no opmask registers, so the swap's phis go slot to slot, a cycle through the mask class's
+    // temporary slot, each slot-to-slot move through k0.
+    Tier1CfgTestBuilder* mask_memory = &builders[8];
+    memset(mask_memory, 0, sizeof(*mask_memory));
+    mask_memory->block_count = 3;
+    mask_memory->instructions[0] = 2;
+    mask_memory->instructions[1] = 2;
+    mask_memory->instructions[2] = 1;
+    tier1_cfg_test_edge(mask_memory, 0, 1);
+    tier1_cfg_test_edge(mask_memory, 1, 1);
+    tier1_cfg_test_edge(mask_memory, 1, 2);
+    mask_memory->registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x0003;
+    mask_memory->registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0x0001;
+    mask_memory->registers[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    mask_memory->scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    mask_memory->scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+    mask_memory->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    const uint32_t km0 = tier1_cfg_test_value(mask_memory, 0, 0, BUSTER_TIER1_ALLOCATE_MASK, 0);
+    const uint32_t km1 = tier1_cfg_test_value(mask_memory, 0, 1, BUSTER_TIER1_ALLOCATE_MASK, 0);
+    const uint32_t mask_memory_a_operands[] = {
+        km0,
+        mask_memory->value_count + 1,
+    };
+    const uint32_t mask_memory_a = tier1_cfg_test_phi(mask_memory, 1, BUSTER_TIER1_ALLOCATE_MASK, mask_memory_a_operands);
+    const uint32_t mask_memory_b_operands[] = {
+        km1,
+        mask_memory_a,
+    };
+    const uint32_t mask_memory_b = tier1_cfg_test_phi(mask_memory, 1, BUSTER_TIER1_ALLOCATE_MASK, mask_memory_b_operands);
+    tier1_cfg_test_use(mask_memory, mask_memory_a, 1, 0, false);
+    tier1_cfg_test_use(mask_memory, mask_memory_b, 1, 1, false);
+    tier1_cfg_test_use(mask_memory, mask_memory_a, 2, 0, false);
+    tier1_cfg_test_use(mask_memory, mask_memory_b, 2, 0, false);
+    // Masks across a call, which clobbers every opmask register, with uses after it that need registers: each mask's
+    // range is cut around the call, stored before it and reloaded after, four moves at the two splits; a general value
+    // live across it keeps its register.
+    Tier1CfgTestBuilder* mask_call = &builders[9];
+    memset(mask_call, 0, sizeof(*mask_call));
+    mask_call->block_count = 1;
+    mask_call->instructions[0] = 3;
+    mask_call->registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x0003;
+    mask_call->registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0x000f;
+    mask_call->registers[BUSTER_TIER1_ALLOCATE_MASK] = 0xfe;
+    mask_call->scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    mask_call->scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+    mask_call->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    const uint32_t kc0 = tier1_cfg_test_value(mask_call, 0, 0, BUSTER_TIER1_ALLOCATE_MASK, 0xfe);
+    const uint32_t kc1 = tier1_cfg_test_value(mask_call, 0, 0, BUSTER_TIER1_ALLOCATE_MASK, 0xfe);
+    const uint32_t kept = tier1_cfg_test_value(mask_call, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 0x0003);
+    mask_call->fixed_block[0] = 0;
+    mask_call->fixed_instruction[0] = 1;
+    mask_call->fixed_class[0] = BUSTER_TIER1_ALLOCATE_MASK;
+    mask_call->fixed_register[0] = 0xfe;
+    mask_call->fixed_count = 1;
+    tier1_cfg_test_use(mask_call, kc0, 0, 2, true);
+    tier1_cfg_test_use(mask_call, kc1, 0, 2, true);
+    tier1_cfg_test_use(mask_call, kept, 0, 2, true);
+    // Eight masks in seven registers: m_j defined at instruction j and used at 8 + j, so that all eight are live at
+    // instruction 8, where one must be in its slot.
+    Tier1CfgTestBuilder* mask_pressure = &builders[10];
+    memset(mask_pressure, 0, sizeof(*mask_pressure));
+    mask_pressure->block_count = 1;
+    mask_pressure->instructions[0] = 16;
+    mask_pressure->registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x0003;
+    mask_pressure->registers[BUSTER_TIER1_ALLOCATE_VECTOR] = 0x0001;
+    mask_pressure->registers[BUSTER_TIER1_ALLOCATE_MASK] = 0xfe;
+    mask_pressure->scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    mask_pressure->scratch[BUSTER_TIER1_ALLOCATE_VECTOR] = 15;
+    mask_pressure->scratch[BUSTER_TIER1_ALLOCATE_MASK] = 0;
+    for (uint32_t j = 0; j < 8; j += 1)
+    {
+        const uint32_t mask = tier1_cfg_test_value(mask_pressure, 0, j, BUSTER_TIER1_ALLOCATE_MASK, 0xfe);
+        tier1_cfg_test_use(mask_pressure, mask, 0, 8 + j, true);
+    }
     const char* names[] = {
         "diamond",
         "loop",
@@ -862,6 +999,10 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
         "one register",
         "memory swap",
         "call across a double",
+        "mask phi swap",
+        "mask memory swap",
+        "masks across a call",
+        "eight masks in seven registers",
     };
     const uint8_t temp_slots[] = {
         0,
@@ -869,7 +1010,11 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
         0,
         0,
         0,
-        1,
+        1u << BUSTER_TIER1_ALLOCATE_GPR,
+        0,
+        0,
+        1u << BUSTER_TIER1_ALLOCATE_MASK,
+        0,
         0,
     };
     const uint32_t split_moves[] = {
@@ -880,8 +1025,40 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
         0,
         0,
         2,
+        0,
+        0,
+        4,
+        0,
     };
-    for (uint32_t f = 0; f < 7; f += 1)
+    // What the opmask fixtures must do: move masks through k0, the class's scratch register, and spill masks.
+    const bool mask_scratch[] = {
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+    };
+    const bool mask_spill[] = {
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(names) == BUSTER_ARRAY_LENGTH(builders), "a name per fixture");
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(names); f += 1)
     {
         const uint64_t saved = output->length;
         Tier1CfgInput input;
@@ -889,7 +1066,11 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
         tier1_cfg_test_expect(tally, built, names[f]);
         if (built)
         {
+            const uint64_t scratch_before = tally->scratch_moves;
+            const uint64_t spills_before = tally->mask_spills;
             tier1_cfg_test_case(tally, &input, output, scratch, names[f], true, temp_slots[f], split_moves[f], true);
+            tier1_cfg_test_expect(tally, !mask_scratch[f] || tally->scratch_moves > scratch_before, "the opmask fixture moves a mask through k0");
+            tier1_cfg_test_expect(tally, !mask_spill[f] || tally->mask_spills > spills_before, "the opmask fixture spills a mask");
         }
         arena_pop_to(output, saved);
     }
@@ -897,6 +1078,8 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
     (void)i;
     (void)swap_b;
     (void)memory_b;
+    (void)mask_swap_b;
+    (void)mask_memory_b;
 }
 
 static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
@@ -960,7 +1143,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.interference_killed == tally.interference_mutants && tally.order_killed == tally.order_mutants && tally.definition_killed == tally.definition_mutants, "every mutant fails the checker");
         tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, seed, count);
+        tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, seed, count);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);

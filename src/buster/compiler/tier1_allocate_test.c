@@ -41,7 +41,7 @@ static uint32_t tier1_allocation_test_random(uint64_t* state)
 // interval-overlap tests with the allocator. All generated inputs below fit this deliberately small domain.
 static bool tier1_allocation_test_occupancy(const Tier1AllocationInput* input, const Tier1Allocation* output)
 {
-    uint32_t owners[2][32][256];
+    uint32_t owners[BUSTER_TIER1_ALLOCATE_CLASSES][32][256];
     memset(owners, 0xff, sizeof(owners));
     bool valid = true;
     for (uint32_t i = 0; valid && i < input->count; i += 1)
@@ -133,6 +133,12 @@ static bool tier1_allocation_test_levels(const Tier1AllocationInput* input, uint
     return fits;
 }
 
+// A class's every register: 16 general ones, 32 vector ones, 8 opmask ones.
+static uint32_t tier1_allocation_test_class_registers(uint32_t class)
+{
+    return class == BUSTER_TIER1_ALLOCATE_GPR ? 0xffffu : class == BUSTER_TIER1_ALLOCATE_VECTOR ? UINT32_MAX : BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
+}
+
 static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed, uint32_t iterations)
 {
     uint32_t starts[96];
@@ -145,10 +151,10 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
     uint8_t required[96];
     uint32_t use_offsets[97];
     uint32_t use_positions[96];
-    const uint32_t fixed_start[] = { 23, 70, 90, 24, 0, 90, 128 };
-    const uint32_t fixed_end[] = { 25, 71, 96, 26, 2, 97, 129 };
-    const uint32_t fixed_regs[] = { 0x3, 0xf, 0x80000000u, 0x2, 0, 0x80000001u, 0x1 };
-    const uint8_t fixed_classes[] = { 0, 0, 1, 0, 1, 1, 0 };
+    const uint32_t fixed_start[] = { 23, 70, 90, 24, 0, 90, 128, 40, 41 };
+    const uint32_t fixed_end[] = { 25, 71, 96, 26, 2, 97, 129, 44, 42 };
+    const uint32_t fixed_regs[] = { 0x3, 0xf, 0x80000000u, 0x2, 0, 0x80000001u, 0x1, 0xfe, 0x81 };
+    const uint8_t fixed_classes[] = { 0, 0, 1, 0, 1, 1, 0, 2, 2 };
     for (uint32_t iteration = 0; iteration < iterations; iteration += 1)
     {
         const uint64_t saved = arena->length;
@@ -156,13 +162,14 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
         const bool constrained = (iteration % 3) == 0;
         const bool sparse = (iteration % 3) == 1;
         const uint32_t gpr_mask = sparse ? 0xaaaa : (1u << (1 + iteration % 8)) - 1;
+        const uint32_t mask_mask = gpr_mask & BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
         for (uint32_t i = 0; i < count; i += 1)
         {
             starts[i] = sparse ? i * 2 : tier1_allocation_test_random(&seed) % 96;
             ends[i] = sparse ? starts[i] + 2 : starts[i] + 1 + tier1_allocation_test_random(&seed) % 64;
             values[i] = i;
-            classes[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
-            allowed[i] = classes[i] == 0 ? gpr_mask : UINT32_MAX;
+            classes[i] = (uint8_t)(tier1_allocation_test_random(&seed) % BUSTER_TIER1_ALLOCATE_CLASSES);
+            allowed[i] = classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? gpr_mask : classes[i] == BUSTER_TIER1_ALLOCATE_VECTOR ? UINT32_MAX : mask_mask;
             if (constrained && (i & 3) == 0)
             {
                 allowed[i] &= tier1_allocation_test_random(&seed);
@@ -189,13 +196,13 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
             .count = count,
             .value_count = count,
             .position_count = 192,
-            .registers = { gpr_mask, UINT32_MAX },
+            .registers = { gpr_mask, UINT32_MAX, mask_mask },
             .fixed = {
                 .starts = fixed_start,
                 .ends = fixed_end,
                 .registers = fixed_regs,
                 .classes = fixed_classes,
-                .count = constrained ? 7 : 0,
+                .count = constrained ? BUSTER_ARRAY_LENGTH(fixed_classes) : 0,
             },
         };
         Tier1Allocation vector = { 0 };
@@ -264,8 +271,8 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
             starts[i] = iteration % 4 == 0 ? i * 2 : tier1_allocation_test_random(&seed) % 192;
             ends[i] = iteration % 4 == 0 ? starts[i] + 1 : starts[i] + 1 + tier1_allocation_test_random(&seed) % (192 - starts[i]);
             values[i] = i;
-            classes[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
-            allowed[i] = tier1_allocation_test_random(&seed) & (classes[i] == 0 ? 0xffff : UINT32_MAX);
+            classes[i] = (uint8_t)(tier1_allocation_test_random(&seed) % BUSTER_TIER1_ALLOCATE_CLASSES);
+            allowed[i] = tier1_allocation_test_random(&seed) & tier1_allocation_test_class_registers(classes[i]);
             use_offsets[i] = i;
             use_positions[i] = starts[i];
             use_required[i] = allowed[i] != 0;
@@ -281,8 +288,8 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
                 fixed_starts[f] = 23;
                 fixed_ends[f] = 24 + f;
             }
-            fixed_classes[f] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
-            fixed_registers[f] = tier1_allocation_test_random(&seed) & (fixed_classes[f] == 0 ? 0xffff : UINT32_MAX);
+            fixed_classes[f] = (uint8_t)(tier1_allocation_test_random(&seed) % BUSTER_TIER1_ALLOCATE_CLASSES);
+            fixed_registers[f] = tier1_allocation_test_random(&seed) & tier1_allocation_test_class_registers(fixed_classes[f]);
             for (uint32_t p = fixed_starts[f]; p < fixed_ends[f]; p += 1)
             {
                 occupied[fixed_classes[f]][p] |= fixed_registers[f];
@@ -333,7 +340,7 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
             .count = count,
             .value_count = count,
             .position_count = 192,
-            .registers = { 0xffff, UINT32_MAX },
+            .registers = { 0xffff, UINT32_MAX, BUSTER_TIER1_ALLOCATE_MASK_REGISTERS },
             .fixed = {
                 .starts = fixed_starts,
                 .ends = fixed_ends,
@@ -492,7 +499,7 @@ static void tier1_allocation_test_failures(Tier1AllocationTestTally* tally, Aren
             ends[0] = 0;
             break;
         case 4:
-            classes[0] = 2;
+            classes[0] = BUSTER_TIER1_ALLOCATE_CLASSES;
             break;
         case 5:
             values[1] = 0;

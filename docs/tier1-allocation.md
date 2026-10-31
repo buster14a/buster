@@ -23,7 +23,7 @@ Allocating the unfused uses and then folding is unsound.
 | --- | --- | --- |
 | `starts`, `ends` | u32 | Half-open machine lifetime `[start,end)` |
 | `values` | u32 | Stable value id, below `value_count` |
-| `classes` | u8 | GPR=0, vector=1 |
+| `classes` | u8 | GPR=0, vector=1, opmask=2 |
 | `allowed_registers` | u32 | Allowed physical-register bit mask |
 | `flags` | optional u8 | `REQUIRED` pins the whole interval in a register |
 | `hints` | optional u8 | Preferred allowed register, or `UINT8_MAX` |
@@ -32,12 +32,21 @@ Allocating the unfused uses and then folding is unsound.
 | `use_positions` | optional u32 | Nondecreasing positions inside each range |
 | `use_required` | optional u8 | 1 requires a register at that use; 0 permits memory |
 
-`registers[2]` contains the allocatable physical masks. GPR bits are 0–15;
-vector bits are 0–31. The caller restricts the vector mask to the generated-code
-target, independently of the host's AVX-512 capability. The caller excludes
-RSP, reserved scratch registers, and frame bases selected by the frame planner.
-In particular, it applies the frame planner's RBP/R13 reservation before
-allocation. Masks of zero are valid when memory operands are permitted.
+`registers[3]` contains the allocatable physical masks. GPR bits are 0–15;
+vector bits are 0–31; opmask bits are 0–7, k0 to k7 (#179). The caller
+restricts the vector and opmask masks to the generated-code target,
+independently of the host's AVX-512 capability: a target without AVX-512 has
+no opmask registers. The caller excludes RSP, reserved scratch registers, and
+frame bases selected by the frame planner. In particular, it applies the frame
+planner's RBP/R13 reservation before allocation. A value used as a write mask
+has k1 to k7 alone among its allowed registers, since EVEX encodes "no mask"
+with k0. Masks of zero are valid when memory operands are permitted.
+
+A class without intervals is skipped: one pass over the intervals' classes
+finds the classes present, and an absent class's passes over the intervals and
+the events, and the scan the common path would have left it, are never run, so
+a function's empty vector and opmask classes cost nothing past that pass. The
+output is the same as the scan's of an empty class, which assigns nothing.
 
 The selector/liveness adapter uses input position `2*i` and definition position
 `2*i+1` for node `i`. Ending a source interval at the output phase permits a
@@ -344,6 +353,29 @@ Locations are `class * 32 + register` for registers,
 `BUSTER_TIER1_CFG_SPILL + spill_count + class` for the temporary slots, which
 `temp_slots` marks for the frame to reserve. A move whose source is
 `BUSTER_TIER1_CFG_REMATERIALIZE` recomputes its value into its destination.
+`BUSTER_TIER1_CFG_SPILL` is 32 per class, 96 with the opmask class.
+
+### The opmask class (#179)
+
+AVX-512's opmask registers are the third class, k0 to k7. Nothing moves a value
+between classes, so a mask is never reinterpreted as a general register's
+value. The producers here (`tier1_cfg_ir.c`, the tests) give the class k1 to k7
+and make k0 its scratch register: k0 can't be a write mask, and the class needs
+a register outside its own for cycles and slot-to-slot moves, which `kmov`
+makes through k0 as `mov` does through the general class's scratch. A mask's
+slot and the class's temporary slot hold the mask at its width, which a
+consumer moves, spills and reloads with the `kmov` of that width. The System V
+convention passes nothing in the opmask registers and preserves none of them, so
+a call clobbers all of them: `tier1_cfg_ir.c` gives each call a fixed range of
+the class over k1 to k7, which cuts every mask live across it around the call,
+stored before it and reloaded after. Every use of a mask in the model needs a
+register: the opmask instructions have no memory operand but `kmov`'s, and a
+write mask is a register.
+
+VP2INTERSECT's pair of masks, the first even, is no constraint the allocator
+takes: the IR has no operation that writes one, and Tier 0's X86 rows keep it
+inside a row (docs/tier0.md's "Vectors"). A form that needs one would come
+with a selector that makes it, as #141's vector selection.
 
 `tier1_cfg_verify` is the independent oracle. It computes liveness by walking
 each use back to its definition, simulates each block's locations from its
@@ -356,13 +388,19 @@ to the predecessor's final state: each must read the value it says it carries
 and write a location of that value's class, and the successor's entry state
 must then hold every live-in value and each phi's operand.
 
-`test-tier1-cfg [--seed N] [--count N]` runs seven fixtures (a diamond, a loop
+`test-tier1-cfg [--seed N] [--count N]` runs eleven fixtures (a diamond, a loop
 phi, a phi swap, a critical edge, one register, a swap without general
-registers, whose slot cycle needs the temporary slot, and a double live across a
-call, which a fixed range splits) and `--count` random SSA programs (2,000 by
-default) over CFGs with loops, self-loops, irreducible regions, narrowed masks,
-required uses, fixed ranges and rematerializable values, every use dominated by
-its definition (`dominators.c`). Both entry points' results must pass the
+registers, whose slot cycle needs the temporary slot, a double live across a
+call, which a fixed range splits, and the opmask class's: a phi swap with k1 and
+k2 alone, whose cycle goes through k0, a swap without opmask registers, through
+the class's temporary slot and k0, two masks across a call that clobbers every
+mask, four moves at its splits, and eight masks live at once in k1 to k7, one of
+them spilled) and `--count` random SSA programs (2,000 by default) over CFGs
+with loops, self-loops, irreducible regions, narrowed masks, required uses,
+fixed ranges and rematerializable values of the three classes, a quarter of the
+values masks in one to seven of k1 to k7 and half the opmask class's fixed
+ranges a call's, over all of them, every use dominated by its definition
+(`dominators.c`). The masks must be moved, spilled and split. Both entry points' results must pass the
 checker and, up to 600 intervals, the interval verifier, and the two must agree
 on which cases they refuse. On every fixture and every eighth program, mutants
 must fail the checker: a register fragment given the register of another
@@ -374,18 +412,26 @@ move whose source it overwrites.
 `tier1_cfg_ir.c` turns a promoted function of the shared IR into an allocation
 problem, until the selector makes general CFGs' (#141): two positions per
 instruction (three where it clobbers registers between its uses and its
-result), a call's caller-saved general and vector registers, division's rax and
-rdx and a variable shift's rcx as fixed ranges, constants and addresses
-rematerializable, and an instruction's first operand and a store's value
-needing registers. A function with a value of a type the model has no class for
-(long double, 128-bit integers) is left out and counted.
+result), a call's caller-saved general registers and every vector and opmask
+register, division's rax and rdx and a variable shift's rcx as fixed ranges,
+constants and addresses rematerializable, and an instruction's first operand, a
+store's value and every use of a mask needing registers. Masks (`m8` to `m64`)
+are the opmask class's, in k1 to k7 with k0 the scratch. A function with a value
+of a type the model has no class for (long double, 128-bit integers) is left out
+and counted.
 
-`test-tier1-cfg-source [--print NAME] [options] file...` prepares every function
-`-c` compiles as `test-ir-source` does, lowers and promotes it, adapts it,
-allocates it by both paths and checks both with `tier1_cfg_verify`; any refusal
-but the model's, a rejection or paths that disagree fail it. The correctness
-list runs it on c-testsuite's subset, the frozen `sqlite3.c` and musl's units,
-whose every function allocates and passes the checker on both paths:
+`test-tier1-cfg-source [--simd] [--print NAME] [options] file...` prepares every
+function `-c` compiles as `test-ir-source` does, lowers and promotes it, adapts
+it, allocates it by both paths and checks both with `tier1_cfg_verify`; any
+refusal but the model's, a rejection or paths that disagree fail it. With
+`--simd`, a function the SSA promoter refuses for its vectors or masks (as
+`test-ir-source --simd` requires it to) is allocated as lowered, all its locals
+in slots, which is SSA too: #732's `vcmp` results reach the opmask class from
+real C, and the run fails unless some do. On `tests/ir/vector-i32.c` with
+`-march=x86-64-v4`, its three functions' 3 masks allocate on both paths and pass
+the checker. The correctness list runs it there, and without `--simd` on
+c-testsuite's subset, the frozen `sqlite3.c` and musl's units, whose every
+function allocates and passes the checker on both paths:
 
 | Corpus | Functions | Left out | IR instructions | Intervals | Left to the scan | Spilled values | Stores | Reloads | Moves | Split edges |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -470,7 +516,7 @@ input and impossible register constraints.
 ## Validation and measurements
 
 `test-tier1-allocation [--seed N] [--count N]` checks arbitrary input order,
-both classes including vector register 31, pressure boundaries, required
+the three classes including vector register 31 and k0 to k7, pressure boundaries, required
 operands, fixed clobbers, hints, deterministic output, repeated reload/resplit,
 compact spill identity, malformed/overflow inputs and arena rollback. One
 oracle compares interval fragments pairwise; another expands them into a
@@ -484,7 +530,7 @@ nonoverlapping fixed/value interval fixture checks every resulting register
 without invoking the deliberately quadratic allocation verifier.
 
 `tier1_allocate_expiry_test.c` adds literal traces, on both entry points and
-both classes, which run even with `--count 0`:
+every class, which run even with `--count 0`:
 - an evicted interval's old end while its successor still holds the register;
 - a reload of the same value into another register before its original end,
   which must free that current register;

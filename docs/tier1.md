@@ -48,12 +48,17 @@ The shared interpreter keeps wide payloads only for vector-producing values.
 [#141](https://github.com/buster14a/buster/issues/141) must select these values
 using the generated target, retain memory effects and publish vector/mask
 register constraints. [#179](https://github.com/buster14a/buster/issues/179)
-must then allocate the distinct opmask class, define k0 eligibility per selected
-form, spill/reload mask widths exactly and reconcile live values at CFG edges.
-Neither consumer may reinterpret a mask as an ordinary GPR value or infer target
-permission from the compiler host. Scalar-only promotion, optimization and
-selection still refuse SIMD functions before publication; this handoff does not
-claim native Tier 1 vector execution, full vector ABI support or a throughput gain.
+allocates the distinct opmask class: `tier1_allocate.c` and `tier1_cfg.c` take
+it as their third class, k1 to k7 for values and k0 the class's scratch, calls
+clobbering all of them, and `tier1_cfg_verify` checks it; `tier1_cfg_ir.c`
+models the IR's masks with it, and `test-tier1-cfg-source --simd` allocates
+real C's `vcmp` masks ([the allocation guide](tier1-allocation.md)'s "The
+opmask class"). A consumer then spills and reloads a mask at its width and
+moves it along CFG edges with `kmov`. Neither consumer may reinterpret a mask as
+an ordinary GPR value or infer target permission from the compiler host.
+Scalar-only promotion, optimization and selection still refuse SIMD functions
+before publication; this handoff does not claim native Tier 1 vector execution,
+full vector ABI support or a throughput gain.
 
 ## Required evidence
 

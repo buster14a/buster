@@ -92,11 +92,12 @@ static void tier1_allocation_test_expiry_case(Tier1AllocationTestTally* tally, c
     uint8_t classes[4] = { (uint8_t)class, (uint8_t)class, (uint8_t)class, (uint8_t)class };
     Tier1AllocationInput input = fixture->input;
     input.classes = classes;
-    input.registers[class] = fixture->input.registers[0];
-    input.registers[1 - class] = 0;
     Tier1Allocation expected = fixture->expected;
-    expected.peak_pressure[class] = fixture->expected.peak_pressure[0];
-    expected.peak_pressure[1 - class] = 0;
+    for (uint32_t other = 0; other < BUSTER_TIER1_ALLOCATE_CLASSES; other += 1)
+    {
+        input.registers[other] = other == class ? fixture->input.registers[0] : 0;
+        expected.peak_pressure[other] = other == class ? fixture->expected.peak_pressure[0] : 0;
+    }
     _Alignas(64) uint8_t memory[2][2048];
     Tier1Allocation ample[2] = { { 0 } };
     bool produced[2] = { false, false };
@@ -309,8 +310,10 @@ static void tier1_allocation_test_expiry(Tier1AllocationTestTally* tally)
         const uint32_t allowed[] = { 1, 1, 1 };
         impossible.classes = classes;
         impossible.allowed_registers = allowed;
-        impossible.registers[class] = 1;
-        impossible.registers[1 - class] = 0;
+        for (uint32_t other = 0; other < BUSTER_TIER1_ALLOCATE_CLASSES; other += 1)
+        {
+            impossible.registers[other] = other == class ? 1 : 0;
+        }
         for (uint32_t path = 0; path < 2; path += 1)
         {
             _Alignas(64) uint8_t memory[2048];
