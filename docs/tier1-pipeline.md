@@ -116,6 +116,29 @@ detection and a semantic difference from the frozen result. The other hangs a
 command, its child and a detached grandchild; it requires a timeout, reaping of
 all three processes and proof that both descendant PIDs no longer exist.
 
+## Run time
+
+`benchmark-tier1-pipeline [--clang PATH] [--repeat N] [--seed N] [--dump
+DIRECTORY]` compiles each supported fixture four ways: by Tier 1 (the vector
+path with rematerialization, every caller-saved register and the red zone), by
+Tier 0 (`tier0_test.c`'s builder, from the same typed stream), and by clang at
+`-O0` and `-O2` (`-march=x86-64`) from the fixtures' C formulas, as shared
+objects loaded in place. Every compile's results on the 32 inputs must be the
+typed interpreter's before anything is timed. Then 21 passes call each
+compile's function on every input `--repeat` (2,000) times, the compiles'
+order rotating by pass, and the report gives each one's median in ns per call
+and their geometric means. `--dump` writes each fixture's Tier 1 and Tier 0
+code for `objdump -D -b binary -m i386:x86-64`. These are bounded kernels, not
+programs: a call's cost is a large part of the shortest ones'.
+
+On the 9700X (CPU 2, medians of five processes), the geometric means were 2.18
+ns per call for Tier 1, 2.25 for Tier 0, 3.55 for clang `-O0` and 2.08 for clang
+`-O2`. The loops: `do { b += a; a >>= 1; } while (a)` took 9.62 ns by Tier 1,
+11.41 by Tier 0 and 9.56 by clang `-O2`; the swap loop 2.68, 2.68 and 1.99; eight
+values around a loop past the registers 5.05, 4.44 and 3.72; a call in a loop
+4.71, 4.80 and 4.26. One process each of the swap loop ran 42% (Tier 1) and 50%
+(Tier 0) slower than the other four; the medians take all five.
+
 ## Unsupported cases and limits
 
 An additional valid typed fixture, floating-point arithmetic, passes through

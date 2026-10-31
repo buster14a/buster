@@ -184,7 +184,9 @@ designs and the compilers already built this way.
   edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
   `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
   `test-tier1-pipeline --cross-check` for bounded typed-stream/native
-  validation. `test-tier1-model` checks the emitted-case measurement reader;
+  validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
+  pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
+  not programs; under the 9700X's lock, CPU 2). `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
