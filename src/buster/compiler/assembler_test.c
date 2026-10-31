@@ -1096,7 +1096,7 @@ static bool asm_test_gas_pads_like_2_47(AsmTest* test, const char* directory)
 static void asm_test_reader(AsmTest* test, const char* directory)
 {
     static const char text[] = "nop\nret\n";
-    Arena arena = arena_reserve(1ull << 26);
+    Arena arena = arena_reserve(1ull << 30);
     int ends[2];
     bool okay = pipe(ends) == 0;
     if (okay)
@@ -1150,6 +1150,34 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     const uint64_t before = arena.length;
     okay = okay && !asm_read_file(large, &arena, &source) && arena.length == before && source.pointer == 0;
     asm_test_check(test, okay, "assembly input past the limit refused", 0);
+    unlink(large);
+    // A source past the former 16 MiB bound reaches the parser and assembles. One comment line keeps its token table
+    // small; the source itself proves the read and lexer bounds.
+    const int big_fd = open(large, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    uint8_t chunk[1u << 16];
+    memset(chunk, 'x', sizeof(chunk));
+    uint64_t left = 17u << 20;
+    okay = big_fd >= 0 && write(big_fd, "#", 1) == 1;
+    while (okay && left != 0)
+    {
+        const uint64_t count = left < sizeof(chunk) ? left : sizeof(chunk);
+        okay = write(big_fd, chunk, count) == (ssize_t)count;
+        left -= count;
+    }
+    okay = okay && write(big_fd, "\nret\n", 5) == 5;
+    if (big_fd >= 0)
+    {
+        close(big_fd);
+    }
+    arena.length = 0;
+    source = (String8){0};
+    okay = okay && asm_read_file(large, &arena, &source) && source.length > (16u << 20) && source.length < BUSTER_ASM_MAX_SOURCE;
+    if (okay)
+    {
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &arena);
+        okay = assembled.error == 0 && assembled.link.atoms.count > 1;
+    }
+    asm_test_check(test, okay, "assembly input past 16 MiB assembles", 0);
     unlink(large);
     arena_release(&arena);
 }

@@ -1133,7 +1133,8 @@ static const uint8_t* check_driver_function_name(const CheckProgram* program, co
 
 // Code generation's check of target features (#775, check_program_target_features): clang's errors, at -c and when it
 // links but not at -fsyntax-only, for the calls of always_inline functions, and a flatten function's calls, whose callees
-// need features their callers lack, in clang's words. Clang reports them as it emits their function: after its closing
+// need features their callers lack, and the x86 builtins' calls whose callers lack their features (#148), in clang's
+// words. Clang reports them as it emits their function: after its closing
 // brace and the lookahead past it (as the x86 builtins' deferred range errors, from `original`'s tree), or at the
 // unit's end for a function it defers. Returns false after an error.
 static bool check_driver_target_features(CheckProgram* program, const Parser* parser, const Parser* original, Preprocessor* pp, const PredefinesOptions* predefines,
@@ -1156,7 +1157,15 @@ static bool check_driver_target_features(CheckProgram* program, const Parser* pa
         const uint8_t* callee = check_driver_function_name(program, parser, pp->table, error->callee, &callee_length);
         const char* feature = predefines_features[error->feature].name;
         char message[1024];
-        if (error->flatten)
+        if (error->builtin != NULL)
+        {
+            // An SSE compare's predicate past 7 needs AVX (check_target_feature_predicate), else the builtin's features.
+            const char* features = error->predicate ? "avx" : error->builtin->features;
+            const uint32_t features_length = error->predicate ? 3u : error->builtin->features_length;
+            snprintf(message, sizeof(message), "'%.*s' needs target feature %.*s", (int)error->builtin->name_length, error->builtin->name,
+                     (int)features_length, features);
+        }
+        else if (error->flatten)
         {
             snprintf(message, sizeof(message), "flatten function '%.*s' calls '%.*s' which requires target feature '%s', but the caller is compiled without support for '%s'",
                      (int)caller_length, (const char*)caller, (int)callee_length, (const char*)callee, feature, feature);
