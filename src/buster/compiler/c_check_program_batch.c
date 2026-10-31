@@ -287,6 +287,7 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
     // Preserve the leaf-sized hot path. Only a supported root with a non-VALUE child can amortize a larger
     // proof; the out-of-line helper must prove the entire closed fragment before publishing any entry.
     if (!valid && check_lower_fragment_operator(op) && a < node && (!binary || b < node) &&
+        a + BUSTER_CHECK_LOWER_FRAGMENT_NODES > node && (!binary || b + BUSTER_CHECK_LOWER_FRAGMENT_NODES > node) &&
         (graph->ops[a] != CHECK_OP_VALUE || (binary && graph->ops[b] != CHECK_OP_VALUE)))
     {
         valid = check_lower_fragment(writer, node);

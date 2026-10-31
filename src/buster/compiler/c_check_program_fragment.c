@@ -36,11 +36,16 @@ static __attribute__((noinline)) bool check_lower_fragment(CheckLowerWriter* wri
     const CheckStream* stream = program->stream;
     const CheckGraph* graph = &program->input->graph;
     uint32_t pending[BUSTER_CHECK_LOWER_FRAGMENT_NODES] = { root };
+    uint32_t visited[BUSTER_CHECK_LOWER_FRAGMENT_NODES];
     uint32_t depth = 1;
     uint32_t count = 0;
     uint32_t leaves = 0;
+    uint32_t unproved = 0;
     uint32_t last_leaf = BUSTER_CHECK_NONE;
     CheckLowerFragmentResult result = CHECK_LOWER_FRAGMENT_OK;
+    // The structural pass reads only the op, its constant kind and its operand edges. Constant kind alone decides
+    // whether a folded node can prove leaf here; the full proof and the effect reads wait for pass two, so a walk
+    // that fails on order or depth costs one or two lines per node instead of the whole value record.
     while (result == CHECK_LOWER_FRAGMENT_OK && depth != 0 && count < BUSTER_CHECK_LOWER_FRAGMENT_NODES)
     {
         const uint32_t node = pending[--depth];
@@ -52,21 +57,24 @@ static __attribute__((noinline)) bool check_lower_fragment(CheckLowerWriter* wri
         {
             const CheckOp op = graph->ops[node];
             const CheckValue* value = stream->values + node;
-            const bool leaf = op == CHECK_OP_VALUE || check_lower_batch_proof(value, op);
-            leaves = (leaves << 1) | leaf;
-            count += 1;
-            if (value->overload_head != 0 || value->fault != CHECK_FAULT_NONE ||
-                (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0)
+            const bool supported = check_lower_fragment_operator(op);
+            bool leaf = op == CHECK_OP_VALUE;
+            if (!leaf && value->constant_kind != CHECK_CONSTANT_NONE)
             {
-                result = CHECK_LOWER_FRAGMENT_EFFECT;
+                leaf = check_lower_batch_proof(value, op);
             }
-            else if (leaf)
+            visited[count] = node;
+            leaves = (leaves << 1) | leaf;
+            unproved = (unproved << 1) | (!leaf && !supported);
+            count += 1;
+            if (leaf)
             {
                 last_leaf = last_leaf == BUSTER_CHECK_NONE ? node : last_leaf;
             }
-            else if (!check_lower_fragment_operator(op))
+            else if (!supported)
             {
-                result = CHECK_LOWER_FRAGMENT_OPERATOR;
+                // Unsupported operators cannot grow the walk; keeping them provisional leaves lets deeper pops
+                // still report ORDER, after which pass two returns OPERATOR for the first unprovable one.
             }
             else
             {
@@ -92,6 +100,22 @@ static __attribute__((noinline)) bool check_lower_fragment(CheckLowerWriter* wri
                     }
                 }
             }
+        }
+    }
+    // Effects and unprovable operators are settled in pop order only for runs the structure already proved; the
+    // verdicts are identical to the inline checks this pass replaces.
+    for (uint32_t i = 0; result == CHECK_LOWER_FRAGMENT_OK && i < count; i += 1)
+    {
+        const uint32_t node = visited[i];
+        const CheckValue* value = stream->values + node;
+        if (value->overload_head != 0 || value->fault != CHECK_FAULT_NONE ||
+            (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) != 0)
+        {
+            result = CHECK_LOWER_FRAGMENT_EFFECT;
+        }
+        else if ((unproved & (1u << i)) != 0)
+        {
+            result = CHECK_LOWER_FRAGMENT_OPERATOR;
         }
     }
     if (result == CHECK_LOWER_FRAGMENT_OK && depth != 0)
