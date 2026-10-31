@@ -6,8 +6,7 @@ For example, with the compiler built from the stated source revision:
 
 ```sh
 ./build/compiler test-ir-reduce --seed 733 --count 64
-./build/compiler reduce-ir --revision COMMIT --output reduction \
-  --demo phi --inject result-phi --arg 5
+./build/compiler reduce-ir --revision COMMIT --output reduction --demo phi --inject result-phi --arg 5
 BUSTER_COMPILER=/absolute/path/to/compiler sh reduction/replay.sh
 ```
 
@@ -55,11 +54,22 @@ in a retained scratch prefix are supported; output and scratch writes cannot
 overlap either arena's retained prefix.
 
 `--max-candidates`, `--memory`, `--steps` and `--frames` bound candidates, arena
-capacity and interpreter execution. `--milliseconds` and `--predicate-ms` sample
-monotonic time between bounded public consumer calls. Trusted built-in predicates
-run in process and must honor their step/resource budgets; these time checks do
-not preempt a call or recover from a native process fault. An external-process
-predicate adapter is outside this first kernel. The candidate/cache limits may
+capacity and interpreter execution. The CLI runs each built-in predicate in a
+fresh Linux child, including the original observation and independent publication
+replay. `--predicate-ms` is a parent-enforced monotonic deadline, clipped to the
+remaining `--milliseconds` budget. A signal, unsuccessful exit, missing/invalid
+response or deadline is unavailable, never a matching failure. Timeout cleanup
+kills and reaps the owned child; core dumps are disabled. Only a fixed-size
+observation crosses a nonblocking pipe. Private function/context/arena mappings
+remain copy-on-write, so even a faulty observer cannot mutate the parent's case.
+The generic `ir_reduce` callback API remains in-process; clients choose this
+adapter explicitly. Its caller and observer must be single-threaded; callbacks
+must not create threads/children or use shared writable mappings. This is fault
+containment for trusted compiler code, not a hostile-code security sandbox or an
+external executable protocol. Arena limits are not a total process/RSS limit:
+parent and child may retain separate copies of touched pages. Admission, rebuild
+and publication I/O remain bounded trusted calls in the parent, not preempted
+processes. The candidate/cache limits may
 publish a verified partial reduction after establishing the original failure.
 A wall-time boundary publishes the original valid reproducer, avoiding a
 scheduling-dependent reduced artifact.
@@ -70,8 +80,14 @@ file. The manifest records source revision, executable byte count and FNV-1a
 identity, limits, seed, classified failure and reduction counters. Revision is a
 caller-supplied provenance assertion. The script uses bundle-relative files and
 requires `BUSTER_COMPILER` so the bundle can move between workspaces. Use the
-matching source/tool build recorded by the manifest; the script does not verify
-an executable's identity itself. Its `--expect-kind`, `--expect-pass` and
+matching source/tool build recorded by the manifest. The script supplies
+`--expect-binary-hash` and `--expect-binary-bytes`; these are an all-or-nothing
+pair checked against `/proc/self/exe` before input parsing, reduction or
+publication. An unavailable identity returns 2; a mismatch returns 1.
+FNV-1a plus byte length detects accidental wrong builds, not malicious
+substitution or cryptographic authenticity. Source revision remains a caller
+assertion rather than an independently verified Git checkout. Its
+`--expect-kind`, `--expect-pass` and
 `--expect-detail` arguments require the recorded failure class before publishing
 a replay. Each replay creates a new `replayed` directory.
 Replay selects the scalar parser used by the independent publication check,
@@ -80,6 +96,14 @@ a different failure class or an existing destination; status 2 means a resource,
 I/O or unavailable-observation boundary, including during publication and replay.
 Neither outcome publishes a partial bundle. Unsigned numeric limits require
 a digit first and reject signs, leading whitespace and overflow.
+
+The correctness suite exercises real signal death, silent/nonzero exits,
+timeouts and invalid responses, checks unchanged parent storage, and verifies
+that faulting smaller candidates do not replace the original classified case.
+It also executes `replay.sh` after moving a bundle to a path containing spaces
+and a quote. A runnable executable copy with an appended byte must be refused
+without publication; the original executable must reproduce identical reduced
+IR. These tests are part of the existing `test-ir-reduce` CI command.
 
 This additive test tool does not change IR, verifier, optimizer or interpreter
 implementations. Its first structural subset is scalar IR; unfamiliar opcodes,

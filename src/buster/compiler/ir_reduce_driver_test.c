@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Original in-process CLI controls. Each call receives a bounded argv and an isolated temporary destination;
-// successful artifacts are independently read, reparsed and observed. No replay script or process is executed.
+// Original CLI controls. Each call receives a bounded argv and an isolated temporary destination;
+// successful artifacts are independently read, reparsed and observed. Process controls also execute moved replay scripts.
 
 static bool ir_reduce_test_driver_path(char* path, uint64_t capacity, const char* directory, const char* name)
 {
@@ -199,8 +199,11 @@ static bool ir_reduce_test_driver_reparse(const char* directory, IrReduceInjecti
     return valid;
 }
 
+#include "ir_reduce_process_test.c"
+
 static void ir_reduce_test_driver(IrReduceTest* test)
 {
+    ir_reduce_test_process(test);
     char temporary[] = "/tmp/buster-ir-reduce-driver-XXXXXX";
     char* directory = mkdtemp(temporary);
     Arena storage = arena_reserve(UINT64_C(1) << 20);
@@ -238,6 +241,7 @@ static void ir_reduce_test_driver(IrReduceTest* test)
     }
     if (paths_ready)
     {
+        ir_reduce_test_process_replay(test, directory, bundles[0], &storage);
         const IrReduceFailure expected = { .kind = IR_REDUCE_FAILURE_RESULT, .pass = 7 };
         char refused[PATH_MAX];
         char input[PATH_MAX];
