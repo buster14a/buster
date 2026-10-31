@@ -6,6 +6,7 @@
 // transfer equation. Loop membership uses forward reachability to a latch with its header deleted; irreducibility
 // uses the acyclicity of the graph after deleting every dominance backedge. Guard mappings bound all CSR columns.
 // The small generator is also included by dominators_benchmark.c, outside its timed region.
+// dominator_test_export checks dominators_export.c's format, which must be included before this file.
 
 #include <errno.h>
 #include <inttypes.h>
@@ -840,6 +841,251 @@ static void dominator_test_deep(DominatorTestTally* tally, Arena* memory, Arena*
     arena_pop_to(memory, saved);
 }
 
+#define BUSTER_DOMINATOR_TEST_EXPORTS 20
+
+// One malformation of the small export: its first `from` replaced by `to`.
+typedef struct DominatorTestChange DominatorTestChange;
+struct DominatorTestChange
+{
+    const char* from;
+    const char* to;
+};
+
+// Reads `bytes` as an export from a copy that ends at an inaccessible page, so that a read past its end faults.
+static bool dominator_test_export_read(Arena* memory, const void* bytes, uint64_t length, DominatorExport* result)
+{
+    DominatorTestGuard guard = dominator_test_guard(bytes, length);
+    const bool read = guard.mapping != 0 && dominators_export_read(memory, guard.data, length, result);
+    if (guard.mapping != 0)
+    {
+        munmap(guard.mapping, guard.mapping_bytes);
+    }
+    return read;
+}
+
+// buster-dominators-v1 (dominators_export.c). Generated CFGs written and read back keep their counts, entries,
+// successor views and names byte for byte; the predecessor view is the analyzer's (it validates both views) and
+// sorted by source, and both paths' complete results are those of the original. Every truncation and each named
+// malformation of a small export is refused whole, leaving the arena as it was.
+static void dominator_test_export(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t saved = memory->length;
+    const uint32_t sizes[] = {
+        0,
+        1,
+        7,
+        65,
+        513,
+    };
+    const uint32_t shapes[] = {
+        1,
+        3,
+        4,
+        5,
+    };
+    DominatorCfg graphs[BUSTER_DOMINATOR_TEST_EXPORTS];
+    uint8_t names[BUSTER_DOMINATOR_TEST_EXPORTS][4];
+    const uint8_t file[] = {
+        'a',
+        ' ',
+        '\n',
+        0,
+        0xff,
+        'c',
+    };
+    uint32_t count = 0;
+    bool built = true;
+    for (uint32_t size = 0; size < sizeof(sizes) / sizeof(sizes[0]); size += 1)
+    {
+        for (uint32_t shape = 0; shape < sizeof(shapes) / sizeof(shapes[0]); shape += 1)
+        {
+            built = built && dominator_test_generate(memory, sizes[size], shapes[shape], count, &graphs[count]);
+            names[count][0] = 'f';
+            names[count][1] = (uint8_t)count;
+            names[count][2] = '\n';
+            names[count][3] = 0xa0;
+            count += 1;
+        }
+    }
+    dominator_test_expect(tally, built, "export fixtures");
+    char* text = 0;
+    size_t length = 0;
+    FILE* stream = built ? open_memstream(&text, &length) : 0;
+    bool written = stream != 0 && dominators_export_begin(stream);
+    for (uint32_t i = 0; written && i < count; i += 1)
+    {
+        written = dominators_export_cfg(stream, &graphs[i], file, sizeof(file) - i % 2, names[i], 4 - i % 4, i % 3);
+    }
+    written = written && dominators_export_complete(stream, 2, 7, count);
+    if (stream != 0)
+    {
+        written = fclose(stream) == 0 && written;
+    }
+    dominator_test_expect(tally, written, "export written");
+    DominatorExport export = { 0 };
+    const uint64_t read_at = memory->length;
+    const bool read = written && dominator_test_export_read(memory, text, length, &export);
+    dominator_test_expect(tally, read && export.count == count && export.files == 2 && export.functions == 7, "export read back");
+    uint64_t blocks = 0;
+    uint64_t edges = 0;
+    for (uint32_t i = 0; read && i < count; i += 1)
+    {
+        const DominatorCfg* original = &graphs[i];
+        const DominatorExportGraph* graph = &export.graphs[i];
+        tally->blocks = original->block_count;
+        blocks += original->block_count;
+        edges += original->edge_count;
+        bool same = graph->form == i % 3 && graph->cfg.block_count == original->block_count && graph->cfg.edge_count == original->edge_count && graph->cfg.entry == original->entry;
+        same = same && graph->file_length == sizeof(file) - i % 2 && memcmp(graph->file, file, graph->file_length) == 0 && graph->name_length == 4 - i % 4 && memcmp(graph->name, names[i], graph->name_length) == 0;
+        for (uint32_t block = 0; same && block <= original->block_count; block += 1)
+        {
+            same = graph->cfg.successor_offsets[block] == original->successor_offsets[block] && graph->cfg.predecessor_offsets[block] == original->predecessor_offsets[block];
+        }
+        for (uint32_t edge = 0; same && edge < original->edge_count; edge += 1)
+        {
+            same = graph->cfg.successors[edge] == original->successors[edge];
+        }
+        for (uint32_t block = 0; same && block < original->block_count; block += 1)
+        {
+            for (uint32_t edge = graph->cfg.predecessor_offsets[block] + 1; same && edge < graph->cfg.predecessor_offsets[block + 1]; edge += 1)
+            {
+                same = graph->cfg.predecessors[edge - 1] <= graph->cfg.predecessors[edge];
+            }
+        }
+        dominator_test_expect(tally, same, "export round trip keeps counts, names and both CSR views");
+        DominatorOptions options = dominators_options();
+        for (uint32_t path = 0; same && path < 2; path += 1)
+        {
+            options.path = path == 0 ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+            const uint64_t analysis_at = memory->length;
+            Dominators before = { 0 };
+            Dominators after = { 0 };
+            const bool analyzed = dominators_analyze(memory, scratch, original, options, &before) == DOMINATOR_OK && dominators_analyze(memory, scratch, &graph->cfg, options, &after) == DOMINATOR_OK;
+            dominator_test_expect(tally, analyzed && dominator_test_equal(&before, &after), "an exported CFG's complete analysis is the original's");
+            arena_pop_to(memory, analysis_at);
+        }
+    }
+    dominator_test_expect(tally, !read || (export.blocks == blocks && export.edges == edges), "export totals");
+    arena_pop_to(memory, read_at);
+    free(text);
+    static const char valid[] = "buster-dominators-v1\ncfg 0 3 3 0\nfile 612e63\nname 66\n0 1\n0 2\n1 2\nend\ncfg 1 0 0 4294967295\nfile \nname 67\nend\ncomplete 1 1 2\n";
+    DominatorExport small = { 0 };
+    const uint64_t small_at = memory->length;
+    const bool small_read = dominator_test_export_read(memory, valid, sizeof(valid) - 1, &small);
+    dominator_test_expect(tally, small_read && small.count == 2 && small.blocks == 3 && small.edges == 3 && small.graphs[1].cfg.entry == BUSTER_DOMINATOR_NONE && small.graphs[0].file_length == 3, "small export read");
+    arena_pop_to(memory, small_at);
+    for (uint64_t cut = 0; cut + 1 < sizeof(valid); cut += 1)
+    {
+        const bool refused = !dominator_test_export_read(memory, valid, cut, &small);
+        dominator_test_expect(tally, refused && memory->length == small_at, "a truncated export is refused whole");
+    }
+    static const DominatorTestChange changes[] = {
+        {
+            .from = "dominators-v1",
+            .to = "dominators-v2",
+        },
+        {
+            .from = "complete 1 1 2\n",
+            .to = "",
+        },
+        {
+            .from = "complete 1 1 2",
+            .to = "complete 1 1 3",
+        },
+        {
+            .from = "complete 1 1 2\n",
+            .to = "complete 1 1 2\nx",
+        },
+        {
+            .from = "complete 1 1 2\n",
+            .to = "complete 1 1 2\n\n",
+        },
+        {
+            .from = "1 2\nend",
+            .to = "3 2\nend",
+        },
+        {
+            .from = "0 2\n",
+            .to = "0 3\n",
+        },
+        {
+            .from = "0 1\n0 2\n1 2\n",
+            .to = "0 1\n1 2\n0 2\n",
+        },
+        {
+            .from = "0 3 3 0",
+            .to = "0 3 4 0",
+        },
+        {
+            .from = "0 3 3 0",
+            .to = "0 3 2 0",
+        },
+        {
+            .from = "cfg 0 3",
+            .to = "cfg 0 03",
+        },
+        {
+            .from = "612e63",
+            .to = "612E63",
+        },
+        {
+            .from = "name 66",
+            .to = "name 6",
+        },
+        {
+            .from = "0 3 3 0",
+            .to = "0 3 3 3",
+        },
+        {
+            .from = "0 0 4294967295",
+            .to = "0 0 0",
+        },
+        {
+            .from = "cfg 0 3 3 0",
+            .to = "cfg 0 4294967296 3 0",
+        },
+        {
+            .from = "cfg 0 3 3 0",
+            .to = "cfg 0 4294967295 3 0",
+        },
+        {
+            .from = "1 2\nend",
+            .to = "1 2\nfin",
+        },
+        {
+            .from = "cfg 0 3 3 0\n",
+            .to = "cfg 0 3 3 0\r\n",
+        },
+        {
+            .from = "0 1\n",
+            .to = "0  1\n",
+        },
+        {
+            .from = "0 1\n",
+            .to = "-0 1\n",
+        },
+    };
+    char changed[512];
+    for (uint32_t i = 0; i < sizeof(changes) / sizeof(changes[0]); i += 1)
+    {
+        const char* at = strstr(valid, changes[i].from);
+        const uint64_t prefix = at != 0 ? (uint64_t)(at - valid) : 0;
+        const uint64_t from = strlen(changes[i].from);
+        const uint64_t to = strlen(changes[i].to);
+        const uint64_t total = sizeof(valid) - 1 - from + to;
+        const bool placed = at != 0 && total <= sizeof(changed);
+        if (placed)
+        {
+            memcpy(changed, valid, prefix);
+            memcpy(changed + prefix, changes[i].to, to);
+            memcpy(changed + prefix + to, at + from, sizeof(valid) - 1 - prefix - from);
+        }
+        const bool refused = placed && !dominator_test_export_read(memory, changed, total, &small);
+        dominator_test_expect(tally, refused && memory->length == small_at, "a malformed export is refused whole");
+    }
+    arena_pop_to(memory, saved);
+}
+
 static bool dominator_test_parse(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -989,6 +1235,7 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                 dominator_test_case(&tally, &memory, &scratch, &special, true);
             }
             dominator_test_deep(&tally, &memory, &scratch);
+            dominator_test_export(&tally, &memory, &scratch);
         }
         printf("dominators: %" PRIu64 " checks, %" PRIu64 " failures (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, seed, random_count);
         result = tally.failures == 0 ? 0 : 1;

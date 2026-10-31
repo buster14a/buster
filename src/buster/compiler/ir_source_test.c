@@ -589,7 +589,7 @@ static int run_ir_source_tests(int count, char** arguments)
     bool graph_valid = graph_open;
     if (graphs != 0)
     {
-        graph_valid = fputs("buster-dominators-v1\n", graphs) != EOF;
+        graph_valid = dominators_export_begin(graphs);
     }
     if (valid && !graph_valid)
     {
@@ -648,7 +648,7 @@ static int run_ir_source_tests(int count, char** arguments)
     {
         if (passed)
         {
-            graph_valid = fprintf(graphs, "complete %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", totals.files, totals.functions, totals.dominator_forms) >= 0;
+            graph_valid = dominators_export_complete(graphs, totals.files, totals.functions, totals.dominator_forms);
         }
         graph_valid = ferror(graphs) == 0 && graph_valid;
         const int closed = fclose(graphs);
