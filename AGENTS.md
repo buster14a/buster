@@ -380,7 +380,8 @@ designs and the compilers already built this way.
   compiler.
   `tests/c-testsuite/subset.txt` declares the programs of c-testsuite's commit
   `5c72756` that must pass, all 220 of them; the 9700X job fetches that commit
-  and runs both. [The c-testsuite guide](docs/c-testsuite.md) has the details.
+  and runs both, and the subset again with `--tier1`, which compiles them by the
+  driver's `--tier1` and runs both paths' programs. [The c-testsuite guide](docs/c-testsuite.md) has the details.
 - `src/buster/compiler/main.c` is the executable entry point: its commands, and
   for anything else the semantic driver (`run_check_command`, in
   `c_checker_driver.c`): `./build/compiler [--scalar] -fsyntax-only [-E's
@@ -394,7 +395,11 @@ designs and the compilers already built this way.
   checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`), `--id-order N` handing the unit's identifiers their
+  `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
+  takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
+  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` says which
+  step refused each: [the Tier 1 guide](docs/tier1.md)'s "The C driver's
+  `--tier1`"), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
