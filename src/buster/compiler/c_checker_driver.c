@@ -338,6 +338,41 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
 
 #include "c_check_warning_render.c"
 
+// The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
+// preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
+static bool check_driver_initializer_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                      const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && !pp->fatal && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS)
+        {
+            valid = event->token < parser->tokens.count && event->completion <= parser->tokens.count &&
+                    event->payload.data == CHECK_WARNING_EXCESS_INITIALIZERS;
+            if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
+            {
+                const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
+                if (severity != CHECK_WARNING_IGNORE)
+                {
+                    const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                                   severity >= CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                    const uint32_t publication = check_driver_publication_position(parser, pp, event->completion, pp->output.count);
+                    pp_diagnose_output_at(pp, disposition, parser->tokens.sources[event->token], publication, "%s", check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS));
+                    valid = !pp->diagnostic_collection_failed;
+                }
+            }
+        }
+        else
+        {
+            const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
+            valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
+        }
+    }
+    return valid;
+}
+
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
     if ((record->warnings & CHECK_FP_PRAGMA_INVALID_PLACEMENT) != 0)
@@ -449,8 +484,8 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN, "non-void function does not return a value%s [-Wreturn-type]",
-                                   body->return_warning == 2 ? " in all control paths" : "");
+                pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_RETURN, "non-void function does not return a value%s [%s-Wreturn-type]",
+                                   body->return_warning == 2 ? " in all control paths" : "", severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
             }
         }
     }
@@ -2441,7 +2476,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // bodies deferred (check_input_selected) or the whole unit (check_input).
             const bool input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                          repairing ? repair.original_end : checking->tokens.count,
-                                                         lazy_system_headers && !prefix_only ? lazy.deferred_tokens : 0);
+                                                         lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0);
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             if (input.resource)
             {
@@ -2455,6 +2490,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 CheckStream stream;
                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
+                ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
                 if (ready)
                 {
@@ -2481,14 +2517,35 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     uint32_t excess_count = 0;
                     CheckAsms asms = { 0 };
                     CheckInitializers initializers = { 0 };
-                    if (expression_valid && !repairing)
+                    // The initializer walk's output and scratch mustn't own these facts: its plan is rolled back on a
+                    // failure, and the warning buffer outlives it for rendering.
+                    CheckWarningBuffer initializer_warnings = { .arena = arena };
+                    CheckWarningSet initializer_warning_keys = { .arena = arena };
+                    bool initializer_warning_storage = true;
+                    for (uint32_t i = 0; initializer_warning_storage && i < input.warning_events.count; i += 1)
+                    {
+                        const CheckWarningEvent* event = input.warning_events.events + i;
+                        const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
+                        if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL || selected)
+                        {
+                            const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
+                            initializer_warning_storage = check_warning_set_add(&initializer_warning_keys, key);
+                        }
+                    }
+                    if (!initializer_warning_storage)
+                    {
+                        initializers.status = CHECK_INIT_RESOURCE;
+                        initializers.token = 0;
+                    }
+                    if (expression_valid && !repairing && initializer_warning_storage)
                     {
                         if (!check_asms_run(&asms, &input, &stream, &types, output_arena, scratch))
                         {
                             additional[additional_count++] = (CheckDriverDiagnostic){ asms.token,
                                 asms.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", asms.token };
                         }
-                        if (check_initializers_run(&initializers, &input, &stream, checking, &types, output_arena, scratch))
+                        if (check_initializers_run_events(&initializers, &input, &stream, checking, &types, output_arena, scratch,
+                                                          !quiet ? &initializer_warnings : NULL, !quiet ? &initializer_warning_keys : NULL))
                         {
                             excess_tokens = initializers.warning_tokens;
                             excess_count = initializers.warning_count;
@@ -2498,7 +2555,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         CheckInitDiagnostic earlier = { 0 };
                         const uint32_t before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
-                        CheckInitWarningSink warnings = { .capacity = !quiet ? tokens : 0 };
+                        CheckInitWarningSink warnings = {
+                            .capacity = !quiet ? tokens : 0,
+                            .events = !quiet ? &initializer_warnings : NULL,
+                            .event_keys = !quiet ? &initializer_warning_keys : NULL,
+                        };
                         warnings.tokens = warnings.capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, warnings.capacity) : NULL;
                         const bool storage = warnings.capacity == 0 || warnings.tokens != NULL;
                         const bool diagnosed = storage && initializers.status != CHECK_INIT_RESOURCE &&
@@ -2513,11 +2574,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         {
                             earlier.status = initializers.status;
                             earlier.token = initializers.token;
+                            earlier.completion = initializers.completion;
                         }
                         if ((diagnosed && earlier.status != CHECK_INIT_OK) || earlier.status == CHECK_INIT_RESOURCE ||
                             (!diagnosed && initializers.status != CHECK_INIT_OK))
                         {
-                            additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token, check_driver_initializer_message(earlier.status), earlier.token };
+                            additional[additional_count++] = (CheckDriverDiagnostic){ earlier.token, check_driver_initializer_message(earlier.status), earlier.token, earlier.completion };
                         }
                         if (diagnosed)
                         {
@@ -2536,9 +2598,17 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 assembly.status == CHECK_ASM_RESOURCE ? "assembly operand checking capacity exhausted" : "invalid assembly operand or constraint", assembly.token };
                         }
                     }
+                    const bool initializer_context = check_initializers_warning_context(&initializer_warnings, &input, checking, &types, scratch);
+                    if (!initializer_context)
+                    {
+                        fprintf(errors, "fatal error: initializer diagnostic capacity exhausted\n");
+                        ready = false;
+                    }
+                    const CheckWarningEvents initializer_warning_view = initializer_context ? check_warning_view(&initializer_warnings) : (CheckWarningEvents){ 0 };
                     uint32_t promoted_token = BUSTER_CHECK_NONE;
                     bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
                     promoted |= check_driver_warning_promoted(pp, &input, &input.warning_events, repairing ? &repair : NULL);
+                    promoted |= check_driver_warning_promoted(pp, &input, &initializer_warning_view, repairing ? &repair : NULL);
                     promoted |= check_driver_warning_promoted(pp, &input, &stream.warning_events, repairing ? &repair : NULL);
                     uint32_t promoted_source = BUSTER_CHECK_NONE;
                     const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
@@ -2568,9 +2638,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 control.position < tokens ? control.position + 1u : tokens };
                         }
                     }
-                    if (!check_driver_reports(checking, parser, pp, publication_end, &input, &stream, repairing ? &repair : NULL,
+                    if (!check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, scratch) ||
+                        !check_driver_reports(checking, parser, pp, publication_end, &input, &stream, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
-                                              excess_tokens, excess_count, quiet, scratch) ||
+                                              NULL, 0, quiet, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch) ||
                         !check_driver_warning_events_at(checking, pp, &input, &types, &stream.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                     {
@@ -2625,6 +2696,22 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         result = 1;
                     }
                     check_driver_x86_reports(checking, parser, pp, &input, &stream, &types, quiet);
+                    const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
+                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
+                    if (final_warnings)
+                    {
+                        CheckInput undefined_input;
+                        CheckWarningBuffer undefined_warnings = { .arena = output_arena };
+                        const bool completed = check_initializers_warning_uses(&undefined_input, &input, &initializer_warning_view, output_arena) &&
+                                               check_warning_undefined_internal(&undefined_warnings, &undefined_input, checking, &types, &stream, scratch);
+                        const CheckWarningEvents undefined_view = check_warning_view(&undefined_warnings);
+                        if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
+                        {
+                            fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
+                            result = 1;
+                        }
+                        result = pp->errors != 0 ? 1 : result;
+                    }
                     if (program_checked)
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :

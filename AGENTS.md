@@ -257,6 +257,16 @@ designs and the compilers already built this way.
   rematerialization. Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.
 
+- `tier1_certificate.c` checks a normalized source/machine-stream allocation
+  certificate (#939): block-entry facts, sequential edge edits, simultaneous
+  phi renames and concrete exchange/XOR recipes against ABI-backed state, with
+  `tier1_certificate_oracle.c`'s dense CFG fixpoint as the independent oracle
+  and `tier1_certificate_interval.c` as the current interval allocator's
+  fragment adapter. `test-tier1-allocation` runs the stream/mutation suites
+  and certificate-checks every successful allocation its fixtures make. [The
+  certificate guide](docs/tier1-certificate.md) records the trust boundary,
+  supported forms and the native-emitter bridge still pending for #939.
+
 - `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
   liveness with phi operands on their edges, hinted (`hint_values`) to keep one
   register, then each edge's parallel move, placed at a block's end or start or

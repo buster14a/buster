@@ -348,7 +348,9 @@ static bool tier1_narrow_records(const Tier1SelectPlan* plan, const Tier1EmitRes
     {
         while (node < function->instruction_count && emitted->code.node_first[node + 1] == record)
         {
-            if (probes && !plan->covered[node] && (function->type[node] == IR_I8 || function->type[node] == IR_I16))
+            // Issue #981: every rule making a narrow value leaves zeros past its width in the whole 64-bit
+            // register. Probe I1 as well as I8/I16 so a later copy/extension cannot hide noncanonical bits.
+            if (probes && !plan->covered[node] && (function->type[node] == IR_I1 || function->type[node] == IR_I8 || function->type[node] == IR_I16))
             {
                 const uint32_t reg = tier1_narrow_register(emitted, node);
                 ready = ready && reg < 16 && reg != X86_REGISTER_R11;
@@ -431,7 +433,7 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                     tier1_emit_test_expect(test, memcmp(data, page_expected, page) == 0, "narrow memory value and every adjacent byte match the frozen oracle");
                     for (uint32_t node = 0; probes && node < fixture->nodes; node += 1)
                     {
-                        if (!plan->covered[node] && (fixture->function.type[node] == IR_I8 || fixture->function.type[node] == IR_I16))
+                        if (!plan->covered[node] && (fixture->function.type[node] == IR_I1 || fixture->function.type[node] == IR_I8 || fixture->function.type[node] == IR_I16))
                         {
                             tier1_emit_test_expect(test, observed[node] == expected->values[sample][node], "narrow producer/reload COPY holds zero-extended canonical bits before a later conversion");
                         }

@@ -2758,5 +2758,16 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         }
     }
     valid = valid && check_program_define_aliases(code, program);
+    // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
+    // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
+    // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.
+    for (SymbolId symbol = 1; valid && symbol < code->link.symbols.count; symbol += 1)
+    {
+        if ((code->link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+            code->link.symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE)
+        {
+            code->link.symbols.flags[symbol] = (uint8_t)((code->link.symbols.flags[symbol] & ~BUSTER_LINK_SYMBOL_BINDING) | BUSTER_LINK_SYMBOL_GLOBAL);
+        }
+    }
     return valid;
 }

@@ -1036,7 +1036,9 @@ static __m512i ir_lookup_bytes(__m512i table, __m128i op)
 }
 
 // A bit for every row needing the scalar semantic check. The common arithmetic, comparison, selection and memory
-// rules are checked here. Indexed byte loads are scalar, bounded and independent; comparisons remain 16-wide.
+// rules are checked here. Operand types are in-register permutes when a function's whole type array fits in two
+// registers; larger functions keep the scalar gather's per-lane loads, whose invalid and unused lanes keep the
+// gather's zero through the masks (#786).
 static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t count, __mmask16* terminators)
 {
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
@@ -1068,35 +1070,57 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     bad |= (~_mm512_test_epi32_mask(fields, one)) & _mm512_cmpneq_epi32_mask(a, none);
     bad |= (~_mm512_test_epi32_mask(fields, _mm512_set1_epi32(2))) & _mm512_cmpneq_epi32_mask(b, none);
     bad |= (~_mm512_test_epi32_mask(fields, _mm512_set1_epi32(4))) & _mm512_cmpneq_epi32_mask(c, none);
-    bad |= use_a & _mm512_cmpge_epu32_mask(a, limit);
-    bad |= use_b & _mm512_cmpge_epu32_mask(b, limit);
-    bad |= use_c & _mm512_cmpge_epu32_mask(c, limit);
+    const __mmask16 over_a = _mm512_cmpge_epu32_mask(a, limit);
+    const __mmask16 over_b = _mm512_cmpge_epu32_mask(b, limit);
+    const __mmask16 over_c = _mm512_cmpge_epu32_mask(c, limit);
+    bad |= use_a & over_a;
+    bad |= use_b & over_b;
+    bad |= use_c & over_c;
+    // The gather's lane condition, computed once: a used operand whose index is in bounds.
+    const __mmask16 valid_a = use_a & ~over_a;
+    const __mmask16 valid_b = use_b & ~over_b;
+    const __mmask16 valid_c = use_c & ~over_c;
     const __mmask16 memory = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
     bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~BUSTER_IR_VOLATILE)) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
     bad |= ~memory & (_mm512_test_epi32_mask(flags, none) | _mm512_test_epi32_mask(align, none));
-    uint32_t types_a[BUSTER_IR_VECTOR_COUNT] = { 0 };
-    uint32_t types_b[BUSTER_IR_VECTOR_COUNT] = { 0 };
-    uint32_t types_c[BUSTER_IR_VECTOR_COUNT] = { 0 };
-    for (uint32_t lane = 0; lane < count; lane += 1)
+    __m512i ta;
+    __m512i tb;
+    __m512i tc;
+    if (f->instruction_count <= 2 * 64)
     {
-        const uint32_t bit = 1u << lane;
-        const uint32_t index = first + lane;
-        if ((use_a & bit) != 0 && f->a[index] < f->instruction_count)
-        {
-            types_a[lane] = f->type[f->a[index]];
-        }
-        if ((use_b & bit) != 0 && f->b[index] < f->instruction_count)
-        {
-            types_b[lane] = f->type[f->b[index]];
-        }
-        if ((use_c & bit) != 0 && f->c[index] < f->instruction_count)
-        {
-            types_c[lane] = f->type[f->c[index]];
-        }
+        const __mmask64 low_types = f->instruction_count >= 64 ? (__mmask64)-1 : ((__mmask64)1 << f->instruction_count) - 1;
+        const __mmask64 high_types = f->instruction_count >= 2 * 64 ? (__mmask64)-1 : f->instruction_count > 64 ? ((__mmask64)1 << (f->instruction_count - 64)) - 1 : 0;
+        const __m512i types_low = _mm512_maskz_loadu_epi8(low_types, f->type);
+        const __m512i types_high = _mm512_maskz_loadu_epi8(high_types, f->type + (f->instruction_count < 64 ? f->instruction_count : 64));
+        ta = _mm512_maskz_cvtepu8_epi32(valid_a, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(a)), types_high)));
+        tb = _mm512_maskz_cvtepu8_epi32(valid_b, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(b)), types_high)));
+        tc = _mm512_maskz_cvtepu8_epi32(valid_c, _mm512_castsi512_si128(_mm512_permutex2var_epi8(types_low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(c)), types_high)));
     }
-    const __m512i ta = _mm512_loadu_si512(types_a);
-    const __m512i tb = _mm512_loadu_si512(types_b);
-    const __m512i tc = _mm512_loadu_si512(types_c);
+    else
+    {
+        uint32_t types_a[BUSTER_IR_VECTOR_COUNT] = { 0 };
+        uint32_t types_b[BUSTER_IR_VECTOR_COUNT] = { 0 };
+        uint32_t types_c[BUSTER_IR_VECTOR_COUNT] = { 0 };
+        for (uint32_t lane = 0; lane < count; lane += 1)
+        {
+            const uint32_t bit = 1u << lane;
+            if ((valid_a & bit) != 0)
+            {
+                types_a[lane] = f->type[f->a[first + lane]];
+            }
+            if ((valid_b & bit) != 0)
+            {
+                types_b[lane] = f->type[f->b[first + lane]];
+            }
+            if ((valid_c & bit) != 0)
+            {
+                types_c[lane] = f->type[f->c[first + lane]];
+            }
+        }
+        ta = _mm512_loadu_si512(types_a);
+        tb = _mm512_loadu_si512(types_b);
+        tc = _mm512_loadu_si512(types_c);
+    }
     bad |= use_a & (_mm512_cmpeq_epi32_mask(ta, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(ta, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_b & (_mm512_cmpeq_epi32_mask(tb, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tb, _mm512_set1_epi32(IR_TYPE_COUNT)));
     bad |= use_c & (_mm512_cmpeq_epi32_mask(tc, _mm512_setzero_si512()) | _mm512_cmpge_epu32_mask(tc, _mm512_set1_epi32(IR_TYPE_COUNT)));
@@ -1171,10 +1195,20 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
     return check;
 }
 
+// A terminator's successor source by operation: none, one target in a, two in b and c, a switch's
+// case list in extra, or a br_indirect's labels. The op-indexed read keeps each block's dispatch a
+// load where the equivalent compare chain lowered to a jump table's indirect branch (#786).
+static const uint8_t ir_successor_table[64] = {
+    [IR_BR] = 1,
+    [IR_CBR] = 2,
+    [IR_SWITCH] = 3,
+    [IR_BR_INDIRECT] = 4,
+};
+
 static uint32_t ir_successor_count(const IrFunction* f, uint32_t i)
 {
-    const uint32_t op = f->op[i];
-    return op == IR_BR ? 1 : op == IR_CBR ? 2 : op == IR_SWITCH ? f->c[i] + 1 : op == IR_BR_INDIRECT ? (f->b[i] == BUSTER_IR_NONE ? f->label_count : f->c[i]) : 0;
+    const uint32_t kind = ir_successor_table[f->op[i]];
+    return kind <= 2 ? kind : kind == 3 ? f->c[i] + 1 : (f->b[i] == BUSTER_IR_NONE ? f->label_count : f->c[i]);
 }
 
 static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)

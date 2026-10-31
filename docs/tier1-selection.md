@@ -37,7 +37,13 @@ patterns are:
   and 64-bit additions of constants, which join the displacement while it fits
   32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
   conversions, two `lea`s and the constants' moves; a pointer that is a value
-  (a ptrtoint or an inttoptr of such a chain) is one `lea`.
+  (a ptrtoint or an inttoptr of such a chain) is one `lea`. The index sheds the
+  constants added to it (`tier1_select_index`): a 64-bit addition of a constant
+  on either side, or a subtraction of one, joins the displacement scaled, so
+  that `p[i + 100]` of a 64-bit `i` is `[p + i * 4 + 400]`. A 32-bit `int` index
+  keeps its addition, which comes before its sign extension: `(i + c) * s` isn't
+  `i * s + c * s` when `i + c` overflows, which the IR doesn't rule out (and
+  `-fwrapv` defines).
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
@@ -225,6 +231,17 @@ and pipeline tests check.
 
 The output reserves at most six records per original node and two branches per
 block. Its logical lengths are the returned counts, not the reserved capacity.
+Every record a rule's expansion writes goes through `tier1_select_append`, which
+checks it against the node's room (`BUSTER_TIER1_SELECT_RECORDS_PER_NODE`): a
+sequence longer than the room writes nothing past it and marks the node's records
+overflowed, which the three consumers refuse as an invalid function. The
+signed power-of-two remainder's six records are the longest, the room's whole.
+The tests take a node's sequence to its room and past it with no-ops before its
+records (`Tier1SelectPattern.nops`, which the selector never sets):
+`test-tier1-select` through the selector's emitter and `test-tier1-emit` through
+both consumers, a conditional branch's sequence among them. At the room the
+function emits and runs; one record past it, it fails at the node with its
+arenas and result as they were.
 Input columns and output records require no padding. Only the encoder's own
 documented output buffer capacity/padding contract applies when encoding them.
 All retained arrays belong to the caller's arena. Emission failure restores its
