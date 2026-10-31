@@ -756,8 +756,7 @@ static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, 
 // bytes too (AVX-512VL).
 static bool check_lower_vector_target(uint64_t features)
 {
-    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
-    return (features & required) == required;
+    return (features & BUSTER_X86_FEATURE(SSE2)) != 0;
 }
 
 // The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
@@ -2042,6 +2041,19 @@ static uint32_t check_lower_temporary_of(CheckLowerWriter* writer, TypeId type)
 // The rows are few (an operator's at a type), and check_vector_lower_row clears each one's padding.
 static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier0Operation* row)
 {
+    Tier0Operation baseline;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    if ((writer->target.features & evex) != evex)
+    {
+        if (check_vector_baseline_row(&writer->target, row, &baseline))
+        {
+            row = &baseline;
+        }
+        else
+        {
+            check_lower_unsupported(writer, "vector machine operation unavailable at this target");
+        }
+    }
     uint32_t index = 0;
     while (index < writer->operation_count && memcmp(&writer->operations[index], row, sizeof(*row)) != 0)
     {
@@ -2946,8 +2958,8 @@ static __attribute__((noinline)) void check_lower_emit_classless(CheckLowerWrite
     else
     {
         check_lower_unsupported(writer, class != BUSTER_TYPED_CLASS_VECTOR ? "values of this type" :
-                                        check_lower_vector_target(writer->program->target.features) ? "vector types in a function whose target attribute turns off AVX-512F or AVX-512VL" :
-                                        "vector types without AVX-512F and AVX-512VL");
+                                        check_lower_vector_target(writer->program->target.features) ? "vector types in a function whose target attribute turns off SSE2" :
+                                        "vector types without SSE2");
     }
 }
 
@@ -11554,6 +11566,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         function->int128 = writer->int128;
         function->vectors = writer->vectors;
+        if (writer->vectors)
+        {
+            const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+            function->vector_bytes = (writer->target.features & evex) == evex ? 0 :
+                                     (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+        }
         BUSTER_CHECK_LOWER_COPY(operations, operations, Tier0Operation, writer->operation_count);
         function->operation_count = writer->operation_count;
         BUSTER_CHECK_LOWER_COPY(vector_constants, vector_constants, uint64_t, 8 * (uint64_t)writer->vector_constant_count);

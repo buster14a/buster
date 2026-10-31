@@ -408,9 +408,7 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
     {
         check_test_program_boundary_target(test, refused[i].source, refused[i].name, true, false, 0, refused[i].initializations, refused[i].reason, target);
     }
-    // Without AVX-512F and AVX-512VL, a vector value of any kind.
-    check_test_program_boundary_reason(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
-                                       "vector-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL");
+
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -457,6 +455,85 @@ static void check_test_program_atomic_vector_constraints(CheckTest* test, const 
     }
 }
 
+// Differential baseline coverage: exact source and -march shared with Clang, both lowering and Tier 0 paths.
+static void check_test_program_vector_baselines(CheckTest* test, const char* clang)
+{
+    static const char* const levels[] = { "x86-64", "x86-64-v2", "x86-64-v3" };
+    static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v2", "-march=x86-64-v3" };
+    static const char* const programs[][2] = {
+        { "baseline-integers",
+          "typedef unsigned U __attribute__((vector_size(16)));typedef short H __attribute__((vector_size(16)));\n"
+          "static v4si calc(v4si a,v4si b){return a*b+a-b;}static v4si global;\n"
+          "int tested(int n){unsigned h=2166136261u;v4si a,b;U u,v;v16qu q,r;v8hu w,x;H k,l;v2di d,e;\n"
+          "fill(&a,16,n);fill(&b,16,n+1);fill(&u,16,n+2);fill(&v,16,n+3);fill(&q,16,n+4);fill(&r,16,n+5);fill(&w,16,n+6);fill(&x,16,n+7);fill(&k,16,n+8);fill(&l,16,n+9);fill(&d,16,n+10);fill(&e,16,n+11);\n"
+          "v4si z[]={calc(a,b),a+(int)n,-b,~a,a&b,a|b,a^b,a<b,a<=b,a>b,a>=b,a==b,a!=b};FOLD(z);\n"
+          "U t[]={u+v,u-v,u*v,u<v,u<=v,u>v,u>=v,u==v,u!=v};FOLD(t);\n"
+          "v16qu c[]={q+r,q-r,~q,(v16qu)(q<r),(v16qu)(q<=r),(v16qu)(q>r),(v16qu)(q>=r),(v16qu)(q==r),(v16qu)(q!=r),q+(unsigned char)n};FOLD(c);\n"
+          "v8hu j[]={w+x,w*x,(v8hu)(w<x),(v8hu)(w<=x),(v8hu)(w>x),(v8hu)(w>=x),w+(unsigned short)n};FOLD(j);\n"
+          "H m[]={k+l,k*l,k<l,k<=l,k>l,k>=l,k==l,k!=l};FOLD(m);v2di ll[]={d+e,d-e,-e,~d,d+(long long)n};FOLD(ll);\n"
+          "global=calc(a,b);v4si mem[3]={a,b,{0}};mem[n%3]=global;v4si out=*mem;out[2]=n;mem[1]+=out;FOLD(mem);FOLD(global);return (int)h;}\n"
+        },
+        { "baseline-floating",
+          "int tested(int n){unsigned h=2166136261u;v4sf a,b;v2df d,e;fillf((float*)&a,4,n);fillf((float*)&b,4,n+1);filld((double*)&d,2,n);filld((double*)&e,2,n+2);b+=1.0f;e+=1.0;\n"
+          "v4sf r[]={a+b,a-b,a*b,a/b,-a,a*1.5f,2.5f-a};FOLD(r);v4si c[]={a<b,a<=b,a>b,a>=b,a==b,a!=b};FOLD(c);\n"
+          "v2df z[]={d+e,d-e,d*e,d/e,-d,d*2.0};FOLD(z);v2di k[]={d<e,d<=e,d>e,d>=e,d==e,d!=e};FOLD(k);\n"
+          "union{unsigned u[4];v4sf f;}q={{0x7fc01234u,0x80000000u,0,0x3f800000u}},p={{0x3f800000u,0,0x80000000u,0xffc05678u}};\n"
+          "v4si cmp[]={q.f<p.f,q.f<=p.f,q.f>p.f,q.f>=p.f,q.f==p.f,q.f!=p.f};FOLD(cmp);return (int)h;}\n"
+        },
+        { "baseline-narrow-and-wide-transport",
+          "typedef int V __attribute__((vector_size(8)));typedef unsigned char C __attribute__((vector_size(4)));\n"
+          "static v16su wide(v16su a){v16su b=a;return b;}static V narrow(V a){return a+3;}\n"
+          "int tested(int n){unsigned h=2166136261u;struct S{C v;unsigned guard;} s={{1,2,3,(unsigned char)n},0xdeadbeef};\n"
+          "C t=s.v+2;s.v=t;FOLD(s);V a={n,-n},b=narrow(a);V out[2]={a,b};out[0]=out[1];FOLD(out);\n"
+          "v16su x;fill(&x,64,n);v16su z=wide(x);FOLD(z);return (int)h;}\n"
+        },
+        { "baseline-floating-pressure",
+          "static double consume(double a,double b,double c,double d,double e,double f,double g,double h,double i,double j,double k,double l,double m,double o,double p,double q,v4si v){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+v[1];}\n"
+          "int tested(int n){v4si a={n,1,2,3},b={4,n,5,6};return (int)consume(n,n+1,n+2,n+3,n+4,n+5,n+6,n+7,n+8,n+9,n+10,n+11,n+12,n+13,n+14,n+15,a*b+a);}\n"
+        },
+        { "baseline-sse-builtins",
+          "#include <emmintrin.h>\n"
+          "int tested(int n){unsigned h=2166136261u;__m128i a,b;__m128 f,g;fill(&a,16,n);fill(&b,16,n+1);fill(&f,16,n+2);fill(&g,16,n+3);\n"
+          "__m128i r[]={_mm_add_epi32(a,b),_mm_shuffle_epi32(a,0x1b),_mm_shufflehi_epi16(a,0x4e),_mm_shufflelo_epi16(b,0xb1),_mm_slli_si128(a,3),_mm_srli_si128(a,15),_mm_srli_si128(b,16),_mm_packs_epi32(a,b),_mm_packus_epi16(a,b),_mm_madd_epi16(a,b),_mm_mulhi_epi16(a,b),_mm_mul_epu32(a,b),_mm_insert_epi16(a,n*31,6),_mm_cvtps_epi32(f),_mm_slli_epi16(a,n&15),_mm_srli_epi16(b,n&15),_mm_srai_epi16(a,n&15),_mm_slli_epi32(a,n&31),_mm_srli_epi32(b,n&31),_mm_srai_epi32(a,n&31),_mm_slli_epi64(a,n&63),_mm_srli_epi64(b,n&63)};FOLD(r);\n"
+          "__m128 m[]={_mm_shuffle_ps(f,g,0x1b),_mm_max_ps(f,g),_mm_min_ps(f,g)};FOLD(m);int e[]={_mm_extract_epi16(a,5),_mm_extract_epi16(b,0)};FOLD(e);return (int)h;}\n"
+        },
+    };
+    const X86Target native = x86_target_native();
+    for (uint32_t level = 0; level < BUSTER_ARRAY_LENGTH(levels); level += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(levels[level], strlen(levels[level]), &target);
+        check_test_expect(test, parsed, "baseline vector target");
+        check_test_program_build_release();
+        check_test_program_march = marches[level];
+        for (uint32_t i = 0; parsed && i < BUSTER_ARRAY_LENGTH(programs); i += 1)
+        {
+            const size_t length = strlen(check_test_vector_types) + strlen(programs[i][1]) + 1;
+            char* source = malloc(length);
+            check_test_expect(test, source != NULL, "baseline vector source");
+            if (source != NULL)
+            {
+                snprintf(source, length, "%s%s", check_test_vector_types, programs[i][1]);
+                check_test_program_includes = i + 1 == BUSTER_ARRAY_LENGTH(programs);
+                check_test_program_source_native_limits(test, source, programs[i][0], clang, false, -1, 0, &target,
+                                                         (native.features & target.features) == target.features);
+                check_test_program_includes = false;
+                free(source);
+            }
+        }
+        if (parsed)
+        {
+            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a+b;}",
+                                               "baseline-wide-vector-operator", true, false, 0, 0,
+                                               "vector operations wider than the target's registers", &target);
+            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
+                                               "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
+        }
+    }
+    check_test_program_build_release();
+    check_test_program_march = "-march=x86-64";
+}
+
 static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test, const char* clang)
 {
     X86Target target = { 0 };
@@ -472,5 +549,6 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
         check_test_program_atomic_vector_constraints(test, clang);
+        check_test_program_vector_baselines(test, clang);
     }
 }

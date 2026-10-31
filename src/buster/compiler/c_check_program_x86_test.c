@@ -1711,16 +1711,9 @@ static void check_test_program_x86_refusals(CheckTest* test)
         check_test_program_boundary_target(test, masks[i], "integer-only-opmask-without-avx512", true, false, 0, 0,
                                            "x86 builtins whose instructions the target hasn't", &baseline);
     }
-    // #148's SSE builtins pass the checker at the default target, as clang's do there, and the lowering refuses their
-    // vectors.
+    // Baseline SSE success is covered by --program-vectors. AVX2 still requires its target feature.
     if (baseline_parsed)
     {
-        check_test_program_boundary_target(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n,1,2,3};"
-                                                 "v4si b=__builtin_ia32_pshufd(a,0x1b);return b[0];}",
-                                           "sse-builtin-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL", &baseline);
-        check_test_program_boundary_target(test, "typedef double v2df __attribute__((vector_size(16)));int tested(int n){v2df a={n,1};"
-                                                 "v2df b=__builtin_ia32_shufpd(a,a,3);return (int)b[0];}",
-                                           "sse-shufpd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
         check_test_program_boundary_target(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n,1};"
                                                  "v8si b=__builtin_ia32_pshufd256(a,0x1b);return b[0];}",
                                            "avx2-pshufd-without-avx512", true, false, 0, 2, "x86 builtins whose instructions the target hasn't", &baseline);
