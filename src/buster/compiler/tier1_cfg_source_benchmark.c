@@ -87,8 +87,9 @@ static Tier0BenchmarkReading tier1_cfg_source_run(uint32_t variant, const Tier1C
 }
 
 // Adds `file`'s functions to the corpus: each one's problem and intervals in `kept`, after both paths' allocations of
-// it passed the checker. Returns false on any failure but a function the model has no class for.
-static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept, Arena* output, Arena* scratch)
+// it passed the checker. Each function is lowered into `ir` and promoted into `output`, which ssa_ir_promote takes apart
+// from its input's arena, both emptied after it. Returns false on any failure but a function the model has no class for.
+static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept, Arena* ir, Arena* output, Arena* scratch)
 {
     IrSourceFile file;
     ir_source_prepare(&file, name, options, option_count, lowered, table, false);
@@ -101,11 +102,13 @@ static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const cha
     for (uint32_t f = 0; valid && f < file.count; f += 1)
     {
         const IrSourceFunction* source = &file.functions[f];
+        const uint64_t ir_mark = ir->length;
         const uint64_t output_mark = output->length;
-        IrFunction ir = { 0 };
+        IrFunction lowered_function = { 0 };
         IrFunction promoted = { 0 };
-        valid = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &ir).error == IR_OK;
-        valid = valid && ssa_ir_promote(&ir, output, scratch, &promoted).error == IR_OK;
+        const IrCheck lowering = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, ir, scratch, &lowered_function);
+        const IrCheck promotion = lowering.error == IR_OK ? ssa_ir_promote(&lowered_function, output, scratch, &promoted) : lowering;
+        valid = promotion.error == IR_OK;
         Tier1CfgIrProblem problem = { 0 };
         const Tier1CfgIrStatus adapted = valid ? tier1_cfg_from_ir(&promoted, kept, scratch, &problem) : TIER1_CFG_IR_INVALID;
         valid = valid && (adapted == TIER1_CFG_IR_OK || adapted == TIER1_CFG_IR_UNSUPPORTED);
@@ -134,9 +137,10 @@ static bool tier1_cfg_source_corpus_file(Tier1CfgSourceCorpus* corpus, const cha
         }
         if (!valid)
         {
-            printf("benchmark-tier1-cfg-source: file=%s function=%s doesn't join the corpus\n", name, source->name);
+            printf("benchmark-tier1-cfg-source: file=%s function=%s doesn't join the corpus: %s\n", name, source->name, lowering.error != IR_OK ? "its lowering failed" : promotion.error != IR_OK ? "its promotion failed" : adapted != TIER1_CFG_IR_OK ? "the model refused it" : "an allocation failed or the checker rejected it");
         }
         arena_pop_to(output, output_mark);
+        arena_pop_to(ir, ir_mark);
     }
     printf("benchmark-tier1-cfg-source: file=%s functions=%u joined=%u\n", name, file.count, joined);
     corpus->files += valid;
@@ -269,12 +273,13 @@ static __attribute__((unused)) int run_tier1_cfg_source_benchmark(int count, cha
     Arena lowered = arena_reserve(UINT64_C(1) << 36);
     Arena table = arena_reserve(UINT64_C(1) << 32);
     Arena kept = arena_reserve(UINT64_C(1) << 35);
+    Arena ir = arena_reserve(UINT64_C(1) << 34);
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
     Tier1CfgSourceCorpus corpus = {
         .capacity = BUSTER_TIER0_BENCHMARK_MAX_FUNCTIONS,
     };
-    valid = valid && lowered.base != 0 && table.base != 0 && kept.base != 0 && output.base != 0 && scratch.base != 0;
+    valid = valid && lowered.base != 0 && table.base != 0 && kept.base != 0 && ir.base != 0 && output.base != 0 && scratch.base != 0;
     corpus.problems = valid ? arena_push_array(&kept, corpus.capacity, sizeof(Tier1CfgInput), _Alignof(Tier1CfgInput)) : 0;
     corpus.intervals = valid ? arena_push_array(&kept, corpus.capacity, sizeof(Tier1AllocationInput), _Alignof(Tier1AllocationInput)) : 0;
     valid = valid && corpus.problems != 0 && corpus.intervals != 0;
@@ -282,7 +287,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_benchmark(int count, cha
     for (uint32_t i = 0; joined && i < file_count; i += 1)
     {
         // The files' preparations accumulate, as benchmark-ir-source's do.
-        joined = tier1_cfg_source_corpus_file(&corpus, files[i], options, option_count, &lowered, &table, &kept, &output, &scratch);
+        joined = tier1_cfg_source_corpus_file(&corpus, files[i], options, option_count, &lowered, &table, &kept, &ir, &output, &scratch);
         fflush(stdout);
     }
     bool measured = false;
@@ -297,6 +302,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_benchmark(int count, cha
     }
     arena_release(&scratch);
     arena_release(&output);
+    arena_release(&ir);
     arena_release(&kept);
     arena_release(&table);
     arena_release(&lowered);

@@ -207,7 +207,7 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     return value != UINT32_MAX ? last[value] : UINT8_MAX;
 }
 
-static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
+static inline __attribute__((always_inline)) bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
 {
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing every store below could change
     // *input, and clang would reload them after each one.
@@ -375,7 +375,7 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
 // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
-static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
+static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
 {
     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
     // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
@@ -493,8 +493,9 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
 // that holds it, which then holds the register the rule would have taken, or as a fresh one, which makes a register
 // taken from this level fresh again. Every level from the current one up then still holds a free register or none,
 // and every level below none, so an end never overwrites a deposit and a start never runs out of registers while the
-// class's pressure fits.
-static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last)
+// class's pressure fits. The body is compiled twice (tier1_allocate_impl's calls): with a constant null `last` it is
+// the rule's loop alone, so an input without hints runs the code it ran before hints existed.
+static inline __attribute__((always_inline)) void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last)
 {
     uint8_t ended[32];
     uint32_t available = input->registers[class];
@@ -508,7 +509,22 @@ static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t c
         {
             level -= 1;
             ended[level] = regs[interval];
-            deposited |= 1u << regs[interval];
+            deposited |= last != 0 ? 1u << regs[interval] : 0;
+        }
+        else if (last == 0)
+        {
+            uint8_t r = ended[level];
+            if (r != UINT8_MAX)
+            {
+                ended[level] = UINT8_MAX;
+            }
+            else
+            {
+                r = (uint8_t)__builtin_ctz(available);
+                available &= available - 1;
+            }
+            regs[interval] = r;
+            level += 1;
         }
         else
         {
@@ -547,10 +563,7 @@ static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t c
             }
             ended[level] = UINT8_MAX;
             regs[interval] = r;
-            if (last != 0)
-            {
-                last[input->values[interval]] = r;
-            }
+            last[input->values[interval]] = r;
             level += 1;
         }
     }
@@ -869,7 +882,15 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                tier1_allocation_color(input, class, class_events, class_event_count, regs, value_last);
+                // Each body twice: with hints, and without, where it is the loop it was before them.
+                if (value_last != 0)
+                {
+                    tier1_allocation_color(input, class, class_events, class_event_count, regs, value_last);
+                }
+                else
+                {
+                    tier1_allocation_color(input, class, class_events, class_event_count, regs, 0);
+                }
                 allocation.vector_intervals += class_count;
             }
             else
@@ -879,11 +900,11 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, value_last);
+                    assigned = value_last != 0 ? tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, value_last) : tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, 0);
                 }
                 else
                 {
-                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, value_last);
+                    assigned = value_last != 0 ? tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, value_last) : tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, 0);
                 }
                 if (!assigned)
                 {
