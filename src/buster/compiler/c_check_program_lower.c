@@ -18,7 +18,9 @@
 // where the function's target has no instruction for them (c_check_program_half.c); and the C library's mathematical
 // functions that clang -O0 calls for the generic vector builtins (check_lower_vector_calls: acosf ... powf, acos ... pow
 // and acosl ... powl, each name's float, double and long double ones, in BUSTER_CHECK_LOWER_LIBM's order), with fmaxl,
-// fminl and ldexpl, a long double's maxnum, minnum and ldexp.
+// fminl and ldexpl, a long double's maxnum, minnum and ldexp; __builtin_powi's (#148); and the library builtins'
+// functions (c_builtin_library.c), from CHECK_LOWER_RUNTIME_LIBRARY on, in its list's order: library function l's is
+// CHECK_LOWER_RUNTIME_LIBRARY + l.
 #define BUSTER_CHECK_LOWER_LIBM(X) \
     X(ACOS, "acos") \
     X(ASIN, "asin") \
@@ -165,14 +167,18 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_FMAXL,
     CHECK_LOWER_RUNTIME_FMINL,
     CHECK_LOWER_RUNTIME_LDEXPL,
-    CHECK_LOWER_RUNTIMES,
+    CHECK_LOWER_RUNTIME_POWIDF2,
+    CHECK_LOWER_RUNTIME_POWISF2,
+    CHECK_LOWER_RUNTIME_POWIXF2,
+    CHECK_LOWER_RUNTIME_LIBRARY,
+    CHECK_LOWER_RUNTIMES = CHECK_LOWER_RUNTIME_LIBRARY + CBUILTIN_LIBRARY_COUNT,
 } CheckLowerRuntime;
 
 // The libm functions' first, from which a name's float, double and long double ones follow (check_lower_libm_function).
 #define BUSTER_CHECK_LOWER_LIBM_FIRST CHECK_LOWER_RUNTIME_LIBM_ACOSF
 
 // The mask of the runtime functions a part calls has a bit each, in as many 64-bit words as that takes.
-_Static_assert(CHECK_LOWER_RUNTIMES <= 256, "the runtime functions are numbered in bytes");
+_Static_assert(CHECK_LOWER_RUNTIMES <= UINT16_MAX, "a part's runtime functions are numbered in 16 bits");
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
@@ -217,8 +223,24 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
 #define BUSTER_CHECK_LOWER_LIBM_NAME(id, name) name "f", name, name "l",
     BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
 #undef BUSTER_CHECK_LOWER_LIBM_NAME
-    "fmaxl", "fminl", "ldexpl",
+    "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2",
+#define BUSTER_CBUILTIN_LIBRARY_CALL(id, name) name,
+#include "c_builtin_library_calls.inc"
+#undef BUSTER_CBUILTIN_LIBRARY_CALL
 };
+
+// The runtime function a library builtin's call calls (#148): the lowering's own of its function's name where it has one
+// before the library's (fmax, mempcpy, strcpy, sprintf, ...), so that a unit has one symbol of each name, or else the
+// library's entry.
+static CheckLowerRuntime check_lower_library_runtime(CBuiltinLibraryId library)
+{
+    CheckLowerRuntime result = (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_LIBRARY + library);
+    for (uint32_t r = 0; r < CHECK_LOWER_RUNTIME_LIBRARY && result >= CHECK_LOWER_RUNTIME_LIBRARY; r += 1)
+    {
+        result = strcmp(check_lower_runtime_names[r], cbuiltin_library_names[library]) == 0 ? (CheckLowerRuntime)r : result;
+    }
+    return result;
+}
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
 // program's controls, by which the lowering finds it (check_lower_table_of), and for each value from its cases' lowest up
@@ -271,7 +293,7 @@ struct CheckProgramLowered
     // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
     // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
     SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
-    uint8_t runtime_order[CHECK_LOWER_RUNTIMES];
+    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
     // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
@@ -672,18 +694,17 @@ struct CheckLowerWriter
     // The runtime's functions (check_lower_runtime): each one's symbol where the unit declares it, 0 for none
     // (CheckLowerShared.declared_runtimes); the first of the provisional symbols that a call of one of the lowering's own
     // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, `runtime_mask` their bits in
-    // two words), which check_lower_finish numbers in source order's order (#151).
+    // words), which check_lower_finish numbers in source order's order (#151).
     const SymbolId* declared_runtimes;
     SymbolId provisional_runtimes;
     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
     uint32_t runtime_count;
-    uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
     // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
     // until the writer first asks.
     uint64_t first_classification;
 };
 
-_Static_assert(CHECK_LOWER_RUNTIMES <= UINT8_MAX + 1, "a part's runtime functions are numbered in bytes");
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
 // its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
@@ -5580,7 +5601,7 @@ static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime 
         if ((writer->runtime_mask[runtime >> 6] & (UINT64_C(1) << (runtime & 63))) == 0)
         {
             writer->runtime_mask[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
-            writer->runtimes[writer->runtime_count++] = (uint8_t)runtime;
+            writer->runtimes[writer->runtime_count++] = (uint16_t)runtime;
         }
     }
     return symbol;
@@ -6655,7 +6676,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (count > 3 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
+    else if (count > 4 || stream->misc[selected].evaluated_operands != (1u << evaluated) - 1)
     {
         check_lower_unsupported(writer, "this builtin");
     }
@@ -6670,6 +6691,30 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = runtime, .argument_count = evaluated };
+        if (cbuiltin_bits(call->id))
+        {
+            // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
+            // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
+            const TypeId result_type = stream->values[node].type;
+            const uint32_t result = check_lower_builtin_type(program->types, result_type);
+            bool described = cbuiltin_carry(call->id) || result != 0;
+            for (uint32_t i = 0; i < evaluated; i += 1)
+            {
+                const bool pointer = cbuiltin_carry(call->id) && i == 3;
+                const uint32_t type = pointer ? 0 : check_lower_builtin_type(program->types, stream->argument_conversions[first + i].type);
+                described = described && (pointer || type != 0);
+                call->argument_types[i] = type;
+            }
+            call->result_type = result;
+            if (!described)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else if (!cbuiltin_carry(call->id) && cbuiltin_bits_width(result) > 64)
+            {
+                call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
+            }
+        }
         if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
         {
             const uint32_t size_node = graph->argument_nodes[first + 2];
@@ -6687,8 +6732,10 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         }
         for (uint32_t i = 0; i < evaluated; i += 1)
         {
+            // A bit builtin's 128-bit integer is a frame object of its own (check_lower_temporary's), whose limbs its
+            // recipe loads.
             const TypeId type = stream->argument_conversions[first + i].type;
-            if (check_lower_memory(writer, type))
+            if (check_lower_memory(writer, type) && !cbuiltin_bits(call->id))
             {
                 check_lower_unsupported(writer, "builtins of long double and __int128 operands");
             }
@@ -6697,8 +6744,9 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = stream->values[node].type });
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
+            // A frame object's value is its value class's (a 128-bit integer's), as SET_LOCAL writes it.
             const uint32_t local = call->arguments[i];
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[local], local);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->value_classes[local], local);
             check_lower_operand(writer, node, i + 3, false, stream->argument_conversions[first + i].type);
         }
     }
@@ -6809,11 +6857,44 @@ static __attribute__((noinline)) void check_lower_floating_strict(CheckLowerWrit
     }
 }
 
+// isfpclass of a vector: each lane's classification by the scalar recipe of the lane loaded into the argument local,
+// stored into the result's frame object as an int (a float's lane) or a long long (a double's), 1 or 0, as clang's zero
+// extension of llvm.is.fpclass's lanes is; then the result vector. Out of line, as few tasks are.
+static __attribute__((noinline)) void check_lower_floating_lanes(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CBuiltinFloatLowerCall* call = writer->floating + task.node;
+    const uint8_t element = (uint8_t)call->argument_class;
+    const uint8_t lane_class = call->lane_bytes == 8 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+    for (uint32_t lane = 0; lane < call->lanes && writer->output->status == CHECK_PROGRAM_OK; lane += 1)
+    {
+        const uint64_t offset = (uint64_t)lane * call->lane_bytes;
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->result_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, call->vector_local);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_LOAD, element, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, element, call->argument_local);
+        check_lower_floating_recipe(writer, call, BUSTER_TYPE_INT);
+        if (lane_class == BUSTER_TYPED_CLASS_I64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET, lane_class, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, call->result_local);
+}
+
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
-    if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
+    if (call->lanes != 0)
+    {
+        check_lower_floating_lanes(writer, task);
+    }
+    else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
     {
         check_lower_floating_strict(writer, task);
     }
@@ -6921,10 +7002,17 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     {
         const CheckBuiltinFloatEffect* effect = stream->floating + selected;
         const CBuiltinId id = effect->runtime_builtin;
-        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL;
+        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL ||
+                              cbuiltin_float_class(id) || cbuiltin_float_signbit(id) || cbuiltin_float_canonicalize(id);
         const bool compare = id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
-        if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)) || (compare && count != 2))
+        // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated. Its first may be a vector.
+        const uint32_t arguments = selectors ? 6u : id == CBUILTIN_ISFPCLASS ? 2u : 1u;
+        const TypeId operand = id == CBUILTIN_ISFPCLASS && count == 2 ?
+                               type_unqualified(type_strip_aligned(program->types, stream->values[graph->argument_nodes[graph->argument_offsets[node]]].type)) : 0;
+        const uint8_t operand_kind = operand != 0 ? type_kind(program->types, operand) : BUSTER_TYPE_KIND_VOID;
+        const bool vector = operand_kind == BUSTER_TYPE_KIND_VECTOR || operand_kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+        if (effect->unsupported != 0 || (classify && count != arguments) || (compare && count != 2))
         {
             check_lower_unsupported(writer, "this floating builtin");
         }
@@ -6953,6 +7041,45 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
                 }
             }
         }
+        else if (classify && vector && check_lower_vector_of(writer, operand) == 0)
+        {
+            check_lower_unsupported(writer, "vector types of other than 4, 8, 16, 32 or 64 bytes");
+        }
+        else if (classify && vector)
+        {
+            const CheckVectorShape shape = check_vector_builtin_shape(program->types, operand);
+            if (shape.element != 4 && shape.element != 8)
+            {
+                // A long double's 16-byte element takes a vector of __int128 results (clang's signed vector of its
+                // elements' width), whose lanes these int and long long stores don't hold. Refuse, rather than write
+                // each lane's int at an offset no element stride gives.
+                check_lower_unsupported(writer, "isfpclass of a vector whose elements are not 4 or 8 bytes");
+            }
+            else
+            {
+                // isfpclass of a vector of floats or doubles: the vector stored into a frame object, then each lane
+                // classified by the scalar recipe and stored into the result's frame object (check_lower_floating_lanes).
+                const uint32_t index = writer->floating_count++;
+                const uint8_t class = check_lower_class(writer, effect->floating_type);
+                const uint32_t vector_local = check_lower_temporary_of(writer, operand);
+                const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+                writer->floating[index] = (CBuiltinFloatLowerCall){
+                    .id = id,
+                    .argument_local = check_lower_temporary(writer, class),
+                    .argument_class = class,
+                    .fenv_access = fenv_access,
+                    .class_mask = effect->class_mask,
+                    .vector_local = vector_local,
+                    .result_local = check_lower_temporary_of(writer, stream->values[node].type),
+                    .lanes = shape.lanes,
+                    .lane_bytes = shape.element,
+                };
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_FLOAT, .node = index, .type = stream->values[node].type });
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, vector_local);
+                check_lower_operand(writer, node, 3, false, operand);
+                writer->vectors = true;
+            }
+        }
         else if (classify)
         {
             const uint32_t index = writer->floating_count++;
@@ -6960,7 +7087,13 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             // A long double's argument is a frame object of its own, which fabsl clears the sign of in place.
             const uint32_t argument = check_lower_temporary(writer, class);
             const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
-            writer->floating[index] = (CBuiltinFloatLowerCall){ .id = id, .argument_local = argument, .argument_class = class, .fenv_access = fenv_access };
+            writer->floating[index] = (CBuiltinFloatLowerCall){
+                .id = id,
+                .argument_local = argument,
+                .argument_class = class,
+                .fenv_access = fenv_access,
+                .class_mask = effect->class_mask,
+            };
             if (selectors)
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
@@ -7590,9 +7723,26 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     const CBuiltinFortifyId fortify = info != NULL ? cbuiltin_fortify_id(info->name, info->name_length) : CBUILTIN_FORTIFY_COUNT;
+    const bool candidate = info != NULL && cbuiltin_library_candidate(info->name, info->name_length);
+    const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+    const uint32_t libgcc = candidate ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
+    const char* refusal = candidate ? cbuiltin_library_refusal(info->name, info->name_length) : NULL;
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
+    }
+    else if (library != CBUILTIN_LIBRARY_COUNT)
+    {
+        // A library builtin's call is a call of its function, by its prototype (#148, c_builtin_library.c).
+        check_lower_call_to(writer, node, check_lower_library_runtime(library), 0, 0);
+    }
+    else if (libgcc != BUSTER_CBUILTIN_LIBRARY_LIBGCC)
+    {
+        check_lower_call_to(writer, node, (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_POWIDF2 + libgcc), 0, 0);
+    }
+    else if (refusal != NULL)
+    {
+        check_lower_unsupported(writer, refusal);
     }
     else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
@@ -10540,7 +10690,7 @@ struct CheckLowerPart
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
-    uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
 };
 
 // Leaves `lowered` with its failure alone, `output` as it was at `mark` (check_program_lower's contract for a failure): a
@@ -10558,8 +10708,10 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
 // `declaring` is check_program_declaring's source-ordered list, including initializer-only tokens. Its logical
 // length is declaring_count; no padding is read here and the original declaration/linkage predicates still apply.
 // The normal path reuses that already-built compact list; the scalar oracle retains the independent full-token
-// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared.
-static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers, SymbolId* symbols, bool scalar)
+// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared. The names
+// are the `spelled` runtime functions' the unit spells, `identifiers[s]` runtime function `runtimes[s]`'s.
+static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
+                                          const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool scalar)
 {
     const CheckInput* input = program->input;
     const uint32_t* declarations = input->declarations;
@@ -10576,9 +10728,16 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
         const IdentId name = names[declaration];
         if (name != 0 && declarations[declaration] == declaration && linkage[declaration] == 2 && object != 0 && object < object_count)
         {
-            for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; r < CHECK_LOWER_RUNTIMES; r += 1)
+            // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
+            bool any = false;
+            for (uint32_t s = 0; s < spelled; s += 1)
             {
-                if (identifiers[r] == name && symbols[r] == 0)
+                any |= identifiers[s] == name;
+            }
+            for (uint32_t s = 0; any && s < spelled; s += 1)
+            {
+                const uint32_t r = runtimes[s];
+                if (identifiers[s] == name && symbols[r] == 0)
                 {
                     symbols[r] = object_symbols[object];
                 }
@@ -10852,21 +11011,42 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
-        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). One pass over the
-        // declarations, which only a unit that spells one of the names takes.
+        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). The names are the
+        // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
+        // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
+        // each declaration's name with them.
         shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
-        IdentId identifiers[CHECK_LOWER_RUNTIMES] = { 0 };
-        bool spelled = false;
+        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
+        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
+        {
+            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
+            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
+                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+            if (library != CBUILTIN_LIBRARY_COUNT)
+            {
+                const uint32_t runtime = check_lower_library_runtime(library);
+                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
+            }
+        }
+        IdentId identifiers[CHECK_LOWER_RUNTIMES];
+        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+        uint32_t spelled = 0;
         for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
         {
-            const char* name = check_lower_runtime_names[r];
-            const uint32_t length = (uint32_t)strlen(name);
-            identifiers[r] = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
-            spelled |= identifiers[r] != 0;
+            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
+            {
+                const char* name = check_lower_runtime_names[r];
+                const uint32_t length = (uint32_t)strlen(name);
+                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
+                identifiers[spelled] = identifier;
+                spelled_runtimes[spelled] = (uint16_t)r;
+                spelled += identifier != 0;
+            }
         }
-        if (spelled)
+        if (spelled != 0)
         {
-            check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, shared->declared_runtimes, BUSTER_SCALAR_PATH(scalar));
+            check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, spelled_runtimes, spelled, shared->declared_runtimes,
+                                          BUSTER_SCALAR_PATH(scalar));
         }
     }
     return valid;
@@ -11687,7 +11867,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->expression_nodes = writer->expression_nodes;
     part->batch_nodes = writer->batch_nodes;
     part->classified_nodes = writer->classified_nodes;
-    memcpy(part->runtimes, writer->runtimes, CHECK_LOWER_RUNTIMES);
+    memcpy(part->runtimes, writer->runtimes, (uint64_t)writer->runtime_count * sizeof(uint16_t));
 }
 
 // A part's lowering (check_lower_part_body), plain: every compile's without -g. Out of line, so that the program's
@@ -11762,7 +11942,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             if (lowered->runtime_symbols[runtime] == 0)
             {
                 lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
-                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint8_t)runtime;
+                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)runtime;
             }
             runtimes = true;
         }

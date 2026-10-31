@@ -88,6 +88,7 @@ static bool ir_optimize_benchmark_number(const char* text, uint32_t maximum, uin
 static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** argv)
 {
     uint32_t length = 4096;
+    uint32_t blocks = 128;
     uint32_t after_scalar = 0;
     uint32_t samples = BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES;
     uint32_t passes = BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
@@ -98,6 +99,10 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         if (strcmp(argv[i], "--instructions") == 0 && i + 1 < argc)
         {
             valid = ir_optimize_benchmark_number(argv[++i], 1000000, &length) && length >= 1;
+        }
+        else if (strcmp(argv[i], "--blocks") == 0 && i + 1 < argc)
+        {
+            valid = ir_optimize_benchmark_number(argv[++i], 1000000, &blocks) && blocks >= 1;
         }
         else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
         {
@@ -110,7 +115,7 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : -1;
+            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : strcmp(argv[i], "auto") == 0 ? 2 : -1;
             valid = only >= 0;
         }
         else if (strcmp(argv[i], "--pass") == 0 && i + 1 < argc)
@@ -125,12 +130,13 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         }
     }
     Arena input_arena = arena_reserve(64ull << 20);
-    Arena outputs[2] = {
+    Arena outputs[3] = {
+        arena_reserve(128ull << 20),
         arena_reserve(128ull << 20),
         arena_reserve(128ull << 20),
     };
     Arena scratch = arena_reserve(256ull << 20);
-    valid = valid && input_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && scratch.base != 0;
+    valid = valid && input_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && outputs[2].base != 0 && scratch.base != 0;
     const char* names[] = {
         "small-dag",
         "large-dag",
@@ -156,31 +162,32 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         }
         else
         {
-            valid = ir_optimize_test_jumps(&input_arena, &input, 128, false);
+            valid = ir_optimize_test_jumps(&input_arena, &input, blocks, false);
         }
-        IrOptimizeResult reference[2] = { 0 };
+        IrOptimizeResult reference[3] = { 0 };
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = passes;
-        for (uint32_t path = 0; valid && path < 2; path += 1)
+        for (uint32_t path = 0; valid && path < 3; path += 1)
         {
-            options.scalar = path == 0;
+            options.path = path == 0 ? BUSTER_IR_OPTIMIZE_SCALAR : path == 1 ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_AUTO;
             valid = ir_optimize(&input, &outputs[path], &scratch, options, &reference[path]).error == IR_OK;
         }
-        valid = valid && ir_optimize_test_equal(&reference[0].function, &reference[1].function);
+        valid = valid && ir_optimize_test_equal(&reference[0].function, &reference[1].function) && ir_optimize_test_equal(&reference[0].function, &reference[2].function);
         if (valid)
         {
             printf("ir-optimize %s input=%u output=%u blocks=%u/%u folded=%u output-bytes=%" PRIu64 " analysis-bytes=%" PRIu64 "\n", names[shape], input.instruction_count, reference[1].function.instruction_count, input.block_count, reference[1].function.block_count, reference[1].folded, reference[1].function.arena_bytes, reference[1].scratch_bytes);
         }
         arena_pop_to(&outputs[0], 0);
         arena_pop_to(&outputs[1], 0);
-        uint32_t repetitions[2] = { 1, 1 };
-        double times[2][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
-        double ticks[2][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
-        for (uint32_t path = 0; valid && path < 2; path += 1)
+        arena_pop_to(&outputs[2], 0);
+        uint32_t repetitions[3] = { 1, 1, 1 };
+        double times[3][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
+        double ticks[3][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
+        for (uint32_t path = 0; valid && path < 3; path += 1)
         {
             if (only < 0 || only == (int)path)
             {
-                options.scalar = path == 0;
+                options.path = path == 0 ? BUSTER_IR_OPTIMIZE_SCALAR : path == 1 ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_AUTO;
                 uint64_t elapsed = 0;
                 while (valid && elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS && repetitions[path] < (1u << 20))
                 {
@@ -196,21 +203,22 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
         }
         for (uint32_t sample = 0; valid && sample < samples; sample += 1)
         {
-            for (uint32_t order = 0; valid && order < 2; order += 1)
+            for (uint32_t order = 0; valid && order < 3; order += 1)
             {
-                const uint32_t path = (order + sample) & 1;
+                // Each path takes a turn running first.
+                const uint32_t path = (order + sample) % 3;
                 if (only < 0 || only == (int)path)
                 {
-                    if (path == 1 && after_scalar != 0)
+                    if (path != 0 && after_scalar != 0)
                     {
-                        options.scalar = true;
+                        options.path = BUSTER_IR_OPTIMIZE_SCALAR;
                         const uint64_t until = ir_optimize_benchmark_time() + (uint64_t)after_scalar * 1000000;
                         while (valid && ir_optimize_benchmark_time() < until)
                         {
                             valid = ir_optimize_benchmark_repeat(&input, &outputs[0], &scratch, options, 1);
                         }
                     }
-                    options.scalar = path == 0;
+                    options.path = path == 0 ? BUSTER_IR_OPTIMIZE_SCALAR : path == 1 ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_AUTO;
                     const uint64_t start = ir_optimize_benchmark_time();
                     const uint64_t start_ticks = ir_optimize_benchmark_ticks();
                     valid = ir_optimize_benchmark_repeat(&input, &outputs[path], &scratch, options, repetitions[path]);
@@ -221,7 +229,7 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
                 }
             }
         }
-        for (uint32_t path = 0; valid && path < 2; path += 1)
+        for (uint32_t path = 0; valid && path < 3; path += 1)
         {
             if (only < 0 || only == (int)path)
             {
@@ -234,7 +242,8 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
                 }
                 const double median = ir_optimize_benchmark_median(times[path], samples);
                 const double tsc = ir_optimize_benchmark_median(ticks[path], samples);
-                printf("  %s ns/function=%.1f [%.1f,%.1f] ns/input-instruction=%.3f TSC-ticks/input-instruction=%.3f instructions/second=%.0f\n", path == 0 ? "scalar" : "vector", median, minimum, maximum, median / input.instruction_count, tsc / input.instruction_count, (double)input.instruction_count * 1000000000.0 / median);
+                const char* name = path == 0 ? "scalar" : path == 1 ? "vector" : "auto";
+                printf("  %s ns/function=%.1f [%.1f,%.1f] ns/input-instruction=%.3f TSC-ticks/input-instruction=%.3f instructions/second=%.0f\n", name, median, minimum, maximum, median / input.instruction_count, tsc / input.instruction_count, (double)input.instruction_count * 1000000000.0 / median);
             }
         }
         arena_pop_to(&input_arena, 0);
@@ -245,7 +254,7 @@ static __attribute__((unused)) int run_ir_optimize_benchmark(int argc, char** ar
     arena_release(&input_arena);
     if (!valid)
     {
-        fprintf(stderr, "benchmark-ir-optimize failed: [--instructions N] [--samples 1..21] [--only scalar|vector] [--pass all|sccp|dce|cfg] [--after-scalar MS <= 1000]\n");
+        fprintf(stderr, "benchmark-ir-optimize failed: [--instructions N] [--blocks N] [--samples 1..21] [--only scalar|vector|auto] [--pass all|sccp|dce|cfg] [--after-scalar MS <= 1000]\n");
     }
     return valid ? 0 : 1;
 }

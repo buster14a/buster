@@ -3711,6 +3711,27 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){unsigned long a=(unsigned long)n,b=3,out=0;int overflow=__builtin_umull_overflow(a++,b++,&out);"
         "return (int)(out%97)+overflow*100+(int)(a%13)+(int)b;}", "typed-overflow-prototype-conversions-and-effects", clang);
+    // The other typed overflow builtins (#148) of boundary values, each from long long operands that convert to its
+    // prototype's type, the overflow and the stored value hashed; then a fold of constants and operands evaluated once.
+    check_test_program_source(test,
+        "static unsigned long h;static void mix(long long v){h=(h^(unsigned long)v)*1099511628211UL;}"
+        "int tested(int n){h=14695981039346656037UL;"
+        "const long long v[]={0,1,-1,2147483647LL,-2147483647LL-1,4294967295LL,9223372036854775807LL,-9223372036854775807LL-1,n,-n,n*1000003LL};"
+        "for(int i=0;i<11;i++)for(int j=0;j<11;j++){long long a=v[i],b=v[j];int si;long sl;long long sll;unsigned ui;unsigned long ul;unsigned long long ull;"
+        "mix(__builtin_sadd_overflow(a,b,&si));mix(si);mix(__builtin_saddl_overflow(a,b,&sl));mix(sl);mix(__builtin_saddll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_ssub_overflow(a,b,&si));mix(si);mix(__builtin_ssubl_overflow(a,b,&sl));mix(sl);mix(__builtin_ssubll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_smul_overflow(a,b,&si));mix(si);mix(__builtin_smull_overflow(a,b,&sl));mix(sl);mix(__builtin_smulll_overflow(a,b,&sll));mix(sll);"
+        "mix(__builtin_uadd_overflow(a,b,&ui));mix(ui);mix(__builtin_uaddl_overflow(a,b,&ul));mix((long long)ul);"
+        "mix(__builtin_uaddll_overflow(a,b,&ull));mix((long long)ull);mix(__builtin_usub_overflow(a,b,&ui));mix(ui);"
+        "mix(__builtin_usubl_overflow(a,b,&ul));mix((long long)ul);mix(__builtin_usubll_overflow(a,b,&ull));mix((long long)ull);"
+        "mix(__builtin_umul_overflow(a,b,&ui));mix(ui);mix(__builtin_umulll_overflow(a,b,&ull));mix((long long)ull);}"
+        "return (int)(h^(h>>32));}",
+        "typed-overflow-every-builtin-of-boundary-values", clang);
+    check_test_program_source(test,
+        "int tested(int n){int a=n,b=n*2,si=0;unsigned ui=0;long long sll=0;"
+        "int r=__builtin_sadd_overflow(a++,b++,&si)*1000+__builtin_usub_overflow(3u,4u,&ui)*100+__builtin_smulll_overflow(3037000500LL,3037000500LL,&sll)*10;"
+        "r+=__builtin_ssub_overflow(-2147483647-1,1,&si)+si%1000;return r+a+b+(int)(ui%1000)+(int)(sll%1000);}",
+        "typed-overflow-folds-and-operands-evaluated-once", clang);
     check_test_program_source(test,
         "int absent(void);int tested(int n){unsigned long a=__builtin_object_size(\"abc\",0);"
         "unsigned long b=__builtin_object_size(\"abc\",2);int ignored=__builtin_object_size((n++,(char*)0),0)==~0UL;"

@@ -148,9 +148,12 @@ definition. Its flags and edges:
   declaration of that function is plain `inline`; a plain inline definition is
   emitted. Inline-only calls and addresses go to the external symbol. Like Clang,
   `-fno-gnu89-inline` turns the option off in C99 and later modes but does not
-  change C89's GNU inline semantics. The checker currently rejects a GNU
-  `extern inline` definition followed by an ordinary definition of the same
-  function in one translation unit; this selection change does not accept it.
+  change C89's GNU inline semantics. A GNU `extern inline` definition followed
+  by an ordinary definition of the same function in one translation unit is
+  GNU89's idiom: the `extern inline` definition stays inline-only and the
+  ordinary one is the external definition, as Clang accepts it. Where a plain
+  inline declaration makes the `extern inline` body external, Clang emits that
+  body and ignores the later ordinary one; this selection does the same.
 - **Edges:** each body's evaluated references (calls, addresses and reads of
   static objects, from the checked expression walk: not `sizeof`, `alignof` or a
   `_Generic` association it doesn't select, and not the operands of `&&`, `||`

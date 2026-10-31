@@ -130,13 +130,13 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xf0b33adc74a14fb9ull
+#define BUSTER_X86_TEST_DIGEST 0xc41b44d654f1912full
 // The same for the stream with 32-bit addresses (--address32), for the one with APX's registers (--apx), and for those
 // of 32-bit and 16-bit modes (--mode32 and --mode16).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x89d61221b2e298c7ull
-#define BUSTER_X86_TEST_DIGEST_APX 0x9417f9289e033f50ull
-#define BUSTER_X86_TEST_DIGEST_32 0x7f789e7d53594ac3ull
-#define BUSTER_X86_TEST_DIGEST_16 0xc92ce60d94c512c1ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x52a5ccefd44d71f2ull
+#define BUSTER_X86_TEST_DIGEST_APX 0xdb7a16046c6f0decull
+#define BUSTER_X86_TEST_DIGEST_32 0x7667a4b1c4188b89ull
+#define BUSTER_X86_TEST_DIGEST_16 0x89a7588fe1dd8db8ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull

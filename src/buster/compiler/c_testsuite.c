@@ -4,7 +4,7 @@
 // The c-testsuite harness (#145), for the test-c-testsuite command:
 //
 //   build/compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH]
-//                                   [--id-order N] [--cross-check] [--keep] DIR
+//                                   [--id-order N] [--tier1] [--cross-check] [--keep] DIR
 //   build/compiler test-c-testsuite --self-test
 //
 // DIR is a checkout of c-testsuite (https://github.com/c-testsuite/c-testsuite) or its tests/single-exec directory. Each
@@ -24,6 +24,13 @@
 // direct path did: wrong code in a test the direct path can't link still fails. -c may refuse a test as unsupported,
 // exiting as a refusal does, only where the direct path refused it too. Then the object must define the functions and
 // objects that clang -O0 -c's (--clang's) defines, no more and no fewer (#129's selection, c_lowering_symbols.c).
+//
+// --tier1 compiles every test with the driver's --tier1 (c_check_tier1.c: each function Tier 1's pipeline takes by
+// Tier 1, the others by Tier 0, without unwind tables, which Tier 1's frames don't have yet), whose vector and scalar
+// paths assign registers by different algorithms (#140's interval coloring and its linear-scan twin), so that their
+// executables differ: the scalar path's is compiled a third time, with the ids in source order, and must be the same bytes
+// as with them in another order, and both paths' programs must run as expected. The report adds how many of the tests'
+// functions Tier 1 compiled (the vector path's --tier1-report).
 //
 // --self-test checks the harness itself, on tests of its own and a stand-in compiler (c_testsuite_self_test).
 //
@@ -86,6 +93,9 @@ struct CTestsuiteResult
 {
     uint8_t outcome;
     bool subset;
+    // With --tier1, the vector path's functions and those Tier 1 compiled (its --tier1-report).
+    uint32_t tier1_functions;
+    uint32_t tier1_compiled;
     char detail[256];
 };
 
@@ -104,6 +114,7 @@ struct CTestsuite
     uint32_t timeout;
     uint32_t compile_timeout;
     bool cross_check;
+    bool tier1;
     // The scalar path's compiles' --id-order, test i's this plus i.
     uint64_t id_order;
     CTestsuiteResult* results;
@@ -302,6 +313,40 @@ static bool c_testsuite_compiled(int status, bool timed_out, const char* log_pat
 
 // Whether the program at `program` exits with status 0 having written `expected`'s bytes, run in `directory` with its
 // output into `output`; if not, why, in `detail`.
+// A compile's arguments into `arguments`, which has room for BUSTER_C_TESTSUITE_ARGUMENTS: the compiler, --verify, with
+// --tier1 Tier 1's options, then `rest`'s `rest_count`, then a null pointer.
+#define BUSTER_C_TESTSUITE_ARGUMENTS 16
+static void c_testsuite_compile_arguments(char** arguments, const CTestsuite* suite, char* const* rest, uint32_t rest_count)
+{
+    uint32_t count = 0;
+    arguments[count++] = (char*)suite->compiler;
+    arguments[count++] = "--verify";
+    if (suite->tier1)
+    {
+        arguments[count++] = "--tier1";
+        arguments[count++] = "--tier1-report";
+        arguments[count++] = "-fno-asynchronous-unwind-tables";
+    }
+    for (uint32_t i = 0; i < rest_count; i += 1)
+    {
+        arguments[count++] = rest[i];
+    }
+    arguments[count] = 0;
+}
+
+// The functions of the vector path's --tier1-report in compile log `log_path`, and those Tier 1 compiled, into *functions
+// and *compiled: zeros without a report.
+static void c_testsuite_tier1_counts(const char* log_path, uint32_t* functions, uint32_t* compiled)
+{
+    uint64_t length = 0;
+    char* log = c_testsuite_read(log_path, &length);
+    const char* line = log != 0 ? strstr(log, "tier1\tfunctions=") : 0;
+    const char* taken = line != 0 ? strstr(line, "\ttier1=") : 0;
+    *functions = line != 0 ? (uint32_t)strtoul(line + strlen("tier1\tfunctions="), 0, 10) : 0;
+    *compiled = taken != 0 ? (uint32_t)strtoul(taken + strlen("\ttier1="), 0, 10) : 0;
+    free(log);
+}
+
 static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const char* directory, const char* output, const char* expected,
                             const char* what, char* detail, uint64_t capacity)
 {
@@ -414,7 +459,9 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     snprintf(program, sizeof(program), "%s/program-cc", directory);
     snprintf(log, sizeof(log), "%s/object.txt", directory);
     snprintf(output, sizeof(output), "%s/output-cc.txt", directory);
-    char* const compile[] = { (char*)suite->compiler, "--verify", "-c", (char*)source, "-o", object, 0 };
+    char* compile[BUSTER_C_TESTSUITE_ARGUMENTS];
+    char* const compile_rest[] = { "-c", (char*)source, "-o", object };
+    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest));
     char* const readelf[] = { "readelf", "-a", "-W", object, 0 };
     char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
     bool timed_out = false;
@@ -468,8 +515,10 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     char directory[PATH_MAX];
     char program[PATH_MAX];
     char scalar[PATH_MAX];
+    char plain[PATH_MAX];
     char log[PATH_MAX];
     char scalar_log[PATH_MAX];
+    char plain_log[PATH_MAX];
     char output[PATH_MAX];
     snprintf(source, sizeof(source), "%s/%s.c", suite->tests, name);
     snprintf(expected, sizeof(expected), "%s/%s.c.expected", suite->tests, name);
@@ -478,11 +527,20 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     snprintf(scalar, sizeof(scalar), "%s/program-scalar", directory);
     snprintf(log, sizeof(log), "%s/compile.txt", directory);
     snprintf(scalar_log, sizeof(scalar_log), "%s/compile-scalar.txt", directory);
+    snprintf(plain, sizeof(plain), "%s/program-scalar-plain", directory);
+    snprintf(plain_log, sizeof(plain_log), "%s/compile-scalar-plain.txt", directory);
     snprintf(output, sizeof(output), "%s/output.txt", directory);
     char order[48];
     snprintf(order, sizeof(order), "--id-order=%llu", (unsigned long long)(suite->id_order + index));
-    char* const vector_arguments[] = { (char*)suite->compiler, "--verify", source, "-o", program, "-lm", 0 };
-    char* const scalar_arguments[] = { (char*)suite->compiler, "--verify", "--scalar", order, source, "-o", scalar, "-lm", 0 };
+    char* vector_arguments[BUSTER_C_TESTSUITE_ARGUMENTS];
+    char* scalar_arguments[BUSTER_C_TESTSUITE_ARGUMENTS];
+    char* plain_arguments[BUSTER_C_TESTSUITE_ARGUMENTS];
+    char* const vector_rest[] = { source, "-o", program, "-lm" };
+    char* const scalar_rest[] = { "--scalar", order, source, "-o", scalar, "-lm" };
+    char* const plain_rest[] = { "--scalar", source, "-o", plain, "-lm" };
+    c_testsuite_compile_arguments(vector_arguments, suite, vector_rest, BUSTER_ARRAY_LENGTH(vector_rest));
+    c_testsuite_compile_arguments(scalar_arguments, suite, scalar_rest, BUSTER_ARRAY_LENGTH(scalar_rest));
+    c_testsuite_compile_arguments(plain_arguments, suite, plain_rest, BUSTER_ARRAY_LENGTH(plain_rest));
     result->outcome = C_TESTSUITE_FAILED;
     bool valid = mkdir(directory, 0755) == 0;
     if (!valid)
@@ -497,13 +555,34 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     char scalar_detail[sizeof(result->detail)];
     const bool scalar_compiled = valid && c_testsuite_compiled(scalar_status, scalar_timed_out, scalar_log, "the compiler, --scalar", scalar_detail,
                                                                 sizeof(scalar_detail));
+    // With --tier1, the scalar path again with the ids in source order: its executable is the other's to compare with.
+    bool plain_timed_out = false;
+    const int plain_status = valid && suite->tier1 && scalar_compiled ? c_testsuite_run(plain_arguments, directory, plain_log, suite->compile_timeout, &plain_timed_out) : -1;
+    char plain_detail[sizeof(result->detail)];
+    const bool plain_compiled = suite->tier1 && scalar_compiled &&
+                                c_testsuite_compiled(plain_status, plain_timed_out, plain_log, "the compiler, --scalar with the ids in source order", plain_detail,
+                                                     sizeof(plain_detail));
+    if (suite->tier1 && compiled)
+    {
+        c_testsuite_tier1_counts(log, &result->tier1_functions, &result->tier1_compiled);
+    }
     if (valid && compiled != scalar_compiled)
     {
         snprintf(result->detail, sizeof(result->detail), "the vector path %s and the scalar path %s", compiled ? "compiles it" : "refuses it",
                  scalar_compiled ? "compiles it" : "refuses it");
         valid = false;
     }
-    else if (valid && compiled && !c_testsuite_same(program, scalar))
+    else if (valid && compiled && suite->tier1 && !plain_compiled)
+    {
+        snprintf(result->detail, sizeof(result->detail), "%s", plain_detail);
+        valid = false;
+    }
+    else if (valid && compiled && suite->tier1 && !c_testsuite_same(plain, scalar))
+    {
+        snprintf(result->detail, sizeof(result->detail), "the scalar path, with the ids in source order and in another, writes different executables");
+        valid = false;
+    }
+    else if (valid && compiled && !suite->tier1 && !c_testsuite_same(program, scalar))
     {
         snprintf(result->detail, sizeof(result->detail), "the vector path, and the scalar path with the ids in another order, write different executables");
         valid = false;
@@ -516,6 +595,8 @@ static void c_testsuite_one(const CTestsuite* suite, uint32_t index)
     if (valid && compiled)
     {
         valid = c_testsuite_ran(suite, program, directory, output, expected, "the program", result->detail, sizeof(result->detail));
+        // With --tier1, the scalar path's program too, whose code is another.
+        valid = valid && (!suite->tier1 || c_testsuite_ran(suite, scalar, directory, output, expected, "the scalar path's program", result->detail, sizeof(result->detail)));
         result->outcome = valid ? C_TESTSUITE_PASSED : C_TESTSUITE_FAILED;
     }
     else if (valid)
@@ -774,6 +855,17 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
     }
     printf("test-c-testsuite: %u tests: %u passed, %u unsupported, %u failed, %u not run", suite->count, counts[C_TESTSUITE_PASSED],
            counts[C_TESTSUITE_UNSUPPORTED], counts[C_TESTSUITE_FAILED], counts[C_TESTSUITE_NOT_RUN]);
+    uint64_t tier1_functions = 0;
+    uint64_t tier1_compiled = 0;
+    for (uint32_t i = 0; suite->tier1 && i < suite->count; i += 1)
+    {
+        tier1_functions += suite->results[i].tier1_functions;
+        tier1_compiled += suite->results[i].tier1_compiled;
+    }
+    if (suite->tier1)
+    {
+        printf("; Tier 1 compiled %" PRIu64 " of the compiled tests' %" PRIu64 " functions", tier1_compiled, tier1_functions);
+    }
     if (subset)
     {
         printf("; the subset's %u: %u passed", subset_count, subset_passed);
@@ -1037,6 +1129,10 @@ static int run_c_testsuite_tests(int argc, char** argv)
         {
             suite.cross_check = true;
         }
+        else if (strcmp(argv[i], "--tier1") == 0)
+        {
+            suite.tier1 = true;
+        }
         else if (strcmp(argv[i], "--keep") == 0)
         {
             keep = true;
@@ -1058,7 +1154,7 @@ static int run_c_testsuite_tests(int argc, char** argv)
     if (!valid || (self_test ? root != 0 : root == 0))
     {
         fprintf(stderr, "usage: compiler test-c-testsuite [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH] [--clang PATH] "
-                        "[--id-order N] [--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
+                        "[--id-order N] [--tier1] [--cross-check] [--keep] DIR\n       compiler test-c-testsuite --self-test\n");
     }
     else
     {

@@ -587,6 +587,41 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
     }
 }
 
+// An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
+// C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
+// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t, and then its spelling without it), and
+// a note naming the header that declares it, where its row has one.
+static void check_driver_implicit_library(Preprocessor* pp, PPSeverity severity, uint32_t source, uint32_t publication, const uint8_t* name, uint32_t length,
+                                          bool c99)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+    char sugared[256];
+    char plain[256];
+    bool sized = false;
+    const bool spelled = info != NULL && cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, c99,
+                                                                 sugared, sizeof(sugared), &sized) &&
+                         cbuiltin_library_spell(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, plain,
+                                                sizeof(plain), &sized);
+    char type[560];
+    snprintf(type, sizeof(type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "int ()", plain);
+    const char* header = info != NULL ? cbuiltin_library_header(info->header_token) : NULL;
+    char note[192];
+    snprintf(note, sizeof(note), "include the header <%s> or explicitly provide a declaration for '%.*s'", header != NULL ? header : "", (int)length, name);
+    const PPOutputDiagnosticNote notes[1] = { { .token = source, .message = note } };
+    if (c99)
+    {
+        pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
+                                    "call to undeclared library function '%.*s' with type %s; ISO C99 and later do not support implicit function declarations "
+                                    "[-Wimplicit-function-declaration]",
+                                    (int)length, name, type);
+    }
+    else
+    {
+        pp_diagnose_output_notes_at(pp, severity, source, publication, notes, header != NULL,
+                                    "implicitly declaring library function '%.*s' with type %s [-Wimplicit-function-declaration]", (int)length, name, type);
+    }
+}
+
 // The unit's diagnostics in token order: at each token, its floating-point pragmas, its warnings by flag, the addresses
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
@@ -894,10 +929,8 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
-                            "implicit declaration of library function '%.*s'%s [-Wimplicit-function-declaration]",
-                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
-                            input->implicit_function_c99 ? "; ISO C99 and later do not support implicit function declarations" : "");
+                        check_driver_implicit_library(pp, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
+                                                      intern_length(pp->table, name), input->implicit_function_c99);
                     }
                     else if (input->implicit_function_c99)
                     {
@@ -2285,6 +2318,11 @@ struct CheckDriverCommand
     const char* output;
     // The direct path's -l libraries and -L directories.
     const CheckDriverLibraries* libraries;
+    // --tier1 (c_check_tier1.c), and the report its units' emissions sum into, atomically: units compile on lanes; and
+    // --tier1-refusals' stream, or null.
+    bool tier1;
+    CheckTier1Report* tier1_report;
+    FILE* tier1_refusals;
 };
 
 typedef struct CheckUnitsKept CheckUnitsKept;
@@ -3034,6 +3072,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // of additional workers at emission time. No external budget changes the body's profitability decision itself.
     lanes.budget = &worker_budget;
     bool invalid_lanes = false;
+    // --tier1 compiles each function Tier 1's pipeline takes by Tier 1 (c_check_tier1.c, #138's piece for #140),
+    // --tier1-report prints how many each tier compiled and why Tier 1 refused the others, and --tier1-refusals each
+    // function Tier 0 compiled with the step that refused it, on standard error.
+    bool tier1_report = false;
     // The checker does not implement these ABI layout options. Clang selects the last =N packing option when one is
     // present; otherwise the last bare -f[no-]pack-struct selects packing. Never emit a different layout silently.
     const char* short_enums = NULL;
@@ -3148,6 +3190,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
+        }
+        else if (strcmp(arguments[i], "--tier1") == 0)
+        {
+            lanes.tier1 = true;
+        }
+        else if (strcmp(arguments[i], "--tier1-report") == 0)
+        {
+            tier1_report = true;
+        }
+        else if (strcmp(arguments[i], "--tier1-refusals") == 0)
+        {
+            lanes.tier1_refusals = stderr;
         }
         else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
         {
@@ -3281,6 +3335,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .unwind_tables = unwind_tables,
         .output = output,
         .libraries = &libraries,
+        .tier1 = lanes.tier1,
+        .tier1_report = &lanes.tier1_report,
+        .tier1_refusals = lanes.tier1_refusals,
     };
     if (worker_budget.dry_run)
     {
@@ -3301,7 +3358,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--shared-parts] [--lanes N] "
-                        "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+                        "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-report] [--tier1-refusals]] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (unsupported_pic != NULL)
     {
@@ -3316,8 +3373,25 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
+    else if ((tier1_report || lanes.tier1_refusals != NULL) && !lanes.tier1)
+    {
+        fprintf(stderr, "error: %s needs --tier1\n", tier1_report ? "--tier1-report" : "--tier1-refusals");
+    }
+    else if (lanes.tier1 && source_rows)
+    {
+        fprintf(stderr, "error: --tier1 doesn't support -g: Tier 1's code has no source rows yet\n");
+    }
+    else if (lanes.tier1 && unwind_tables && (emit_object || link))
+    {
+        fprintf(stderr, "error: --tier1 needs -fno-asynchronous-unwind-tables: Tier 1's frames have no unwind tables yet\n");
+    }
     else
     {
+        // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
+        if (lanes.tier1 && !check_tier1_ready)
+        {
+            check_tier1_ready = x86_zen5_initialize();
+        }
         // The command runs on its session's lanes (#905), which start here, after its options and before any source is
         // read (check_driver_run).
         CheckDriverRun run = {
@@ -3335,6 +3409,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             .result = 1,
         };
         result = check_driver_run(&run, announced);
+        if (tier1_report)
+        {
+            check_tier1_print_report(stderr, &lanes.tier1_report);
+        }
     }
     if (release)
     {

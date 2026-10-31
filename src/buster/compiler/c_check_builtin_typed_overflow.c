@@ -1,28 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's typed __builtin_umull_overflow wrapper. Include after c_check_builtin_atomic.c and c_check_builtin.c.
-// Unlike generic mul_overflow, this alias has the ordinary ULONG, ULONG, ULONG* prototype. Apply those conversions
-// first, retaining source-position tag history and original conversion records, then reuse the generic U64 action.
-// The source adapter evaluates every argument once and performs the separately retained destination store even when
-// the boolean/stored bits fold. Runtime expansion uses existing MUL_OVERFLOW with three unsigned-64 descriptors.
+// #148's typed overflow builtins: __builtin_sadd_overflow to __builtin_umulll_overflow, s or u for int's or unsigned's
+// signedness, add, sub or mul, and nothing, l or ll for int, long or long long (check_builtin_typed_overflows). Include
+// after c_check_builtin_atomic.c and c_check_builtin.c. Unlike the generic add, sub and mul_overflow, each has the
+// ordinary T, T, T* prototype of its type. Apply those conversions first, retaining source-position tag history and
+// original conversion records, then reuse the generic action of the converted operands. The source adapter evaluates
+// every argument once and performs the separately retained destination store even when the boolean/stored bits fold.
+// Runtime expansion uses the generic builtin's with the three converted descriptors.
 //
 // Only check_builtin_atomic_argument/convert are reused: those are ordinary source-operand/prototype conversion
 // helpers and never perform the atomic object's width, alignment, order or memory checks. Their immutable source
 // history and pointer qualifier/signedness diagnostics are useful here independently of atomic operations.
-// Qualifier loss into the ordinary ULONG* parameter warns; the converted store itself has unqualified ULONG type.
+// Qualifier loss into the ordinary T* parameter warns; the converted store itself has unqualified T type.
 // No input memory is read and no source store is executed by this checking action.
 //
 // Valid complex/extended-format conversions without exact payloads, or runtime wide-integer conversions the current
 // consumer cannot express, remain typed with explicit unsupported metadata. They do not fabricate a numeric fold.
-// Exact integer payloads through 128 bits may be truncated to ULONG before multiplication, as the prototype requires.
+// Exact integer payloads through 128 bits may be truncated to T before the operation, as the prototype requires.
 // Input/output records are bounded, ordinarily aligned, disjoint from each other and mutable type storage, and need
 // no padding. Empty batches permit null slices. Preparation may intern decay types in input order; groups of eight
 // feed the existing scalar/vector generic fold. Legal partitions have identical semantics and retain no work.
 //
-// Audited against llvmorg-23.1.1, without importing implementation: Builtins.td's UmulOverflow UOverflowTemplate has
-// no CustomTypeChecking; SemaChecking's BuiltinOverflow applies only to the generic three names; CGBuiltin scalarizes
-// the converted operands and stores umul_with_overflow's integer result through the converted pointer.
+// Audited against llvmorg-23.1.1, without importing implementation: Builtins.td's SOverflow and UOverflow templates
+// have no CustomTypeChecking; SemaChecking's BuiltinOverflow applies only to the generic three names; CGBuiltin
+// scalarizes the converted operands and stores the {s,u}{add,sub,mul}_with_overflow integer result through the
+// converted pointer.
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/include/clang/Basic/Builtins.td
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaChecking.cpp
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGBuiltin.cpp
@@ -47,6 +50,50 @@ struct CheckBuiltinTypedOverflowResult
     CBuiltinId runtime_builtin;
 };
 
+// A typed overflow builtin: its generic builtin (add, sub or mul_overflow) and its prototype's integer type.
+typedef struct CheckBuiltinTypedOverflowInfo CheckBuiltinTypedOverflowInfo;
+struct CheckBuiltinTypedOverflowInfo
+{
+    CBuiltinId id;
+    CBuiltinId generic;
+    TypeId type;
+};
+
+static const CheckBuiltinTypedOverflowInfo check_builtin_typed_overflows[] =
+{
+    { CBUILTIN_SADD_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_INT },
+    { CBUILTIN_SADDL_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_LONG },
+    { CBUILTIN_SADDLL_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_LLONG },
+    { CBUILTIN_SSUB_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_INT },
+    { CBUILTIN_SSUBL_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_LONG },
+    { CBUILTIN_SSUBLL_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_LLONG },
+    { CBUILTIN_SMUL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_INT },
+    { CBUILTIN_SMULL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_LONG },
+    { CBUILTIN_SMULLL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_LLONG },
+    { CBUILTIN_UADD_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_UINT },
+    { CBUILTIN_UADDL_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_ULONG },
+    { CBUILTIN_UADDLL_OVERFLOW, CBUILTIN_ADD_OVERFLOW, BUSTER_TYPE_ULLONG },
+    { CBUILTIN_USUB_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_UINT },
+    { CBUILTIN_USUBL_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_ULONG },
+    { CBUILTIN_USUBLL_OVERFLOW, CBUILTIN_SUB_OVERFLOW, BUSTER_TYPE_ULLONG },
+    { CBUILTIN_UMUL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_UINT },
+    { CBUILTIN_UMULL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_ULONG },
+    { CBUILTIN_UMULLL_OVERFLOW, CBUILTIN_MUL_OVERFLOW, BUSTER_TYPE_ULLONG },
+};
+
+// The typed overflow builtin `id`'s row, or null for any other builtin.
+static const CheckBuiltinTypedOverflowInfo* check_builtin_typed_overflow_info(CBuiltinId id)
+{
+    // Only umull_overflow's id and the family's range name one; another builtin's skips the scan.
+    const CheckBuiltinTypedOverflowInfo* result = NULL;
+    const bool candidate = id == CBUILTIN_UMULL_OVERFLOW || (id >= CBUILTIN_SADD_OVERFLOW && id <= CBUILTIN_UMULLL_OVERFLOW);
+    for (uint32_t i = 0; candidate && i < BUSTER_ARRAY_LENGTH(check_builtin_typed_overflows); i += 1)
+    {
+        result = check_builtin_typed_overflows[i].id == id ? check_builtin_typed_overflows + i : result;
+    }
+    return result;
+}
+
 static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBuiltinAction* input, CheckBuiltinTypedOverflowResult* output, CheckBuiltinAction* converted)
 {
     *output = (CheckBuiltinTypedOverflowResult)
@@ -58,7 +105,8 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
     };
     *converted = (CheckBuiltinAction){ 0 };
     bool accepted = false;
-    if (input->id != CBUILTIN_UMULL_OVERFLOW)
+    const CheckBuiltinTypedOverflowInfo* info = check_builtin_typed_overflow_info(input->id);
+    if (info == NULL)
     {
         check_action_diagnose(&output->builtin.action, CHECK_DIAG_UNSUPPORTED, 0);
     }
@@ -80,7 +128,7 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
             .extensions = input->extensions,
         };
         CheckBuiltinAtomicResult checked = { 0 };
-        const TypeId pointer = type_pointer(table, BUSTER_TYPE_ULONG);
+        const TypeId pointer = type_pointer(table, info->type);
         if (pointer == 0)
         {
             check_action_diagnose(&checked.action, CHECK_DIAG_RESOURCE, 2);
@@ -98,7 +146,7 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
             }
             if (checked.action.diagnostic == CHECK_DIAG_NONE)
             {
-                check_builtin_atomic_convert(table, &prototype, &checked, &value, i, i == 2 ? pointer : BUSTER_TYPE_ULONG);
+                check_builtin_atomic_convert(table, &prototype, &checked, &value, i, i == 2 ? pointer : info->type);
             }
             if (checked.action.diagnostic == CHECK_DIAG_NONE && wide)
             {
@@ -120,7 +168,7 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
         accepted = checked.action.diagnostic == CHECK_DIAG_NONE;
         if (accepted)
         {
-            converted->id = CBUILTIN_MUL_OVERFLOW;
+            converted->id = info->generic;
             converted->argument_count = 3;
             converted->node = input->node;
             converted->tag_completions = input->tag_completions;
@@ -128,7 +176,7 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
             converted->source_position = input->source_position;
             converted->extensions = input->extensions;
             output->evaluated_operands = 7;
-            output->runtime_builtin = CBUILTIN_MUL_OVERFLOW;
+            output->runtime_builtin = info->generic;
         }
     }
     if (!accepted)
