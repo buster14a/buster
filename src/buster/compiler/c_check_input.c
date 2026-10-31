@@ -357,6 +357,10 @@ struct CheckInput
     uint32_t* initializer_begins;
     uint32_t* initializer_ends;
     uint32_t* token_nodes;
+    // A variably modified typeof's evaluated operand, by its declaration's terminator token. The operand is not
+    // otherwise a runtime root: the type query carries only its type, and its side effects run where the declaration
+    // does, after the type's bounds and before its initializers.
+    uint32_t* evaluation_nodes;
     // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
@@ -632,6 +636,8 @@ struct CheckInputSpecifierJob
     bool is_typedef;
     bool is_inline;
     bool ready;
+    // Whether the typeof operand's type is variably modified, which evaluates the operand when the declaration is.
+    bool variably_modified;
 };
 
 struct CheckInputVarargs
@@ -1221,6 +1227,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
 static TypeId check_input_constant_type(CheckInputReader* reader, uint32_t first, uint32_t end);
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* value);
 static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type);
+static bool check_input_vla_modified(const TypeTable* types, TypeId type);
 
 static bool check_input_qualifier(uint32_t name, uint32_t* qualifiers)
 {
@@ -1802,12 +1809,12 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             for (uint32_t token = i + 2; kind == PARSE_KIND_TYPEOF && reader->specifier_owner == first &&
                  token < close && close < end && !region; token += 1)
             {
-                region = parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK;
+                region = parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK || parser->tree.roles[token] == PARSE_ROLE_OPEN_COMPOUND;
             }
             if (region && job == 0)
             {
-                // A type query may contain ordinary declarations. Suspend this specifier frame while the
-                // ordered source loop elaborates that region, then resume from the saved state at its close.
+                // Statement expressions and compound literals need the ordered declaration/initializer reader.
+                // Suspend this specifier frame until their objects and completed array types are available.
                 job = arena_push(reader->scratch, sizeof(*job), _Alignof(CheckInputSpecifierJob));
                 reader->output->resource |= job == 0;
                 if (job != 0)
@@ -1861,6 +1868,10 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             if (selected != 0 && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC))
             {
                 valid &= check_input_vla_query(reader, i + 2, close, selected);
+            }
+            if (job != 0)
+            {
+                job->variably_modified = selected != 0 && check_input_vla_modified(reader->types, selected);
             }
             i = selected != 0 ? close : i;
         }
@@ -4673,7 +4684,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             reader->constant_abi_origin = 0;
             const bool evaluated = check_input_evaluate_cached_at(reader, job->keyword + 2, job->closing, &value, &failed_token);
             check_input_warning_suppress(reader, job->keyword + 2, job->closing, check_constant_unevaluated_warnings());
-            job->result = evaluated ? value.type : 0;
+            job->result = evaluated && (value.flags & BUSTER_CHECK_BIT_FIELD) == 0 ? value.type : 0;
             job->result_abi_origin = evaluated ? reader->constant_abi_origin : 0;
             if (!evaluated && failed_token < parser->tokens.count && !reader->output->resource)
             {
@@ -5356,11 +5367,16 @@ static void check_input_expressions(CheckInputReader* reader)
         uint32_t first = BUSTER_CHECK_NONE;
         uint32_t last = BUSTER_CHECK_NONE;
         uint32_t count = 0;
+        // A typeof expression of variably modified type is evaluated, unlike a fixed-type one: its operand's value
+        // must reach the declaration as a discarded expression, which its initializer and other effects then run.
+        const CheckInputSpecifierJob* specifier_job = reader->specifier_finishes[token];
+        const bool evaluated_specifier = specifier_job != 0 &&
+                                         (specifier_job->variably_modified || check_input_vla_modified(reader->types, specifier_job->result));
         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
-            if (reader->specifier_finishes[token] != 0 && child < token)
+            if (specifier_job != 0 && !evaluated_specifier && child < token)
             {
-                // Keep query-region nodes checked, but do not make their value a runtime declaration operand.
+                // A fixed-type query keeps its region checked; its value is not a runtime declaration operand.
                 continue;
             }
             const uint32_t begin = reader->first_value[child];
@@ -5391,6 +5407,23 @@ static void check_input_expressions(CheckInputReader* reader)
         const uint32_t a = first;
         const uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
         const uint32_t c = b != BUSTER_CHECK_NONE ? reader->value_next[b] : BUSTER_CHECK_NONE;
+        if (evaluated_specifier && a != BUSTER_CHECK_NONE)
+        {
+            // The operand's value is the declaration's runtime side effect. Its graph token is the operand's own, so
+            // the declaration's token task wouldn't evaluate it through its token's first values; record it at the
+            // statement's terminator instead, where its bounds and initializers are written (check_program's token
+            // task).
+            uint32_t statement = specifier_job->first;
+            for (uint32_t steps = 0; statement < parser->tokens.count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR &&
+                 steps < parser->tokens.count; steps += 1)
+            {
+                statement = parser->tree.parents[statement];
+            }
+            if (statement < parser->tokens.count && parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR)
+            {
+                reader->output->evaluation_nodes[statement] = a;
+            }
+        }
         uint32_t node = BUSTER_CHECK_NONE;
         bool list = false;
         bool supported = true;
@@ -6492,6 +6525,7 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
     memset(input->initializer_begins, 0xff, bytes);
     memset(input->initializer_ends, 0xff, bytes);
     memset(input->token_nodes, 0xff, bytes);
+    memset(input->evaluation_nodes, 0xff, bytes);
     memset(input->body_declarations, 0xff, bytes);
     memset(input->declaration_bodies, 0xff, bytes);
     memset(input->parameter_next, 0xff, bytes);
@@ -6661,6 +6695,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(initializer_begins, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(initializer_ends, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(token_nodes, uint32_t);
+    BUSTER_CHECK_OUTPUT_ARRAY(evaluation_nodes, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warnings, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(constant_warning_ignored, uint8_t);
     BUSTER_CHECK_OUTPUT_ARRAY(body_declarations, uint32_t);
@@ -6940,6 +6975,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 input->initializer_begins[i] = BUSTER_CHECK_NONE;
                 input->initializer_ends[i] = BUSTER_CHECK_NONE;
                 input->token_nodes[i] = BUSTER_CHECK_NONE;
+                input->evaluation_nodes[i] = BUSTER_CHECK_NONE;
                 input->body_declarations[i] = BUSTER_CHECK_NONE;
                 input->declaration_bodies[i] = BUSTER_CHECK_NONE;
                 input->parameter_next[i] = BUSTER_CHECK_NONE;

@@ -5407,6 +5407,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_data_source_test.c"
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
+#include "c_check_typeof_compound_test.c"
 #include "c_check_cleanup_test.c"
 #include "c_check_musttail_test.c"
 #include "c_check_const_source_test.c"
@@ -5645,6 +5646,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&output);
             arena_release(&storage);
             check_test_sources(&test, clang);
+            check_test_typeof_compounds(&test, clang);
             check_test_constraints(&test, clang);
             check_test_initializer_nesting(&test, clang);
             check_test_member_scaling(&test, clang);
