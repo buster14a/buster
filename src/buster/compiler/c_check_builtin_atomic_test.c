@@ -425,7 +425,8 @@ static void check_builtin_atomic_test_constraints(CheckBuiltinAtomicTest* test, 
         const bool family = (id >= CBUILTIN_ATOMIC_LOAD && id <= CBUILTIN_ATOMIC_IS_LOCK_FREE) ||
                             (id >= CBUILTIN_SYNC_FETCH_AND_ADD && id <= CBUILTIN_SYNC_LOCK_RELEASE);
         if (family && id != CBUILTIN_ATOMIC_LOAD_N && id != CBUILTIN_ATOMIC_STORE_N && id != CBUILTIN_SYNC_SYNCHRONIZE &&
-            id != CBUILTIN_ATOMIC_THREAD_FENCE && id != CBUILTIN_ATOMIC_SIGNAL_FENCE)
+            id != CBUILTIN_ATOMIC_THREAD_FENCE && id != CBUILTIN_ATOMIC_SIGNAL_FENCE && id != CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE &&
+            id != CBUILTIN_ATOMIC_IS_LOCK_FREE)
         {
             result = check_builtin_atomic_test_action(table, id, NULL, UINT32_MAX);
             check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED &&
@@ -868,6 +869,219 @@ static void check_builtin_atomic_test_c11(CheckBuiltinAtomicTest* test, TypeTabl
     }
 }
 
+// A family's call through the shared dispatch (check_builtin_atomic_family), its object aligned to `alignment`.
+static CheckBuiltinAtomicResult check_builtin_atomic_test_family(TypeTable* table, CBuiltinId id, const CheckValue* arguments, uint32_t count, uint64_t alignment)
+{
+    const CheckBuiltinAtomicAction action = {
+        .id = id,
+        .arguments = arguments,
+        .argument_count = count,
+        .node = 148,
+        .source_position = UINT32_MAX,
+        .minimum_alignment = alignment,
+        .alignment_known = true,
+    };
+    CheckBuiltinAtomicResult result;
+    check_builtin_atomic_family(table, &action, &result);
+    return result;
+}
+
+// #148's families past the _n forms: the lock-free queries' constants, GNU's generic forms and the scoped families.
+static void check_builtin_atomic_test_families(CheckBuiltinAtomicTest* test, TypeTable* table)
+{
+    // The queries: a size that is a power of two up to the inline width is lock-free for one byte, a constant address
+    // aligned to it or a pointee aligned to it; __atomic_always_lock_free answers 0 where __atomic_is_lock_free asks
+    // libatomic, and neither is a constant of a size that isn't one.
+    // A function's pointee too, whose type GNU aligns to 4 bytes (#932's review: clang's evaluator takes it as complete).
+    const uint64_t sizes[] = { 0, 1, 2, 3, 4, 8, 16, 32 };
+    const TypeId pointees[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_CHAR, BUSTER_TYPE_INT, BUSTER_TYPE_LONG, type_function(table, BUSTER_TYPE_VOID, NULL, 0, 0) };
+    for (uint32_t wide = 0; wide < 2; wide += 1)
+    {
+        table->atomic_inline_16 = wide != 0;
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sizes); s += 1)
+        {
+            for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(pointees) + 2; p += 1)
+            {
+                // A typed pointer, the null pointer constant 0 and the constant address 8.
+                const bool null = p == BUSTER_ARRAY_LENGTH(pointees);
+                const bool address = p == BUSTER_ARRAY_LENGTH(pointees) + 1;
+                CheckValue arguments[2] = {
+                    check_test_integer(BUSTER_TYPE_ULONG, sizes[s]),
+                    null ? check_test_integer(BUSTER_TYPE_INT, 0) :
+                    address ? check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_VOID), 0, 8) :
+                              check_builtin_atomic_test_pointer(type_pointer(table, pointees[p]), 21, 0),
+                };
+                arguments[0].flags |= BUSTER_CHECK_ICE;
+                const uint64_t size = sizes[s];
+                const bool fits = (size & (size - 1)) == 0 && size <= (wide != 0 ? 16u : 8u);
+                const bool function = !null && !address && p == BUSTER_ARRAY_LENGTH(pointees) - 1;
+                const bool typed = !null && !address && p != 0 && (function ? size <= 4 : type_alignment(table, pointees[p]) >= size);
+                const bool aligned = null ? true : address ? size != 0 && 8 % size == 0 : false;
+                const bool lock_free = fits && (size == 1 || typed || aligned);
+                for (uint32_t always = 0; always < 2; always += 1)
+                {
+                    const CheckBuiltinAtomicResult result = check_builtin_atomic_test_action(table, always != 0 ? CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE : CBUILTIN_ATOMIC_IS_LOCK_FREE, arguments, 2);
+                    const bool constant = always != 0 || lock_free;
+                    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_BOOL &&
+                                                    (result.action.value.constant_kind == CHECK_CONSTANT_INTEGER) == constant &&
+                                                    (!constant || (result.action.value.integer == lock_free && (result.action.value.flags & BUSTER_CHECK_ICE) != 0 &&
+                                                                   result.evaluated_operands == 0)) &&
+                                                    (constant || result.evaluated_operands == 3),
+                                                    "a lock-free query's constant is clang's evaluator's, its arguments then never evaluated");
+                }
+            }
+        }
+    }
+    table->atomic_inline_16 = false;
+    CheckValue sized[2] = { (CheckValue){ .type = BUSTER_TYPE_ULONG, .category = CHECK_RVALUE }, check_test_integer(BUSTER_TYPE_INT, 0) };
+    CheckBuiltinAtomicResult result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE, sized, 2);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.evaluated_operands == 3,
+                                    "a query of a size that isn't a constant is none");
+    sized[1] = check_test_integer(BUSTER_TYPE_INT, 4);
+    sized[1].constant_kind = CHECK_CONSTANT_INTEGER;
+    sized[1].integer = 4;
+    sized[0] = check_test_integer(BUSTER_TYPE_ULONG, 4);
+    result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_IS_LOCK_FREE, sized, 2);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "a query's pointer isn't an integer but 0");
+    // GNU's generic forms: their value pointers' conversions, any complete object but an _Atomic or a _BitInt one.
+    const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 152);
+    const TypeId objects[] = { BUSTER_TYPE_INT, BUSTER_TYPE_LONG_DOUBLE, type_array(table, BUSTER_TYPE_CHAR, 3), type_atomic(table, BUSTER_TYPE_INT),
+                               type_bit_int(table, 32, false), BUSTER_TYPE_VOID, record };
+    const CBuiltinId generic[] = { CBUILTIN_ATOMIC_LOAD, CBUILTIN_ATOMIC_STORE, CBUILTIN_ATOMIC_EXCHANGE, CBUILTIN_ATOMIC_COMPARE_EXCHANGE };
+    const uint32_t counts[] = { 3, 3, 4, 6 };
+    for (uint32_t g = 0; g < BUSTER_ARRAY_LENGTH(generic); g += 1)
+    {
+        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(objects); o += 1)
+        {
+            // An array's qualifiers are its elements', so it is accessed as it is.
+            const TypeId object = o == 2 ? objects[o] : type_qualify(table, objects[o], BUSTER_TYPE_VOLATILE);
+            const TypeId value = type_conversion_operand(table, objects[o]);
+            CheckValue arguments[6] = {
+                check_builtin_atomic_test_pointer(type_pointer(table, object), 21, 0),
+                check_builtin_atomic_test_pointer(type_pointer(table, value), 22, 0),
+                check_builtin_atomic_test_pointer(type_pointer(table, value), 23, 0),
+                check_test_integer(BUSTER_TYPE_INT, 5),
+                check_test_integer(BUSTER_TYPE_INT, 5),
+                check_test_integer(BUSTER_TYPE_INT, 2),
+            };
+            // A load's and a store's order is their third argument, an exchange's its fourth.
+            if (g == 0 || g == 1)
+            {
+                arguments[2] = check_test_integer(BUSTER_TYPE_INT, 5);
+            }
+            if (g == 2)
+            {
+                arguments[3] = check_test_integer(BUSTER_TYPE_INT, 5);
+            }
+            result = check_builtin_atomic_test_family(table, generic[g], arguments, counts[g], 16);
+            const bool valid = o < 3;
+            const CheckDiagnostic expected = o < 3 ? CHECK_DIAG_NONE : o < 5 ? CHECK_DIAG_INCOMPATIBLE : CHECK_DIAG_INCOMPLETE;
+            check_builtin_atomic_test_expect(test, result.action.diagnostic == expected, "a generic form's object is any complete one but an _Atomic or a _BitInt");
+            if (valid)
+            {
+                // A store's value and a compare-exchange's desired one keep the first argument's qualifiers.
+                const TypeId kept = type_pointer(table, object);
+                const TypeId plain = type_pointer(table, value);
+                check_builtin_atomic_test_expect(test, result.action.value.type == (g == 3 ? BUSTER_TYPE_BOOL : BUSTER_TYPE_VOID) && result.value_type == value &&
+                                                result.object_size == type_size(table, objects[o]) && result.runtime_builtin == generic[g] &&
+                                                result.evaluated_operands == (1u << counts[g]) - 1 && result.volatile_access == (o != 2) && result.unsupported == 0 &&
+                                                result.argument_conversions[1].type == (g == 1 ? kept : plain) &&
+                                                (g == 0 || g == 1 || result.argument_conversions[2].type == (g == 2 || g == 3 ? kept : plain)) &&
+                                                (g != 3 || result.argument_conversions[3].type == BUSTER_TYPE_BOOL),
+                                                "a generic form's value pointers convert to its object's types");
+            }
+            result = check_builtin_atomic_test_family(table, generic[g], arguments, counts[g] - 1, 16);
+            check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a generic form takes its arguments exactly");
+        }
+        CheckValue constant[6] = {
+            check_builtin_atomic_test_pointer(type_pointer(table, type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST)), 21, 0),
+            check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_INT), 22, 0),
+            g < 2 ? check_test_integer(BUSTER_TYPE_INT, 5) : check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_INT), 23, 0),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+        };
+        result = check_builtin_atomic_test_family(table, generic[g], constant, counts[g], 16);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == (g == 0 ? CHECK_DIAG_NONE : CHECK_DIAG_MODIFIABLE_REQUIRED),
+                                        "a generic form writes no const object, which a load reads");
+    }
+    // The scoped families: their bases' operations with a scope last, checked against its model where it is an integer
+    // constant expression, and evaluated.
+    const struct
+    {
+        CBuiltinId id;
+        CBuiltinId runtime;
+        TypeId object;
+        uint32_t count;
+        uint32_t first_valid;
+        uint32_t last_valid;
+    } scoped[] = {
+        { CBUILTIN_SCOPED_ATOMIC_FETCH_ADD, CBUILTIN_ATOMIC_FETCH_ADD, BUSTER_TYPE_INT, 4, 0, 5 },
+        { CBUILTIN_SCOPED_ATOMIC_LOAD_N, CBUILTIN_ATOMIC_LOAD_N, BUSTER_TYPE_INT, 3, 0, 5 },
+        { CBUILTIN_HIP_ATOMIC_LOAD, CBUILTIN_ATOMIC_LOAD_N, BUSTER_TYPE_INT, 3, 1, 6 },
+        { CBUILTIN_HIP_ATOMIC_FETCH_ADD, CBUILTIN_ATOMIC_FETCH_ADD, BUSTER_TYPE_INT, 4, 1, 6 },
+        { CBUILTIN_OPENCL_ATOMIC_LOAD, CBUILTIN_ATOMIC_LOAD_N, type_atomic(table, BUSTER_TYPE_INT), 3, 1, 4 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(scoped); i += 1)
+    {
+        for (uint32_t model = 0; model < 8; model += 1)
+        {
+            for (uint32_t ice = 0; ice < 2; ice += 1)
+            {
+                CheckValue arguments[4] = {
+                    check_builtin_atomic_test_pointer(type_pointer(table, scoped[i].object), 21, 0),
+                    check_test_integer(BUSTER_TYPE_INT, 5),
+                    check_test_integer(BUSTER_TYPE_INT, 5),
+                    check_test_integer(BUSTER_TYPE_INT, 5),
+                };
+                arguments[scoped[i].count - 1] = check_test_integer(BUSTER_TYPE_INT, model);
+                arguments[scoped[i].count - 1].flags = ice != 0 ? BUSTER_CHECK_ICE : 0;
+                result = check_builtin_atomic_test_family(table, scoped[i].id, arguments, scoped[i].count, 16);
+                const bool valid = ice == 0 || (model >= scoped[i].first_valid && model <= scoped[i].last_valid);
+                check_builtin_atomic_test_expect(test, valid ? result.action.diagnostic == CHECK_DIAG_NONE && result.runtime_builtin == scoped[i].runtime &&
+                                                                   result.evaluated_operands == (1u << scoped[i].count) - 1 &&
+                                                                   result.argument_conversions[scoped[i].count - 1].type == BUSTER_TYPE_INT :
+                                                               result.action.diagnostic == CHECK_DIAG_INVALID_TYPE && result.action.diagnostic_operand == scoped[i].count - 1,
+                                                "a scope out of its model is clang's error where it is an integer constant expression");
+            }
+        }
+        CheckValue arguments[4] = {
+            check_builtin_atomic_test_pointer(type_pointer(table, scoped[i].object), 21, 0),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+            check_test_integer(BUSTER_TYPE_INT, 5),
+        };
+        result = check_builtin_atomic_test_family(table, scoped[i].id, arguments, scoped[i].count - 1, 16);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a scoped builtin needs its scope");
+        result = check_builtin_atomic_test_family(table, scoped[i].id, arguments, 0, 16);
+        check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "a scoped builtin of no arguments");
+    }
+    // HIP's object isn't _Atomic and OpenCL's is; __scoped_atomic_thread_fence's scope is any int; __opencl_atomic_init has none.
+    CheckValue arguments[4] = {
+        check_builtin_atomic_test_pointer(type_pointer(table, type_atomic(table, BUSTER_TYPE_INT)), 21, 0),
+        check_test_integer(BUSTER_TYPE_INT, 5),
+        check_test_integer(BUSTER_TYPE_INT, 1),
+        check_test_integer(BUSTER_TYPE_INT, 1),
+    };
+    arguments[2].flags = BUSTER_CHECK_ICE;
+    result = check_builtin_atomic_test_family(table, CBUILTIN_HIP_ATOMIC_LOAD, arguments, 3, 16);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "HIP's object isn't _Atomic");
+    arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, BUSTER_TYPE_INT), 21, 0);
+    result = check_builtin_atomic_test_family(table, CBUILTIN_OPENCL_ATOMIC_LOAD, arguments, 3, 16);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "OpenCL's object is _Atomic");
+    arguments[0] = check_test_integer(BUSTER_TYPE_INT, 5);
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 9);
+    arguments[1].flags = BUSTER_CHECK_ICE;
+    result = check_builtin_atomic_test_family(table, CBUILTIN_SCOPED_ATOMIC_THREAD_FENCE, arguments, 2, 16);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.evaluated_operands == 3 && result.runtime_builtin == CBUILTIN_ATOMIC_THREAD_FENCE,
+                                    "__scoped_atomic_thread_fence's scope is an ordinary int");
+    arguments[0] = check_builtin_atomic_test_pointer(type_pointer(table, type_atomic(table, BUSTER_TYPE_INT)), 21, 0);
+    result = check_builtin_atomic_test_family(table, CBUILTIN_OPENCL_ATOMIC_INIT, arguments, 2, 16);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.evaluated_operands == 3, "__opencl_atomic_init has no scope");
+    result = check_builtin_atomic_test_family(table, CBUILTIN_OPENCL_ATOMIC_INIT, arguments, 3, 16);
+    check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT, "__opencl_atomic_init takes two arguments");
+}
+
 static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char** argv)
 {
     const bool epoch = oracle_epoch_begin();
@@ -896,6 +1110,7 @@ static __attribute__((unused)) int run_check_builtin_atomic_tests(int argc, char
         {
             check_builtin_atomic_test_values(&test, &types.table);
             check_builtin_atomic_test_c11(&test, &types.table);
+            check_builtin_atomic_test_families(&test, &types.table);
             check_builtin_atomic_test_enum_pointers(&test, &types.table);
             check_builtin_atomic_test_orders(&test, &types.table);
             check_builtin_atomic_test_constraints(&test, &types.table);

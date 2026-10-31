@@ -427,6 +427,8 @@ struct CheckLowerAtomic
     CBuiltinId id;
     uint8_t operation;
     bool builtin;
+    // GNU's generic forms, whose values and results are where their arguments point (check_lower_atomic_generic).
+    bool by_pointer;
     bool native;
     bool postfix;
     bool discard;
@@ -5380,17 +5382,28 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = program->stream;
     const CheckProgramHelpers* helpers = &writer->output->helpers;
     const uint32_t selected = check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node);
-    const uint32_t count = graph->argument_counts[node];
+    // A scoped family's builtin calls its base's helper (check_builtin_atomic_base) on the base's arguments, its scope, the
+    // last, evaluated after them and dropped.
+    const uint32_t scoped = check_builtin_atomic_scope((CBuiltinId)graph->members[node]) != CHECK_BUILTIN_ATOMIC_SCOPE_NONE;
+    const uint32_t count = graph->argument_counts[node] - scoped;
     const uint32_t first = graph->argument_offsets[node];
-    const CBuiltinId source_id = (CBuiltinId)graph->members[node];
+    const CBuiltinId source_id = check_builtin_atomic_base((CBuiltinId)graph->members[node]);
     const bool c11 = check_builtin_atomic_c11(source_id);
     const bool compare = source_id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || source_id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
     const bool init = source_id == CBUILTIN_C11_ATOMIC_INIT;
     const uint32_t parameters = count + compare + init;
+    // clang's code computes the IEEE maximum and minimum by AVX10.2's vminmax in a function whose target has it, whose NaN
+    // results aren't the expansion's that the leaves compute (cbuiltin_atomic_rmw_ieee_body).
+    const bool minmax = source_id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && source_id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM &&
+                        (writer->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) != 0;
     CheckLowerAbi* abi = writer->abi;
     if (selected == BUSTER_CHECK_NONE || helpers->uses[selected].helper >= helpers->count)
     {
         check_lower_unsupported(writer, "this builtin");
+    }
+    else if (minmax)
+    {
+        check_lower_unsupported(writer, "clang's atomic IEEE maximum and minimum for a target with AVX10.2");
     }
     else if (abi->count >= abi->capacity || parameters > abi->argument_capacity - abi->argument_count)
     {
@@ -5455,6 +5468,10 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
             check_lower_instruction(writer, BUSTER_TYPED_CALL, vector_result ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, helper->result_type), call);
+            if (scoped != 0)
+            {
+                check_lower_operand(writer, node, count + 3, false, BUSTER_TYPE_VOID);
+            }
             for (uint32_t a = parameters; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
                 const bool inserted = (compare && a == 3) || (init && a == 2);
@@ -8753,7 +8770,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_BUILTIN_ATOMIC)
     {
         const uint32_t helper = check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node);
-        if (check_builtin_atomic_c11((CBuiltinId)graph->members[node]) && helper == BUSTER_CHECK_NONE)
+        const CBuiltinId id = check_builtin_atomic_base((CBuiltinId)graph->members[node]);
+        if (id == CBUILTIN_ATOMIC_ALWAYS_LOCK_FREE || id == CBUILTIN_ATOMIC_IS_LOCK_FREE)
+        {
+            check_lower_atomic_query(writer, node);
+        }
+        else if ((check_builtin_atomic_c11(id) && helper == BUSTER_CHECK_NONE) || check_builtin_atomic_generic(id))
         {
             check_lower_atomic_prepare(writer, node, true, discard);
         }

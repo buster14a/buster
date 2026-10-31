@@ -171,20 +171,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
             .minimum_alignment = evidence.minimum_alignment, .alignment_known = evidence.alignment_known,
         };
         CheckBuiltinAtomicResult checked;
-        if (check_builtin_atomic_rmw_rule(builtin) != NULL)
-        {
-            const CheckBuiltinAtomicRmwAction rmw = {
-                .source = action,
-                .order_ice_arguments = check_builtin_atomic_rmw_order_ice(builtin, arguments, count),
-            };
-            CheckBuiltinAtomicRmwResult full;
-            check_builtin_atomic_rmw(reader->types, &rmw, &full, 1);
-            checked = full.atomic;
-        }
-        else
-        {
-            check_builtin_atomic(reader->types, &action, &checked, 1);
-        }
+        check_builtin_atomic_family(reader->types, &action, &checked);
         result = checked.action;
     }
     else if (check_input_complex_builtin(builtin))

@@ -310,9 +310,10 @@ struct CheckProgram
     // or destructor attribute, both by the function's declarations up to the definition (check_program_body_eager),
     // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
     // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
-    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
-    // a program that no selection made, or in a unit without a target attribute or an x86 builtin's call (#148), which
-    // the check skips.
+    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
+    // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
+    // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
+    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
     uint8_t* body_eager;
 };
 
