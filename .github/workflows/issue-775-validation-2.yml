@@ -1,0 +1,82 @@
+name: Issue 775 target and transport validation
+on:
+  push:
+    branches: [codex/775-baseline-vectors]
+    paths: [.github/workflows/issue-775-validation-2.yml]
+permissions:
+  contents: read
+jobs:
+  apply:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: codex/775-baseline-vectors
+      - id: source
+        shell: bash
+        env:
+          PATCH: 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
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, base64, gzip, hashlib, pathlib
+          patch=gzip.decompress(base64.b64decode(os.environ['PATCH']))
+          assert hashlib.sha256(patch).hexdigest()=='5700c445752ac97cdd4282b8a2dabdfdf777f4f79fe18169560337321d205dfd'
+          pathlib.Path('/tmp/issue775.patch').write_bytes(patch)
+          PY
+          git apply --check /tmp/issue775.patch
+          git apply /tmp/issue775.patch
+          git diff --check
+          git config user.name ChatGPT
+          git config user.email noreply@openai.com
+          git add src/buster/compiler
+          env -u BUSTER_DCO_SIGN_OFF git commit -m 'test(tier0): qualify SSE2 and AVX transport including full floating windows'
+          git push origin HEAD:refs/heads/codex/775-baseline-vectors
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  validate:
+    needs: apply
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BUSTER_DEBUG_INFO: 0
+      BUSTER_ORACLE_CACHE: check
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ needs.apply.outputs.commit }}
+          persist-credentials: false
+      - run: bash tools/ci/setup-benchpress.sh
+      - name: Build and validate under the runner hook's shared lock
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/issue775"
+          taskset -c 0-7 ./build.sh > "$RUNNER_TEMP/issue775/build.log" 2>&1
+          result=$?
+          cat "$RUNNER_TEMP/issue775/build.log"
+          if [ "$result" -eq 0 ]; then
+            taskset -c 2 ./build/compiler test-tier0 > "$RUNNER_TEMP/issue775/tier0.log" 2>&1
+            a=$?
+            taskset -c 2 ./build/compiler test-checker --program-vectors > "$RUNNER_TEMP/issue775/vectors.log" 2>&1
+            b=$?
+            taskset -c 2 ./build/compiler test-x86-target > "$RUNNER_TEMP/issue775/target.log" 2>&1
+            c=$?
+            cat "$RUNNER_TEMP/issue775/tier0.log" "$RUNNER_TEMP/issue775/vectors.log" "$RUNNER_TEMP/issue775/target.log"
+            printf 'tier0=%s vectors=%s target=%s\n' "$a" "$b" "$c"
+            result=$((a | b | c))
+          fi
+          git rev-parse HEAD > "$RUNNER_TEMP/issue775/commit.txt"
+          exit "$result"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue775-validation-2
+          path: ${{ runner.temp }}/issue775
+          retention-days: 7
