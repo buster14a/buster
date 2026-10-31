@@ -78,6 +78,11 @@ typedef enum Tier1SelectRule
     // takes, saving another value live past it there (tier1_emit_cfg_fixed).
     TIER1_RULE_DIVIDE,
     TIER1_RULE_SHIFT,
+    // A signed division or remainder of values[0] by 2^`scale` (`immediate`'s bits as TIER1_RULE_DIVIDE's), rounded
+    // toward zero as C's: the dividend plus 2^scale - 1 where it is negative, a bias the scratch register computes from
+    // its sign, shifted right, or for the remainder masked and the bias taken back. An unsigned one is a shift or a mask
+    // (TIER1_RULE_IMMEDIATE).
+    TIER1_RULE_DIVIDE_POWER,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -517,6 +522,33 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_SYMBOL_ADDRESS:
         result.records[result.count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = destination, .mode = BUSTER_X86_MEMORY_RIP };
         break;
+    case TIER1_RULE_DIVIDE_POWER:
+    {
+        // The bias in the scratch register: the dividend's sign through every bit, then its low `shift` bits (for a shift
+        // of 1 the sign bit alone), added to the dividend by a lea, which leaves the dividend for the remainder's mask.
+        const uint8_t bias = BUSTER_TIER1_SELECT_SCRATCH;
+        const uint32_t bits = width * 8;
+        const uint32_t shift = holes->scale;
+        result.records[result.count++] = tier1_select_move(width, bias, holes->left);
+        if (shift > 1)
+        {
+            result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - 1) };
+        }
+        result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SHR_RM64_IMM8 : X86_FORM_SHR_RM32_IMM8, .rm = bias, .immediate = (int32_t)(bits - shift) };
+        result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_LEA_R64_M : X86_FORM_LEA_R32_M, .reg = destination, .rm = holes->left, .index = bias, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
+        if ((holes->immediate & 2) != 0)
+        {
+            const int32_t mask = (int32_t)((UINT64_C(1) << shift) - 1);
+            const uint16_t form = mask <= 127 ? (width == 8 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM32_IMM8) : (width == 8 ? X86_FORM_AND_RM64_IMM32 : X86_FORM_AND_RM32_IMM32);
+            result.records[result.count++] = (X86Instruction){ .form = form, .rm = destination, .immediate = mask };
+            result.records[result.count++] = tier1_select_register_record(width == 8 ? X86_FORM_SUB_R64_RM64 : X86_FORM_SUB_R32_RM32, destination, bias);
+        }
+        else
+        {
+            result.records[result.count++] = (X86Instruction){ .form = width == 8 ? X86_FORM_SAR_RM64_IMM8 : X86_FORM_SAR_RM32_IMM8, .rm = destination, .immediate = (int32_t)shift };
+        }
+        break;
+    }
     default:
         result.records[result.count++] = (X86Instruction){0};
         break;
@@ -529,7 +561,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 #define BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES (UINT64_C(1) << 28)
 #define BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT 4096u
 #define BUSTER_TIER1_SELECT_MAX_CANDIDATES 8
-#define BUSTER_TIER1_SELECT_MAX_FOLDS 3
+// The most links a pattern's walk follows through a truth value's chain or an address's (tier1_select_truth,
+// tier1_select_address): a bound on each node's walk, which every node of a chain takes again as its own pattern's.
+#define BUSTER_TIER1_SELECT_WALK 8
 
 // Cold per-node emission metadata. The hot rule-choice pass uses contiguous 16-lane cost arrays; the emitter consumes
 // all fields of one selected pattern. `values` preserve operand roles, including absent slots, while the effective-use
@@ -537,13 +571,14 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 // ordered argument slice, including duplicates, is in the effective-use CSR, immediate is its symbol ID, and width
 // is the result width (zero for void). Memory/conversion patterns keep logical byte widths, while the allocator and
 // frame consumer use tier1_select_width's 4-byte canonical storage for I8/I16. Conversion source_width is the source's
-// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. The original function stays immutable.
+// logical byte width, except canonical I1 zero-extension reads its 32-bit storage. `fold_count` counts the nodes the
+// pattern computes itself rather than reads (maximal munch's rank): which nodes the code leaves out follows from what the
+// chosen patterns read (tier1_select_plan). The original function stays immutable.
 typedef struct Tier1SelectPattern Tier1SelectPattern;
 struct Tier1SelectPattern
 {
     uint64_t immediate;
     uint32_t values[3];
-    uint32_t folds[BUSTER_TIER1_SELECT_MAX_FOLDS];
     int32_t displacement;
     uint8_t rule;
     uint8_t operation;
@@ -747,11 +782,7 @@ static bool tier1_select_load_folds(const Tier1SelectForest* forest, uint32_t co
 
 static void tier1_select_fold(const Tier1SelectForest* forest, uint32_t parent, uint32_t value, Tier1SelectPattern* pattern)
 {
-    if (tier1_select_tree_child(forest, parent, value))
-    {
-        assert(pattern->fold_count < BUSTER_TIER1_SELECT_MAX_FOLDS);
-        pattern->folds[pattern->fold_count++] = value;
-    }
+    pattern->fold_count += tier1_select_tree_child(forest, parent, value) ? 1 : 0;
 }
 
 static void tier1_select_add_candidate(const Tier1SelectForest* forest, uint32_t node, Tier1SelectCandidates* candidates, Tier1SelectPattern pattern)
@@ -786,30 +817,145 @@ static bool tier1_select_constant(const IrFunction* function, uint32_t value, ui
     return result;
 }
 
-// Only an explicit IR address with a representable displacement is folded. No narrowed address or speculative load
-// is introduced. A large offset remains an explicit unsupported operation until its materialization path exists.
-static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
+// Each integer predicate's negation: !(a < b) is a >= b, and so on.
+static const uint8_t tier1_select_negations[IR_PREDICATE_COUNT] = { IR_NE, IR_EQ, IR_GE, IR_GT, IR_LE, IR_LT, IR_UGE, IR_UGT, IR_ULE, IR_ULT };
+
+// C's truth values reach the IR as integers: `a < b` is `zext (icmp lt a, b)`, which `if`, `!` and `&&` test against
+// zero again, `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source nests. The walk follows such a
+// chain back from `value`, an I1, to the value it tests, through links that only `root`'s pattern uses, at most
+// BUSTER_TIER1_SELECT_WALK of them: each a zero extension, a zero and their comparison in consecutive nodes, right after
+// the value it extends, so that nothing the pattern doesn't compute runs between the test and the root. It returns the
+// node it stops at, counts the nodes it passed among the pattern's folds, and says whether an odd number of the links
+// were `eq`, where the root's truth is the stopped node's negation.
+static uint32_t tier1_select_truth(const Tier1SelectForest* forest, uint32_t root, uint32_t value, Tier1SelectPattern* pattern, bool* negated)
 {
     const IrFunction* function = forest->function;
-    bool folded = false;
-    pattern->values[first] = pointer;
-    pattern->values[first + 1] = BUSTER_IR_NONE;
-    pattern->scale = 0;
-    pattern->displacement = 0;
-    if (function->op[pointer] == IR_ADDRESS && tier1_select_tree_child(forest, node, pointer))
+    bool odd = false;
+    bool walking = true;
+    for (uint32_t link = 0; walking && link < BUSTER_TIER1_SELECT_WALK; link += 1)
     {
-        const IrAddress address = function->addresses[function->c[pointer]];
-        if (address.offset == (int64_t)(int32_t)address.offset)
+        uint64_t zero = 1;
+        const uint32_t extended = function->op[value] == IR_ICMP ? function->a[value] : BUSTER_IR_NONE;
+        walking = extended != BUSTER_IR_NONE && function->c[value] <= IR_NE && extended + 2 == value && function->b[value] + 1 == value &&
+                  tier1_select_constant(function, function->b[value], &zero) && zero == 0 && function->op[extended] == IR_ZEXT &&
+                  function->type[function->a[extended]] == IR_I1 && function->a[extended] + 1 == extended && tier1_select_tree_child(forest, root, value) &&
+                  tier1_select_tree_child(forest, root, extended) && tier1_select_tree_child(forest, root, function->b[value]);
+        if (walking)
         {
-            pattern->values[first] = function->a[pointer];
-            pattern->values[first + 1] = function->b[pointer];
-            pattern->scale = (uint8_t)tier1_select_log2(address.scale);
-            pattern->displacement = (int32_t)address.offset;
-            tier1_select_fold(forest, node, pointer, pattern);
-            folded = true;
+            odd ^= function->c[value] == IR_EQ;
+            pattern->fold_count += 3;
+            value = function->a[extended];
         }
     }
-    return folded;
+    *negated = odd;
+    return value;
+}
+
+// The comparison `tested`, an ICMP of 32- or 64-bit integers or pointers that only `root`'s pattern uses, as the pattern's
+// own: its operands, their width, its predicate (with `negated`, its negation) and a constant right operand that fits as
+// the immediate.
+static bool tier1_select_comparison(const Tier1SelectForest* forest, uint32_t root, uint32_t tested, bool negated, Tier1SelectPattern* pattern)
+{
+    const IrFunction* function = forest->function;
+    const uint32_t left = function->a[tested];
+    const bool result = function->op[tested] == IR_ICMP && tier1_select_tree_child(forest, root, tested) &&
+                        (function->type[left] == IR_I32 || function->type[left] == IR_I64 || function->type[left] == IR_PTR);
+    if (result)
+    {
+        pattern->values[0] = left;
+        pattern->values[1] = function->b[tested];
+        pattern->width = (uint8_t)tier1_select_width(function->type[left]);
+        pattern->condition = negated ? tier1_select_negations[function->c[tested]] : (uint8_t)function->c[tested];
+        tier1_select_fold(forest, root, tested, pattern);
+        uint64_t immediate = 0;
+        if (tier1_select_constant(function, function->b[tested], &immediate) && tier1_select_immediate_fits(pattern->width, immediate))
+        {
+            pattern->values[1] = BUSTER_IR_NONE;
+            pattern->immediate = immediate;
+            pattern->compare_immediate = true;
+            tier1_select_fold(forest, root, function->b[tested], pattern);
+        }
+    }
+    return result;
+}
+
+// A memory operand's address: base + index * 2^scale + displacement, and the nodes its walk passed.
+typedef struct Tier1SelectAddress Tier1SelectAddress;
+struct Tier1SelectAddress
+{
+    int64_t displacement;
+    uint32_t base;
+    uint32_t index;
+    uint8_t scale;
+    uint8_t folds;
+};
+
+// The address continued from `address.base` through the nodes that only `root`'s pattern uses, at most
+// BUSTER_TIER1_SELECT_WALK of them: the conversions between a pointer and its 64 bits that the typed stream's integers
+// put around every address (`inttoptr`, `ptrtoint`), a 64-bit addition of a constant, and addresses, each taken whole
+// while the operand has room for its index, a constant index joining the displacement, and while the displacement fits
+// 32 bits. No narrowed address or speculative load is introduced: the walk stops at the base, the first node it can't
+// take.
+static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address)
+{
+    const IrFunction* function = forest->function;
+    bool walking = true;
+    for (uint32_t step = 0; walking && step < BUSTER_TIER1_SELECT_WALK; step += 1)
+    {
+        const uint32_t node = address.base;
+        const uint32_t op = function->op[node];
+        const uint32_t a = function->a[node];
+        const uint32_t b = function->b[node];
+        Tier1SelectAddress next = address;
+        uint64_t constant = 0;
+        uint32_t constant_node = BUSTER_IR_NONE;
+        bool taken = tier1_select_tree_child(forest, root, node);
+        if (taken && op == IR_ADDRESS)
+        {
+            const IrAddress operand = function->addresses[function->c[node]];
+            const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+            int64_t offset = 0;
+            taken = (b == BUSTER_IR_NONE || constant_index || address.index == BUSTER_IR_NONE) && !__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &offset) &&
+                    !__builtin_add_overflow(offset, operand.offset, &offset) && !__builtin_add_overflow(address.displacement, offset, &next.displacement);
+            next.index = b != BUSTER_IR_NONE && !constant_index ? b : address.index;
+            next.scale = b != BUSTER_IR_NONE && !constant_index ? (uint8_t)tier1_select_log2(operand.scale) : address.scale;
+            next.base = a;
+            constant_node = constant_index ? b : BUSTER_IR_NONE;
+        }
+        else if (taken && op == IR_ADD && function->type[node] == IR_I64)
+        {
+            const bool right = tier1_select_constant(function, b, &constant);
+            const bool left = !right && tier1_select_constant(function, a, &constant);
+            taken = (right || left) && !__builtin_add_overflow(address.displacement, (int64_t)constant, &next.displacement);
+            next.base = right ? a : b;
+            constant_node = right ? b : a;
+        }
+        else
+        {
+            taken = taken && ((op == IR_INTTOPTR && function->type[a] == IR_I64) || (op == IR_PTRTOINT && function->type[node] == IR_I64));
+            next.base = a;
+        }
+        walking = taken && next.displacement == (int64_t)(int32_t)next.displacement;
+        if (walking)
+        {
+            next.folds = (uint8_t)(address.folds + 1 + (constant_node != BUSTER_IR_NONE && tier1_select_tree_child(forest, root, constant_node) ? 1 : 0));
+            address = next;
+        }
+    }
+    return address;
+}
+
+// The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
+// with its scale and displacement. Returns whether the walk took anything.
+static bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
+{
+    const Tier1SelectAddress address = tier1_select_address(forest, node, (Tier1SelectAddress){ .base = pointer, .index = BUSTER_IR_NONE });
+    pattern->values[first] = address.base;
+    pattern->values[first + 1] = address.index;
+    pattern->scale = address.scale;
+    pattern->displacement = (int32_t)address.displacement;
+    pattern->fold_count += address.folds;
+    return address.folds != 0;
 }
 
 static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* forest, uint32_t node)
@@ -825,7 +971,6 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
     Tier1SelectPattern base =
     {
         .values = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
-        .folds = {BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE},
         .operation = (uint8_t)tier1_select_operation(op),
         .width = (uint8_t)width,
     };
@@ -857,6 +1002,21 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.values[0] = a;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A pointer's 64 bits, or the pointer of 64 bits, from an address: the address's lea, or the copy of what the
+        // conversions around it convert.
+        const Tier1SelectAddress address = op == IR_INTTOPTR || op == IR_PTRTOINT ? tier1_select_address(forest, node, (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE })
+                                                                                  : (Tier1SelectAddress){ .base = a, .index = BUSTER_IR_NONE };
+        if (address.folds != 0)
+        {
+            Tier1SelectPattern walked = base;
+            walked.rule = address.index == BUSTER_IR_NONE && address.displacement == 0 ? TIER1_RULE_COPY : TIER1_RULE_ADDRESS;
+            walked.values[0] = address.base;
+            walked.values[1] = address.index;
+            walked.scale = address.scale;
+            walked.displacement = (int32_t)address.displacement;
+            walked.fold_count = address.folds;
+            tier1_select_add_candidate(forest, node, &candidates, walked);
+        }
     }
     else if ((op == IR_TRUNC && (type == IR_I8 || type == IR_I16 || type == IR_I32) && tier1_select_memory_width(function->type[a]) != 0 && function->type[a] != IR_PTR) ||
              (op == IR_ZEXT && (type == IR_I8 || type == IR_I16 || integer) && (function->type[a] == IR_I1 || function->type[a] == IR_I8 || function->type[a] == IR_I16 || function->type[a] == IR_I32)) ||
@@ -868,6 +1028,18 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.source_width = function->type[a] == IR_I1 ? 4 : (uint8_t)tier1_select_memory_width(function->type[a]);
         base.intrinsic_cost = op == IR_SEXT && type == IR_I16 ? 2 : 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A truth value as an integer: the comparison it is, through C's truth values, right before the extension, its
+        // setcc and movzx already the extension's 32 (or 64) bits.
+        Tier1SelectPattern folded = base;
+        bool negated = false;
+        const uint32_t tested = op == IR_ZEXT && function->type[a] == IR_I1 && a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
+        if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
+        {
+            folded.rule = folded.compare_immediate ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE;
+            folded.source_width = 0;
+            folded.intrinsic_cost = 3;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if ((op == IR_NEG || op == IR_NOT) && integer)
     {
@@ -1005,18 +1177,79 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.immediate = (op == IR_SDIV || op == IR_SREM ? 1u : 0u) | (op == IR_SREM || op == IR_UREM ? 2u : 0u);
         base.intrinsic_cost = 8;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // By a power of two 2^k: unsigned, a shift right by k or a mask of k bits (a copy and zero for 2^0), and signed,
+        // TIER1_RULE_DIVIDE_POWER's sequence, for a positive divisor (k at most the width's bits less 2).
+        const uint32_t bits = width * 8;
+        uint64_t divisor = 0;
+        const bool constant = tier1_select_constant(function, b, &divisor);
+        divisor &= bits < 64 ? (UINT64_C(1) << bits) - 1 : UINT64_MAX;
+        const uint32_t shift = constant ? tier1_select_log2(divisor) : UINT32_MAX;
+        const bool is_signed = op == IR_SDIV || op == IR_SREM;
+        const bool remainder = op == IR_SREM || op == IR_UREM;
+        Tier1SelectPattern folded = base;
+        folded.values[1] = BUSTER_IR_NONE;
+        tier1_select_fold(forest, node, b, &folded);
+        const bool unsigned_power = shift < bits && (!is_signed || shift == 0);
+        const bool signed_power = is_signed && shift >= 1 && shift <= bits - 2;
+        const bool mask = (unsigned_power || signed_power) && tier1_select_immediate_fits(width, divisor - 1);
+        if (unsigned_power && !remainder && shift == 0)
+        {
+            folded.rule = TIER1_RULE_COPY;
+            folded.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (unsigned_power && !remainder)
+        {
+            folded.rule = TIER1_RULE_IMMEDIATE;
+            folded.operation = X86_OPERATION_SHR;
+            folded.immediate = shift;
+            folded.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (unsigned_power && mask)
+        {
+            folded.rule = TIER1_RULE_IMMEDIATE;
+            folded.operation = X86_OPERATION_AND;
+            folded.immediate = divisor - 1;
+            folded.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
+        else if (signed_power && (!remainder || mask))
+        {
+            folded.rule = TIER1_RULE_DIVIDE_POWER;
+            folded.scale = (uint8_t)shift;
+            folded.intrinsic_cost = 5;
+            tier1_select_add_candidate(forest, node, &candidates, folded);
+        }
     }
     else if (op == IR_ADDRESS)
     {
-        const IrAddress address = function->addresses[c];
-        if (address.offset == (int64_t)(int32_t)address.offset)
+        // The address's lea, its constant index in the displacement, through what its base's walk takes.
+        const IrAddress operand = function->addresses[c];
+        uint64_t constant = 0;
+        const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+        int64_t displacement = 0;
+        if (!__builtin_mul_overflow((int64_t)constant, (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
+            displacement == (int64_t)(int32_t)displacement)
         {
+            const Tier1SelectAddress start = {
+                .displacement = displacement,
+                .base = a,
+                .index = constant_index ? BUSTER_IR_NONE : b,
+                .scale = constant_index ? 0 : (uint8_t)tier1_select_log2(operand.scale),
+            };
+            const Tier1SelectAddress address = tier1_select_address(forest, node, start);
             base.rule = TIER1_RULE_ADDRESS;
-            base.values[0] = a;
-            base.values[1] = b;
-            base.displacement = (int32_t)address.offset;
-            base.scale = (uint8_t)tier1_select_log2(address.scale);
+            base.values[0] = address.base;
+            base.values[1] = address.index;
+            base.displacement = (int32_t)address.displacement;
+            base.scale = address.scale;
+            base.fold_count = address.folds;
             base.intrinsic_cost = 1;
+            if (constant_index)
+            {
+                tier1_select_fold(forest, node, b, &base);
+            }
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
     }
@@ -1077,23 +1310,13 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.values[0] = a;
         base.intrinsic_cost = 3;
         tier1_select_add_candidate(forest, node, &candidates, base);
-        if (a + 1 == node && function->op[a] == IR_ICMP && tier1_select_tree_child(forest, node, a) && (function->type[function->a[a]] == IR_I32 || function->type[function->a[a]] == IR_I64 || function->type[function->a[a]] == IR_PTR))
+        // The comparison the condition tests, through C's truth values, right before the branch: its jcc.
+        Tier1SelectPattern folded = base;
+        bool negated = false;
+        const uint32_t tested = a + 1 == node ? tier1_select_truth(forest, node, a, &folded, &negated) : BUSTER_IR_NONE;
+        if (tested != BUSTER_IR_NONE && tier1_select_comparison(forest, node, tested, negated, &folded))
         {
-            Tier1SelectPattern folded = base;
             folded.rule = TIER1_RULE_BRANCH_COMPARE;
-            folded.values[0] = function->a[a];
-            folded.values[1] = function->b[a];
-            folded.width = (uint8_t)tier1_select_width(function->type[function->a[a]]);
-            folded.condition = (uint8_t)function->c[a];
-            tier1_select_fold(forest, node, a, &folded);
-            uint64_t immediate = 0;
-            if (tier1_select_constant(function, function->b[a], &immediate) && tier1_select_immediate_fits(folded.width, immediate))
-            {
-                folded.values[1] = BUSTER_IR_NONE;
-                folded.immediate = immediate;
-                folded.compare_immediate = true;
-                tier1_select_fold(forest, node, function->b[a], &folded);
-            }
             tier1_select_add_candidate(forest, node, &candidates, folded);
         }
     }
@@ -1416,17 +1639,51 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     if (error == TIER1_SELECT_OK)
     {
+        // What the code computes, from the last node back: a node with an effect (a store, a call, a terminator, a
+        // volatile load), a parameter, a phi and its operands, which its edges' moves read, a node nothing uses, which the
+        // optimizer kept for a fault it may raise (a load or a division), and each value a computed node's pattern reads.
+        // Every other node is covered: its users' patterns compute it themselves, a constant as an immediate, a load as a
+        // memory operand, an address as a displacement, a truth value's chain as a branch's comparison, however deep their
+        // walks went. A non-phi node's values precede it, so each is final when the walk back reaches it.
+        uint8_t* needed = plan.covered;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const uint32_t operand_count = function->op[node] == IR_PHI ? (uint32_t)ir_operand_count(function, node) : 0;
+            needed[node] |= function->op[node] == IR_PHI ? 1 : 0;
+            for (uint32_t p = 0; p < operand_count; p += 1)
+            {
+                needed[ir_operand(function, node, p, blocks[node]).value] = 1;
+            }
+        }
         for (uint32_t reverse = count; reverse != 0; reverse -= 1)
         {
             const uint32_t node = reverse - 1;
-            if (plan.covered[node] == 0)
+            const uint32_t op = function->op[node];
+            needed[node] |= tier1_select_barrier(function, node) || op == IR_BR || op == IR_CBR || op == IR_RET || op == IR_UNREACHABLE || op == IR_PARAM || uses[node] == 0 ? 1 : 0;
+            const Tier1SelectPattern* pattern = &plan.patterns[node];
+            if (needed[node] != 0 && pattern->rule == TIER1_RULE_CALL)
             {
-                const Tier1SelectPattern* pattern = &plan.patterns[node];
-                for (uint32_t f = 0; f < pattern->fold_count; f += 1)
+                const IrCall call = function->calls[function->b[node]];
+                for (uint32_t argument = 0; argument < call.argument_count; argument += 1)
                 {
-                    plan.covered[pattern->folds[f]] = 1;
+                    needed[function->extra[call.argument_first + argument]] = 1;
+                }
+                if (op == IR_CALL_INDIRECT)
+                {
+                    needed[function->a[node]] = 1;
                 }
             }
+            for (uint32_t operand = 0; needed[node] != 0 && pattern->rule != TIER1_RULE_CALL && operand < 3; operand += 1)
+            {
+                if (pattern->values[operand] != BUSTER_IR_NONE)
+                {
+                    needed[pattern->values[operand]] = 1;
+                }
+            }
+        }
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            plan.covered[node] = needed[node] ^ 1;
         }
         for (uint32_t node = 0; node < count; node += 1)
         {
