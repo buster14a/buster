@@ -1,0 +1,350 @@
+diff --git a/docs/ir-value-numbering.md b/docs/ir-value-numbering.md
+index 693fc63..5808454 100644
+--- a/docs/ir-value-numbering.md
++++ b/docs/ir-value-numbering.md
+@@ -14,17 +14,54 @@ then repeatedly partitions each class by the classes of its operands. An old
+ class is part of the next key, so refinement only splits. Phis compare their
+ incoming values in CFG predecessor order, regardless of the side-table order.
+ They may establish equivalent cyclic recurrences. Refinement ends when no
+-class splits. After `sweep_limit` rounds (64 by default), scalar hashing
+-completes the same fixed point; a limit never authorizes an unfinished
++class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
++complete the same fixed point; a limit never authorizes an unfinished
+ optimistic substitution.
+ 
+ Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
+ 16-instruction batch. Every column has its exact logical length, partial
+ loads/stores are masked, and zero length performs no column access. Phi tails
+-are hashed separately. Stable merge sorting compares the full keys and phi
+-operands after comparing hashes; hash collisions never establish equality.
++are hashed separately. `ir_gvn_partition_group` interns those already materialized
++keys in a bounded scratch hash table. A folded hash selects a bucket; the
++original full-key and predecessor-ordered phi comparison establishes equality.
+ The analysis owns these columns in scratch. They are not persistent IR fields.
+ 
++## Bounded partition grouping (#866)
++
++Previously every round comparison-sorted every instruction, even when almost
++all keys were distinct. Grouping now reuses the two existing `n`-element `u32`
++sort columns as bucket heads and representative links. The bucket count is the
++largest power of two not exceeding `n`; there is no new scratch allocation,
++padding or signed-gather bound. Empty input accesses neither column. Only the
++first member of a key class is inserted, so a large duplicate class does not
++create a long chain. The existing eight-lane key hashing is retained; table
++probes are scalar indexed loads rather than AVX-512 gathers. No host-specific
++crossover threshold is introduced.
++
++Each round permits at most `8 * n` representative comparisons. If another probe
++would be needed, it abandons the partial grouping and runs the original stable
++comparison sort on the same keys. The sort initializes its own index order and
++overwrites every tentative class. This bounds hostile collisions by a linear
++probe prefix plus the original `O(n log n)` key-comparison bound. The budget is
++a worst-case work guard, not a measured performance crossover. Explicit scalar
++completion bypasses hashing and takes that sorted oracle directly.
++
++Neither grouping path changes the old class column before the new partition
++is complete. Numbering classes in first-occurrence order instead of sorted-key
++order only renames the equivalence classes: their members, predecessor-ordered
++phi relations and parent-class splits remain the same. By induction the entire
++refinement sequence is unchanged up to renaming, including cyclic recurrences
++and the number of rounds. The subsequent dominance walk chooses representatives
++by instruction traversal and class equality, not by the numeric class order.
++Thus this is not an acyclic-only dispatch to the weaker available-expression
++oracle, nor does it eliminate whole-function refinement rounds.
++
++`IrGvnResult.partition_probes` counts the bounded lookup comparisons across
++rounds. `partition_sort_fallbacks` counts collision-budget completions, separately
++from the existing sweep-limit `fallback` flag. A forced sorted round is not a
++collision fallback. These counters describe work, not elapsed time or generated
++program performance.
++
+ A dominator-tree walk chooses a previously executed representative from each
+ class. Bucket insertions are undone when leaving a dominator subtree. Equal
+ expressions in sibling blocks therefore remain separate. The scalar oracle
+@@ -59,10 +96,31 @@ cover cyclic congruences and deliberate recurrence splits, reordered phi
+ inputs, sibling dominance, undef taint, repeated faulting operations,
+ effects, unreachable copy cycles, random DAGs with planted duplicates,
+ forced completion, guarded tails, forced hash collisions and partial
+-allocation rollback. This is focused local correctness evidence; target-host
++allocation rollback. Direct grouping tests check both initial and refined
++partitions against the independent full-key relation and the sorted oracle at
++empty, tiny, vector and power-of-two boundaries through 257 instructions.
++The table, links, output classes and hashes end at protected pages. Distinct
++full-hash collisions exercise the exact probe-budget boundary and sort restart;
++a single duplicate class must not trigger it. A 4,100-instruction DAG keeps
++1,024 planted eliminations, verifies interpreted behavior, and checks that no
++sort fallback is needed. Forced sorted completion must preserve the rewritten
++function, class count, round count and scratch usage. This is focused local correctness evidence; target-host
+ compile-time, emitted-code and complete pipeline measurements remain pending.
+ 
+ The implementation is original. The algorithmic reference is Alpern, Wegman
+ and Zadeck, [Detecting Equality of Variables in Programs (1988)](
+ https://doi.org/10.1145/73560.73561), whose partition-refinement idea motivated
+ the monotone congruence solver. No source implementation was imported.
++
++
++## Performance acceptance
++
++The grouping change targets #866's repeated full comparison sorts. It does not
++claim that the partition solver now beats the weaker scalar algorithm, that
++all acyclic work is eliminated, or that the default C compilation path gets
++faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
++--samples 21` for the existing whole-public-stage fixture, including preparation
++and rewriting. Target acceptance still requires locked 9700X baseline/candidate
++measurements across repeated processes and effective placements, tiny and cyclic
++controls, and real-source IR qualification. Record raw evidence in
++`buster14a/buster-performance`, not this repository.
+diff --git a/src/buster/compiler/ir_optimize_gvn.c b/src/buster/compiler/ir_optimize_gvn.c
+index e81695e..842b972 100644
+--- a/src/buster/compiler/ir_optimize_gvn.c
++++ b/src/buster/compiler/ir_optimize_gvn.c
+@@ -8,6 +8,7 @@
+ 
+ #define BUSTER_IR_GVN_FIELDS 8
+ #define BUSTER_IR_GVN_HASH_MULTIPLIER UINT64_C(1099511628211)
++#define BUSTER_IR_GVN_PROBES_PER_INSTRUCTION 8
+ 
+ typedef struct IrGvnOptions IrGvnOptions;
+ struct IrGvnOptions
+@@ -23,6 +24,8 @@ struct IrGvnResult
+     uint32_t removed;
+     uint32_t classes;
+     uint64_t rounds;
++    uint64_t partition_probes;
++    uint64_t partition_sort_fallbacks;
+     uint64_t scratch_bytes;
+     bool fallback;
+ };
+@@ -260,7 +263,6 @@ static void ir_gvn_keys(IrGvnWork* work, bool initial, bool scalar)
+             {
+                 work->hashes[i] = ir_gvn_hash_one(work, i, initial);
+             }
+-            work->order[i] = i;
+         }
+     }
+ }
+@@ -289,12 +291,15 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, bool in
+     return result;
+ }
+ 
+-static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
++// The independent comparison-sort completion also bounds adversarial hash-table work. Neither grouping path
++// mutates the old classes: parent-class keys remain immutable until the complete partition is published.
++static uint32_t ir_gvn_partition_sorted(IrGvnWork* work, bool initial)
+ {
+-    (void)scalar;
+-
+-    ir_gvn_keys(work, initial, BUSTER_SCALAR_PATH(scalar));
+     const uint64_t n = work->ir.function->instruction_count;
++    for (uint32_t i = 0; i < n; i += 1)
++    {
++        work->order[i] = i;
++    }
+     for (uint64_t width = 1; width < n; width *= 2)
+     {
+         for (uint64_t first = 0; first < n; first += width * 2)
+@@ -322,6 +327,72 @@ static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
+         }
+         work->next_classes[work->order[i]] = classes;
+     }
++    return classes;
++}
++
++// Reuse the sort's two n-element u32 columns as bucket heads and representative links. The largest power of two
++// not exceeding n needs no extra allocation or padding. Only representatives enter a chain, so a wide duplicate
++// class costs one comparison per member, not a growing chain. Full keys (including ordered phi inputs) decide
++// equality; the folded hash selects a bucket only. Class IDs need not follow key order, only the same equivalence.
++//
++// Stop after a linear probe budget and restart the unchanged comparison sort on the already materialized keys.
++// This bounds a hostile all-collision round by O(n log n) key comparisons instead of quadratic probing. The table
++// probes use scalar indexed loads, not gathers; the preceding eight-lane SIMD key hashing stays unchanged.
++static uint32_t ir_gvn_partition_group(IrGvnWork* work, bool initial, bool sorted)
++{
++    const uint32_t n = work->ir.function->instruction_count;
++    uint32_t classes = 0;
++    if (!sorted && n != 0)
++    {
++        uint32_t buckets = 1;
++        while (buckets <= n / 2)
++        {
++            buckets *= 2;
++        }
++        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
++        const uint64_t budget = (uint64_t)n * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION;
++        uint64_t probes = 0;
++        for (uint32_t i = 0; i < n && !sorted; i += 1)
++        {
++            const uint64_t hash = work->hashes[i];
++            const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
++            uint32_t match = work->temporary_order[bucket];
++            bool equal = false;
++            while (match != BUSTER_IR_NONE && !equal && probes < budget)
++            {
++                probes += 1;
++                equal = ir_gvn_compare(work, i, match, initial) == 0;
++                if (!equal)
++                {
++                    match = work->order[match];
++                }
++            }
++            sorted = match != BUSTER_IR_NONE && !equal;
++            if (!sorted)
++            {
++                if (match == BUSTER_IR_NONE)
++                {
++                    work->order[i] = work->temporary_order[bucket];
++                    work->temporary_order[bucket] = i;
++                    classes += 1;
++                }
++                work->next_classes[i] = match == BUSTER_IR_NONE ? classes : work->next_classes[match];
++            }
++        }
++        work->statistics.partition_probes += probes;
++        work->statistics.partition_sort_fallbacks += sorted;
++    }
++    if (sorted)
++    {
++        classes = ir_gvn_partition_sorted(work, initial);
++    }
++    return classes;
++}
++
++static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
++{
++    ir_gvn_keys(work, initial, BUSTER_SCALAR_PATH(scalar));
++    const uint32_t classes = ir_gvn_partition_group(work, initial, scalar);
+     uint32_t* swap = work->classes;
+     work->classes = work->next_classes;
+     work->next_classes = swap;
+diff --git a/src/buster/compiler/ir_optimize_gvn_test.c b/src/buster/compiler/ir_optimize_gvn_test.c
+index 0b9522c..d351af6 100644
+--- a/src/buster/compiler/ir_optimize_gvn_test.c
++++ b/src/buster/compiler/ir_optimize_gvn_test.c
+@@ -166,7 +166,7 @@ static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena
+         options.sweep_limit = 0;
+         IrGvnResult fallback = { 0 };
+         const IrCheck fc = ir_optimize_gvn(f, scalar, scratch, options, &fallback);
+-        ir_optimize_test_expect(test, fc.error == IR_OK && fallback.fallback && ir_optimize_test_equal(&a.function, &fallback.function), "GVN forced scalar refinement completion is exact");
++        ir_optimize_test_expect(test, fc.error == IR_OK && fallback.fallback && fallback.classes == a.classes && fallback.rounds == a.rounds && fallback.scratch_bytes == a.scratch_bytes && ir_optimize_test_equal(&a.function, &fallback.function), "GVN forced scalar refinement completion is exact");
+     }
+     arena_pop_to(scalar, sm);
+     arena_pop_to(vector, vm);
+@@ -226,6 +226,102 @@ static void ir_gvn_test_limits(IrOptimizeTest* test, Arena* input, Arena* output
+     arena_pop_to(input, 0);
+ }
+ 
++// Direct producer/consumer checks for partition grouping. Class labels may differ from the sorted oracle, but the
++// complete equivalence relation must not. Every mutable grouping column and the hashes end at a protected page.
++static void ir_gvn_test_partitions(IrOptimizeTest* test)
++{
++    const long page = sysconf(_SC_PAGESIZE);
++    void* mapping = page >= 257 * (long)sizeof(uint64_t) ? mmap(0, (uint64_t)page * 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
++    bool ready = mapping != MAP_FAILED;
++    for (uint32_t p = 1; ready && p < 8; p += 2)
++    {
++        ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
++    }
++    ir_optimize_test_expect(test, ready, "GVN partition guarded columns setup");
++    uint8_t operations[257] = { 0 };
++    uint64_t fields[257 * BUSTER_IR_GVN_FIELDS] = { 0 };
++    uint32_t grouped[257] = { 0 };
++    const uint32_t tails[] = { 63, 64, 65, 127, 128, 129, 255, 256, 257 };
++    for (uint32_t size = 0; ready && size < 34 + BUSTER_ARRAY_LENGTH(tails); size += 1)
++    {
++        const uint32_t n = size < 34 ? size : tails[size - 34];
++        for (uint32_t kind = 0; kind < 4; kind += 1)
++        {
++            for (uint32_t initial = 0; initial < 2; initial += 1)
++            {
++                IrFunction f = { .instruction_count = n, .op = operations };
++                IrGvnWork work = {
++                    .ir = { .function = &f },
++                    .order = (uint32_t*)((char*)mapping + page - (uint64_t)n * sizeof(uint32_t)),
++                    .temporary_order = (uint32_t*)((char*)mapping + 3 * page - (uint64_t)n * sizeof(uint32_t)),
++                    .next_classes = (uint32_t*)((char*)mapping + 5 * page - (uint64_t)n * sizeof(uint32_t)),
++                    .hashes = (uint64_t*)((char*)mapping + 7 * page - (uint64_t)n * sizeof(uint64_t)),
++                    .fields = fields,
++                };
++                for (uint32_t i = 0; i < n; i += 1)
++                {
++                    operations[i] = IR_ADD;
++                    const uint32_t key = kind == 1 ? i % 7 : kind == 3 ? 0 : i;
++                    for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
++                    {
++                        // In collision mode each field independently distinguishes some keys.
++                        fields[(uint64_t)field * n + i] = kind == 2 ? (field == i % BUSTER_IR_GVN_FIELDS ? (uint64_t)i / BUSTER_IR_GVN_FIELDS + 1 : 0) : ((uint64_t)key << (field * 7)) ^ (UINT64_C(0x9e3779b97f4a7c15) * (field + 1));
++                    }
++                    work.hashes[i] = kind >= 2 ? 0 : ir_gvn_hash_one(&work, i, initial != 0);
++                }
++                const uint32_t classes = ir_gvn_partition_group(&work, initial != 0, false);
++                if (n != 0)
++                {
++                    memcpy(grouped, work.next_classes, (uint64_t)n * sizeof(uint32_t));
++                }
++                ir_optimize_test_expect(test, work.statistics.partition_probes <= (uint64_t)n * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION, "GVN partition probing obeys its linear budget");
++                const bool crowded = kind == 2 && n > 2 * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION + 1;
++                ir_optimize_test_expect(test, work.statistics.partition_sort_fallbacks == crowded, "GVN distinct full-hash collisions take bounded sort completion; duplicate classes do not");
++                const uint32_t sorted = ir_gvn_partition_group(&work, initial != 0, true);
++                ir_optimize_test_expect(test, classes == sorted, "GVN grouped and sorted partition counts agree");
++                for (uint32_t i = 0; i < n; i += 1)
++                {
++                    ir_optimize_test_expect(test, grouped[i] != 0 && grouped[i] <= classes, "GVN partition publishes every class within its range");
++                    for (uint32_t j = 0; j < n; j += 1)
++                    {
++                        bool equal = true;
++                        for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
++                        {
++                            equal = equal && fields[(uint64_t)field * n + i] == fields[(uint64_t)field * n + j];
++                        }
++                        ir_optimize_test_expect(test, (grouped[i] == grouped[j]) == equal && (work.next_classes[i] == work.next_classes[j]) == equal, "GVN grouped and sorted partitions match the independent full-key relation");
++                    }
++                }
++            }
++        }
++    }
++    if (mapping != MAP_FAILED)
++    {
++        munmap(mapping, (uint64_t)page * 8);
++    }
++}
++
++static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++{
++    IrFunction f = { 0 };
++    const bool created = ir_optimize_test_random_dag(input, &f, test, 4096);
++    ir_optimize_test_expect(test, created, "GVN 4100-instruction DAG allocation");
++    if (created)
++    {
++        for (uint32_t i = 4; i + 1 < f.instruction_count; i += 4)
++        {
++            ir_optimize_test_instruction(&f, i, f.op[i - 1], f.type[i - 1], f.a[i - 1], f.b[i - 1], f.c[i - 1]);
++        }
++        ir_gvn_test_compare(test, &f, vector, scalar, scratch, 1024, false);
++        IrGvnResult result = { 0 };
++        const IrCheck check = ir_optimize_gvn(&f, vector, scratch, ir_gvn_options(), &result);
++        ir_optimize_test_expect(test, check.error == IR_OK && result.partition_sort_fallbacks == 0 && !result.fallback, "GVN ordinary large DAG needs no comparison-sort completion");
++        ir_optimize_test_expect(test, check.error == IR_OK && result.partition_probes <= (uint64_t)f.instruction_count * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION * result.rounds, "GVN large DAG partition work stays within its per-round budget");
++    }
++    arena_pop_to(vector, 0);
++    arena_pop_to(input, 0);
++}
++
+ static void ir_gvn_test_ir(IrOptimizeTest* test)
+ {
+     Arena input = arena_reserve(16ull << 20);
+@@ -293,6 +389,7 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+         }
+         ir_gvn_test_dead_cycle(test, &input, &vector, &scalar, &scratch);
+         ir_gvn_test_limits(test, &input, &vector, &scratch);
++        ir_gvn_test_large_partition(test, &input, &vector, &scalar, &scratch);
+         for (uint32_t length = 0; length < 130; length += 1)
+         {
+             IrFunction f = { 0 };
+@@ -337,6 +434,7 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
+     if (valid)
+     {
+         ir_gvn_test_guards(&test);
++        ir_gvn_test_partitions(&test);
+         ir_gvn_test_ir(&test);
+         printf("ir-gvn: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+         result = test.failures == 0 ? 0 : 1;

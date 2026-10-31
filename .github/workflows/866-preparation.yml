@@ -1,22 +1,31 @@
-name: Issue 866 source preparation
+name: Issue 866 candidate publication
 on:
   push:
-    branches: [chatgpt/866-preparation]
+    branches: [chatgpt/866-publication]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  publish:
+    if: github.repository_id == '1421805693'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: e10b9ff75d58471cb5e6a1400e49767f9ea0fff9
-          persist-credentials: false
-      - name: Archive the exact base with its licenses
-        run: git archive --format=tar --prefix=buster/ HEAD > "$RUNNER_TEMP/buster-source.tar"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: issue-866-source
-          path: ${{ runner.temp }}/buster-source.tar
-          retention-days: 3
+          fetch-depth: 4
+      - name: Apply the reviewed patch to its exact base and publish only a new candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp tools/866.patch "$RUNNER_TEMP/866.patch"
+          printf '%s  %s\n' e704405d11eb63897f55f8d855876363063cc49ebf916af45d9e1e92ff6f02d8 "$RUNNER_TEMP/866.patch" | sha256sum --check
+          git checkout --detach e10b9ff75d58471cb5e6a1400e49767f9ea0fff9
+          git apply --check "$RUNNER_TEMP/866.patch"
+          git apply --index "$RUNNER_TEMP/866.patch"
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 3
+          git switch -c chatgpt/866-bounded-gvn
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'GVN: bound exact partition grouping instead of sorting every round (#866)'
+          git push origin HEAD:refs/heads/chatgpt/866-bounded-gvn
+          git show --stat --oneline HEAD
+          git ls-tree HEAD docs/ir-value-numbering.md src/buster/compiler/ir_optimize_gvn.c src/buster/compiler/ir_optimize_gvn_test.c
