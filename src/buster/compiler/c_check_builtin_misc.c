@@ -48,6 +48,12 @@ struct CheckBuiltinMiscAction
     // object's declaration alignment as clang gives it, its log2 plus 1, 0 when unknown: what folds an address.
     uint32_t pointer_object;
     uint8_t pointer_alignment;
+    // An alignment builtin's alignment as clang's evaluator reads it, where the call's evidence has it
+    // (CheckBuiltinCall.alignment_evaluated), with whether it has side effects: what its checks and folds read in place
+    // of the runtime view's value, which reads no const object's initializer.
+    bool alignment_evaluated;
+    bool alignment_side_effects;
+    unsigned __int128 alignment_value;
 };
 
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
@@ -401,15 +407,16 @@ static bool check_builtin_misc_align_integer(const TypeTable* table, TypeId type
 // The alignment builtins (cbuiltin_align, clang's BuiltinAlignment), of the raw arguments' types, before their lvalue
 // conversions: a source of an integer type (check_builtin_misc_align_integer) or an object pointer, an array decayed to its
 // element's pointer, a function and a function pointer neither, of up to 128 bits; then an alignment of such an integer
-// type. A constant alignment, which clang evaluates past its side effects, must be at least 1, at most 2 to the source's
-// width less 1 (a pointer's 64), and a power of 2, in that order; 1 draws -Wtautological-compare (recorded, not
-// reported). align_up and align_down are of the source's type, its qualifiers kept, and is_aligned is a bool. Each folds,
-// as an integer constant expression, where clang's evaluator does: of a source and an alignment that are constants without
-// side effects, in the source's width ((x + (a - 1)) & ~(a - 1), x & ~(a - 1) and (x & (a - 1)) == 0); and of an address
-// constant: with an alignment of 1, the same address or 1; else where the call's evidence gives its object's declaration
-// alignment (CheckBuiltinMiscAction.pointer_alignment), the same address or 1 where its alignment at the offset is at least
-// the alignment, the offset rounded or 0 where the object's is, and not at all otherwise. A folded integer evaluates
-// neither argument, as clang's code doesn't; an address still evaluates both, as clang computes it at run time.
+// type. A constant alignment, which clang evaluates past its side effects and through const objects' constant initializers
+// (CheckBuiltinMiscAction.alignment_evaluated), must be at least 1, at most 2 to the source's width less 1 (a pointer's
+// 64), and a power of 2, in that order; 1 draws -Wtautological-compare (recorded, not reported). align_up and align_down
+// are of the source's type, its qualifiers kept, and is_aligned is a bool. Each folds, as an integer constant expression,
+// where clang's evaluator does: of a source and an alignment that are constants without side effects, in the source's
+// width ((x + (a - 1)) & ~(a - 1), x & ~(a - 1) and (x & (a - 1)) == 0); and of an address constant: with an alignment of
+// 1, the same address or 1; else where the call's evidence gives its object's declaration alignment
+// (CheckBuiltinMiscAction.pointer_alignment), the same address or 1 where its alignment at the offset is at least the
+// alignment, the offset rounded or 0 where the object's is, and not at all otherwise. A folded integer evaluates neither
+// argument, as clang's code doesn't; an address still evaluates both, as clang computes it at run time.
 static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
     const CheckValue* raw = input->arguments;
@@ -440,24 +447,28 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
         output->unsupported |= BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE;
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, integer ? 0 : 1);
     }
-    else if (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE)
+    else
     {
-        const unsigned __int128 bits = values[1].integer & check_action_mask(alignment_width);
+        // The alignment as clang's evaluator reads it where the call's evidence has it, else the runtime view's constant.
+        const bool evaluated = input->alignment_evaluated;
+        const bool constant = evaluated || (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE);
+        const unsigned __int128 bits = (evaluated ? input->alignment_value : values[1].integer) & check_action_mask(alignment_width);
+        const bool effects = evaluated ? input->alignment_side_effects : (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         const bool negative = alignment_signed && (bits >> (alignment_width - 1)) != 0;
-        if (negative || bits == 0 || bits > (unsigned __int128)1 << (width - 1))
+        if (constant && (negative || bits == 0 || bits > (unsigned __int128)1 << (width - 1)))
         {
             output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
         }
-        else if ((bits & (bits - 1)) != 0)
+        else if (constant && (bits & (bits - 1)) != 0)
         {
             output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT;
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
         }
-        else
+        else if (constant)
         {
             alignment = bits;
-            known = (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+            known = !effects;
             output->warnings |= bits == 1 ? BUSTER_CHECK_BUILTIN_MISC_WARN_ALIGNED_TO_ONE : 0;
             output->warning_operands |= bits == 1 ? 2 : 0;
         }

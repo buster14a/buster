@@ -149,6 +149,39 @@ static void check_input_vararg_type(CheckInputReader* reader, uint32_t token)
     }
 }
 
+// The miscellaneous builtins' evidence (cbuiltin_misc_recorded), the call's record made: an alignment builtin's
+// alignment, its second argument from past `end` (its first's) to the call's closing parenthesis `token`, as clang's
+// evaluator reads it (BuiltinAlignment's EvaluateAsInt), the source evaluator's integer read as a constant context's
+// rvalue, which reads a const object's constant initializer wherever the expression holds one (`const int a = 3;`'s `a`,
+// `a + 0`, `(int)d` of a const double), where it gives one without a fault: the graph's runtime view of the argument reads
+// none, so the call's checks take this value instead (CheckBuiltinCall.alignment_evaluated). And expect_with_probability's
+// probability, which clang evaluates as a constant expression (EvaluateAsConstantExpr), const objects anywhere in it
+// read too (`one ? 0.5 : 0.25`): it never runs, so its subtree is checked as a constant context's
+// (BUSTER_CHECK_CONTEXT_VALUE, which reports no constraint of its own). Out of line, so that check_input_expressions'
+// walk keeps its frame and registers: inlined, the evaluator's state took the walk's frame from 376 to 904 bytes.
+static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader* reader, uint32_t node, uint32_t token, uint32_t count, uint32_t end,
+                                                                CheckBuiltinCall* evidence)
+{
+    CheckGraph* graph = &reader->output->graph;
+    const uint16_t builtin = reader->builtins[token];
+    const bool align = cbuiltin_align(builtin) && count == 2 && end < token;
+    const uint32_t last = align ? check_constant_punctuation(reader->parser, end + 1, token, PARSE_KIND_COMMA) : token;
+    CheckValue value = { 0 };
+    if (align && last == token && end + 1 < last && check_input_evaluate_cached(reader, end + 1, last, &value) && check_input_const_rvalue(reader, last, &value) &&
+        value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE)
+    {
+        evidence->alignment_evaluated = true;
+        evidence->alignment_side_effects = (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
+        evidence->alignment_low = (uint64_t)value.integer;
+        evidence->alignment_high = (uint64_t)(value.integer >> 64);
+    }
+    if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
+        graph->argument_offsets[node] == graph->argument_count - 3)
+    {
+        graph->contexts[graph->argument_nodes[graph->argument_count - 1]] |= BUSTER_CHECK_CONTEXT_VALUE;
+    }
+}
+
 static void check_input_shuffle_evidence(CheckInputReader* reader, uint32_t keyword, uint32_t closing, uint32_t argument_count, CheckBuiltinCall* evidence)
 {
     const uint32_t count = argument_count > 2 ? argument_count - 2 : 0;

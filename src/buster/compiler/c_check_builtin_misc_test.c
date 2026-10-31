@@ -239,6 +239,25 @@ static CheckBuiltinMiscResult check_builtin_misc_test_witnessed(TypeTable* table
     return output;
 }
 
+// An alignment builtin whose call's evidence gives its alignment as clang's evaluator reads it (CheckBuiltinCall's
+// alignment_evaluated): `value`, with side effects or not.
+static CheckBuiltinMiscResult check_builtin_misc_test_evaluated(TypeTable* table, CBuiltinId id, const CheckValue* arguments, unsigned __int128 value, bool effects)
+{
+    const CheckBuiltinMiscAction input = {
+        .id = id,
+        .arguments = arguments,
+        .argument_count = 2,
+        .node = 148,
+        .source_position = UINT32_MAX,
+        .alignment_evaluated = true,
+        .alignment_side_effects = effects,
+        .alignment_value = value,
+    };
+    CheckBuiltinMiscResult output;
+    check_builtin_misc_one(table, &input, &output);
+    return output;
+}
+
 // expect_with_probability: expect's longs and fold, and its probability's rules; and the alignment builtins: their
 // operands' types, their alignments' rules, their result types and their folds of integers and of addresses.
 static void check_builtin_misc_test_alignment(CheckBuiltinMiscTest* test, TypeTable* table)
@@ -449,6 +468,37 @@ static void check_builtin_misc_test_alignment(CheckBuiltinMiscTest* test, TypeTa
                                                                           result.evaluated_operands == 3;
         check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && value->constant_kind == addresses[i].kind && folded,
                                       "an alignment builtin folds an address where clang's evaluator does, by its object's declaration alignment");
+    }
+    // The alignment as clang's evaluator reads it (a const object's initializer), where the runtime view has no constant.
+    const struct
+    {
+        unsigned __int128 value;
+        bool effects;
+        CheckBuiltinMiscConstraint constraint;
+    } evaluated[] =
+    {
+        { 3, false, CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT },
+        { 0, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { (unsigned __int128)-8, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { UINT64_C(1) << 40, false, CHECK_BUILTIN_MISC_CONSTRAINT_RANGE },
+        { 3, true, CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT },
+        { 8, false, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+        { 8, true, CHECK_BUILTIN_MISC_CONSTRAINT_NONE },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(evaluated); i += 1)
+    {
+        arguments[0] = check_test_integer(BUSTER_TYPE_INT, 5);
+        arguments[1] = (CheckValue){ .type = evaluated[i].value >> 32 != 0 ? BUSTER_TYPE_LONG : BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+        result = check_builtin_misc_test_evaluated(table, CBUILTIN_ALIGN_UP, arguments, evaluated[i].value, evaluated[i].effects);
+        const bool fold = evaluated[i].constraint == CHECK_BUILTIN_MISC_CONSTRAINT_NONE && !evaluated[i].effects;
+        const bool checked = evaluated[i].constraint == CHECK_BUILTIN_MISC_CONSTRAINT_NONE ?
+                             result.action.diagnostic == CHECK_DIAG_NONE &&
+                             (fold ? result.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.action.value.integer == 8 &&
+                                     (result.action.value.flags & BUSTER_CHECK_ICE) != 0 && result.evaluated_operands == 0 :
+                                     result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.evaluated_operands == 3) :
+                             result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.action.diagnostic_operand == 1 &&
+                             result.constraint == evaluated[i].constraint;
+        check_builtin_misc_test_expect(test, checked, "an alignment the evaluator reads through a const object is checked, and folds without side effects");
     }
 }
 

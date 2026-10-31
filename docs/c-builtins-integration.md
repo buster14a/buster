@@ -962,18 +962,29 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   an array decayed to its element's pointer; a function, a function pointer, an
   `_Atomic` type and `nullptr_t` aren't. Its alignment is such an integer type.
   Both are checked by their types before their lvalue conversions;
-- a constant alignment, which clang evaluates past its side effects, must be at
+- a constant alignment, which clang evaluates past its side effects and through
+  const objects' constant initializers wherever the expression holds them
+  (`const int c = 3;` makes `__builtin_align_up(x, c + 0)` an error), must be at
   least 1, at most 2 to the source's width less 1 (a pointer's 64), and a power
   of 2, in that order; 1 draws clang's `-Wtautological-compare`, which the
-  checker records but doesn't report. An unknown alignment is unchecked;
+  checker records but doesn't report. The checker's runtime view of the argument
+  reads no const object, so the source adapter evaluates it as a constant
+  context would (`check_input_misc_evidence`), and the call's checks and
+  folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
+  while the argument itself is checked, and runs, as before. An unknown
+  alignment is unchecked;
 - `align_up` and `align_down` are of the source's type, its qualifiers kept (a
   `const int` source's `__typeof__` is a `const int`), and `is_aligned` is a
   bool;
 - `expect_with_probability` takes `expect`'s two longs and a probability that,
   converted to `double`, must be a constant floating expression without side
-  effects (a const variable with a constant initializer is one, read as clang's
-  evaluator reads it) in [0, 1]: a NaN isn't. It never runs. Its call folds as `expect`'s, and otherwise its recipe
-  is `expect`'s.
+  effects in [0, 1]: a NaN isn't. Clang evaluates it as a constant expression,
+  which reads a const object's constant initializer wherever it holds one
+  (`one ? 0.5 : 0.25` of a `const int one = 1`), so its subtree is checked as a
+  constant context's (`BUSTER_CHECK_CONTEXT_VALUE` on its node, without a
+  constraint report of its own), which the same helper marks from the call's
+  evidence record. It never runs. Its call folds as `expect`'s, and otherwise
+  its recipe is `expect`'s.
 
 The alignment builtins fold, as integer constant expressions, where clang's
 evaluator does: of constants without side effects, in the source's width

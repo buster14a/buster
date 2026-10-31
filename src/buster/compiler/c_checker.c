@@ -60,6 +60,14 @@ struct CheckBuiltinCall
     uint8_t base_alignment;
     // That declaration's object, which an address constant of the argument names (the alignment builtins' folds).
     uint32_t base_object;
+    // An alignment builtin's alignment as clang's evaluator reads it (BuiltinAlignment's EvaluateAsInt, which reads a const
+    // object's constant initializer wherever the expression holds one): the source evaluator's integer, where it gives one
+    // without a fault, its halves keeping the record's alignment at 8, and whether the expression has side effects, which
+    // the alignment's checks allow and a fold doesn't (check_input_misc_evidence).
+    bool alignment_evaluated;
+    bool alignment_side_effects;
+    uint64_t alignment_low;
+    uint64_t alignment_high;
 };
 
 typedef struct CheckGraph CheckGraph;
@@ -984,7 +992,7 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
         result = call->node == node &&
                  (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
                   op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST ||
-                  (op == CHECK_OP_BUILTIN_MISC && graph->members != NULL && cbuiltin_align(graph->members[node])));
+                  (op == CHECK_OP_BUILTIN_MISC && graph->members != NULL && cbuiltin_misc_recorded(graph->members[node])));
         const bool shuffle = op == CHECK_OP_BUILTIN_VECTOR && graph->members != NULL && graph->members[node] == CBUILTIN_SHUFFLEVECTOR;
         result = result && (call->shuffle_index_ice != NULL ? shuffle && count >= 2 && call->shuffle_index_ice_count == count - 2 : call->shuffle_index_ice_count == 0);
         for (uint32_t i = 0; result && i < call->shuffle_index_ice_count; i += 1)
@@ -1718,6 +1726,9 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .constant_evaluated = action->constant_evaluated,
             .pointer_object = witness != NULL ? witness->base_object : 0,
             .pointer_alignment = witness != NULL ? witness->base_alignment : 0,
+            .alignment_evaluated = witness != NULL && witness->alignment_evaluated,
+            .alignment_side_effects = witness != NULL && witness->alignment_side_effects,
+            .alignment_value = witness != NULL ? (unsigned __int128)witness->alignment_high << 64 | witness->alignment_low : 0,
         };
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);

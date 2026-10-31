@@ -603,6 +603,14 @@ static __attribute__((unused)) bool cbuiltin_align(uint32_t id)
     return result;
 }
 
+// Whether a miscellaneous builtin's calls take one of the graph's builtin call records, which the source adapter's walk
+// fills (check_input_misc_evidence): the alignment builtins' and __builtin_expect_with_probability's.
+static __attribute__((unused)) bool cbuiltin_misc_recorded(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ALIGN_UP && id <= CBUILTIN_EXPECT_WITH_PROBABILITY;
+    return result;
+}
+
 // The language modes' token of clang 23.1.1's table for a catalog name, which the preprocessor's __has_builtin reads
 // (#148): C23_LANG for __builtin_c23_va_start, a builtin in C23 alone, and ALL_LANGUAGES for every other name.
 // test-preprocessor checks each name's against the table.

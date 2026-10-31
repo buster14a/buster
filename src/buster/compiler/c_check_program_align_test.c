@@ -68,6 +68,24 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
         { .name = "align: an alignment past its side effects", .source = "int g(void);\nint f(int x)\n{\nreturn __builtin_align_up(x, (g(), 3));\n}\n",
           .rejected = true },
         { .name = "align: an unknown alignment", .source = "int f(int x, int a)\n{\nreturn __builtin_align_down(x, a) + __builtin_is_aligned(x, a);\n}\n" },
+        { .name = "align: a const object's alignment", .source = "int f(int x)\n{\nconst int a = 3;\nreturn __builtin_align_up(x, a);\n}\n", .rejected = true },
+        { .name = "align: a const object's alignment of 0", .source = "int f(int x)\n{\nconst int z = 0;\nreturn __builtin_align_down(x, z);\n}\n",
+          .rejected = true },
+        { .name = "align: a file-scope const object's alignment", .source = "static const int s = 6;\nint f(int x)\n{\nreturn __builtin_is_aligned(x, s);\n}\n",
+          .rejected = true },
+        { .name = "align: a const object's alignment past an int's", .source =
+          "static const long big = 1L << 40;\nint f(int x)\n{\nreturn __builtin_align_down(x, big);\n}\n", .rejected = true },
+        { .name = "align: a const object inside an alignment", .source = "int f(int x)\n{\nconst int c = 3;\nreturn __builtin_align_up(x, c + 0);\n}\n",
+          .rejected = true },
+        { .name = "align: a const double's alignment", .source = "static const double d = 3.0;\nint f(int x)\n{\nreturn __builtin_align_up(x, (int)d);\n}\n",
+          .rejected = true },
+        { .name = "align: alignments the evaluator doesn't read", .source =
+          "int f(int x, int y)\n{\nconst volatile int v = 3;\nconst int w = y;\nreturn __builtin_align_up(x, v) + __builtin_align_down(x, w);\n}\n" },
+        { .name = "align: const objects folded in constant contexts", .source =
+          "static const int x = 5;\nstatic const int a = 8;\n"
+          "_Static_assert(__builtin_align_up(x, 8) == 8 && __builtin_align_down(13, a) == 8 && __builtin_is_aligned(16, a), \"\");\n"
+          "int sizes[__builtin_align_up(x, 8)];\n"
+          "int f(void)\n{\nconst int y = 6;\nswitch (0) { case __builtin_align_up(y, 4) - 8: return 1; }\nreturn 0;\n}\n" },
         { .name = "align: one argument", .source = "int f(int x)\n{\nreturn __builtin_align_up(x);\n}\n", .rejected = true },
         { .name = "align: three arguments", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, 4, 4);\n}\n", .rejected = true },
         { .name = "probability: accepted forms", .source =
@@ -76,6 +94,10 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
           "__builtin_expect_with_probability(x, 1, half) + __builtin_expect_with_probability(x, 1, -0.0) + __builtin_expect_with_probability(x, 1, 0.25f) +\n"
           "__builtin_expect_with_probability(x, 1, sizeof(int) / 8.0) + __builtin_expect_with_probability(x, 1, one ? 0.5 : 0.25) +\n"
           "__builtin_expect_with_probability(x, 1, (0, 0.5)) + __builtin_expect_with_probability(x, 1, one);\n}\n" },
+        { .name = "probability: const objects in its expression", .source =
+          "static const double half = 0.5;\nlong f(long x)\n{\nconst int n = 4;\nreturn __builtin_expect_with_probability(x, 1, half / 2 + 1.0 / n);\n}\n" },
+        { .name = "probability: a const object's past 1", .source =
+          "static const double two = 2.0;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, two / 1.5);\n}\n", .rejected = true },
         { .name = "probability: a variable", .source = "long f(long x, double p)\n{\nreturn __builtin_expect_with_probability(x, 1, p);\n}\n", .rejected = true },
         { .name = "probability: past 1", .source = "long f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, 1.5);\n}\n", .rejected = true },
         { .name = "probability: below 0", .source = "long f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, -0.1);\n}\n", .rejected = true },
