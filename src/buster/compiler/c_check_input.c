@@ -1796,12 +1796,12 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             for (uint32_t token = i + 2; kind == PARSE_KIND_TYPEOF && reader->specifier_owner == first &&
                  token < close && close < end && !region; token += 1)
             {
-                region = parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK;
+                region = parser->tree.roles[token] == PARSE_ROLE_OPEN_BLOCK || parser->tree.roles[token] == PARSE_ROLE_OPEN_COMPOUND;
             }
             if (region && job == 0)
             {
-                // A type query may contain ordinary declarations. Suspend this specifier frame while the
-                // ordered source loop elaborates that region, then resume from the saved state at its close.
+                // Statement expressions and compound literals need the ordered declaration/initializer reader.
+                // Suspend this specifier frame until their objects and completed array types are available.
                 job = arena_push(reader->scratch, sizeof(*job), _Alignof(CheckInputSpecifierJob));
                 reader->output->resource |= job == 0;
                 if (job != 0)
@@ -4632,7 +4632,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             reader->constant_abi_origin = 0;
             const bool evaluated = check_input_evaluate_cached_at(reader, job->keyword + 2, job->closing, &value, &failed_token);
             check_input_warning_suppress(reader, job->keyword + 2, job->closing, check_constant_unevaluated_warnings());
-            job->result = evaluated ? value.type : 0;
+            job->result = evaluated && (value.flags & BUSTER_CHECK_BIT_FIELD) == 0 ? value.type : 0;
             job->result_abi_origin = evaluated ? reader->constant_abi_origin : 0;
             if (!evaluated && failed_token < parser->tokens.count && !reader->output->resource)
             {
