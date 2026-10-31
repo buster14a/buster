@@ -7,7 +7,7 @@
 // both promoted forms must then round-trip through text by both parsers, preserving structure and canonical bytes
 // (#175). Include after ir_lower_test.c, ir_parse_test.c, ssa_ir.c and tier0_source_benchmark.c.
 //
-//   build/compiler test-ir-source [--simd] [--print NAME] [preprocessor options] file...
+//   build/compiler test-ir-source [--simd] [--print NAME] [--dominators] [--dominators-cfg NEW_FILE] [preprocessor options] file...
 //
 // Each file is checked and its definitions selected and emitted as benchmark-backend-source has them
 // (ir_source_prepare, which benchmark-ir-source shares), their typed streams in an arena that outlives the file's other
@@ -20,12 +20,17 @@
 // address space can't grow by the preparation's arena, which must fail it as the memory's, touching nothing it couldn't
 // allocate (ir_source_exhausted). --simd instead checks the bounded vector adapter and text forms, and requires
 // transactional refusal at the still-scalar SSA promoter boundary. It never counts that refusal as promotion.
-// This is a test outside the compile path, with no vector path of its own.
+// --dominators additionally checks each form against #174's scalar/vector/AUTO analysis and its independent
+// definition oracle; unlike the ordinary command, no excluded file is a pass. --dominators-cfg NEW_FILE implies
+// that check and exports the qualified CFGs to an exclusively created file. Only a complete successful corpus
+// receives the completion record; failed writes fail the command. This is a test outside the compile path, with
+// no vector path of its own.
 
 #include <sys/resource.h>
 #include <sys/wait.h>
 
 #include "ir_source_roundtrip.c"
+#include "ir_source_dominators.c"
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
 // whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
@@ -324,6 +329,9 @@ struct IrSourceTotals
     // Representations checked through both text parser paths, and representations whose round trip failed.
     uint64_t text_forms;
     uint64_t text_failed;
+    uint64_t dominator_forms;
+    uint64_t dominator_checks;
+    uint64_t dominator_failed;
 };
 
 static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
@@ -345,8 +353,8 @@ static const char* const ir_source_errors[IR_ERROR_UNSUPPORTED + 1] = {
 // Lowers, compares and promotes each of `file`'s functions, adding to `totals`, and prints the file's line and a line
 // per function that fails. `print` names a function to print the IR of, or is null.
 // Each lowering goes into its own arena and each promotion into another, which mustn't hold its input (ssa_ir.c).
-static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, bool allow_simd, Arena* output, Arena* twin_output, Arena* promoted_output,
-                            Arena* text_output, Arena* scratch)
+static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, bool allow_simd, bool dominators, FILE* graphs, Arena* output,
+                            Arena* twin_output, Arena* promoted_output, Arena* text_output, Arena* scratch)
 {
     uint64_t entries = 0;
     uint64_t instructions = 0;
@@ -392,6 +400,7 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
             totals->promoted_bytes += promoted.arena_bytes;
         }
         bool text_valid = true;
+        bool dominators_valid = true;
         const IrFunction* const forms[] = {
             &vector,
             &promoted,
@@ -416,8 +425,23 @@ static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, co
                        (uint64_t)check.parsed.line, (uint64_t)check.parsed.column, (unsigned)check.parsed.check.error,
                        check.parsed.check.instruction, check.parsed.check.detail);
             }
+            if (dominators)
+            {
+                IrSourceDominatorCheck dominance = { 0 };
+                const bool qualified = ir_source_dominator_check(forms[form], text_output, scratch, graphs, name, source->name, source->name_length, form, &dominance);
+                totals->dominator_forms += 1;
+                totals->dominator_checks += dominance.checks;
+                totals->dominator_failed += !qualified;
+                dominators_valid = dominators_valid && qualified;
+                if (!qualified)
+                {
+                    printf("ir-source: file=%s function=%s form=%s dominators_failed=\"%s\" cfg_error=%u scalar=%u vector=%u auto=%u\n",
+                           name, source->name, form_names[form], dominance.reason, (unsigned)dominance.cfg_error,
+                           (unsigned)dominance.status[0], (unsigned)dominance.status[1], (unsigned)dominance.status[2]);
+                }
+            }
         }
-        failures += (!promotes && !simd_refused) || !text_valid;
+        failures += (!promotes && !simd_refused) || !text_valid || !dominators_valid;
         if (!promotes && !simd_refused)
         {
             const IrCheck first = vector_check.error != IR_OK ? vector_check : scalar_check.error != IR_OK ? scalar_check : promotion.error != IR_OK ? promotion : promotion_twin;
@@ -494,6 +518,8 @@ static int run_ir_source_tests(int count, char** arguments)
 {
     const char* print = 0;
     bool simd = false;
+    const char* graph_name = 0;
+    bool dominators = false;
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
@@ -509,6 +535,16 @@ static int run_ir_source_tests(int count, char** arguments)
         else if (strcmp(arguments[i], "--simd") == 0)
         {
             simd = true;
+        }
+        else if (strcmp(arguments[i], "--dominators") == 0)
+        {
+            dominators = true;
+        }
+        else if (strcmp(arguments[i], "--dominators-cfg") == 0)
+        {
+            valid = graph_name == 0 && i + 1 < count;
+            graph_name = valid ? arguments[++i] : 0;
+            dominators = true;
         }
         else if (arguments[i][0] != '-')
         {
@@ -535,7 +571,22 @@ static int run_ir_source_tests(int count, char** arguments)
     Arena text_output = arena_reserve(UINT64_C(1) << 34);
     Arena scratch = arena_reserve(UINT64_C(1) << 34);
     valid = valid && lowered.base != 0 && arena.base != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && text_output.base != 0 && scratch.base != 0;
+    // Exclusive creation never truncates an input or an earlier measurement. Check close as well as every write:
+    // buffered output can fail only when the completion record is flushed.
+    FILE* graphs = valid && graph_name != 0 ? fopen(graph_name, "wx") : 0;
+    const bool graph_open = graph_name == 0 || graphs != 0;
+    bool graph_valid = graph_open;
+    if (graphs != 0)
+    {
+        graph_valid = dominators_export_begin(graphs);
+    }
+    if (valid && !graph_valid)
+    {
+        fprintf(stderr, "ir-source: cannot create CFG export %s: %s\n", graph_name, strerror(errno));
+    }
+    valid = valid && graph_valid;
     IrSourceTotals totals = { 0 };
+    const bool dominator_oracle = !dominators || (valid && ir_source_dominator_tests(&arena, &text_output, &scratch));
     const bool text_oracle = valid && ir_source_text_tests(&arena, &output, &twin_output, &text_output, &scratch);
     const bool exhausted = valid && ir_source_exhausted(files[0], options, option_count, &lowered, &arena);
     if (valid)
@@ -548,7 +599,7 @@ static int run_ir_source_tests(int count, char** arguments)
         ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            ir_source_check(&totals, &file, files[i], print, simd, &output, &twin_output, &promoted, &text_output, &scratch);
+            ir_source_check(&totals, &file, files[i], print, simd, dominators, graphs, &output, &twin_output, &promoted, &text_output, &scratch);
         }
         else
         {
@@ -571,7 +622,35 @@ static int run_ir_source_tests(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler test-ir-source [--simd] [--print NAME] [--dominators] [--dominators-cfg NEW_FILE] [preprocessor options] file...\n");
+    }
+    bool passed = valid && exhausted && text_oracle && dominator_oracle && (!simd || (totals.simd_refused != 0 && totals.left_out == 0)) &&
+                  totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 &&
+                  totals.functions != 0;
+    if (dominators)
+    {
+        passed = passed && totals.left_out == 0 && totals.dominator_failed == 0 && totals.dominator_forms == 3 * totals.functions;
+        printf("ir-source: dominators forms=%" PRIu64 " checks=%" PRIu64 " failed=%" PRIu64 " excluded=%" PRIu64 " host-vector=%u %s\n",
+               totals.dominator_forms, totals.dominator_checks, totals.dominator_failed, totals.left_out, BUSTER_HOST_VECTOR, passed ? "passed" : "FAILED");
+    }
+    if (graphs != 0)
+    {
+        if (passed)
+        {
+            graph_valid = dominators_export_complete(graphs, totals.files, totals.functions, totals.dominator_forms);
+        }
+        graph_valid = ferror(graphs) == 0 && graph_valid;
+        const int closed = fclose(graphs);
+        graph_valid = closed == 0 && graph_valid;
+        if (!graph_valid)
+        {
+            fprintf(stderr, "ir-source: CFG export write/close failed: %s\n", graph_name);
+        }
+        passed = passed && graph_valid;
+        if (!passed && unlink(graph_name) != 0)
+        {
+            fprintf(stderr, "ir-source: cannot remove incomplete CFG export: %s\n", graph_name);
+        }
     }
     arena_release(&scratch);
     arena_release(&text_output);
@@ -582,5 +661,5 @@ static int run_ir_source_tests(int count, char** arguments)
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && exhausted && text_oracle && (!simd || (totals.simd_refused != 0 && totals.left_out == 0)) && totals.text_failed == 0 && totals.failed_files == 0 && totals.refused == 0 && totals.disagreed == 0 && totals.unpromoted == 0 && totals.functions != 0 ? 0 : 1;
+    return passed ? 0 : 1;
 }
