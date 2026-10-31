@@ -126,7 +126,12 @@ by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
 the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
 read, and any other value live past the node there saved around it in a
 call-save row). A parameter's register binds its definition's interval alone
-(`Tier1CfgInput.definition_registers`). Values live across a call take the
+(`Tier1CfgInput.definition_registers`); where that leaves a use in the interval
+no register, the allocation runs again with every parameter free, and the entry's
+moves bring each from its incoming register (`tier1_emit_cfg_entry`). Freeing a
+parameter live across a call there too, in a callee-saved register from the
+entry on, cut the saves around speedtest1's calls but spilled more and ran
+slower, so a bound parameter stays bound. Values live across a call take the
 callee-saved registers (`rbx`, `r12` to `r15`), which the prologue saves once,
 rather than caller-saved ones that every call saves and restores around itself
 (`tier1_emit_cfg_callee`: from the first allocation's intervals, each value whose
