@@ -236,6 +236,12 @@ checks it against the node's room (`BUSTER_TIER1_SELECT_RECORDS_PER_NODE`): a
 sequence longer than the room writes nothing past it and marks the node's records
 overflowed, which the three consumers refuse as an invalid function. The
 signed power-of-two remainder's six records are the longest, the room's whole.
+The tests take a node's sequence to its room and past it with no-ops before its
+records (`Tier1SelectPattern.nops`, which the selector never sets):
+`test-tier1-select` through the selector's emitter and `test-tier1-emit` through
+both consumers, a conditional branch's sequence among them. At the room the
+function emits and runs; one record past it, it fails at the node with its
+arenas and result as they were.
 Input columns and output records require no padding. Only the encoder's own
 documented output buffer capacity/padding contract applies when encoding them.
 All retained arrays belong to the caller's arena. Emission failure restores its

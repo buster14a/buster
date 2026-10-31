@@ -2342,6 +2342,19 @@ static void tier1_select_test_room(Tier1SelectTest* test)
     }
     tier1_select_test_expect(test, kept && records.value == 0x5a5a5a5a5a5a5a5a && records.row == 0x1234 && records.context == 0x4321 && records.request == 3 && records.destination == 7 && records.requested,
                              "records past a node's room write nothing there and mark it overflowed");
+    // #989's review: a request takes the room's last record, and one past it writes nothing, its request's fields kept.
+    Tier1SelectRecords full = {0};
+    for (uint32_t r = 0; r + 1 < BUSTER_TIER1_SELECT_RECORDS_PER_NODE; r += 1)
+    {
+        tier1_select_append(&full, (X86Instruction){ .form = X86_FORM_RET, .immediate = (int32_t)r });
+    }
+    tier1_select_request(&full, X86_OPERATION_ADD, 8, X86_REGISTER_RCX, 5, 0);
+    const Tier1SelectRecords last = full;
+    tier1_select_request(&full, X86_OPERATION_SUB, 4, X86_REGISTER_RAX, 77, 0);
+    tier1_select_test_expect(test, last.requested && last.request == BUSTER_TIER1_SELECT_RECORDS_PER_NODE - 1 && last.count == BUSTER_TIER1_SELECT_RECORDS_PER_NODE && !last.overflowed && full.overflowed &&
+                                       full.requested && full.request == last.request && full.destination == last.destination && full.row == last.row && full.value == last.value &&
+                                       full.context == last.context && full.count == last.count && memcmp(full.records, last.records, sizeof(full.records)) == 0,
+                             "a request takes a node's last record, and one past its room changes no record or request");
     for (uint32_t width = 4; width <= 8; width += 4)
     {
         for (uint32_t shift = 1; shift <= 31; shift += 1)
@@ -2365,10 +2378,140 @@ static void tier1_select_test_room(Tier1SelectTest* test)
     }
 }
 
+// #989's review: a node's sequence at its room and past it, in the selector's emitter. Each node of s = a + b, then
+// s < b (unsigned) ? s ^ a : s - b, its branch's comparison folded, takes no-ops before its records
+// (Tier1SelectPattern.nops) up to its room: the function emits, with that many more records, and runs as before. One
+// more fails the function at the node, as an invalid one, with its output released and its result left as it was.
+static void tier1_select_test_overlong(Tier1SelectTest* test)
+{
+    Arena input = arena_reserve(1u << 20);
+    Arena output = arena_reserve(8u << 20);
+    Arena scratch = arena_reserve(8u << 20);
+    uint64_t random = UINT64_C(0x2f6b1d0c9e8a7354);
+    const IrSizes sizes =
+    {
+        .instruction_count = 9,
+        .block_count = 3,
+        .parameter_count = 2,
+    };
+    IrFunction function;
+    const bool created = ir_create(&input, &sizes, &function) == IR_OK;
+    tier1_select_test_expect(test, created, "create overlong fixture");
+    Tier1SelectPlan plans[2];
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.block_offsets[1] = 5;
+        function.block_offsets[2] = 7;
+        function.block_offsets[3] = 9;
+        tier1_select_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 2, IR_ADD, IR_I64, 0, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 3, IR_ICMP, IR_I1, 2, 1, IR_ULT);
+        tier1_select_test_node(&function, 4, IR_CBR, IR_VOID, 3, 1, 2);
+        tier1_select_test_node(&function, 5, IR_XOR, IR_I64, 2, 0, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 7, IR_SUB, IR_I64, 2, 1, BUSTER_IR_NONE);
+        tier1_select_test_node(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    // The blocks' uses of block 0's values need its dominance.
+    IrCfg cfg = { 0 };
+    Dominators dominators = { 0 };
+    bool planned = created && ir_build_cfg(&function, &output, &scratch, &cfg) == IR_OK;
+    if (planned)
+    {
+        const DominatorCfg graph =
+        {
+            .block_count = cfg.block_count,
+            .edge_count = cfg.edge_count,
+            .entry = 0,
+            .successor_offsets = cfg.successor_offsets,
+            .successors = cfg.successors,
+            .predecessor_offsets = cfg.predecessor_offsets,
+            .predecessors = cfg.predecessors,
+        };
+        DominatorOptions options = dominators_options();
+        options.outputs = 0;
+        planned = dominators_analyze(&output, &scratch, &graph, options, &dominators) == DOMINATOR_OK;
+    }
+    const IrDominance dominance = planned ? (IrDominance){ .enter = dominators.preorder, .leave = dominators.subtree_end, .block_count = dominators.block_count } : (IrDominance){ 0 };
+    for (uint32_t path = 0; planned && path < 2; path += 1)
+    {
+        uint32_t failed = 0;
+        planned = tier1_select_plan(&function, &dominance, &output, &scratch, path == 0, &plans[path], &failed) == TIER1_SELECT_OK;
+    }
+    tier1_select_test_expect(test, planned, "overlong fixture selects");
+    if (planned)
+    {
+        tier1_select_test_expect(test, plans[0].patterns[4].rule == TIER1_RULE_BRANCH_COMPARE && plans[1].patterns[4].rule == TIER1_RULE_BRANCH_COMPARE && plans[0].covered[3] && plans[1].covered[3],
+                                 "the overlong fixture's branch takes its comparison");
+        uint8_t registers[16];
+        memset(registers, X86_REGISTER_RAX, sizeof(registers));
+        registers[0] = X86_REGISTER_RDI;
+        registers[1] = X86_REGISTER_RSI;
+        registers[2] = X86_REGISTER_R8;
+        registers[5] = X86_REGISTER_RCX;
+        registers[7] = X86_REGISTER_RDX;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            Tier1SelectPlan* plan = &plans[path];
+            Tier1SelectCode base = { 0 };
+            uint32_t failed = 0;
+            const bool based = tier1_select_emit(plan, registers, test->allowed, &output, &base, &failed) == TIER1_SELECT_OK;
+            tier1_select_test_expect(test, based, "the overlong fixture emits");
+            for (uint32_t node = 0; based && node < function.instruction_count; node += 1)
+            {
+                const Tier1SelectHoles holes = tier1_select_holes(plan, registers, node);
+                const uint32_t own = plan->covered[node] ? BUSTER_TIER1_SELECT_RECORDS_PER_NODE : tier1_select_expand(&holes).count;
+                for (uint32_t past = 0; own < BUSTER_TIER1_SELECT_RECORDS_PER_NODE && past < 2; past += 1)
+                {
+                    plan->patterns[node].nops = (uint8_t)(BUSTER_TIER1_SELECT_RECORDS_PER_NODE - own + past);
+                    const uint64_t mark = output.length;
+                    Tier1SelectCode code;
+                    memset(&code, 0xa5, sizeof(code));
+                    Tier1SelectCode before;
+                    memcpy(&before, &code, sizeof(code));
+                    failed = 0;
+                    const Tier1SelectError error = tier1_select_emit(plan, registers, test->allowed, &output, &code, &failed);
+                    if (past == 0)
+                    {
+                        tier1_select_test_expect(test, error == TIER1_SELECT_OK && code.count == base.count + plan->patterns[node].nops, "a node's no-ops up to its room are its records");
+                        arena_pop_to(&output, mark);
+                        if (tier1_select_test_walk_load(test, plan, registers, &output))
+                        {
+                            for (uint32_t sample = 0; sample < 16; sample += 1)
+                            {
+                                const uint64_t a = sample < 4 ? UINT64_MAX >> sample : tier1_select_test_random(&random);
+                                const uint64_t b = sample < 2 ? sample : tier1_select_test_random(&random);
+                                const uint64_t s = a + b;
+                                tier1_select_test_expect(test, tier1_select_test_call(test, a, b, 0) == (s < b ? s ^ a : s - b), "a node's sequence at its room runs");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        tier1_select_test_expect(test, error == TIER1_SELECT_ERROR_INVALID && failed == node && output.length == mark && memcmp(&code, &before, sizeof(code)) == 0,
+                                                 "a node's sequence past its room fails the function at the node, its output released and its result kept");
+                    }
+                    arena_pop_to(&output, mark);
+                }
+                plan->patterns[node].nops = 0;
+            }
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 // #977's review: constants added to an index. `p + (i + c) * s + k` of a 64-bit i is one memory operand,
 // p + i * s + (k + c * s): c on either side of an addition, or subtracted, for loads, stores and pointers. A 32-bit
-// index added before its sign extension keeps its addition, as does a scaled constant past 32 bits; both run as the
-// IR says.
+// index added before its sign extension keeps its addition, as does a scaled constant past 32 bits. Each runs as the
+// IR says on indices 0 to 3, which stay in the memory (with 2^31, the indices 2^31 below them, whose index the constant
+// cancels), and the pointer, which nothing accesses, also on indices whose additions wrap: at 32 bits before the
+// extension (INT32_MAX + 3), and at 64 (#989's review).
 static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, uint32_t shape, uint32_t scale, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
 {
     // form 0: add i, c; 1: add c, i; 2: sub i, c; 3: add.i32 (trunc i), c, then sext; 4: add i, 2^31 (past 32 bits).
@@ -2441,7 +2584,6 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
         tier1_select_test_expect(test, pattern->rule == rule && pattern->values[0] == 0 && pattern->values[1] == (folded ? 1u : index) && pattern->displacement == displacement &&
                                            pattern->scale == tier1_select_log2(scale) && plans[0].covered[2] && plans[0].covered[address] && plans[0].covered[4] == folded,
                                  "a 64-bit index's added constants join the displacement, scaled; a 32-bit addition before its extension and a scaled constant past 32 bits stay");
-        // The scaled constant past 32 bits makes an address no memory holds: its plan is the check.
         uint8_t registers[16];
         memset(registers, X86_REGISTER_RAX, sizeof(registers));
         registers[0] = X86_REGISTER_RDI;
@@ -2450,13 +2592,16 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
         registers[5] = narrow ? X86_REGISTER_R9 : registers[5];
         registers[4] = narrow ? X86_REGISTER_R10 : registers[4];
         registers[address + 1] = shape == 1 ? X86_REGISTER_RCX : X86_REGISTER_RAX;
-        for (uint32_t path = 0; form != 4 && path < 2; path += 1)
+        const uint64_t wraps[] = { INT32_MAX, INT32_MAX - 2, UINT32_MAX, UINT64_C(0xffffffff7fffffff), UINT64_MAX, INT64_MAX, UINT64_C(1) << 63 };
+        const uint32_t inputs = shape == 2 ? 4 + BUSTER_ARRAY_LENGTH(wraps) : 4;
+        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = output->length;
             if (tier1_select_test_walk_load(test, &plans[path], registers, output))
             {
-                for (uint64_t i = 0; i < 4; i += 1)
+                for (uint32_t input = 0; input < inputs; input += 1)
                 {
+                    const uint64_t i = input < 4 ? input - (form == 4 ? UINT64_C(1) << 31 : 0) : wraps[input - 4];
                     uint64_t memory[64];
                     uint64_t expected_memory[64];
                     for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(memory); word += 1)
@@ -2593,6 +2738,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_unreachable(&test);
             tier1_select_test_walks(&test);
             tier1_select_test_room(&test);
+            tier1_select_test_overlong(&test);
             if (manifest)
             {
                 printf("# tier1-manifest-end,version=1,plan=%" PRIu64 ",expansion=%" PRIu64 ",wrapper=%" PRIu64 "\n", test.emitted_records[0], test.emitted_records[1], test.emitted_records[2]);

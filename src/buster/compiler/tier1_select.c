@@ -294,6 +294,8 @@ struct Tier1SelectHoles
     uint8_t condition;
     uint8_t scale;
     bool compare_immediate;
+    // The pattern's no-ops (Tier1SelectPattern.nops).
+    uint8_t nops;
 };
 
 static uint16_t tier1_select_binary_form(X86Operation operation, uint32_t width)
@@ -347,6 +349,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     Tier1SelectRecords result = {0};
     const uint8_t destination = holes->destination;
     const uint32_t width = holes->width;
+    for (uint32_t r = 0; r < holes->nops; r += 1)
+    {
+        tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_NOP });
+    }
     switch (holes->rule)
     {
     case TIER1_RULE_LEAF:
@@ -607,6 +613,9 @@ struct Tier1SelectPattern
     uint8_t fold_count;
     uint8_t intrinsic_cost;
     bool compare_immediate;
+    // A test's: no-ops the node's expansion writes before its rule's records, which take its sequence to its room and
+    // past it (#989's review). Every pattern the selector makes has none.
+    uint8_t nops;
 };
 
 typedef struct Tier1SelectPlan Tier1SelectPlan;
@@ -1817,6 +1826,7 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .condition = pattern->condition,
         .scale = pattern->scale,
         .compare_immediate = pattern->compare_immediate,
+        .nops = pattern->nops,
     };
     switch (pattern->rule)
     {
