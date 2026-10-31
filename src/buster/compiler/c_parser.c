@@ -8617,8 +8617,8 @@ struct ParseGroupWindows
 static ParseGroupWindows parse_group_windows_load(const ParseRoleCarry* carry, uint32_t depth)
 {
     const ParseGroupWindows result = {
-        .roles = _mm512_loadu_si512(carry->group_roles + (int64_t)depth - 64),
-        .keywords = _mm512_loadu_si512(carry->group_keywords + (int64_t)depth - 64),
+        .roles = _mm512_loadu_si512(carry->group_roles + (int64_t)(int32_t)depth - 64),
+        .keywords = _mm512_loadu_si512(carry->group_keywords + (int64_t)(int32_t)depth - 64),
     };
     return result;
 }
@@ -8857,8 +8857,8 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t 
     // entries below depth 0); and the 64 below those, from the stacks, which the block before last wrote at the latest.
     // Lanes with no enclosing opener at all are at depth 0: their entry is below depth 0, PARSE_ROLE_NONE.
     const __m512i outside_group = _mm512_permutexvar_epi8(window_index, windows->roles);
-    const __m512i below_roles = _mm512_loadu_si512(carry->group_roles + (int64_t)depth_base - 128);
-    const __m512i below_keywords = _mm512_loadu_si512(carry->group_keywords + (int64_t)depth_base - 128);
+    const __m512i below_roles = _mm512_loadu_si512(carry->group_roles + (int64_t)(int32_t)depth_base - 128);
+    const __m512i below_keywords = _mm512_loadu_si512(carry->group_keywords + (int64_t)(int32_t)depth_base - 128);
     const __m512i outside_features = parse_table8(t->features, outside_group);
     // What each lane's kind and its neighbors' kinds decide, from the pass before the rounds (parse_role_statics_avx512).
     const ParseRoleStatics* statics = &kernels->role_statics[block / 64];
@@ -8975,7 +8975,7 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t 
             }
             else if (opener != BUSTER_PARSE_NONE && opener >= 2)
             {
-                value = carry->group_typed[(int64_t)depth_base - 64 + view->relative_depths[lane] + 63] != 0;
+                value = carry->group_typed[(int64_t)(int32_t)depth_base - 64 + view->relative_depths[lane] + 63] != 0;
             }
             copied |= (uint64_t)value << lane;
         }
@@ -9050,9 +9050,9 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t 
         if (open != 0)
         {
             const uint64_t typed_two_back = (typed << 2) | (carry->typed >> 62);
-            _mm512_storeu_si512(carry->group_roles + first_open, open_roles);
-            _mm512_storeu_si512(carry->group_typed + first_open, _mm512_maskz_compress_epi8(open, _mm512_maskz_mov_epi8(typed_two_back, _mm512_set1_epi8(1))));
-            _mm512_storeu_si512(carry->group_keywords + first_open, open_keywords);
+            _mm512_storeu_si512(carry->group_roles + (int32_t)first_open, open_roles);
+            _mm512_storeu_si512(carry->group_typed + (int32_t)first_open, _mm512_maskz_compress_epi8(open, _mm512_maskz_mov_epi8(typed_two_back, _mm512_set1_epi8(1))));
+            _mm512_storeu_si512(carry->group_keywords + (int32_t)first_open, open_keywords);
         }
         const __m512i last_two = _mm512_permutexvar_epi8(_mm512_set1_epi16((short)((live - 1) | (live >= 2 ? live - 2 : live - 1) << 8)), features);
         const uint32_t bytes = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last_two));
@@ -9073,7 +9073,7 @@ static ParseStatementContext parse_statement_context_avx512(const ParseKernels* 
     const __m512i enclosing_lane = _mm512_load_si512(view->opener_lanes);
     const __mmask64 inside = _mm512_cmplt_epu8_mask(enclosing_lane, _mm512_set1_epi8(64));
     const __m512i window_index = _mm512_add_epi8(_mm512_load_si512(view->relative_depths), _mm512_set1_epi8(63));
-    const int64_t depth_base = kernels->depths[block];
+    const int64_t depth_base = (int32_t)kernels->depths[block];
     const __m512i roles = _mm512_loadu_si512(kernels->roles + block);
     const __m512i vk = _mm512_loadu_si512(kernels->vkinds + block);
     const __m512i vk_previous = _mm512_loadu_si512(kernels->vkinds + block - 1);
@@ -9124,9 +9124,9 @@ __attribute__((noinline)) static uint64_t parse_roles_twin_block(ParseKernels* k
     {
         const uint32_t i = block + (uint32_t)__builtin_ctzll(openers);
         openers &= openers - 1;
-        carry->group_roles[kernels->depths[i]] = kernels->roles[i];
-        carry->group_typed[kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
-        carry->group_keywords[kernels->depths[i]] = kernels->vkinds[(int64_t)i - 1];
+        carry->group_roles[(int32_t)kernels->depths[i]] = kernels->roles[i];
+        carry->group_typed[(int32_t)kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
+        carry->group_keywords[(int32_t)kernels->depths[i]] = kernels->vkinds[(int64_t)i - 1];
     }
     carry->previous_feature = parse_role_features(kernels->roles[block + live - 1], kernels->vkinds[block + live - 1]);
     carry->before_feature = live >= 2 ? parse_role_features(kernels->roles[block + live - 2], kernels->vkinds[block + live - 2]) : carry->previous_feature;
