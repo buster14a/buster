@@ -256,6 +256,7 @@ fi
 ./build/compiler test-check-builtins-atomic
 ./build/compiler test-check-builtins-atomic-rmw
 ./build/compiler test-check-builtins-typed-overflow
+./build/compiler test-check-builtins-bits
 ./build/compiler test-check-builtins-rounds
 ./build/compiler test-builtin-lower
 ./build/compiler test-builtin-varargs-lower
