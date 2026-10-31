@@ -99,7 +99,10 @@ each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
 standard error after the command, how many functions each tier compiled and the
 step, and for the selector the IR operation, that refused each of the others,
 and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
-that step (`tier1-refused	NAME	selection	call`):
+that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
+1's code: its records, its spills' stores and reloads, the saves and restores
+around its calls and fixed registers' sequences, its recomputed constants and its
+edges' moves:
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -123,7 +126,14 @@ by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
 the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
 read, and any other value live past the node there saved around it in a
 call-save row). A parameter's register binds its definition's interval alone
-(`Tier1CfgInput.definition_registers`). Still refused: floating point, narrow
+(`Tier1CfgInput.definition_registers`). Values live across a call take the
+callee-saved registers (`rbx`, `r12` to `r15`), which the prologue saves once,
+rather than caller-saved ones that every call saves and restores around itself
+(`tier1_emit_cfg_callee`: from the first allocation's intervals, each value whose
+interval covers a call is allocated again with the callee-saved registers alone,
+every other with the caller-saved ones; the first allocation stands where the
+second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
+records) and the spills' stores and reloads (15,028 to 7,550). Still refused: floating point, narrow
 call arguments (the IR doesn't keep their signedness, which the callee's
 extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.
@@ -131,6 +141,20 @@ variadic definitions.
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and
 `test-differential --tier1-arg --tier1 --tier1-arg -fno-asynchronous-unwind-tables`
 #142's campaigns.
+
+Measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/1d3f174/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5)):
+speedtest1, with 2,207 of its 2,709 functions by Tier 1, gives Tier 0's
+verification hash by both paths and runs in 285.0 ms, against Tier 0's 256.1
+ms, clang -O0's 289.6 ms and clang -O2's 131.5 ms. The functions Tier 1 compiles
+take 843 M cycles as its code against 667 M as Tier 0's: comparisons stay
+`setcc`/`movzx`/`test` chains through the IR's `zext` of C's comparison-as-int,
+constant offsets are added rather than folded into addresses, and parameters'
+definition intervals keep their caller-saved registers across the entry block's
+calls. 80 of #142's programs, 40 per generator, gave 66 passes at both tiers and
+14 failures, all in clang's own steps. The default path's compile time is
+unchanged, but the checker's unit, which now compiles Tier 1's modules for the
+driver, takes 40.0 s to build against 36.6 to 36.9 s.
 
 ## Current integration boundary
 
