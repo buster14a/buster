@@ -1794,6 +1794,15 @@ static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
         *name = BUSTER_S8("pause");
         parser->at += 1;
     }
+    // `rep ret` and `repz ret` (and their q suffixed spelling): AMD's return-stack-buffer hint, F3 C3, and its repne
+    // spelling, F2 C3. `retl` is not one GNU as takes.
+    const bool rep_ret = prefixed && (strcmp(prefix, "rep") == 0 || strcmp(prefix, "repe") == 0 || strcmp(prefix, "repne") == 0) &&
+                         (x86_match_name(instruction, "ret") || x86_match_name(instruction, "retq"));
+    if (rep_ret)
+    {
+        *name = strcmp(prefix, "repne") == 0 ? BUSTER_S8("repne ret") : BUSTER_S8("rep ret");
+        parser->at += 1;
+    }
     // lzcnt written `rep bsr` (dr_flac's `rep; bsr`, for assemblers that don't know lzcnt) and tzcnt written `rep bsf`:
     // the same bytes (F3 0F BD and F3 0F BC), which a processor without LZCNT or BMI runs as the scans themselves. An
     // AT&T size suffix stays on the name, as on bsr's.
