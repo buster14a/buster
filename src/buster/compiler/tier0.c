@@ -11032,7 +11032,11 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
                             _mm256_maskz_compress_epi32(branch, _mm512_cvtepi64_epi32(_mm512_add_epi64(branch_position, branch_field))));
         const __mmask8 branch_end = _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_END));
         const __m512i branch_target = _mm512_mask_mov_epi64(_mm512_and_si512(current, _mm512_set1_epi64(0xffffffff)), branch_end, _mm512_set1_epi64(count));
-        const __m256i target_position = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), branch, branch_target, positions, 4);
+        // #975: `_mm512_mask_i64gather_epi32` expands to `__builtin_ia32_gatherdiv16si`, which neither the checker's
+        // catalogue nor the backend's rows (there is no VPGATHERQD row) have, so the compiler could not check or lower
+        // this file. The 64-bit gather is the measure pass's, and a position's low half is the whole value.
+        const __m512i target_qwords = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), branch, branch_target, positions, 4);
+        const __m256i target_position = _mm512_cvtepi64_epi32(target_qwords);
         _mm256_storeu_si256((__m256i*)(targets + branches), _mm256_maskz_compress_epi32(branch, target_position));
         branches += (uint32_t)__builtin_popcount(branch);
         // The references and the deferred entries, in entry order: a call's references come where its records do.
