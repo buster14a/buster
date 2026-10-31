@@ -142,11 +142,19 @@ static void dynamic_test_lane_main(void* argument)
         memset(poison, 0xa5, poisoned);
         arena_pop_to(scratch.arena, scratch.length);
     }
-    if (write->starve && lane_index() == write->starved_lane && free_bytes > write->room)
+    // Leave `room` bytes by narrowing the arena's bound: pushing free_bytes - room needs a commit as large as the
+    // reservation, which hosted commit limits refuse, and the lane would write with its whole arena.
+    const bool starve = write->starve && lane_index() == write->starved_lane && free_bytes > write->room;
+    const uint64_t capacity = scratch.arena->capacity;
+    if (starve)
     {
-        arena_push(scratch.arena, free_bytes - write->room, 1);
+        scratch.arena->capacity = scratch.arena->length + write->room;
     }
     const bool succeeded = executable_write(write->link, &write->options, &write->result);
+    if (starve)
+    {
+        scratch.arena->capacity = capacity;
+    }
     scratch_end(scratch);
     if (lane_index() == 0)
     {

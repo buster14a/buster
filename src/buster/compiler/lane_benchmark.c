@@ -480,7 +480,8 @@ static void lane_benchmark_arenas(void* argument)
         const uint64_t reserve_end = lane_benchmark_now();
 
         Arena arena = arena_reserve(BUSTER_SCRATCH_ARENA_CAPACITY);
-        volatile uint8_t* base = arena.base;
+        volatile uint8_t* base = arena_push(&arena, BUSTER_ARENA_SMALL_BYTES + 1, 1);
+        assert(base != 0);
         const uint64_t begin = lane_benchmark_now();
         base[0] = 1;
         const uint64_t first_page = lane_benchmark_now();

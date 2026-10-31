@@ -202,6 +202,7 @@ static void foreign_strings_test_case(ForeignStringsTest* test, const ForeignStr
         const uint64_t poisoned = (uint64_t)expected.size + ((uint64_t)input_count + 1 + 3 * ((uint64_t)expected.count + 1)) * sizeof(uint32_t) + 64;
         if (poisoned <= test->paths[path].capacity)
         {
+            assert(arena_commit(&test->paths[path], test->paths[path].capacity));
             memset(test->paths[path].base, path == 0 ? 0xa5 : 0x5a, poisoned);
         }
         const ForeignStringsError error = foreign_strings_build(inputs, input_count, path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR, &test->paths[path], &results[path]);

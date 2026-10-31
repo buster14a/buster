@@ -341,6 +341,7 @@ static void check_test_source_transparent_history(CheckTest* test)
             check_test_expect(test, input.graph.tag_completions[tag] < activation && input.graph.source_positions[calls[0]] < activation &&
                               activation <= input.graph.source_positions[calls[1]],
                               "transparent attribute activation is distinct from the earlier record completion");
+            assert(arena_commit(&scratch, scratch.capacity));
             memset(scratch.base + scratch.length, 0xa5, scratch.capacity - scratch.length);
             CheckStream stream = { 0 };
             const CheckOptions check_options = { .scalar = scalar != 0 };

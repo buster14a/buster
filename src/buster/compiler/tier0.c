@@ -8869,6 +8869,18 @@ static void tier0_reject(Tier0Validator* validator, uint32_t node, const char* r
     }
 }
 
+// A scratch arena refusal is a memory error, not a rule failure: the caller's lanes can run the part again where
+// there is room.
+static void tier0_reject_memory(Tier0Validator* validator, uint32_t node)
+{
+    if (validator->check.error == TIER0_OK)
+    {
+        validator->check.error = TIER0_ERROR_MEMORY;
+        validator->check.node = node;
+        validator->check.rule = "no scratch memory";
+    }
+}
+
 static uint32_t tier0_pop(Tier0Validator* validator, uint32_t node)
 {
     uint32_t class = BUSTER_TYPED_CLASS_VOID;
@@ -8912,7 +8924,7 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
         uint8_t* copy = BUSTER_ARENA_PUSH_ARRAY(validator->saved, uint8_t, (uint64_t)validator->depth + 1);
         if (copy == 0)
         {
-            tier0_reject(validator, node, "no scratch memory");
+            tier0_reject_memory(validator, node);
         }
         else
         {
@@ -9360,7 +9372,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
     validator.saved = scratch.arena;
     if (validator.stack == 0 || hashes == 0 || seen == 0 || labels == 0 || validator.saved_depths == 0 || validator.saved_offsets == 0)
     {
-        tier0_reject(&validator, 0, "no scratch memory");
+        tier0_reject_memory(&validator, 0);
     }
     else if (count > BUSTER_TIER0_MAX_ENTRIES || function->local_count > BUSTER_TIER0_MAX_LOCALS || function->parameter_count > function->local_count)
     {

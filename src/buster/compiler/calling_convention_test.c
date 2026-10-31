@@ -3242,8 +3242,11 @@ static bool abi_test_builtin_rows(void)
                     view.char_unsigned = mode != 0;
                     view.types.count = counts[c];
                     view.types.capacity = BUSTER_TYPE_BUILTIN_COUNT + 1;
+                    assert(arena_commit(&actual, actual.capacity));
                     memset(actual.base, 0xa5, actual.capacity);
+                    assert(arena_commit(&reference, reference.capacity));
                     memset(reference.base, 0xa5, reference.capacity);
+                    assert(arena_commit(&expected, expected.capacity));
                     memset(expected.base, 0xa5, expected.capacity);
                     actual.length = 64;
                     reference.length = 64;

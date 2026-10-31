@@ -26,7 +26,9 @@ static void check_test_prefix_faults(CheckTest* test, Parser* parser)
     check_test_expect(test, ready, "prefix fault arenas initialize");
     if (ready)
     {
+        assert(arena_commit(&output, output.capacity));
         memset(output.base, 0xa5, output.capacity);
+        assert(arena_commit(&scratch, scratch.capacity));
         memset(scratch.base, 0x5a, scratch.capacity);
         output.length = 33;
         scratch.length = 19;

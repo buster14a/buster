@@ -11763,7 +11763,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
             if (check.error != TIER0_OK)
             {
-                status->status = CHECK_PROGRAM_INVALID;
+                status->status = check.error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
                 status->token = program->bodies[b].declaration;
                 status->backend_node = check.node;
                 status->reason = check.rule;
