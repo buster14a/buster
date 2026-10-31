@@ -86,6 +86,16 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
           "_Static_assert(__builtin_align_up(x, 8) == 8 && __builtin_align_down(13, a) == 8 && __builtin_is_aligned(16, a), \"\");\n"
           "int sizes[__builtin_align_up(x, 8)];\n"
           "int f(void)\n{\nconst int y = 6;\nswitch (0) { case __builtin_align_up(y, 4) - 8: return 1; }\nreturn 0;\n}\n" },
+        // Clang's evaluator fails on a modification it must evaluate, past side effects or not, and then checks no value;
+        // a comma's discarded modification it goes past.
+        { .name = "align: modifications the evaluator doesn't evaluate", .source =
+          "static int s;\nlong f(long x)\n{\nint l = 0;\nreturn __builtin_align_up(x, (s = 3)) + __builtin_align_down(x, (s = 3) + 0) +\n"
+          "__builtin_is_aligned(x, (l = 3)) + __builtin_align_up(x, (s += 3)) + __builtin_align_up(x, s++) + __builtin_align_up(x, ++l);\n}\n" },
+        { .name = "align: a modification's value past a comma", .source = "static int s;\nlong f(long x)\n{\nreturn __builtin_align_up(x, (s = 4, 3));\n}\n",
+          .rejected = true },
+        { .name = "align: a discarded modification", .source = "static int s;\nlong f(long x)\n{\nreturn __builtin_align_up(x, ((s = 3), 3));\n}\n",
+          .rejected = true },
+        { .name = "align: a discarded read", .source = "static int s;\nlong f(long x)\n{\nreturn __builtin_align_up(x, (s, 3));\n}\n", .rejected = true },
         { .name = "align: one argument", .source = "int f(int x)\n{\nreturn __builtin_align_up(x);\n}\n", .rejected = true },
         { .name = "align: three arguments", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, 4, 4);\n}\n", .rejected = true },
         { .name = "probability: accepted forms", .source =
@@ -105,6 +115,20 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
         { .name = "probability: an infinity", .source = "long f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, __builtin_inf());\n}\n", .rejected = true },
         { .name = "probability: a call's", .source = "double g(void);\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, (g(), 0.5));\n}\n",
           .rejected = true },
+        // A constant expression's evaluation fails on a discarded operand it can't evaluate, where a fold goes on.
+        { .name = "probability: a discarded read", .source = "static double s;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, (s, 0.75));\n}\n",
+          .rejected = true },
+        { .name = "probability: a discarded read in a condition", .source =
+          "static double s;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, (s, 1) ? 0.5 : 0.25);\n}\n", .rejected = true },
+        { .name = "probability: a read cast to void", .source =
+          "static double s;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, ((void)s, 0.75));\n}\n", .rejected = true },
+        { .name = "probability: a discarded modification", .source =
+          "static double s;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, ((void)(s = 1), 0.75));\n}\n", .rejected = true },
+        { .name = "probability: discarded operands the evaluator evaluates", .source =
+          "static double s;\nconst int one = 1;\nlong f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, ((void)0, 0.75)) +\n"
+          "__builtin_expect_with_probability(x, 1, (one, 0.75)) + __builtin_expect_with_probability(x, 1, ((void)one, 0.75)) +\n"
+          "__builtin_expect_with_probability(x, 1, (&s, 0.75)) + __builtin_expect_with_probability(x, 1, (sizeof(s), 0.75)) +\n"
+          "__builtin_expect_with_probability(x, 1, 0 ? s : 0.75) + __builtin_expect_with_probability(x, 1, ((void)(0, 1), 0.75));\n}\n" },
         { .name = "probability: a pointer", .source = "long f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1, (void*)0);\n}\n", .rejected = true },
         { .name = "probability: two arguments", .source = "long f(long x)\n{\nreturn __builtin_expect_with_probability(x, 1);\n}\n", .rejected = true },
         { .name = "expect: a folded first argument's effects in constant contexts", .source =

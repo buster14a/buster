@@ -63,6 +63,10 @@ typedef enum CheckFault
 // A known value read from a completed const object's initializer. It can be a GNU constant without being an ICE
 // or an ICE-form null pointer constant. An enumerator declared from it receives its own ordinary ICE provenance.
 #define BUSTER_CHECK_GNU_OBJECT_READ 0x10000u
+// A value an assignment, a compound assignment or an increment gives, or one computed from such a value: clang's evaluator
+// fails on it, as it may modify no object whose lifetime began before the evaluation, even past side effects (an
+// alignment builtin's `(s = 3)` is no constant to it). A comma's left operand, whose value is discarded, doesn't pass it on.
+#define BUSTER_CHECK_MODIFICATION 0x20000u
 // The designator names an inactive member of a known const union. Its address remains valid; value conversion
 // cannot use the initializer receipt. Runtime union access keeps its ordinary semantics.
 #define BUSTER_CHECK_INACTIVE_UNION_READ 0x40000u
@@ -71,6 +75,10 @@ typedef enum CheckFault
 // pointee type (including a void round trip), or an array member without a declared bound. This evidence
 // follows the selected pointer, not unrelated/discarded operands. Qualifier-only casts keep the read proof.
 #define BUSTER_CHECK_CONST_READ_RESTRICTED 0x100000u
+// A discarded operand that clang's evaluator can't evaluate: a comma's left operand, or a cast to void's, that is no
+// constant (a variable's read, a modification), or holds such an operand itself. A constant expression's evaluation fails
+// on it (expect_with_probability's probability: `(s, 0.75)`, `((void)s, 0.75)`), where a fold past side effects goes on.
+#define BUSTER_CHECK_DISCARDED_UNEVALUABLE 0x200000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -427,12 +435,23 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
     value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION |
-                                      BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ);
+                                      BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ |
+                                      BUSTER_CHECK_MODIFICATION | BUSTER_CHECK_DISCARDED_UNEVALUABLE);
     if (value->fault == CHECK_FAULT_NONE && operand->fault != CHECK_FAULT_NONE)
     {
         value->fault = operand->fault;
         value->fault_node = operand->fault_node;
     }
+}
+
+// Whether clang's evaluator evaluates a discarded operand (a comma's left one, a cast to void's): a constant, or a void
+// expression without an operand it can't evaluate, and no modification (BUSTER_CHECK_DISCARDED_UNEVALUABLE).
+static bool check_action_discard_evaluable(const TypeTable* table, const CheckValue* value)
+{
+    const bool known = value->constant_kind != CHECK_CONSTANT_NONE ||
+                       (check_action_kind(table, value->type) == BUSTER_TYPE_KIND_VOID &&
+                        (value->flags & BUSTER_CHECK_DISCARDED_UNEVALUABLE) == 0);
+    return known && (value->flags & BUSTER_CHECK_MODIFICATION) == 0;
 }
 
 static bool check_action_integer_constant(const CheckValue* value, uint32_t extensions)
@@ -2088,7 +2107,7 @@ static void check_action_assignment(TypeTable* table, const CheckAction* action,
             {
                 check_action_bit_field_store(table, &action->operands[0], &result->value);
                 result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-                result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+                result->value.flags |= BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
                 check_action_inherit(&result->value, &action->operands[0]);
             }
         }
@@ -2175,7 +2194,7 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
                 }
                 result->value.category = CHECK_RVALUE;
                 result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_REGISTER);
-                result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
+                result->value.flags |= BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
                 if (result->value.fault != CHECK_FAULT_NONE)
                 {
                     result->value.constant_kind = CHECK_CONSTANT_NONE;
@@ -2218,6 +2237,8 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
         const bool ice = check_action_is_integer(table, target) && ((source.flags & BUSTER_CHECK_ICE) != 0 || (source.flags & BUSTER_CHECK_FLOAT_LITERAL) != 0);
         const bool gnu_ice = check_action_is_integer(table, target) && (source.flags & BUSTER_CHECK_GNU_ICE_FORM) != 0;
         const bool null = target_pointer && check_action_kind(table, type_element(table, target)) == BUSTER_TYPE_KIND_VOID && check_action_null(table, &source, action->extensions);
+        // A cast to void discards its operand: whether clang's evaluator evaluates it, before the conversion makes it void.
+        const bool discarded = target_kind != BUSTER_TYPE_KIND_VOID || check_action_discard_evaluable(table, &source);
         check_action_conversion(table, &source, target, BUSTER_CHECK_CONVERT_CAST, &result->conversions[0], action->node);
         result->value = source;
         result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
@@ -2227,6 +2248,7 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
         if (target_kind == BUSTER_TYPE_KIND_VOID)
         {
             result->value.constant_kind = CHECK_CONSTANT_NONE;
+            result->value.flags = (result->value.flags & ~BUSTER_CHECK_MODIFICATION) | (discarded ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
         }
     }
 }
@@ -2708,6 +2730,10 @@ static void check_action_compute(TypeTable* table, const CheckAction* action, Ch
                     result->value.fault_node = left.fault_node;
                 }
                 check_action_inherit(&result->value, &left);
+                // The left operand's value is discarded: its modification makes no value of the comma's one, but what
+                // clang's evaluator can't evaluate there fails a constant expression.
+                result->value.flags = (result->value.flags & ~BUSTER_CHECK_MODIFICATION) | (right.flags & BUSTER_CHECK_MODIFICATION) |
+                                      (check_action_discard_evaluable(table, &left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
             } break;
             case CHECK_OP_ADDRESS:
             {

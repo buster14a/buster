@@ -239,12 +239,14 @@ static CheckValue check_builtin_misc_evaluated(TypeTable* table, const CheckBuil
 // expect_with_probability's probability (clang's check after its prototype's conversion): converted to double, it must be
 // a constant floating expression without side effects or faults (a const object's constant initializer is one, a variable
 // or a call isn't), in [0, 1], which a NaN isn't. Clang evaluates it as a constant expression, so its value is the
-// evaluator's view (check_builtin_misc_evaluated). It is never evaluated at run time.
+// evaluator's view (check_builtin_misc_evaluated), and a discarded operand that evaluator can't evaluate fails it too
+// (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, 0.75)`). It is never evaluated at run time.
 static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value)
 {
     bool accepted = check_builtin_misc_convert(table, input, output, value, 2, BUSTER_TYPE_DOUBLE);
     const CheckValue probability = accepted ? check_builtin_misc_evaluated(table, input, value, 2, BUSTER_TYPE_DOUBLE) : *value;
-    const bool constant = probability.fault == CHECK_FAULT_NONE && (probability.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+    const bool constant = probability.fault == CHECK_FAULT_NONE &&
+                          (probability.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                           probability.constant_kind == CHECK_CONSTANT_FLOATING;
     if (accepted && !constant)
     {
@@ -450,8 +452,11 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
     else
     {
         // The alignment as clang's evaluator reads it where the call's evidence has it, else the runtime view's constant.
+        // A modification's value (`(s = 3)`) is no constant to it at all (BUSTER_CHECK_MODIFICATION), which leaves the
+        // alignment unchecked.
         const bool evaluated = input->alignment_evaluated;
-        const bool constant = evaluated || (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE);
+        const bool constant = evaluated || (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE &&
+                                            (values[1].flags & BUSTER_CHECK_MODIFICATION) == 0);
         const unsigned __int128 bits = (evaluated ? input->alignment_value : values[1].integer) & check_action_mask(alignment_width);
         const bool effects = evaluated ? input->alignment_side_effects : (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         const bool negative = alignment_signed && (bits >> (alignment_width - 1)) != 0;

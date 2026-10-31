@@ -972,7 +972,10 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   context would (`check_input_misc_evidence`), and the call's checks and
   folds take that value from its evidence (`CheckBuiltinCall.alignment_evaluated`)
   while the argument itself is checked, and runs, as before. An unknown
-  alignment is unchecked;
+  alignment is unchecked, and so is a modification's value, on which clang's
+  evaluator fails past side effects or not (`(s = 3)`, `(s = 3) + 0`, `s++`:
+  `BUSTER_CHECK_MODIFICATION`, which assignments and increments set and a
+  comma's discarded left operand doesn't pass on, so `(s = 4, 3)` is checked);
 - `align_up` and `align_down` are of the source's type, its qualifiers kept (a
   `const int` source's `__typeof__` is a `const int`), and `is_aligned` is a
   bool;
@@ -983,8 +986,13 @@ last rows) as miscellaneous builtins, by clang 23's Sema:
   (`one ? 0.5 : 0.25` of a `const int one = 1`), so its subtree is checked as a
   constant context's (`BUSTER_CHECK_CONTEXT_VALUE` on its node, without a
   constraint report of its own), which the same helper marks from the call's
-  evidence record. It never runs. Its call folds as `expect`'s, and otherwise
-  its recipe is `expect`'s.
+  evidence record. A constant expression's evaluation also fails on a discarded
+  operand it can't evaluate, where a fold goes on: a comma's left operand or a
+  cast to void's that is no constant, as a variable's read or a modification
+  (`(s, 0.75)`, `((void)s, 0.75)`), marks the value
+  `BUSTER_CHECK_DISCARDED_UNEVALUABLE`, which the probability refuses, while
+  `((void)0, 0.75)`, `(one, 0.75)` and `(&s, 0.75)` are constants. It never
+  runs. Its call folds as `expect`'s, and otherwise its recipe is `expect`'s.
 
 The alignment builtins fold, as integer constant expressions, where clang's
 evaluator does: of constants without side effects, in the source's width

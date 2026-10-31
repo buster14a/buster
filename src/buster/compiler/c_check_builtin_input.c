@@ -168,7 +168,7 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     const uint32_t last = align ? check_constant_punctuation(reader->parser, end + 1, token, PARSE_KIND_COMMA) : token;
     CheckValue value = { 0 };
     if (align && last == token && end + 1 < last && check_input_evaluate_cached(reader, end + 1, last, &value) && check_input_const_rvalue(reader, last, &value) &&
-        value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE)
+        value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_MODIFICATION) == 0)
     {
         evidence->alignment_evaluated = true;
         evidence->alignment_side_effects = (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
