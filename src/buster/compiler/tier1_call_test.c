@@ -67,6 +67,9 @@ struct Tier1CallFixture
     bool indirect;
     // A function that returns its parameter truncated to this narrow type (I8 or I16, else none), without calls.
     IrType return_type;
+    // Divisions, remainders and shifts by a register of the four parameters, without calls, whose operands that live on
+    // arrive in rdx and rcx, the registers they take (tier1_call_fixed_fixture).
+    bool fixed;
 };
 
 static X86Instruction tier1_call_constant(uint32_t reg, uint64_t value)
@@ -408,6 +411,46 @@ static bool tier1_call_parameter_fixture(Tier1EmitTest* test, Tier1CallFixture* 
     return ready;
 }
 
+// p0 / p1 + p2 % p1 (unsigned) + (p0 << p3) + (p2 >> p3) + (p0 >>> p1) + p0, at the fixture's width: p2 arrives in rdx and
+// p3 in rcx, and both live past the division and the first shift that take those registers, so they are saved around
+// them; p1 is odd, at most 63, and the shift counts are in range (tier1_call_execute).
+static bool tier1_call_fixed_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
+{
+    const IrSizes sizes = {
+        .instruction_count = 15,
+        .block_count = 1,
+        .parameter_count = 4,
+    };
+    IrFunction* function = &fixture->function;
+    bool ready = ir_create(&test->input, &sizes, function) == IR_OK;
+    if (ready)
+    {
+        const IrType type = fixture->width == 4 ? IR_I32 : IR_I64;
+        function->result_type = (uint8_t)type;
+        function->symbol_count = 1;
+        function->block_offsets[1] = 15;
+        for (uint32_t parameter = 0; parameter < 4; parameter += 1)
+        {
+            function->parameter_types[parameter] = (uint8_t)type;
+            tier1_emit_test_node(function, parameter, IR_PARAM, type, parameter, BUSTER_IR_NONE);
+        }
+        tier1_emit_test_node(function, 4, IR_SDIV, type, 0, 1);
+        tier1_emit_test_node(function, 5, IR_UREM, type, 2, 1);
+        tier1_emit_test_node(function, 6, IR_SHL, type, 0, 3);
+        tier1_emit_test_node(function, 7, IR_ASHR, type, 2, 3);
+        tier1_emit_test_node(function, 8, IR_LSHR, type, 0, 1);
+        tier1_emit_test_node(function, 9, IR_ADD, type, 4, 5);
+        tier1_emit_test_node(function, 10, IR_ADD, type, 9, 6);
+        tier1_emit_test_node(function, 11, IR_ADD, type, 10, 7);
+        tier1_emit_test_node(function, 12, IR_ADD, type, 11, 8);
+        tier1_emit_test_node(function, 13, IR_ADD, type, 12, 0);
+        tier1_emit_test_node(function, 14, IR_RET, IR_VOID, 13, BUSTER_IR_NONE);
+        fixture->helper_count = 0;
+        fixture->fixed = true;
+    }
+    return ready;
+}
+
 // A function that returns its parameter truncated to a narrow type: its result's canonical zero-extended 32 bits, which
 // the caller reads as RAX (a 32-bit move's clears the rest).
 static bool tier1_call_return_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture)
@@ -741,6 +784,27 @@ static void tier1_call_execute(Tier1EmitTest* test, const Tier1CallFixture* fixt
         {
             expected = arguments[0] & (fixture->return_type == IR_I8 ? 0xff : 0xffff);
         }
+        else if (fixture->fixed)
+        {
+            // An odd divisor and shift count below the width, which also keeps the signed division from overflowing.
+            arguments[1] = (arguments[1] % (fixture->width * 8 - 1)) | 1;
+            arguments[3] &= fixture->width * 8 - 1;
+            if (fixture->width == 8)
+            {
+                const int64_t p0 = (int64_t)arguments[0];
+                const int64_t p2 = (int64_t)arguments[2];
+                expected = (uint64_t)(p0 / (int64_t)arguments[1]) + arguments[2] % arguments[1] + (arguments[0] << arguments[3]) + (uint64_t)(p2 >> arguments[3]) +
+                           (arguments[0] >> arguments[1]) + arguments[0];
+            }
+            else
+            {
+                const uint32_t q0 = (uint32_t)arguments[0];
+                const uint32_t q1 = (uint32_t)arguments[1];
+                const uint32_t q2 = (uint32_t)arguments[2];
+                const uint32_t q3 = (uint32_t)arguments[3];
+                expected = (uint32_t)((uint32_t)((int32_t)q0 / (int32_t)q1) + q2 % q1 + (q0 << q3) + (uint32_t)((int32_t)q2 >> q3) + (q0 >> q1) + q0);
+            }
+        }
         else if (fixture->indirect)
         {
             arguments[0] = addresses[0];
@@ -892,6 +956,11 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             else if (fixture->return_type != 0)
             {
                 tier1_emit_test_expect(test, emitted.reference_count == 0, "a narrow return's function has no call");
+            }
+            else if (fixture->fixed)
+            {
+                tier1_emit_test_expect(test, emitted.general && emitted.call_stores != 0 && emitted.call_stores == emitted.call_loads,
+                                       "values live past a division and a shift in their fixed registers are saved around them");
             }
             else if (fixture->indirect)
             {
@@ -1123,18 +1192,19 @@ static void tier1_call_cases(Tier1EmitTest* test)
         }
         arena_pop_to(&test->input, 0);
     }
-    // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, and the I8
-    // and I16 returns.
-    for (uint32_t shape = 0; shape < 10; shape += 1)
+    // The mixed cycles, the dirty I32, I8 and I16 call results, the I8 and I16 parameters, the indirect call, the I8
+    // and I16 returns, and the 64- and 32-bit divisions and shifts.
+    for (uint32_t shape = 0; shape < 12; shape += 1)
     {
         Tier1CallFixture fixture = {
             .narrow_type = shape == 3 ? IR_I8 : shape == 4 ? IR_I16 : 0,
             .parameter_type = shape == 5 ? IR_I8 : shape == 6 ? IR_I16 : 0,
             .return_type = shape == 8 ? IR_I8 : shape == 9 ? IR_I16 : 0,
+            .width = shape == 10 ? 8u : shape == 11 ? 4u : 0u,
         };
         const bool ready = shape < 2 ? tier1_call_mixed_fixture(test, &fixture, shape != 0) : shape < 5 ? tier1_call_narrow_fixture(test, &fixture) :
                            shape < 7 ? tier1_call_parameter_fixture(test, &fixture) : shape == 7 ? tier1_call_indirect_fixture(test, &fixture) :
-                           tier1_call_return_fixture(test, &fixture);
+                           shape < 10 ? tier1_call_return_fixture(test, &fixture) : tier1_call_fixed_fixture(test, &fixture);
         tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
         {

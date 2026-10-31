@@ -164,6 +164,11 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         {
             error = TIER1_LIVENESS_INVALID;
         }
+        else if (!phis && !plan->covered[node] && (plan->patterns[node].rule == TIER1_RULE_DIVIDE || plan->patterns[node].rule == TIER1_RULE_SHIFT))
+        {
+            // The fixed registers' sequence is the CFG consumer's.
+            error = TIER1_LIVENESS_UNSUPPORTED;
+        }
         else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 ||
                                     (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16)))))
         {

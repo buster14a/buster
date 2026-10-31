@@ -93,8 +93,10 @@ struct Tier1EmitResult
     LinkReference* references;
     uint32_t reference_count;
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
-    // symbols' access (Tier1EmitOptions.symbol_access).
+    // symbols' access (Tier1EmitOptions.symbol_access); and its divisions' and shifts' by a register, whose sequences
+    // take records past a node's share.
     uint32_t reference_capacity;
+    uint32_t fixed_count;
     const uint8_t* symbol_access;
     uint32_t symbol_access_count;
     uint32_t call_stores;
@@ -828,7 +830,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         }
     }
     // A phi-free straight-line chain keeps this consumer; every other function goes through the CFG consumer.
-    const bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan->function);
+    const bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan);
     if (error == TIER1_EMIT_OK && !chain)
     {
         error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);

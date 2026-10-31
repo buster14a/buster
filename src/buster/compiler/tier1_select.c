@@ -73,6 +73,11 @@ typedef enum Tier1SelectRule
     // A symbol's address (IR_SYMBOL_ADDR of symbol `immediate`): a lea from rip, marked for its reference, which the CFG
     // consumer gives it, or a load of the symbol's GOT slot where its access says so.
     TIER1_RULE_SYMBOL_ADDRESS,
+    // A division or remainder of values[0] by values[1] (`immediate`'s bit 0 signed, bit 1 the remainder), and a shift of
+    // values[0] by the count in values[1]: x86's fixed registers (rax and rdx, or cl), which the CFG consumer's sequence
+    // takes, saving another value live past it there (tier1_emit_cfg_fixed).
+    TIER1_RULE_DIVIDE,
+    TIER1_RULE_SHIFT,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -983,6 +988,23 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
             tier1_select_fold(forest, node, b, &base);
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
+        else
+        {
+            base.rule = TIER1_RULE_SHIFT;
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 4;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if ((op == IR_SDIV || op == IR_UDIV || op == IR_SREM || op == IR_UREM) && integer)
+    {
+        base.rule = TIER1_RULE_DIVIDE;
+        base.values[0] = a;
+        base.values[1] = b;
+        base.immediate = (op == IR_SDIV || op == IR_SREM ? 1u : 0u) | (op == IR_SREM || op == IR_UREM ? 2u : 0u);
+        base.intrinsic_cost = 8;
+        tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_ADDRESS)
     {
@@ -1546,7 +1568,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI ||
-            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS)
+            plan->patterns[node].rule == TIER1_RULE_STACK_ADDRESS || plan->patterns[node].rule == TIER1_RULE_SYMBOL_ADDRESS || plan->patterns[node].rule == TIER1_RULE_DIVIDE ||
+            plan->patterns[node].rule == TIER1_RULE_SHIFT)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;
