@@ -37,7 +37,15 @@ patterns are:
   and 64-bit additions of constants, which join the displacement while it fits
   32 bits. `s->z[2]` is then one `mov` from `[s + 24]` rather than three
   conversions, two `lea`s and the constants' moves; a pointer that is a value
-  (a ptrtoint or an inttoptr of such a chain) is one `lea`.
+  (a ptrtoint or an inttoptr of such a chain) is one `lea`. A walk that reaches
+  a frame object's address (`IR_STACK_ADDR`) ends there instead (#982): the
+  load, store or address takes the frame's base register in its memory operand,
+  with the object's offset plus the walked displacement, which the CFG consumer
+  fills in at emission from the frame's layout, as it does the object's `lea`.
+  The folded pattern reads no base value, so the object needs no `lea` of its
+  own; realigned frames and base-register frames work through the same base and
+  offset the `lea` takes. A displacement the object's offset pushes past 32
+  bits refuses emission rather than truncating.
 - C's truth values (`tier1_select_truth`, #140): the lowering gives `a < b` as
   `zext (icmp lt a, b)`, which `if`, `!`, `&&` and `||` compare with zero again,
   `icmp ne (zext x), 0` (`eq` for `!`), once for each operator the source
