@@ -12,6 +12,69 @@
 #include "c_check_program_diagnostic_test.c"
 #include "c_check_control_input_test.c"
 
+// #889: column bases stay fixed, but check_control_label's count and failure are observed at each token.
+// A second body reuses the same arrays with a different extent; capacity exhaustion must not write past labels.
+static void check_test_control_columns(CheckTest* test)
+{
+    const uint32_t none = BUSTER_CHECK_NONE;
+    uint32_t parents[6] = { none, 0, 0, 2, 0, none };
+    uint8_t roles[6] = { 0, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_CASE, 0, PARSE_ROLE_LABEL, 0 };
+    const uint32_t case_map[6] = { 0 };
+    Parser parser = { 0 };
+    parser.tokens.count = 6;
+    parser.tree.parents = parents;
+    parser.tree.roles = roles;
+    for (uint32_t limited = 0; limited < 2; limited += 1)
+    {
+        uint32_t first[6];
+        uint32_t last[6];
+        uint32_t next[6];
+        uint32_t previous[6];
+        uint32_t source_labels[6];
+        uint32_t stops[6];
+        uint32_t repeats[6];
+        uint32_t labels[4] = { 37, 37, 37, 37 };
+        CheckProgramCase cases[1] = { { .target = none } };
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .cases = cases };
+        CheckControlWriter writer = {
+            .program = &program,
+            .parser = &parser,
+            .first = first,
+            .last = last,
+            .next = next,
+            .previous = previous,
+            .case_map = case_map,
+            .source_labels = source_labels,
+            .stops = stops,
+            .repeats = repeats,
+            .labels = labels,
+            .capacity = limited ? 1 : 3,
+        };
+        check_control_children(&writer, 0, 5);
+        check_test_expect(test, first[0] == 1 && last[0] == 4 && first[2] == 3 && last[2] == 3 &&
+                               next[1] == 2 && next[2] == 4 && next[4] == none && previous[4] == 2,
+                          "cached control columns retain sibling stores across label calls");
+        check_test_expect(test, source_labels[1] == 0 && source_labels[2] == 1 && source_labels[4] == (limited ? 1u : 2u) &&
+                               cases[0].target == 1 && writer.case_start == 0 && writer.case_end == 1,
+                          "control children observe the live label count and publish case targets");
+        check_test_expect(test, writer.label_count == (limited ? 1u : 3u) && labels[0] == none &&
+                               labels[writer.capacity] == 37 && program.status == (limited ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_OK),
+                          "label exhaustion remains visible and never writes past capacity");
+        for (uint32_t token = 0; token < 6; token += 1)
+        {
+            check_test_expect(test, stops[token] == none && repeats[token] == none, "body control scratch is initialized at every token");
+        }
+        // No label allocation in this one-token body: its old lists and case range must be cleared,
+        // while the preceding body's label count and error are not silently reset.
+        check_control_children(&writer, 3, 3);
+        check_test_expect(test, first[3] == none && last[3] == none && next[3] == none && previous[3] == none &&
+                               source_labels[3] == none && writer.case_start == none && writer.case_end == 0 &&
+                               writer.label_count == (limited ? 1u : 3u) &&
+                               program.status == (limited ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_OK),
+                          "a reused control writer resets only the current body's columns");
+    }
+}
+
 static void check_test_program_addressed(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -2962,6 +3025,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_bit_ints(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
+    check_test_control_columns(test);
     check_test_program_addressed(test);
     check_test_program_scans(test);
     check_test_program_bodies(test, clang);

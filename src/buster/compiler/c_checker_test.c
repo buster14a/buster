@@ -1806,6 +1806,24 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
 {
     const uint64_t mark = storage->length;
     CheckGraph graph;
+    // #889: no column storage is required for an empty graph, and invalid descriptors fail before using it.
+    for (uint32_t path = 0; path < 3; path += 1)
+    {
+        const CheckOptions empty_options = { .scalar = path == 0, .level_order = path == 2 };
+        const uint64_t output_mark = output->length;
+        const uint64_t scratch_mark = scratch->length;
+        CheckGraph empty = { 0 };
+        CheckStream stream;
+        bool checked = check_graph_run(table, &empty, output, scratch, &empty_options, &stream);
+        check_test_expect(test, checked && stream.status == CHECK_STATUS_OK && stream.count == 0 && stream.report_count == 0 &&
+                               stream.values == NULL && output->length == output_mark && scratch->length == scratch_mark,
+                          "empty graph leaves null columns untouched on every scheduler");
+        empty.count = 1;
+        checked = check_graph_run(table, &empty, output, scratch, &empty_options, &stream);
+        check_test_expect(test, !checked && stream.status == CHECK_STATUS_INVALID_GRAPH &&
+                               output->length == output_mark && scratch->length == scratch_mark,
+                          "invalid graph capacity rejects null columns before a cached-base walk");
+    }
     const bool initialized = check_graph_initialize(&graph, storage, 65537, 0);
     check_test_expect(test, initialized, "deep graph allocation");
     if (initialized)
