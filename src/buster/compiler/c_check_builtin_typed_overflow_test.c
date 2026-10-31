@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's fixed-prototype unsigned-long overflow action. Integer and floating conversions are independently
-// performed by the host C compiler, then Clang's actual __builtin_umull_overflow supplies stored bits and boolean.
+// #148's fixed-prototype typed overflow actions. Integer and floating conversions are independently performed by the
+// host C compiler, then Clang's actual __builtin_umull_overflow (and for every builtin of the family, the host's own:
+// check_builtin_typed_overflow_test_every) supplies stored bits and boolean.
 // The action's destination/store/effects remain explicit even when folded. Guarded batches compare both paths and
 // legal partitions; external source probes check Clang's prototype and constraints. No C-source lowering is claimed.
 
@@ -191,6 +192,143 @@ static void check_builtin_typed_overflow_test_values(CheckBuiltinTypedOverflowTe
     result = check_builtin_typed_overflow_test_action(test, table, &input);
     check_builtin_typed_overflow_test_expect(test, result.builtin.action.value.fault == CHECK_FAULT_DIVIDE_BY_ZERO && result.builtin.action.value.fault_node == 73 &&
         result.builtin.action.value.constant_kind == CHECK_CONSTANT_NONE && result.builtin.store, "evaluated input fault retains provenance and required runtime store");
+}
+
+// The host compiler's own typed overflow builtin `id` of `a` and `b`, the source values as their types give them,
+// converted to the builtin's prototype's type as a call converts them: the overflow, and the stored value's bits.
+static __attribute__((noinline)) bool check_builtin_typed_overflow_test_host(CBuiltinId id, unsigned long a, unsigned long b, unsigned __int128* stored)
+{
+    bool result = false;
+    int si = 0;
+    long sl = 0;
+    long long sll = 0;
+    unsigned ui = 0;
+    unsigned long ul = 0;
+    unsigned long long ull = 0;
+    *stored = 0;
+    switch (id)
+    {
+    case CBUILTIN_SADD_OVERFLOW:
+        result = __builtin_sadd_overflow((int)a, (int)b, &si);
+        *stored = (unsigned __int128)si;
+        break;
+    case CBUILTIN_SADDL_OVERFLOW:
+        result = __builtin_saddl_overflow((long)a, (long)b, &sl);
+        *stored = (unsigned __int128)sl;
+        break;
+    case CBUILTIN_SADDLL_OVERFLOW:
+        result = __builtin_saddll_overflow((long long)a, (long long)b, &sll);
+        *stored = (unsigned __int128)sll;
+        break;
+    case CBUILTIN_SSUB_OVERFLOW:
+        result = __builtin_ssub_overflow((int)a, (int)b, &si);
+        *stored = (unsigned __int128)si;
+        break;
+    case CBUILTIN_SSUBL_OVERFLOW:
+        result = __builtin_ssubl_overflow((long)a, (long)b, &sl);
+        *stored = (unsigned __int128)sl;
+        break;
+    case CBUILTIN_SSUBLL_OVERFLOW:
+        result = __builtin_ssubll_overflow((long long)a, (long long)b, &sll);
+        *stored = (unsigned __int128)sll;
+        break;
+    case CBUILTIN_SMUL_OVERFLOW:
+        result = __builtin_smul_overflow((int)a, (int)b, &si);
+        *stored = (unsigned __int128)si;
+        break;
+    case CBUILTIN_SMULL_OVERFLOW:
+        result = __builtin_smull_overflow((long)a, (long)b, &sl);
+        *stored = (unsigned __int128)sl;
+        break;
+    case CBUILTIN_SMULLL_OVERFLOW:
+        result = __builtin_smulll_overflow((long long)a, (long long)b, &sll);
+        *stored = (unsigned __int128)sll;
+        break;
+    case CBUILTIN_UADD_OVERFLOW:
+        result = __builtin_uadd_overflow((unsigned)a, (unsigned)b, &ui);
+        *stored = (unsigned __int128)ui;
+        break;
+    case CBUILTIN_UADDL_OVERFLOW:
+        result = __builtin_uaddl_overflow((unsigned long)a, (unsigned long)b, &ul);
+        *stored = (unsigned __int128)ul;
+        break;
+    case CBUILTIN_UADDLL_OVERFLOW:
+        result = __builtin_uaddll_overflow((unsigned long long)a, (unsigned long long)b, &ull);
+        *stored = (unsigned __int128)ull;
+        break;
+    case CBUILTIN_USUB_OVERFLOW:
+        result = __builtin_usub_overflow((unsigned)a, (unsigned)b, &ui);
+        *stored = (unsigned __int128)ui;
+        break;
+    case CBUILTIN_USUBL_OVERFLOW:
+        result = __builtin_usubl_overflow((unsigned long)a, (unsigned long)b, &ul);
+        *stored = (unsigned __int128)ul;
+        break;
+    case CBUILTIN_USUBLL_OVERFLOW:
+        result = __builtin_usubll_overflow((unsigned long long)a, (unsigned long long)b, &ull);
+        *stored = (unsigned __int128)ull;
+        break;
+    case CBUILTIN_UMUL_OVERFLOW:
+        result = __builtin_umul_overflow((unsigned)a, (unsigned)b, &ui);
+        *stored = (unsigned __int128)ui;
+        break;
+    case CBUILTIN_UMULL_OVERFLOW:
+        result = __builtin_umull_overflow((unsigned long)a, (unsigned long)b, &ul);
+        *stored = (unsigned __int128)ul;
+        break;
+    case CBUILTIN_UMULLL_OVERFLOW:
+        result = __builtin_umulll_overflow((unsigned long long)a, (unsigned long long)b, &ull);
+        *stored = (unsigned __int128)ull;
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+// Every typed overflow builtin (check_builtin_typed_overflows) against the host compiler's own, of every pair of
+// integer source types and boundary or random values: the overflow, the stored bits at the prototype's width, the
+// conversions to the prototype and the generic builtin it runs as.
+static void check_builtin_typed_overflow_test_every(CheckBuiltinTypedOverflowTest* test, TypeTable* table)
+{
+    const TypeId types[] = { BUSTER_TYPE_SCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULLONG };
+    const uint64_t boundaries[] = { 0, 1, 2, UINT64_MAX, UINT64_C(0x7fffffff), UINT64_C(0x80000000), UINT64_C(0xffffffff), UINT64_C(0x8000000000000000),
+                                    UINT64_C(0x7fffffffffffffff) };
+    for (uint32_t row = 0; row < BUSTER_ARRAY_LENGTH(check_builtin_typed_overflows); row += 1)
+    {
+        const CheckBuiltinTypedOverflowInfo* info = check_builtin_typed_overflows + row;
+        uint32_t width = 0;
+        bool signed_type = false;
+        check_action_integer_type(table, info->type, &width, &signed_type);
+        const unsigned __int128 mask = check_action_mask(width);
+        for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(types); at += 1)
+        {
+            for (uint32_t bt = 0; bt < BUSTER_ARRAY_LENGTH(types); bt += 1)
+            {
+                for (uint32_t item = 0; item < 12; item += 1)
+                {
+                    const uint64_t a = item < BUSTER_ARRAY_LENGTH(boundaries) ? boundaries[item] : check_builtin_typed_overflow_test_random(test);
+                    const uint64_t b = item < BUSTER_ARRAY_LENGTH(boundaries) ? boundaries[(item * 5 + at + bt) % BUSTER_ARRAY_LENGTH(boundaries)] :
+                                                                                check_builtin_typed_overflow_test_random(test);
+                    CheckBuiltinAction input = check_builtin_typed_overflow_test_input(table, check_test_integer(types[at], a), check_test_integer(types[bt], b));
+                    input.id = info->id;
+                    input.operands[2].type = type_pointer(table, info->type);
+                    unsigned __int128 stored = 0;
+                    const bool overflow = check_builtin_typed_overflow_test_host(info->id, check_builtin_typed_overflow_test_convert(types[at], a),
+                                                                                 check_builtin_typed_overflow_test_convert(types[bt], b), &stored);
+                    const CheckBuiltinTypedOverflowResult result = check_builtin_typed_overflow_test_action(test, table, &input);
+                    check_builtin_typed_overflow_test_expect(test, result.builtin.action.diagnostic == CHECK_DIAG_NONE && result.builtin.fold_status == CBUILTIN_FOLDED &&
+                        result.builtin.action.value.constant_kind == CHECK_CONSTANT_INTEGER && result.builtin.action.value.integer == overflow && result.builtin.store &&
+                        result.builtin.store_value.type == info->type && result.builtin.store_value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                        (result.builtin.store_value.integer & mask) == (stored & mask),
+                        "every typed overflow builtin: the host compiler's overflow and stored bits");
+                    check_builtin_typed_overflow_test_expect(test, result.runtime_builtin == info->generic && result.argument_conversions[0].type == info->type &&
+                        result.argument_conversions[1].type == info->type && result.argument_conversions[2].type == type_pointer(table, info->type),
+                        "every typed overflow builtin: its prototype's conversions and its generic builtin");
+                }
+            }
+        }
+    }
 }
 
 static void check_builtin_typed_overflow_test_constraints(CheckBuiltinTypedOverflowTest* test, TypeTable* table)
@@ -428,6 +566,7 @@ static int run_check_builtin_typed_overflow_tests(int argc, char** argv)
         if (initialized)
         {
             check_builtin_typed_overflow_test_values(&test, &types.table);
+            check_builtin_typed_overflow_test_every(&test, &types.table);
             check_builtin_typed_overflow_test_constraints(&test, &types.table);
             check_builtin_typed_overflow_test_pages(&test, &types.table);
         }

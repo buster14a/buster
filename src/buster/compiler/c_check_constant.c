@@ -1359,6 +1359,33 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         const uint8_t role = parser->tree.roles[token];
         const uint8_t kind = parser->tokens.kinds[token];
         const uint32_t name = parser->tokens.names[token];
+        if (role == PARSE_ROLE_OPEN_COMPOUND && !input->cached)
+        {
+            // A compound literal in a type query's expression (`typeof((T){...})`): its type name is a type, its `)`
+            // and initializer are syntax, and its body's `}` (CLOSE_COMPOUND_BODY) is the value's leaf.
+            const uint32_t close = parser->tree.parents[token];
+            const uint32_t next = token + 1;
+            const uint32_t body = close + 1;
+            const uint32_t body_end = body < input->end ? parser->tree.parents[body] : input->end;
+            valid = close > next && close < input->end && check_constant_type_start(parser, next) &&
+                    body_end > body && body_end < input->end && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY;
+            if (valid)
+            {
+                input->syntax[token - input->first] = true;
+                input->type_begin[close - input->first] = next;
+                check_constant_mark_type(input, next, close);
+                input->syntax[close - input->first] = true;
+                for (uint32_t item = body; item < body_end; item += 1)
+                {
+                    input->syntax[item - input->first] = true;
+                }
+            }
+            if (!valid && input->failed_token != 0)
+            {
+                *input->failed_token = token;
+            }
+            continue;
+        }
         if (input->cached && role == PARSE_ROLE_OPEN_COMPOUND)
         {
             // A compound literal, whose type and object the walk made at this `(`: its tokens are syntax up to its body's
@@ -1974,6 +2001,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         if (valid)
         {
             check_action_scalar(reader->types, &resolved, checked);
+            // A call of a plain library builtin's declaration that clang folds (#148) folds here as in the graph.
+            if (action->op == CHECK_OP_CALL && callee < reader->parser->tokens.count)
+            {
+                check_builtin_library_fold_plain(reader->types, check_input_library_call(reader, callee), &resolved, checked);
+            }
         }
         else
         {
@@ -2163,6 +2195,29 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 produced = true;
             }
         }
+        else if (!input->cached && role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+        {
+            // A compound literal in a type query's expression, whose type its `(` prepared (check_constant_bind). Its
+            // initializer is unevaluated with it; the value is an object of that type.
+            const uint32_t close = reader->first_child[token];
+            const uint32_t type_first = close >= input->first && close < input->end ? input->type_begin[close - input->first] : BUSTER_CHECK_NONE;
+            const TypeId type = type_first != BUSTER_CHECK_NONE ? check_constant_type(input, type_first, close) : 0;
+            const uint8_t kind = type != 0 ? type_kind(reader->types, type) : BUSTER_TYPE_KIND_VOID;
+            valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VOID &&
+                    kind != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
+            if (valid)
+            {
+                input->values[index] = (CheckValue)
+                {
+                    .type = type,
+                    .category = CHECK_LVALUE,
+                    .flags = BUSTER_CHECK_SIDE_EFFECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = 0,
+                };
+                produced = true;
+            }
+        }
         else if (input->cached && role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
         {
             // A compound literal's object (check_constant_bind), as the expression walk's leaf at this `}` has it.
@@ -2194,7 +2249,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             if (valid)
             {
                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                input->values[index] = (CheckValue)
+                // A constexpr object's value is the constant its initializer's finish read (#793): an integer or a
+                // floating constant, or a null pointer, as an lvalue whose object is still the declaration's.
+                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                    check_input_constexpr_find(reader, declaration) : 0;
+                input->values[index] = constant != 0 ? constant->value : (CheckValue)
                 {
                     .type = type,
                     .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
@@ -2205,6 +2264,16 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     .object = reader->objects[declaration],
                     .overload_head = reader->output->overload_heads != 0 ? reader->output->overload_heads[token] : 0,
                 };
+                if (constant != 0)
+                {
+                    input->values[index].type = type;
+                    input->values[index].category = CHECK_LVALUE;
+                    input->values[index].flags |= BUSTER_CHECK_ICE;
+                    input->values[index].object = reader->objects[declaration];
+                    input->values[index].offset = 0;
+                    input->values[index].fault = CHECK_FAULT_NONE;
+                    input->values[index].overload_head = 0;
+                }
                 valid = check_constant_designator(input, &input->values[index]);
                 input->abi_origins[index] = reader->output->explicit_abis != 0 ? reader->output->explicit_abis[declaration] : 0;
                 produced = true;

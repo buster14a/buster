@@ -61,6 +61,19 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         {
             result.value = checked.constant_value;
         }
+        // __builtin_strlen and memcmp fold as the graph folds them (check_builtin_library_fold_memory).
+        const CheckAction folding = {
+            .arguments = arguments,
+            .argument_count = count,
+            .node = closing,
+            .tag_completions = reader->tag_completions,
+            .tag_completion_count = reader->types->tags.capacity,
+            .source_position = closing + 1,
+            .extensions = extensions,
+            .const_values = &reader->output->const_values,
+            .constant_evaluated = true,
+        };
+        check_builtin_library_fold_memory(reader->types, builtin, &folding, checked.argument_conversions, &result);
     }
     else if (builtin == CBUILTIN_FLT_ROUNDS)
     {
@@ -216,7 +229,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         {
             action.operands[i] = arguments[i];
         }
-        if (builtin == CBUILTIN_UMULL_OVERFLOW)
+        if (check_builtin_typed_overflow_info(builtin) != NULL)
         {
             CheckBuiltinTypedOverflowResult checked;
             check_builtin_typed_overflow(reader->types, &action, &checked, 1, BUSTER_SCALAR_PATH(reader->parser->options.scalar));

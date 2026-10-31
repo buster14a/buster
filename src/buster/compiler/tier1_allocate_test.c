@@ -88,6 +88,51 @@ static bool tier1_allocation_test_equal(const Tier1AllocationInput* input, const
     return same;
 }
 
+// tier1_allocation_color's LIFO level rule written independently: positions in order, each position's ends and then
+// its starts in input order, without the event sort or the class's event column. An end at height h + 1 deposits
+// its register at level h; a start at height h takes level h's register, or a fresh one. False when the class's
+// pressure exceeds its registers, which sends it to the scan instead.
+static bool tier1_allocation_test_levels(const Tier1AllocationInput* input, uint32_t class, uint8_t* regs)
+{
+    uint8_t levels[33];
+    memset(levels, UINT8_MAX, sizeof(levels));
+    uint32_t fresh = input->registers[class];
+    const uint32_t capacity = (uint32_t)__builtin_popcount(fresh);
+    uint32_t height = 0;
+    bool fits = true;
+    for (uint32_t p = 0; fits && p <= input->position_count; p += 1)
+    {
+        for (uint32_t i = 0; i < input->count; i += 1)
+        {
+            if (input->classes[i] == class && input->ends[i] == p)
+            {
+                height -= 1;
+                levels[height] = regs[i];
+            }
+        }
+        for (uint32_t i = 0; fits && i < input->count; i += 1)
+        {
+            if (input->classes[i] == class && input->starts[i] == p)
+            {
+                fits = height < capacity;
+                if (fits)
+                {
+                    uint8_t r = levels[height];
+                    levels[height] = UINT8_MAX;
+                    if (r == UINT8_MAX)
+                    {
+                        r = (uint8_t)__builtin_ctz(fresh);
+                        fresh &= fresh - 1;
+                    }
+                    regs[i] = r;
+                    height += 1;
+                }
+            }
+        }
+    }
+    return fits;
+}
+
 static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed, uint32_t iterations)
 {
     uint32_t starts[96];
@@ -167,6 +212,21 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
             tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar), "position occupancy oracle");
             tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &again), "deterministic repeat");
             tier1_allocation_test_expect(tally, vector.vector_intervals + vector.scalar_intervals == count, "fallback accounting");
+            // Without fixed ranges every interval has its class's full mask, so a class that fits is colored.
+            for (uint32_t class = 0; BUSTER_HOST_VECTOR && !constrained && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+            {
+                uint8_t reference[96];
+                if (tier1_allocation_test_levels(&input, class, reference))
+                {
+                    bool same = true;
+                    for (uint32_t i = 0; i < count; i += 1)
+                    {
+                        const uint32_t f = vector.fragment_offsets[i];
+                        same &= classes[i] != class || (vector.fragment_offsets[i + 1] == f + 1 && vector.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && vector.registers[f] == reference[i]);
+                    }
+                    tier1_allocation_test_expect(tally, same, "LIFO reuse matches the independent level-rule reference");
+                }
+            }
             if (sparse)
             {
                 tier1_allocation_test_expect(tally, vector.spill_count == 0 &&
@@ -1108,6 +1168,8 @@ static void tier1_allocation_test_native(Tier1AllocationTestTally* tally, Arena*
 }
 
 #include "buster/compiler/tier1_moves_test.c"
+#include "buster/compiler/tier1_allocate_expiry_test.c"
+#include "buster/compiler/tier1_allocate_hints_test.c"
 
 static int run_tier1_allocate_tests(int argc, char** argv)
 {
@@ -1147,6 +1209,8 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_moves(&tally, &arena, seed);
         tier1_allocation_test_move_scaling(&tally);
         tier1_allocation_test_required(&tally, &arena);
+        tier1_allocation_test_expiry(&tally);
+        tier1_allocation_test_hints(&tally, &arena, seed);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);
         tier1_allocation_test_native(&tally, &arena, seed);

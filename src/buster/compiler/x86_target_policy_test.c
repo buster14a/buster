@@ -368,6 +368,24 @@ static bool x86_target_test_gas(const char* directory)
         BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(BUSTER_X86_TARGET_GAS_VL, VFMSUBADD, "vfmsubadd", 0x97)
 #undef BUSTER_X86_TARGET_GAS_VL
     };
+    // GNU as 2.42 refuses CET's endbr64 and the notrack/bnd prefixes on every -march, so it has no independent
+    // architecture answer for these baseline-safe encodings (#808). The assembler's own tests encode and run them.
+    static const uint8_t gas_cet[X86_FORM_COUNT] = {
+        [X86_FORM_ENDBR64] = 1,
+        [X86_FORM_NOTRACK_JMP_R64] = 1,
+        [X86_FORM_NOTRACK_CALL_R64] = 1,
+        [X86_FORM_NOTRACK_JMP_M64] = 1,
+        [X86_FORM_NOTRACK_CALL_M64] = 1,
+        [X86_FORM_BND_CALL_REL32] = 1,
+        [X86_FORM_BND_CALL_RM64] = 1,
+        [X86_FORM_BND_JMP_REL8] = 1,
+        [X86_FORM_BND_JMP_REL32] = 1,
+        [X86_FORM_BND_JMP_RM64] = 1,
+        [X86_FORM_NOTRACK_BND_JMP_R64] = 1,
+        [X86_FORM_NOTRACK_BND_JMP_M64] = 1,
+        [X86_FORM_NOTRACK_BND_CALL_R64] = 1,
+        [X86_FORM_NOTRACK_BND_CALL_M64] = 1,
+    };
     static const struct
     {
         const char* profile;
@@ -412,7 +430,7 @@ static bool x86_target_test_gas(const char* directory)
         fputs(".intel_syntax noprefix\n.text\n", file);
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (x86_target_requirement(form) != 0)
+            if (x86_target_requirement(form) != 0 && !gas_cet[form])
             {
                 X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, true);
                 // This oracle checks canonical forms. Optional FS/GS prefixes have no separate ISA requirement,
@@ -540,7 +558,7 @@ static bool x86_target_test_gas(const char* directory)
         free(diagnostics);
     }
     unlink(source);
-    printf("target forms against GAS architecture gate: %s (%llu comparisons, %u explicit GAS AVX512VL/FMA gaps; independent feature removals)\n", passed ? "pass" : "FAIL", (unsigned long long)checks, gaps);
+    printf("target forms against GAS architecture gate: %s (%llu comparisons, %u explicit GAS AVX512VL/FMA gaps; CET rows skipped; independent feature removals)\n", passed ? "pass" : "FAIL", (unsigned long long)checks, gaps);
     return passed;
 }
 

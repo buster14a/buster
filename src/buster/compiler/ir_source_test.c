@@ -88,18 +88,7 @@ struct IrSourceFile
 // or for a function no RETURN leaves, its declared result's class, an aggregate's taken as its address's.
 static IrType ir_source_result(const Tier0Function* function, const CheckProgram* program, uint32_t b, bool naked)
 {
-    uint8_t class = UINT8_MAX;
-    for (uint32_t i = 0; class == UINT8_MAX && i < function->count; i += 1)
-    {
-        class = function->kinds[i] == BUSTER_TYPED_RETURN ? function->classes[i] : class;
-    }
-    if (class == UINT8_MAX && !naked)
-    {
-        const TypeTable* types = program->types;
-        const TypeId result = type_return(types, program->input->declared_types[program->bodies[b].declaration]);
-        class = check_lower_type_class(types, result);
-        class = class != UINT8_MAX ? class : type_size(types, result) == 0 ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64;
-    }
+    const uint8_t class = check_program_result_class(function, program, b, naked);
     return class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[class];
 }
 

@@ -310,8 +310,10 @@ struct CheckProgram
     // or destructor attribute, both by the function's declarations up to the definition (check_program_body_eager),
     // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
     // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
-    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
-    // a program that no selection made, or in a unit without a target attribute, which the check skips.
+    // are emitted. Code generation's check of target features takes clang's order of emission from it (#775), and the
+    // lowering of a lock-free query whose answer is its function's emission's takes that emission's place
+    // (CheckBuiltinAtomicEffect.late_completion); null in a program that no selection made, or in a unit without a
+    // target attribute, an x86 builtin's call (#148) or such a query, which neither reads.
     uint8_t* body_eager;
 };
 
@@ -1605,6 +1607,11 @@ static void check_control_drain(CheckControlWriter* writer)
             uint32_t i = plan;
             uint32_t v = writer->vla_first[task.token];
             uint32_t a = writer->allocation_first[task.token];
+            // A variably modified typeof's operand (check_input_expressions' evaluation_nodes) is a side effect of the
+            // declaration, after its type's variable bounds and before its initializers.
+            const uint32_t evaluation = writer->program->input->evaluation_nodes != NULL ?
+                                        writer->program->input->evaluation_nodes[task.token] : BUSTER_CHECK_NONE;
+            bool evaluated = false;
             while ((i != BUSTER_CHECK_NONE || v != BUSTER_CHECK_NONE || a != BUSTER_CHECK_NONE) && writer->program->status == CHECK_PROGRAM_OK)
             {
                 const CheckInitializers* initializers = writer->program->initializers;
@@ -1616,6 +1623,18 @@ static void check_control_drain(CheckControlWriter* writer)
                 const bool bound = v != BUSTER_CHECK_NONE && bounded <= a && bounded <= initialized;
                 const bool allocation = !bound && a != BUSTER_CHECK_NONE && a <= initialized;
                 const uint32_t declaration = bound ? bounded : initialized;
+                if (evaluation != BUSTER_CHECK_NONE && !evaluated && !bound)
+                {
+                    if (writer->count < writer->capacity)
+                    {
+                        writer->entries[writer->count++] = (CheckControl){ .kind = CHECK_CONTROL_EVALUATE, .node = evaluation, .token = task.token, .target = BUSTER_CHECK_NONE };
+                        evaluated = true;
+                    }
+                    else
+                    {
+                        check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
+                    }
+                }
                 if (allocation)
                 {
                     const uint32_t closing = writer->parser->tree.parents[task.token];
@@ -1659,10 +1678,34 @@ static void check_control_drain(CheckControlWriter* writer)
                     i = writer->plan_next[i];
                 }
             }
+            if (evaluation != BUSTER_CHECK_NONE && !evaluated && writer->program->status == CHECK_PROGRAM_OK)
+            {
+                // A declaration whose only entries were variable bounds: its operand follows them.
+                if (writer->count < writer->capacity)
+                {
+                    writer->entries[writer->count++] = (CheckControl){ .kind = CHECK_CONTROL_EVALUATE, .node = evaluation, .token = task.token, .target = BUSTER_CHECK_NONE };
+                }
+                else
+                {
+                    check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
+                }
+            }
             // The graph's token groups are in postorder. Each wrapper here is a complete discarded expression
             // or declaration initializer; expressions of nested statements have their own source tokens.
             for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? writer->token_first[task.token] : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = writer->node_next[node])
             {
+                // The evaluated typeof operand is already a control entry; the discard wrapper the expression walk
+                // made of its value at the terminator must not evaluate it again.
+                uint32_t operand = node;
+                while (operand != BUSTER_CHECK_NONE && (writer->program->input->graph.ops[operand] == CHECK_OP_CAST ||
+                                                        writer->program->input->graph.ops[operand] == CHECK_OP_CONVERT))
+                {
+                    operand = writer->program->input->graph.operand0[operand];
+                }
+                if (evaluation != BUSTER_CHECK_NONE && operand == evaluation)
+                {
+                    continue;
+                }
                 if (!check_control_static(writer, node))
                 {
                     if (writer->count < writer->capacity)
@@ -1827,11 +1870,13 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
         // into their already initialized node marks, then restore every touched word before references consume it.
         // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
-        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16,
-        // so the u32 suffix is aligned and graph->count <= capacity bounds it within the existing allocation.
+        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16 plus
+        // the cleanups' room, so round its byte offset up to a u32's and keep graph->count <= capacity within the
+        // existing allocation.
         const uint32_t warning_mark = UINT32_C(1) << 31;
-        _Static_assert(sizeof(CheckControlTask) >= 5, "control tasks hold byte marks and a u32 visited list");
-        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + writer->capacity);
+        _Static_assert(sizeof(CheckControlTask) >= 8, "control tasks hold byte marks and an aligned u32 visited list");
+        const uint64_t touched_offset = ((uint64_t)writer->capacity + 3) & ~(uint64_t)3;
+        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + touched_offset);
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             bool warning_safe = graph->count <= writer->capacity;

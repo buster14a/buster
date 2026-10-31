@@ -600,8 +600,12 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
         arena_pop_to(&test->output, 0);
         arena_pop_to(&test->input, 0);
     }
-    for (uint32_t failure = 0; failure < 11; failure += 1)
+    // Narrow arithmetic, compares, shifts, call arguments and I1 conversions; narrow parameters (0 and 1), returns (2 and
+    // 3) and call results (8) are taken (tier1_call_test.c runs the parameters and results, and these tests the returns).
+    static const uint32_t failures[] = { 4, 5, 6, 7, 9, 10 };
+    for (uint32_t index = 0; index < sizeof(failures) / sizeof(failures[0]); index += 1)
     {
+        const uint32_t failure = failures[index];
         const IrType narrow = failure & 1 ? IR_I16 : IR_I8;
         const IrSizes sizes = {
             .instruction_count = 6,
@@ -688,7 +692,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const uint64_t scratch_mark = test->scratch.length;
             uint32_t node;
             const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &result, &node);
-            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow PARAM/RET/CALL/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
+            tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow call argument/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
             tier1_emit_test_expect(test, test->output.length == output_mark && test->scratch.length == scratch_mark && memcmp(&before, &result, sizeof(result)) == 0, "unsupported narrow selection publishes no partial plan");
         }
         arena_pop_to(&test->output, 0);
