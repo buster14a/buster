@@ -17955,7 +17955,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
 {
     const bool compact = arena_compact;
     bool result = pp_initialize_once(pp, options, table);
-    if (!result && !compact && arena_compact)
+    if (!result && !pp->fatal && !compact && arena_compact)
     {
         ArenaPool* pool = arena_pool;
         arena_pool = 0;

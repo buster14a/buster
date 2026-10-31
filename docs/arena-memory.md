@@ -74,8 +74,10 @@ zero-filled pool reuse, borrowed/measuring arenas, overflow rollback, a real
 large logical requests under a 2 GiB address-space limit. With a compiler path
 and output directory it runs `-E`, `parse`, `-fsyntax-only`, object compilation
 and executable linking, then executes the result. Each command is also refused
-under a deliberately inadequate limit, with a fatal byte-count diagnostic and
-without usage text.
+by child-only seccomp rules for inaccessible reservations and writable commits,
+with a fatal byte-count diagnostic and without usage text. The loader is allowed
+to map its ELF segments and make RELRO read-only; the test does not assume that
+a small fixed address-space limit must always fail.
 
 The baseline unsanitized hosted CI job runs those commands under 2 GiB,
 separately under Callgrind, and without `RLIMIT_AS` under strict overcommit with
@@ -83,3 +85,7 @@ separately under Callgrind, and without `RLIMIT_AS` under strict overcommit with
 disposable VM and restored before the ordinary suite. Sanitizer shadow mappings
 are not subjected to these artificial limits. CI artifacts retain diagnostics;
 no throughput improvement is asserted by this change.
+
+Complete IR verification and SSA analysis borrow only output already pushed
+through the owner; temporary work also pushes through that owner. They never
+write an uncommitted tail or commit half a large reservation just to split it.

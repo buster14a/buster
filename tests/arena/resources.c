@@ -163,7 +163,23 @@ static bool memory_many_arenas(void)
     return memory_wait(child, 0);
 }
 
-static bool memory_command(char* const* arguments, const char* log, rlim_t limit, bool success)
+// Let exec's loader map its ELF segments and make RELRO read-only. Refuse only the compiler's inaccessible
+// reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass.
+static bool memory_refuse(uint32_t operation)
+{
+    const struct sock_filter instructions[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, operation == 1 ? __NR_mmap : __NR_mprotect, 0, 3),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[2])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, operation == 1 ? PROT_NONE : PROT_READ | PROT_WRITE, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOMEM),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    const struct sock_fprog filter = { .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
+}
+
+static bool memory_command(char* const* arguments, const char* log, rlim_t limit, uint32_t refused)
 {
     const pid_t child = fork();
     if (child == 0)
@@ -174,15 +190,15 @@ static bool memory_command(char* const* arguments, const char* log, rlim_t limit
         {
             close(output);
         }
-        ready = ready && (limit == RLIM_INFINITY || memory_limit(limit));
+        ready = ready && (limit == RLIM_INFINITY || memory_limit(limit)) && (refused == 0 || memory_refuse(refused));
         if (ready)
         {
             execvp(arguments[0], arguments);
         }
         _exit(127);
     }
-    bool valid = memory_wait(child, success ? 0 : 1);
-    if (!success)
+    bool valid = memory_wait(child, refused == 0 ? 0 : 1);
+    if (refused != 0)
     {
         char text[4096] = { 0 };
         FILE* stream = fopen(log, "r");
@@ -234,18 +250,18 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
             traced[5 + j] = options[i][j];
         }
         const rlim_t limit = valgrind || strict ? RLIM_INFINITY : UINT64_C(2) << 30;
-        valid = memory_command(valgrind ? traced : options[i], log, limit, true);
-        if (valid && !valgrind && !strict)
+        valid = memory_command(valgrind ? traced : options[i], log, limit, 0);
+        for (uint32_t refused = 1; valid && !valgrind && !strict && refused <= 2; refused += 1)
         {
-            snprintf(log, sizeof(log), "%s/failure-%u.log", directory, i);
-            valid = memory_command(options[i], log, UINT64_C(64) << 20, false);
+            snprintf(log, sizeof(log), "%s/failure-%u-%u.log", directory, i, refused);
+            valid = memory_command(options[i], log, RLIM_INFINITY, refused);
         }
     }
     if (valid)
     {
         snprintf(log, sizeof(log), "%s/executable.log", directory);
         char* run[] = { output, 0 };
-        valid = memory_command(run, log, RLIM_INFINITY, true);
+        valid = memory_command(run, log, RLIM_INFINITY, 0);
     }
     // Preserve logs and products on failure so that CI's artifact identifies the actual refused allocation.
     return valid;

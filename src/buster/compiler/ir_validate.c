@@ -4,9 +4,9 @@
 // Structural validation of the whole graph and SSA dominance for reachable uses, using the existing CFG and
 // dominator consumers. Include after dominators.c and ir.c. Unreachable uses retain shape/type/phi/order checks;
 // they impose no cross-block dominance relation. A reachable use of an unreachable definition is rejected.
-// ir_verify_complete borrows the unused remainder of scratch as two disjoint, 64-byte-aligned Arena views: the
-// left view owns CFG/tree columns for this call, and the right view owns temporary work. Neither view owns a mapping
-// or outlives the call. The caller's length and prefix are preserved on every outcome; no hidden arena is reserved.
+// ir_verify_complete allocates its graph and work through scratch, then lends an exactly pushed tree-output slice
+// to the dominator consumer. Temporary work still pushes through the parent, so its lazily committed prefix grows
+// normally. The caller's length and prefix are preserved on every outcome; no hidden arena is reserved.
 // Input columns must not overlap scratch's unused remainder. Tree-only analysis caps matrix work at 16 MiB and
 // falls back to the existing scalar algorithm; the scalar entry path requests that algorithm directly.
 
@@ -62,33 +62,40 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
 {
     (void)vector;
 
-    IrCheck check = ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
+    IrCheck check = ir_check(function != 0 && scratch != 0 && scratch->length <= scratch->capacity ? IR_ERROR_MEMORY : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
     const uint64_t mark = scratch != 0 ? scratch->length : 0;
-    Arena columns = { 0 };
-    Arena temporary = { 0 };
-    if (function != 0 && scratch != 0 && scratch->length <= scratch->capacity)
+    if (function != 0 && scratch != 0 && scratch->base != 0 && mark <= scratch->capacity)
     {
-        check.error = IR_ERROR_MEMORY;
-        const uintptr_t position = (uintptr_t)scratch->base + mark;
-        const uint64_t padding = (UINT64_C(0) - position) & 63u;
-        const uint64_t remaining = scratch->capacity - mark;
-        if (scratch->base != 0 && padding <= remaining)
+        // The verifier's existing same-arena CFG path keeps all its columns live until this call returns. Check
+        // shape before reading any counted columns, then retain the graph for both structural and dominance checks.
+        check = ir_check_shape(function);
+        if (check.error == IR_OK)
         {
-            const uint64_t available = remaining - padding;
-            const uint64_t left_bytes = (available / 2) & ~UINT64_C(63);
-            uint8_t* base = scratch->base + mark + padding;
-            columns.base = base;
-            columns.capacity = left_bytes;
-            temporary.base = base + left_bytes;
-            temporary.capacity = available - left_bytes;
-            // Keep all existing structural, type, phi coverage and same-block ordering checks, including dead code.
-            check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, &temporary, 0) : ir_verify_scalar(function, &temporary, 0);
-            IrCfg cfg = { 0 };
-            if (check.error == IR_OK)
+            check = ir_check_rows(function, BUSTER_VECTOR_PATH(vector));
+        }
+        IrCfg cfg = { 0 };
+        if (check.error == IR_OK)
+        {
+            check.error = ir_cfg_validated(function, scratch, scratch, &cfg);
+        }
+        if (check.error == IR_OK)
+        {
+            check = ir_check_graph(function, &cfg, scratch, 0, BUSTER_VECTOR_PATH(vector));
+        }
+        if (check.error == IR_OK)
+        {
+            // Tree-only output is seven u32 columns, with one extra element in tree_offsets. It is disjoint
+            // from scratch's remaining tail without splitting the whole virtual reservation down its middle.
+            const uint64_t bytes = cfg.block_count == 0 ? 0 : ((uint64_t)cfg.block_count * 7 + 1) * sizeof(uint32_t);
+            Arena columns = {
+                .base = arena_push(scratch, bytes, BUSTER_DOMINATOR_VECTOR_BYTES),
+                .capacity = bytes,
+            };
+            if (columns.base == 0)
             {
-                check.error = ir_build_cfg(function, &columns, &temporary, &cfg);
+                check.error = IR_ERROR_MEMORY;
             }
-            if (check.error == IR_OK)
+            else
             {
                 const DominatorCfg graph = {
                     .block_count = cfg.block_count,
@@ -99,17 +106,17 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                     .predecessor_offsets = cfg.predecessor_offsets,
                     .predecessors = cfg.predecessors,
                 };
-                // The tree solver retains one frame and three u32 work columns per block before any matrix.
                 // Reserve both possible 64-byte alignment gaps so AUTO picks scalar when its matrix cannot fit.
                 const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 3 * sizeof(uint32_t)) + 126;
-                const uint64_t budget = temporary.capacity > retained ? temporary.capacity - retained : 0;
+                const uint64_t available = scratch->capacity - scratch->length;
+                const uint64_t budget = available > retained ? available - retained : 0;
                 const DominatorOptions options = {
                     .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
                     .outputs = 0,
                     .max_matrix_bytes = budget < BUSTER_IR_VALIDATE_MATRIX_BYTES ? budget : BUSTER_IR_VALIDATE_MATRIX_BYTES,
                 };
                 Dominators tree = { 0 };
-                const DominatorStatus status = dominators_analyze(&columns, &temporary, &graph, options, &tree);
+                const DominatorStatus status = dominators_analyze(&columns, scratch, &graph, options, &tree);
                 if (status == DOMINATOR_OK)
                 {
                     check = ir_validate_reachable(function, &cfg, &tree, BUSTER_VECTOR_PATH(vector));

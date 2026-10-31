@@ -133,6 +133,34 @@ static void ir_test_printer(IrTestTally* tally, const IrFunction* function, Aren
     }
 }
 
+// A large reservation must not lend an inaccessible half to the complete verifier. Its graph/tree scratch
+// grows through the owning arena, preserving an existing prefix without committing the unused reservation.
+static void ir_test_complete_memory(IrTestTally* tally, Arena* memory)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 30);
+    uint8_t* prefix = arena_push(&scratch, 19, 1);
+    const bool ready = prefix != 0 && ir_test_simple(memory, &function);
+    ir_test_expect(tally, ready, "complete verifier memory fixture failed");
+    if (ready)
+    {
+        memset(prefix, 0xa5, 19);
+        const IrCheck vector = ir_verify_complete(&function, &scratch, true);
+        const IrCheck scalar = ir_verify_complete(&function, &scratch, false);
+        bool preserved = scratch.length == 19 && scratch.peak < (1u << 20);
+        for (uint32_t i = 0; i < 19; i += 1)
+        {
+            preserved = preserved && prefix[i] == 0xa5;
+        }
+        ir_test_expect(tally, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked,
+                       "complete verifier rejected lazy arena scratch");
+        ir_test_expect(tally, preserved, "complete verifier consumed unused capacity or changed its caller's prefix");
+    }
+    arena_release(&scratch);
+    arena_pop_to(memory, mark);
+}
+
 static void ir_test_basic(IrTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
@@ -1895,6 +1923,7 @@ static int run_ir_tests(int argc, char** argv)
             memset(prefix, 0xa5, 19);
             ir_test_allocations(&tally, &memory, &scratch);
             ir_test_basic(&tally, &memory, &scratch);
+            ir_test_complete_memory(&tally, &memory);
             ir_test_phi(&tally, &memory, &scratch);
             ir_test_entry_phi(&tally, &memory, &scratch);
             ir_test_switch(&tally, &memory, &scratch);

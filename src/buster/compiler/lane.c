@@ -155,13 +155,11 @@ _Thread_local uint64_t arena_small_floor;
 #else
 static _Thread_local uint64_t arena_small_floor;
 #endif
-// The arenas a thread keeps, emptied, for its next reservations (#152): a lane that compiles translation units one after
-// another reserves and releases the same arenas, about 70 for each unit, and each reservation's mmap, its madvise calls
-// and its munmap take the address space's lock for writing, which every other lane's page faults and reservations then
-// wait for. arena_release puts an arena in the thread's pool, its pages freed with MADV_DONTNEED, which takes the lock
-// for reading and leaves the mapping and its advice as they were, so that the next user finds zero pages as in a fresh
-// arena; a full pool unmaps the arena it took longest ago to make room. arena_reserve_small takes the pool's latest
-// arena of the capacity and base pages asked for.
+// The arenas a thread keeps, emptied, for its next reservations (#152). Reusing a mapping avoids repeating its
+// allocation, alignment and page advice. Release reprotects the committed prefix before MADV_DONTNEED, returning
+// commit charge as well as physical pages; reuse starts inaccessible and zero-filled. These protection changes
+// still take the VM write lock, unlike discard alone. A full pool evicts its oldest arena; reserve takes the latest
+// arena matching the requested capacity and base-page extent.
 #define BUSTER_ARENA_POOL_SLOTS 256
 typedef struct ArenaPool ArenaPool;
 struct ArenaPool
