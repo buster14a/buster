@@ -500,7 +500,19 @@ beginning, its name, which is where an intrinsic's macro expands
 (`EmitBuiltinExpr`), after its constant folding: not where it folds the call
 first (a builtin it may evaluate, `E` in its definition, with an integer or a
 floating result and constant arguments: `__builtin_ia32_pdep_si(5, 3)`), nor in
-a constant context. Before the builtin's own features, it checks SSE's compares
+a constant context. An argument is constant there where its evaluation has no
+side effect (not `(side(), 5)`) and no floating work under `FENV_ACCESS`, whose
+inexact operations clang doesn't fold; a division by zero stops the evaluation,
+and a signed overflow or a shift past the width doesn't. Clang folds two calls
+that the check takes as emitted, so that it reports clang's error where clang
+has none: one of an argument whose floating work under `FENV_ACCESS` is exact,
+which the value's flag (`BUSTER_CHECK_FP_ENVIRONMENT`) doesn't tell from
+inexact work, and one of constant vectors
+(`__builtin_ia32_vtestcps((v4sf){1, 2, 3, 4}, (v4sf){1, 2, 3, 4})`), as the
+checker has no vector constants. Either is refused anyway: the lowering takes no
+x86 builtin whose instructions the function's target lacks, folded or not
+(`__builtin_ia32_pdep_si(5, 3)` at `-march=x86-64` is refused by name, where
+clang folds it). Before the builtin's own features, it checks SSE's compares
 (`__builtin_ia32_cmpps`, `cmpss`, `cmppd` and `cmpsd`), which take AVX's 32
 predicates: one past SSE's 8 in a function without AVX is
 `'__builtin_ia32_cmpps' needs target feature avx`, at the same place, and so is
@@ -518,8 +530,10 @@ only `predefines_features`' names, which the maps hold
 fixtures' errors with clang `-c`'s: a feature the unit lacks and one it has, one
 that a caller's attribute adds or turns off, either of two features, both of
 two with one or both the caller's or the unit's, builtins in dead code and in a
-function nothing emits, one clang folds, one in a deferred function and an
-intrinsic's macro; SSE's compares of a predicate past 7, at a target with AVX
+function nothing emits, one clang folds, ones of an argument with a side
+effect, of arguments that overflow, of one that divides by zero and of an
+inexact one under `FENV_ACCESS`, one in a deferred function and an intrinsic's
+macro; SSE's compares of a predicate past 7, at a target with AVX
 (`x86-64-v4`, whose vectors the lowering takes), a scalar double's and through
 `_mm_cmp_ps`; and every error, line for line, of a builtin's call before its
 arguments' calls', of builtins in a function's statements, of a compare's

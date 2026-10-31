@@ -3821,6 +3821,18 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "    return __builtin_ia32_palignr128(a, b, 1); }\n", true, true },
         { "a builtin clang folds, before one it emits", "-march=x86-64",
           "unsigned f(void) { return __builtin_ia32_pdep_si(5, 3); }\nunsigned g(unsigned x) { return __builtin_ia32_pdep_si(x, 3); }\n", true, true },
+        // Clang folds a call only where its arguments' evaluation has no side effect, and goes past what it notes as
+        // undefined (a signed overflow, a shift past the width), but not past a division by zero, nor past an inexact
+        // operation under FENV_ACCESS.
+        { "a builtin of a constant argument with a side effect, which clang emits", "-march=x86-64",
+          "void side(void);\nunsigned f(void) { return __builtin_ia32_pdep_si((side(), 5u), 3u); }\n", true, true },
+        { "a builtin of arguments that overflow, which clang folds, before one it emits", "-march=x86-64",
+          "unsigned f(void) { return __builtin_ia32_pdep_si((unsigned)(2147483647 + 1), 1u << 40); }\n"
+          "unsigned g(unsigned x) { return __builtin_ia32_pdep_si(x, 3u); }\n", true, true },
+        { "a builtin of an argument that divides by zero, which clang emits", "-march=x86-64",
+          "unsigned f(void) { return __builtin_ia32_pdep_si(5u / 0u, 3u); }\n", true, true },
+        { "a builtin of an inexact argument under FENV_ACCESS, which clang emits", "-march=x86-64",
+          "#pragma STDC FENV_ACCESS ON\nunsigned f(void) { return __builtin_ia32_pdep_si((unsigned)(1.0 / 3.0 * 30.0), 3u); }\n", true, true },
         { "a builtin in a deferred function", "-march=x86-64",
           "typedef char v16qi __attribute__((vector_size(16)));\nstatic v16qi s(v16qi a, v16qi b) { return __builtin_ia32_palignr128(a, b, 3); }\n"
           "v16qi e(v16qi a, v16qi b) { return s(a, b); }\n",

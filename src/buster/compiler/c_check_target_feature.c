@@ -356,7 +356,11 @@ static bool check_target_feature_expression_fails(CheckTargetFeatureBuiltins* bu
 // features where it emits the call (CodeGenFunction::EmitBuiltinExpr's checkTargetFeatures), which it doesn't where it
 // folds the call first: a builtin it may evaluate (its metadata's E attribute) whose result is an integer or a floating
 // value and whose arguments are constants (EvaluateAsRValue, whose result is then an integer's or a floating value's),
-// or a call in a constant context (CheckX86Call.constant_evaluated_context), which it evaluates and never emits. Where
+// or a call in a constant context (CheckX86Call.constant_evaluated_context), which it evaluates and never emits. An
+// argument's constant counts where clang's evaluation of it has no side effect (!hasSideEffects(): not `(f(), 5)`'s)
+// and no floating work under FENV_ACCESS (BUSTER_CHECK_FP_ENVIRONMENT), whose inexact operations clang doesn't fold
+// (checkFloatingPointResult). A fault clang's evaluation stops at (a division by zero) leaves the argument no constant,
+// and one it notes and goes past (a signed overflow, a shift's count) the constant GNU's extension gives it. Where
 // clang folds such a call and the checker doesn't, the lowering refuses it by name.
 static const BuiltinIntrinsicInfo* check_target_feature_emitted(const CheckProgram* program, uint32_t node)
 {
@@ -370,8 +374,10 @@ static const BuiltinIntrinsicInfo* check_target_feature_emitted(const CheckProgr
     for (uint32_t i = 0; folded && i < graph->argument_counts[node]; i += 1)
     {
         const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
-        const CheckConstantKind constant = argument < graph->count ? stream->values[argument].constant_kind : CHECK_CONSTANT_NONE;
-        folded = constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING;
+        const CheckValue* value = argument < graph->count ? stream->values + argument : NULL;
+        const CheckConstantKind constant = value != NULL ? value->constant_kind : CHECK_CONSTANT_NONE;
+        folded = (constant == CHECK_CONSTANT_INTEGER || constant == CHECK_CONSTANT_FLOATING) &&
+                 (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     }
     const bool constant = call != BUSTER_CHECK_NONE && graph->x86_calls[call].constant_evaluated_context;
     return info != NULL && !folded && !constant ? info : NULL;
