@@ -167,7 +167,10 @@ triage, not silently attributed to a compiler bug.
 ## Resource and process lifetime
 
 `--timeout-ms` applies separately to generation, version probes, compilation and
-execution (default 30,000 ms; maximum one hour). `--output-limit` bounds each
+execution (default 30,000 ms; maximum one hour). A command that has already
+exited when the supervisor next runs keeps its exit or signal status, even when
+test load delayed that check past the deadline; a timeout means the command was
+still running at the deadline. `--output-limit` bounds each
 captured stream (default 1 MiB), and `--source-limit` bounds generated input
 (default 16 MiB total). Both accept at most 64 MiB. Csmith's source stream uses
 the source limit. YARPGen files must be regular nonempty files with a combined
