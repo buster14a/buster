@@ -20,10 +20,11 @@ The early C-driver checks from #852 remain in place.
 `PROT_NONE` still counts toward `RLIMIT_AS`. With a finite limit, each ordinary
 arena admits at most one 128th of it, rounded down to a page. This leaves room
 for the compiler's many simultaneously live arenas instead of letting the first
-64 GiB request greedily consume the available space. A large mapping refused
-with `ENOMEM` also activates a 64 MiB per-arena fallback for that thread, for
-layouts such as Valgrind's. These are admission ceilings, not guarantees that
-an arbitrary workload or number of threads will fit.
+64 GiB request greedily consume the available space. A valid large mapping
+refused with `ENOMEM` or `EINVAL` also activates a 64 MiB per-arena fallback for
+that thread. Valgrind's address manager can report `EINVAL` for a layout it
+cannot represent. These are admission ceilings, not guarantees that an arbitrary
+workload or number of threads will fit.
 
 **The returned `Arena.capacity` is authoritative**, and can be less than the
 requested ceiling. Allocations exceeding it fail; no data is truncated and no
@@ -71,13 +72,16 @@ poison unused logical capacity explicitly commit that test memory first; a raw
 `tests/arena/resources.c` checks inaccessible tails, growth and stable pointers,
 zero-filled pool reuse, borrowed/measuring arenas, overflow rollback, a real
 `mprotect` refusal injected with a child-only seccomp filter, and 32 simultaneous
-large logical requests under a 2 GiB address-space limit. With a compiler path
-and output directory it runs `-E`, `parse`, `-fsyntax-only`, object compilation
-and executable linking, then executes the result. Each command is also refused
-by child-only seccomp rules for inaccessible reservations and writable commits,
-with a fatal byte-count diagnostic and without usage text. The loader is allowed
-to map its ELF segments and make RELRO read-only; the test does not assume that
-a small fixed address-space limit must always fail.
+large logical requests under a 2 GiB address-space limit. Another isolated child
+refuses large inaccessible mappings with `EINVAL`, exercising the compact retry
+without relying on Valgrind's current address layout.
+
+With a compiler path and output directory it runs `-E`, `parse`,
+`-fsyntax-only`, object compilation and executable linking, then executes the
+result. Each command is also refused by child-only seccomp rules for inaccessible
+reservations and writable commits, with a fatal byte-count diagnostic and without
+usage text. The loader is allowed to map its ELF segments and make RELRO read-only;
+the test does not assume that a small fixed address-space limit must always fail.
 
 The baseline unsanitized hosted CI job runs those commands under 2 GiB,
 separately under Callgrind, and without `RLIMIT_AS` under strict overcommit with
@@ -89,3 +93,14 @@ no throughput improvement is asserted by this change.
 Complete IR verification and SSA analysis borrow only output already pushed
 through the owner; temporary work also pushes through that owner. They never
 write an uncommitted tail or commit half a large reservation just to split it.
+
+## Initial qualification
+
+[Hosted qualification run 41196519751](https://github.com/buster14a/buster/actions/runs/41196519751)
+built implementation `7be2d8432d12d46c223fa7bd575aa8019707a901` with official
+Clang 23.1.4 for baseline x86-64. All five command modes and the linked executable
+passed in each of the three environments above. All ten injected command failures
+reported a fatal byte-count diagnostic without usage text. Allocator, mapping
+layout, SSA, IR verification, IR metamorphic execution and IR reducer regressions
+also passed. This focused qualification does not stand in for the full repository
+correctness matrix or the approved-host performance measurements.
