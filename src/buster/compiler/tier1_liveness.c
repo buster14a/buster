@@ -68,7 +68,9 @@ static uint32_t tier1_liveness_parameter_mask(uint32_t parameter)
     return parameter < sizeof(registers) ? 1u << registers[parameter] : 0;
 }
 
-static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector)
+// With `phis`, for the CFG consumer (tier1_emit_cfg.c), a selected phi is valid too, and so are a parameter after other
+// instructions and a narrow one (which it zero-extends at the entry); this file's intervals still refuse them.
+static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector, bool phis)
 {
     (void)vector;
 
@@ -108,15 +110,23 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         {
             error = TIER1_LIVENESS_INVALID;
         }
-        else if (op == IR_PHI || op == IR_CALL_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)) || (type != IR_VOID && tier1_select_width(type) == 0))
+        else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) || ((op == IR_CALL || op == IR_CALL_INDIRECT) && !tier1_select_call_supported(function, node)) ||
+                 (type != IR_VOID && tier1_select_width(type) == 0))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
-        else if (op == IR_CALL)
+        else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
         {
+            error = TIER1_LIVENESS_INVALID;
+        }
+        else if (op == IR_CALL || op == IR_CALL_INDIRECT)
+        {
+            // An indirect call's callee is its last effective use, after its arguments.
             const IrCall call = function->calls[function->b[node]];
             const Tier1SelectPattern* pattern = &plan->patterns[node];
-            if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != tier1_select_width(type) || pattern->fold_count != 0 || end - first != call.argument_count)
+            const uint32_t indirect = op == IR_CALL_INDIRECT;
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_CALL || pattern->immediate != function->a[node] || pattern->width != tier1_select_width(type) || pattern->fold_count != 0 ||
+                end - first != call.argument_count + indirect || (indirect && plan->effective_use_values[first + call.argument_count] != function->a[node]))
             {
                 error = TIER1_LIVENESS_INVALID;
             }
@@ -154,15 +164,18 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         {
             error = TIER1_LIVENESS_INVALID;
         }
-        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 || (type != IR_I32 && type != IR_I64 && type != IR_PTR)))
+        else if (!phis && !plan->covered[node] && (plan->patterns[node].rule == TIER1_RULE_DIVIDE || plan->patterns[node].rule == TIER1_RULE_SHIFT))
+        {
+            // The fixed registers' sequence is the CFG consumer's.
+            error = TIER1_LIVENESS_UNSUPPORTED;
+        }
+        else if (op == IR_PARAM && (!parameter_prefix || plan->covered[node] || tier1_liveness_parameter_mask(function->a[node]) == 0 ||
+                                    (type != IR_I32 && type != IR_I64 && type != IR_PTR && !(phis && (type == IR_I1 || type == IR_I8 || type == IR_I16)))))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
         }
-        else if (op == IR_RET && function->a[node] != BUSTER_IR_NONE && (function->type[function->a[node]] == IR_I8 || function->type[function->a[node]] == IR_I16))
-        {
-            error = TIER1_LIVENESS_UNSUPPORTED;
-        }
-        parameter_prefix &= op == IR_PARAM;
+        // The CFG consumer defines every parameter at the function's start, so anything may come first.
+        parameter_prefix &= op == IR_PARAM || phis;
         for (uint32_t use = first; error == TIER1_LIVENESS_OK && use < end; use += 1)
         {
             const uint32_t value = plan->effective_use_values[use];
@@ -343,7 +356,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
     IrCfg cfg = { 0 };
     if (error == TIER1_LIVENESS_OK)
     {
-        error = tier1_liveness_validate_plan(plan, scratch, BUSTER_VECTOR_PATH(vector));
+        error = tier1_liveness_validate_plan(plan, scratch, BUSTER_VECTOR_PATH(vector), false);
     }
     if (error == TIER1_LIVENESS_OK)
     {

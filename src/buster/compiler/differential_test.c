@@ -31,10 +31,11 @@ static DifferentialOptions differential_test_options(const char* output, const c
     options.csmith = tool;
     options.yarpgen = tool;
     options.fixture = true;
-    // Only the deliberate hangs test the short deadline. Other failure classes retain a bounded watchdog without
-    // turning a delayed exit or signal into a different failure class under concurrent test load.
-    const bool timeout = strcmp(scenario, "compile-timeout") == 0 || strcmp(scenario, "run-timeout") == 0 || strcmp(scenario, "generator-timeout") == 0;
-    options.timeout_ms = timeout ? 200 : 1000;
+    // Every command of a deliberate-hang scenario shares this watchdog, the reference and Tier 0 runs too. The
+    // 200 ms used here before was close enough to a cold start under the parallel test runner that a delayed
+    // reference was once recorded as the campaign's first timeout. The fixture's hangs never finish, so this
+    // still detects them deterministically while leaving startup a realistic bound.
+    options.timeout_ms = 1000;
     options.output_limit = 4096;
     options.source_limit = 4096;
     options.generator_mask = 1u << generator;

@@ -458,15 +458,9 @@ static DifferentialProcess differential_supervise(const char* directory, char* c
             result.kind = 5;
             result.error_number = EIO;
         }
-        else if (now - start >= timeout_ms && result.kind == 0)
-        {
-            result.kind = 3;
-        }
-        if (differential_stop_signal)
-        {
-            result.kind = 6;
-            result.signal_number = differential_stop_signal;
-        }
+        // The supervisor may resume past the deadline after the command already exited, when concurrent test
+        // load delays this process rather than the command. Reap first: a finished command is its exit status,
+        // however late the check runs. Only a command still running at the deadline has timed out.
         siginfo_t information = {0};
         const int waited = waitid(P_PID, (id_t)command, &information, WEXITED | WNOHANG | WNOWAIT);
         ended = waited == 0 && information.si_pid == command;
@@ -479,6 +473,15 @@ static DifferentialProcess differential_supervise(const char* directory, char* c
         {
             result.kind = 5;
             result.error_number = errno;
+        }
+        else if (!ended && now != 0 && now - start >= timeout_ms && result.kind == 0)
+        {
+            result.kind = 3;
+        }
+        if (differential_stop_signal)
+        {
+            result.kind = 6;
+            result.signal_number = differential_stop_signal;
         }
     }
     if (command > 0)

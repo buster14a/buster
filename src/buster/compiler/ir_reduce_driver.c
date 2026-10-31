@@ -3,6 +3,7 @@
 // Standalone regular-file boundary and replay bundle. A new output directory owns every artifact; the manifest
 // is written only after reduced text independently parses, verifies and reproduces the classified failure.
 #include <fcntl.h>
+#include "ir_reduce_process.c"
 
 typedef enum IrReducePublication
 {
@@ -116,12 +117,13 @@ static void ir_reduce_driver_quote(FILE* file, const char* text)
 
 static bool ir_reduce_driver_binary(uint64_t* hash, uint64_t* bytes, char* path, uint64_t capacity)
 {
-    const ssize_t length = readlink("/proc/self/exe", path, capacity - 1);
-    FILE* file = length > 0 && (uint64_t)length < capacity ? fopen("/proc/self/exe", "rb") : NULL;
+    const ssize_t length = capacity > 1 ? readlink("/proc/self/exe", path, capacity - 1) : -1;
+    const bool complete = length > 0 && (uint64_t)length < capacity - 1;
+    FILE* file = complete ? fopen("/proc/self/exe", "rb") : NULL;
     bool valid = file != NULL;
     uint64_t value = UINT64_C(14695981039346656037);
     uint64_t size = 0;
-    if (length > 0 && (uint64_t)length < capacity)
+    if (complete)
     {
         path[length] = 0;
     }
@@ -177,8 +179,18 @@ static IrReducePublication ir_reduce_driver_replay(const char* path, IrReduceOra
                 }
                 else if (vector.error == IR_OK && scalar.error == IR_OK)
                 {
-                    IrReduceWork replay = { .limits = *limits, .predicate = ir_reduce_oracle, .context = oracle,
-                                             .scratch = checks, .started = ir_reduce_milliseconds() };
+                    IrReduceProcess process = {
+                        .predicate = ir_reduce_oracle,
+                        .context = oracle,
+                        .started = ir_reduce_milliseconds(),
+                    };
+                    IrReduceWork replay = {
+                        .limits = *limits,
+                        .predicate = ir_reduce_process,
+                        .context = &process,
+                        .scratch = checks,
+                        .started = process.started,
+                    };
                     const IrReduceObservation observed = ir_reduce_predicate(&function, &replay);
                     result = observed.status != IR_REDUCE_OBSERVED ? IR_REDUCE_PUBLICATION_UNAVAILABLE :
                              ir_reduce_same_failure(observed.failure, failure) ? IR_REDUCE_PUBLISHED : IR_REDUCE_PUBLICATION_REFUSED;
@@ -231,6 +243,7 @@ static IrReducePublication ir_reduce_driver_bundle(const char* directory, const 
     {
         fputs("#!/bin/sh\nset -eu\ncd -- \"$(dirname -- \"$0\")\"\n: \"${BUSTER_COMPILER:?Set BUSTER_COMPILER to the matching compiler executable}\"\n\"$BUSTER_COMPILER\"", replay);
         fprintf(replay, " reduce-ir --revision %s --output ./replayed", revision);
+        fprintf(replay, " --expect-binary-hash 0x%016" PRIx64 " --expect-binary-bytes %" PRIu64, binary_hash, binary_bytes);
         fprintf(replay, " --max-candidates %" PRIu64 " --milliseconds %" PRIu64 " --predicate-ms %" PRIu64
                         " --memory %" PRIu64 " --steps %" PRIu64 " --frames %u --passes %u --seed %" PRIu64,
                 limits->max_candidates, limits->max_milliseconds, limits->predicate_milliseconds, memory,
@@ -306,6 +319,9 @@ static int run_ir_reduce(int argc, char** argv)
     IrReduceOracle oracle = { .passes = 7 };
     IrReduceFailure expected = { 0 };
     uint32_t expected_fields = 0;
+    uint32_t binary_fields = 0;
+    uint64_t expected_binary_hash = 0;
+    uint64_t expected_binary_bytes = 0;
     uint64_t memory = UINT64_C(128) << 20;
     uint64_t seed = 0;
     const char* path = NULL;
@@ -376,6 +392,17 @@ static int run_ir_reduce(int argc, char** argv)
                     expected.detail = (uint32_t)number;
                     expected_fields |= 4;
                 }
+                else if (strcmp(option, "--expect-binary-hash") == 0)
+                {
+                    expected_binary_hash = number;
+                    binary_fields |= 1;
+                }
+                else if (strcmp(option, "--expect-binary-bytes") == 0)
+                {
+                    valid = number != 0;
+                    expected_binary_bytes = number;
+                    binary_fields |= 2;
+                }
                 else if (strcmp(option, "--max-candidates") == 0) limits.max_candidates = number;
                 else if (strcmp(option, "--milliseconds") == 0) limits.max_milliseconds = number;
                 else if (strcmp(option, "--predicate-ms") == 0) limits.predicate_milliseconds = number;
@@ -401,12 +428,26 @@ static int run_ir_reduce(int argc, char** argv)
         }
     }
     valid = valid && directory != NULL && ir_reduce_driver_revision(revision) && ((path != NULL) != (demo != NULL)) &&
-            (expected_fields == 0 || expected_fields == 7) &&
+            (expected_fields == 0 || expected_fields == 7) && (binary_fields == 0 || binary_fields == 3) &&
             memory >= (UINT64_C(1) << 20) && memory <= (UINT64_C(1) << 30) && limits.max_candidates != 0 &&
             limits.max_milliseconds != 0 && limits.predicate_milliseconds != 0 && limits.execution_steps != 0 &&
             (!oracle.verifier || oracle.injection == IR_REDUCE_INJECT_NONE || oracle.injection == IR_REDUCE_INJECT_VERIFY_PHI);
     int result = 1;
-    if (valid)
+    bool identity = true;
+    if (valid && binary_fields == 3)
+    {
+        char executable[PATH_MAX];
+        uint64_t hash = 0;
+        uint64_t bytes = 0;
+        const bool available = ir_reduce_driver_binary(&hash, &bytes, executable, sizeof(executable));
+        identity = available && hash == expected_binary_hash && bytes == expected_binary_bytes;
+        if (!identity)
+        {
+            fprintf(stderr, "ir-reduce: replay requires the recorded compiler executable; no bundle published\n");
+            result = available ? 1 : 2;
+        }
+    }
+    if (valid && identity)
     {
         const uint64_t eighth = memory / 8 & ~UINT64_C(63);
         Arena source = arena_reserve(eighth);
@@ -426,7 +467,12 @@ static int run_ir_reduce(int argc, char** argv)
             oracle.argument_count = function.parameter_count;
         }
         IrReduceResult reduced = { 0 };
-        const IrReduceStatus status = ready ? ir_reduce(&function, ir_reduce_oracle, &oracle, &limits, &output, &scratch, &reduced) :
+        IrReduceProcess process = {
+            .predicate = ir_reduce_oracle,
+            .context = &oracle,
+            .started = ir_reduce_milliseconds(),
+        };
+        const IrReduceStatus status = ready ? ir_reduce(&function, ir_reduce_process, &process, &limits, &output, &scratch, &reduced) :
                                       parsed.error == IR_PARSE_MEMORY || parsed.error == IR_PARSE_LIMIT ? IR_REDUCE_RESOURCE : IR_REDUCE_INVALID;
         const bool reproduces = ready && status <= IR_REDUCE_CACHE_LIMIT &&
                                 (expected_fields == 0 || ir_reduce_same_failure(expected, reduced.failure));
@@ -454,11 +500,12 @@ static int run_ir_reduce(int argc, char** argv)
         arena_release(&input);
         arena_release(&source);
     }
-    else
+    else if (!valid)
     {
         fprintf(stderr, "usage: reduce-ir --revision COMMIT --output NEWDIR [--verify] [--passes 0..7] [--arg LOW[:HIGH]] "
                         "[--max-candidates N] [--milliseconds N] [--predicate-ms N] [--memory BYTES] [--steps N] [--frames N] "
-                        "[--seed N] [--scalar] [--inject verify-phi|result-phi|memory-store] FILE.ir\n");
+                        "[--seed N] [--scalar] [--expect-binary-hash N --expect-binary-bytes N] "
+                        "[--inject verify-phi|result-phi|memory-store] FILE.ir\n");
     }
     return result;
 }
