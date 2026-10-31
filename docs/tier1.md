@@ -99,7 +99,10 @@ each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
 standard error after the command, how many functions each tier compiled and the
 step, and for the selector the IR operation, that refused each of the others,
 and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
-that step (`tier1-refused	NAME	selection	call`):
+that step (`tier1-refused	NAME	selection	call`). The report also sums Tier
+1's code: its records, its spills' stores and reloads, the saves and restores
+around its calls and fixed registers' sequences, its recomputed constants and its
+edges' moves:
 
 ```text
 tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
@@ -123,7 +126,14 @@ by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
 the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
 read, and any other value live past the node there saved around it in a
 call-save row). A parameter's register binds its definition's interval alone
-(`Tier1CfgInput.definition_registers`). Still refused: floating point, narrow
+(`Tier1CfgInput.definition_registers`). Values live across a call take the
+callee-saved registers (`rbx`, `r12` to `r15`), which the prologue saves once,
+rather than caller-saved ones that every call saves and restores around itself
+(`tier1_emit_cfg_callee`: from the first allocation's intervals, each value whose
+interval covers a call is allocated again with the callee-saved registers alone,
+every other with the caller-saved ones; the first allocation stands where the
+second fails). On speedtest1 that halved the saves around calls (41,464 to 20,710
+records) and the spills' stores and reloads (15,028 to 7,550). Still refused: floating point, narrow
 call arguments (the IR doesn't keep their signedness, which the callee's
 extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.

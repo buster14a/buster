@@ -56,9 +56,10 @@ static bool check_tier1_lane_prepare(CheckTier1Lane* lane, const X86Target* targ
 }
 
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           Arena* output, Tier0Code* code, uint32_t* operation)
+                                           Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts)
 {
     *operation = 0;
+    *counts = (CheckTier1Counts){ 0 };
     CheckTier1Stage stage = check_tier1_lane_prepare(lane, target) ? CHECK_TIER1_COMPILED : CHECK_TIER1_RESOURCE;
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
@@ -152,6 +153,15 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
         memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
         memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
         memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+        *counts = (CheckTier1Counts){
+            .records = selected->count,
+            .spill_stores = emitted.spill_stores,
+            .spill_loads = emitted.spill_loads,
+            .call_stores = emitted.call_stores,
+            .call_loads = emitted.call_loads,
+            .rematerializations = emitted.rematerializations,
+            .edge_moves = emitted.edge_moves,
+        };
         *code = (Tier0Code){
             .records = records,
             .count = selected->count,
@@ -213,5 +223,7 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\temission.error%" PRIu32 "=%" PRIu32, k, report->emission[k]);
         }
     }
-    fprintf(stream, "\n");
+    fprintf(stream, "\trecords=%" PRIu64 "\tspill_stores=%" PRIu64 "\tspill_loads=%" PRIu64 "\tcall_stores=%" PRIu64 "\tcall_loads=%" PRIu64 "\trematerializations=%" PRIu64
+                    "\tedge_moves=%" PRIu64 "\n",
+            report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations, report->edge_moves);
 }
