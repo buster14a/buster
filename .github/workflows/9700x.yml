@@ -326,7 +326,9 @@ jobs:
           old_kbytes=$(cat /proc/sys/vm/overcommit_kbytes)
           old_ratio=$(cat /proc/sys/vm/overcommit_ratio)
           trap 'sudo sysctl -q -w vm.overcommit_memory="$old_mode"; if [ "$old_kbytes" = 0 ]; then sudo sysctl -q -w vm.overcommit_ratio="$old_ratio"; else sudo sysctl -q -w vm.overcommit_kbytes="$old_kbytes"; fi' EXIT
-          budget=$(awk '/^Committed_AS:/ {used=$2} /^SwapTotal:/ {swap=$2} END {printf "%.0f\n", used + 4*1024*1024 - swap}' /proc/meminfo)
+          # A fixed CommitLimit admits overcommit_kbytes on its own; subtracting SwapTotal left the headroom at the
+          # mercy of the runner's swapfile size, so the last commands' commits could find almost none.
+          budget=$(awk '/^Committed_AS:/ {used=$2} END {printf "%.0f\n", used + 4*1024*1024}' /proc/meminfo)
           sudo sysctl -q -w vm.overcommit_kbytes="$budget" vm.overcommit_memory=2
           "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-strict" --strict
 
