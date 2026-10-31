@@ -122,8 +122,8 @@
     X(MEMCPY, 0x160u, "__builtin_memcpy", BUSTER_CBUILTIN_SOURCE) \
     X(MEMSET, 0x161u, "__builtin_memset", BUSTER_CBUILTIN_SOURCE) \
     X(MEMMOVE, 0x162u, "__builtin_memmove", BUSTER_CBUILTIN_SOURCE) \
-    X(MEMCMP, 0x163u, "__builtin_memcmp", BUSTER_CBUILTIN_SOURCE) \
-    X(STRLEN, 0x164u, "__builtin_strlen", BUSTER_CBUILTIN_SOURCE) \
+    X(MEMCMP, 0x163u, "__builtin_memcmp", BUSTER_CBUILTIN_CONSTANT) \
+    X(STRLEN, 0x164u, "__builtin_strlen", BUSTER_CBUILTIN_CONSTANT) \
     X(ALLOCA, 0x165u, "__builtin_alloca", BUSTER_CBUILTIN_SOURCE) \
     X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow", BUSTER_CBUILTIN_SOURCE) \
     X(SADD_OVERFLOW, 0x380u, "__builtin_sadd_overflow", BUSTER_CBUILTIN_SOURCE) \

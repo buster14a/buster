@@ -5609,6 +5609,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_input_scan_test.c"
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
+#include "c_check_program_library_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5687,6 +5688,7 @@ static int run_checker_tests(int argc, char** argv)
     bool program_asm = false;
     bool program_bits = false;
     bool program_overloads = false;
+    bool program_library = false;
     bool embed_initializers = false;
     bool sizeof_only = false;
     bool options = true;
@@ -5711,6 +5713,10 @@ static int run_checker_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--program-overloads") == 0)
         {
             program_overloads = true;
+        }
+        else if (strcmp(argv[i], "--program-library") == 0)
+        {
+            program_library = true;
         }
         else if (strcmp(argv[i], "--program-vectors") == 0)
         {
@@ -5747,7 +5753,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-overloads|--embed-initializers|--const-values|--sizeof]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-amx|--program-asm|--program-bits|--program-overloads|--program-library|--embed-initializers|--const-values|--sizeof]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -5779,6 +5785,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_program_overloads(&test, clang);
             check_test_data_sources(&test);
+        }
+        else if (initialized && program_library)
+        {
+            check_test_library(&test, clang);
         }
         else if (initialized && program_amx)
         {
@@ -5894,6 +5904,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_musttails(&test, clang);
             check_test_bits(&test, clang);
             check_test_program_initializers(&test, clang);
+            check_test_library(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);

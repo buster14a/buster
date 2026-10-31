@@ -1180,6 +1180,123 @@ vector nontemporal destination is rejected; matching complex memory types
 retain their explicit payload gap. System-macro-specific conversion exceptions
 are not attested by this ordinary source contract.
 
+## Library builtins
+
+#148's library builtins are clang 23's rows with attribute `F`, `__builtin_X`
+for a C library function X, and its rows with attribute `f`, X itself where
+clang makes the name a builtin of the unit. `c_builtin_library.c` holds both
+lists, `c_check_builtin_library.c` their folds.
+
+**Calls.** `c_builtin_library_calls.inc` lists the 352 `F` rows that compile as
+calls of their functions: the math library's (`sin` to `tgammaf128`, the complex
+functions, `powi`'s aside), the string and memory functions, the formatted
+input and output that takes no `FILE` (`printf`, `snprintf`, `vsscanf`), the
+allocation functions, `abort`, the wide-character functions and
+`__get_unsafe_stack_*`. The checker gives each call its row's ordinary
+prototype (`c_builtin_intrinsic_types.c` decodes it) and checks it as a call
+of that prototype, through `check_x86_action`'s ordinary path, as the
+fortified builtins are: the arguments convert to the parameters, a variadic
+one's take the default promotions, and its diagnostics are a call's. The
+lowering calls X by name (`check_lower_call_to` with a runtime function of the
+lowering, `CHECK_LOWER_RUNTIME_LIBRARY` and the list's index), through the
+unit's own declaration's symbol where the unit declares X with linkage, as
+clang's call shares the module's one function of that name, or through the
+lowering's own runtime function of that name where it has one (`fmax`,
+`memcpy`, `strcpy`, `sprintf`, ...: `check_lower_library_runtime`), so that a
+unit has one symbol of each name. `__builtin_powi`, `powif` and `powil` are
+`llvm.powi`'s, whose code calls libgcc's `__powidf2`, `__powisf2` and
+`__powixf2` (x raised to an `int` by repeated squaring, not `pow`'s value), and
+so do theirs.
+
+**Where clang's code is no call.** clang -O0 compiles many of these rows to
+LLVM intrinsics rather than calls: `llvm.maxnum` and `llvm.minnum` for `fmax`
+and `fmin`, `llvm.maximumnum` and `llvm.minimumnum` for the `_num` ones,
+`llvm.floor`, `ceil`, `trunc`, `round`, `roundeven`, `rint` and `nearbyint`
+for the `long double` and `_Float128` roundings, `llvm.copysign` and
+`llvm.fabs`, `llvm.fma`, `llvm.frexp`, `llvm.modf` and `llvm.abs`. On x86-64
+most come back as calls of the same library functions; the rest (`fabs`,
+`copysign`, `abs`, `maxnum` and `minnum` of `float` and `double`) are computed
+inline. The library's functions give the same values but `fmax`'s, `fmin`'s
+and their `_num` kin's of `float` and `double`: clang's code of `llvm.maxnum` and
+`llvm.minnum`, `maxsd` or `minsd` beside a select of the second operand where
+the first is a NaN, gives its first operand of two zeros and the other operand
+of a signaling NaN, where glibc's `fmax` and `fmin` give the second zero and a
+quiet NaN; and its code of `llvm.maximumnum` and `llvm.minimumnum` gives a
+signaling first operand unquieted where the other is a NaN too, where glibc's
+`fmaximum_num` and `fminimum_num` give a quiet NaN. C allows both (F.10.9.2 leaves the zero's sign open, and a
+signaling NaN's result), and the plain calls of `fmax` and `fmin` (#927's)
+differ so too; computing them as clang's code does waits for rows of those
+instructions at every target (#775). `test-checker`'s programs compare the rest
+bit for bit, on the harness's signaling and quiet NaNs, zeros of both signs,
+infinities and subnormals among them.
+
+**Folds.** The rows with attribute `E` that clang's constant evaluator folds,
+this folds too, in constant contexts (static initializers, `_Static_assert`,
+array bounds, enumerators and case labels) and in code, where clang folds a
+builtin call whose operands evaluate (its CodeGen's `EmitBuiltinExpr` tries
+`EvaluateAsRValue` first): `strcmp`, `strncmp`, `memcmp`, `bcmp` and their wide
+kin (`wcscmp`, `wcsncmp`, `wmemcmp`, which compare `wchar_t`s as `int`s) to
+clang's -1, 0 or 1, not the library's differences; `strlen` and `wcslen`;
+`abs`, `labs` and `llabs`; the `fmax`, `fmin`, `fmaximum_num` and
+`fminimum_num` families; and `copysignl`. Strings are literals, at constant
+offsets, and `const` arrays whose initializers are constant (clang's GNU
+folding, for which its `-pedantic` warns; this doesn't). Pointer results
+(`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
+side effects never are. `__has_constexpr_builtin` answers 1 for these.
+
+**Plain names.** `c_builtin_library_plain.inc` lists the 354 `f` rows of C's
+modes but those whose prototypes need the unit's `FILE`, `jmp_buf` or
+`ucontext_t`, or that have none to check (`setjmp` and its kin, `vfork`,
+`umask`, `pthread_create`), and `<stdarg.h>`'s `va_start`, `va_end` and
+`va_copy`. Each is a builtin of the unit unless `-fno-builtin`,
+`-ffreestanding` or `-fno-builtin-NAME` says otherwise, and one of
+`ALL_GNU_LANGUAGES` (`alloca`, `bzero`, `strdup`, `index`) in GNU's modes alone
+(`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
+`no_builtin_functions`, which the driver's options set), which `__has_builtin`
+answers by. A declaration of such a name is the library's function, which calls
+reach as any function's; where it has external linkage and the row's
+prototype, its calls fold as `__builtin_X`'s do (Sema's `BuiltinAttr`:
+`check_input_library_call` marks them, `check_builtin_library_fold_plain` folds
+them). An undeclared one's use declares it with its catalog row's prototype
+(#927's `check_input_implicit_function`, `c_check_implicit_input.c`, clang's
+`LazilyCreateBuiltin`), which the driver reports as clang does
+(`check_driver_implicit_library`): from C99 on, an error, `call to undeclared
+library function 'sin' with type 'double (double)'; ISO C99 and later do not
+support implicit function declarations`, and before C99 a warning, `implicitly
+declaring library function 'sin' with type 'double (double)'`, each with
+clang's note `include the header <math.h> or explicitly provide a declaration
+for 'sin'`, both under `-Wimplicit-function-declaration`, and a prototype with
+`size_t` spelled as clang's (`'__size_t (const char *)' (aka 'unsigned long
+(const char *)')`). The call then converts its arguments to the prototype's
+parameters (`sin(1)` passes 1.0), in C89 as clang's does.
+
+**Refused.** The table's other `F` rows stay refused, and `__has_builtin`
+answers 0 for them. The lowering refuses by name those the checker can type:
+`__builtin_alloca_with_align` and its `_uninitialized` forms (an alignment
+Tier 0's allocation doesn't take), `__builtin_signbitf` and `signbitl` (clang
+tests the bit inline; no library function has the name), and the signaling
+NaNs' and the `_Float128` and `_Float16` NaNs' (constants clang folds that no
+library function makes). The prototypes of the rest don't decode: the 35
+`__fp16` builtins (no C function takes or returns `__fp16`), the
+classification builtins of custom checking (`__builtin_isnormal` and its kin),
+the matrix builtins, and the `FILE` builtins (`fprintf` and its kin).
+
+`test-checker` (`c_check_program_library_test.c`, alone with
+`--program-library`) checks the lists against clang's table and accounts for
+every `F` and `f` row of C's modes; checks the folds' constant contexts by both
+paths against clang's acceptance; and runs programs of each family (`double`,
+`float`, `long double` and `_Float128` math, `powi`, complex, strings, wide
+characters, formatted output and input, allocation, the folds in code, special
+values and `errno`) by both paths against clang -O0's builds.
+`test-checker-driver` (`c_check_library_driver_test.c`) compares the implicit
+declarations' diagnostics of every plain name with clang's, line for line, in
+twelve configurations of language modes and the options above; runs programs
+of C89's implicit library declarations and of `strcmp`'s fold under each
+option against clang's builds; and checks each refusal by name at `-c`.
+`test-preprocessor --clang` compares `__has_builtin` and
+`__has_constexpr_builtin` with clang's (the preprocessor guide's "feature
+queries").
+
 ## Validation commands
 
 On the approved 9700X, through a separate shared-host lock for each command:
@@ -1214,6 +1331,9 @@ On the approved 9700X, through a separate shared-host lock for each command:
 ./build/compiler test-builtin-rounds-helper
 ./build/compiler test-check-builtins-math
 ./build/compiler test-builtin-math-helpers
+./build/compiler test-checker --program-library
+./build/compiler test-checker-driver --executable ./build/compiler
+./build/compiler test-preprocessor --clang
 ```
 
 The tests distinguish typed constraints and fold metadata from native execution

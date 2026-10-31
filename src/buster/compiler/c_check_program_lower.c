@@ -18,7 +18,9 @@
 // where the function's target has no instruction for them (c_check_program_half.c); and the C library's mathematical
 // functions that clang -O0 calls for the generic vector builtins (check_lower_vector_calls: acosf ... powf, acos ... pow
 // and acosl ... powl, each name's float, double and long double ones, in BUSTER_CHECK_LOWER_LIBM's order), with fmaxl,
-// fminl and ldexpl, a long double's maxnum, minnum and ldexp.
+// fminl and ldexpl, a long double's maxnum, minnum and ldexp; __builtin_powi's (#148); and the library builtins'
+// functions (c_builtin_library.c), from CHECK_LOWER_RUNTIME_LIBRARY on, in its list's order: library function l's is
+// CHECK_LOWER_RUNTIME_LIBRARY + l.
 #define BUSTER_CHECK_LOWER_LIBM(X) \
     X(ACOS, "acos") \
     X(ASIN, "asin") \
@@ -165,14 +167,18 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_FMAXL,
     CHECK_LOWER_RUNTIME_FMINL,
     CHECK_LOWER_RUNTIME_LDEXPL,
-    CHECK_LOWER_RUNTIMES,
+    CHECK_LOWER_RUNTIME_POWIDF2,
+    CHECK_LOWER_RUNTIME_POWISF2,
+    CHECK_LOWER_RUNTIME_POWIXF2,
+    CHECK_LOWER_RUNTIME_LIBRARY,
+    CHECK_LOWER_RUNTIMES = CHECK_LOWER_RUNTIME_LIBRARY + CBUILTIN_LIBRARY_COUNT,
 } CheckLowerRuntime;
 
 // The libm functions' first, from which a name's float, double and long double ones follow (check_lower_libm_function).
 #define BUSTER_CHECK_LOWER_LIBM_FIRST CHECK_LOWER_RUNTIME_LIBM_ACOSF
 
 // The mask of the runtime functions a part calls has a bit each, in as many 64-bit words as that takes.
-_Static_assert(CHECK_LOWER_RUNTIMES <= 256, "the runtime functions are numbered in bytes");
+_Static_assert(CHECK_LOWER_RUNTIMES <= UINT16_MAX, "a part's runtime functions are numbered in 16 bits");
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
@@ -217,8 +223,24 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
 #define BUSTER_CHECK_LOWER_LIBM_NAME(id, name) name "f", name, name "l",
     BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
 #undef BUSTER_CHECK_LOWER_LIBM_NAME
-    "fmaxl", "fminl", "ldexpl",
+    "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2",
+#define BUSTER_CBUILTIN_LIBRARY_CALL(id, name) name,
+#include "c_builtin_library_calls.inc"
+#undef BUSTER_CBUILTIN_LIBRARY_CALL
 };
+
+// The runtime function a library builtin's call calls (#148): the lowering's own of its function's name where it has one
+// before the library's (fmax, mempcpy, strcpy, sprintf, ...), so that a unit has one symbol of each name, or else the
+// library's entry.
+static CheckLowerRuntime check_lower_library_runtime(CBuiltinLibraryId library)
+{
+    CheckLowerRuntime result = (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_LIBRARY + library);
+    for (uint32_t r = 0; r < CHECK_LOWER_RUNTIME_LIBRARY && result >= CHECK_LOWER_RUNTIME_LIBRARY; r += 1)
+    {
+        result = strcmp(check_lower_runtime_names[r], cbuiltin_library_names[library]) == 0 ? (CheckLowerRuntime)r : result;
+    }
+    return result;
+}
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
 // program's controls, by which the lowering finds it (check_lower_table_of), and for each value from its cases' lowest up
@@ -271,7 +293,7 @@ struct CheckProgramLowered
     // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
     // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
     SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
-    uint8_t runtime_order[CHECK_LOWER_RUNTIMES];
+    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
     // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
@@ -672,18 +694,17 @@ struct CheckLowerWriter
     // The runtime's functions (check_lower_runtime): each one's symbol where the unit declares it, 0 for none
     // (CheckLowerShared.declared_runtimes); the first of the provisional symbols that a call of one of the lowering's own
     // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, `runtime_mask` their bits in
-    // two words), which check_lower_finish numbers in source order's order (#151).
+    // words), which check_lower_finish numbers in source order's order (#151).
     const SymbolId* declared_runtimes;
     SymbolId provisional_runtimes;
     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
     uint32_t runtime_count;
-    uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
     // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
     // until the writer first asks.
     uint64_t first_classification;
 };
 
-_Static_assert(CHECK_LOWER_RUNTIMES <= UINT8_MAX + 1, "a part's runtime functions are numbered in bytes");
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
 // its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
@@ -5580,7 +5601,7 @@ static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime 
         if ((writer->runtime_mask[runtime >> 6] & (UINT64_C(1) << (runtime & 63))) == 0)
         {
             writer->runtime_mask[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
-            writer->runtimes[writer->runtime_count++] = (uint8_t)runtime;
+            writer->runtimes[writer->runtime_count++] = (uint16_t)runtime;
         }
     }
     return symbol;
@@ -7617,9 +7638,26 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const uint32_t effect = check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), node);
     const BuiltinIntrinsicInfo* info = effect != BUSTER_CHECK_NONE ? stream->x86[effect].info : NULL;
     const CBuiltinFortifyId fortify = info != NULL ? cbuiltin_fortify_id(info->name, info->name_length) : CBUILTIN_FORTIFY_COUNT;
+    const bool candidate = info != NULL && cbuiltin_library_candidate(info->name, info->name_length);
+    const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+    const uint32_t libgcc = candidate ? cbuiltin_library_libgcc(info->name, info->name_length) : BUSTER_CBUILTIN_LIBRARY_LIBGCC;
+    const char* refusal = candidate ? cbuiltin_library_refusal(info->name, info->name_length) : NULL;
     if (fortify != CBUILTIN_FORTIFY_COUNT)
     {
         check_lower_fortify(writer, node, fortify);
+    }
+    else if (library != CBUILTIN_LIBRARY_COUNT)
+    {
+        // A library builtin's call is a call of its function, by its prototype (#148, c_builtin_library.c).
+        check_lower_call_to(writer, node, check_lower_library_runtime(library), 0, 0);
+    }
+    else if (libgcc != BUSTER_CBUILTIN_LIBRARY_LIBGCC)
+    {
+        check_lower_call_to(writer, node, (CheckLowerRuntime)(CHECK_LOWER_RUNTIME_POWIDF2 + libgcc), 0, 0);
+    }
+    else if (refusal != NULL)
+    {
+        check_lower_unsupported(writer, refusal);
     }
     else if (check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node) != BUSTER_CHECK_NONE)
     {
@@ -10567,7 +10605,7 @@ struct CheckLowerPart
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
-    uint8_t runtimes[CHECK_LOWER_RUNTIMES];
+    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
 };
 
 // Leaves `lowered` with its failure alone, `output` as it was at `mark` (check_program_lower's contract for a failure): a
@@ -10585,8 +10623,10 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
 // `declaring` is check_program_declaring's source-ordered list, including initializer-only tokens. Its logical
 // length is declaring_count; no padding is read here and the original declaration/linkage predicates still apply.
 // The normal path reuses that already-built compact list; the scalar oracle retains the independent full-token
-// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared.
-static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers, SymbolId* symbols, bool scalar)
+// traversal. All borrowed columns are immutable during this pass, and symbols belongs to CheckLowerShared. The names
+// are the `spelled` runtime functions' the unit spells, `identifiers[s]` runtime function `runtimes[s]`'s.
+static void check_lower_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
+                                          const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool scalar)
 {
     const CheckInput* input = program->input;
     const uint32_t* declarations = input->declarations;
@@ -10603,9 +10643,16 @@ static void check_lower_declared_runtimes(const CheckProgram* program, const uin
         const IdentId name = names[declaration];
         if (name != 0 && declarations[declaration] == declaration && linkage[declaration] == 2 && object != 0 && object < object_count)
         {
-            for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; r < CHECK_LOWER_RUNTIMES; r += 1)
+            // Most declarations name none: the names' compare, a reduction clang vectorizes, comes first.
+            bool any = false;
+            for (uint32_t s = 0; s < spelled; s += 1)
             {
-                if (identifiers[r] == name && symbols[r] == 0)
+                any |= identifiers[s] == name;
+            }
+            for (uint32_t s = 0; any && s < spelled; s += 1)
+            {
+                const uint32_t r = runtimes[s];
+                if (identifiers[s] == name && symbols[r] == 0)
                 {
                     symbols[r] = object_symbols[object];
                 }
@@ -10879,21 +10926,42 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its
-        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). One pass over the
-        // declarations, which only a unit that spells one of the names takes.
+        // name with linkage that has one (the errno accessor's is check_lower_runtime_symbols' already). The names are the
+        // lowering's own functions' and those of the library builtins the unit calls (#148), of which the ones the unit
+        // spells are listed, `spelled` of them, and one pass over the declarations, which only such a unit takes, matches
+        // each declaration's name with them.
         shared->declared_runtimes[CHECK_LOWER_RUNTIME_ERRNO] = lowered->errno_symbol;
-        IdentId identifiers[CHECK_LOWER_RUNTIMES] = { 0 };
-        bool spelled = false;
+        uint64_t called[(CHECK_LOWER_RUNTIMES + 63) / 64] = { 0 };
+        for (uint32_t x = 0; program->stream != NULL && x < program->stream->x86_count; x += 1)
+        {
+            const BuiltinIntrinsicInfo* info = program->stream->x86[x].info;
+            const CBuiltinLibraryId library = info != NULL && cbuiltin_library_candidate(info->name, info->name_length) ?
+                                                  cbuiltin_library_id(info->name, info->name_length) : CBUILTIN_LIBRARY_COUNT;
+            if (library != CBUILTIN_LIBRARY_COUNT)
+            {
+                const uint32_t runtime = check_lower_library_runtime(library);
+                called[runtime >> 6] |= UINT64_C(1) << (runtime & 63);
+            }
+        }
+        IdentId identifiers[CHECK_LOWER_RUNTIMES];
+        uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+        uint32_t spelled = 0;
         for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
         {
-            const char* name = check_lower_runtime_names[r];
-            const uint32_t length = (uint32_t)strlen(name);
-            identifiers[r] = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
-            spelled |= identifiers[r] != 0;
+            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
+            {
+                const char* name = check_lower_runtime_names[r];
+                const uint32_t length = (uint32_t)strlen(name);
+                const IdentId identifier = intern_find_hashed(program->identifiers, (const uint8_t*)name, length, intern_hash_bytes((const uint8_t*)name, length));
+                identifiers[spelled] = identifier;
+                spelled_runtimes[spelled] = (uint16_t)r;
+                spelled += identifier != 0;
+            }
         }
-        if (spelled)
+        if (spelled != 0)
         {
-            check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, shared->declared_runtimes, BUSTER_SCALAR_PATH(scalar));
+            check_lower_declared_runtimes(program, declaring, declaring_count, identifiers, spelled_runtimes, spelled, shared->declared_runtimes,
+                                          BUSTER_SCALAR_PATH(scalar));
         }
     }
     return valid;
@@ -11714,7 +11782,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->expression_nodes = writer->expression_nodes;
     part->batch_nodes = writer->batch_nodes;
     part->classified_nodes = writer->classified_nodes;
-    memcpy(part->runtimes, writer->runtimes, CHECK_LOWER_RUNTIMES);
+    memcpy(part->runtimes, writer->runtimes, (uint64_t)writer->runtime_count * sizeof(uint16_t));
 }
 
 // A part's lowering (check_lower_part_body), plain: every compile's without -g. Out of line, so that the program's
@@ -11789,7 +11857,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             if (lowered->runtime_symbols[runtime] == 0)
             {
                 lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
-                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint8_t)runtime;
+                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)runtime;
             }
             runtimes = true;
         }

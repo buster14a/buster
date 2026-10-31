@@ -2001,6 +2001,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         if (valid)
         {
             check_action_scalar(reader->types, &resolved, checked);
+            // A call of a plain library builtin's declaration that clang folds (#148) folds here as in the graph.
+            if (action->op == CHECK_OP_CALL && callee < reader->parser->tokens.count)
+            {
+                check_builtin_library_fold_plain(reader->types, check_input_library_call(reader, callee), &resolved, checked);
+            }
         }
         else
         {

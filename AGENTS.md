@@ -178,10 +178,15 @@ designs and the compilers already built this way.
   records. Bounded direct scalar calls preserve live caller registers and
   publish symbolic CALL references. Byte/word memory and integer conversions
   use canonical 32-bit storage; terminal chains retain explicit traps or empty
-  self-loops. General CFG/phis and indirect/variadic/wide-ABI calls still refuse
-  explicitly. Run `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`
-  and `test-tier1-pipeline --cross-check` for bounded typed-stream/native
-  validation. `test-tier1-model` checks the emitted-case measurement reader;
+  self-loops. Every other function, general CFGs with loops and phis, goes
+  through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
+  move values, before a jump, at a successor's start or in a split critical
+  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
+  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
+  `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
+  pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
+  not programs; under the 9700X's lock, CPU 2). `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
@@ -246,6 +251,17 @@ designs and the compilers already built this way.
   constraints and pending CFG/corpus emission. Use the shared 9700X lock per
   build/test/measurement and CPU 2 for timing.
 
+- `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
+  liveness with phi operands on their edges, hinted (`hint_values`) to keep one
+  register, then each edge's parallel move, placed at a block's end or start or
+  on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
+  is its independent checker, which simulates each block and edge.
+  `test-tier1-cfg` runs fixtures and random SSA over random CFGs with mutants;
+  `test-tier1-cfg-source` adapts every function `-c` compiles of real C, lowered
+  and promoted, through a machine model (`tier1_cfg_ir.c`) and checks both paths'
+  allocations. The allocation guide's "Allocation over a CFG (#140)" has the
+  contract and what is pending.
+
 - `tier1_frame.c` provides interval slot coloring and explicit frame plans for
   #177. `test-tier1-frame` checks independent pressure/layout/prologue oracles;
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost.
@@ -292,7 +308,13 @@ designs and the compilers already built this way.
   `monitorx`, `mwaitx`, `tzcnt`, Key Locker's, `umwait`, `tpause` and
   `xbegin`) are per-unit leaves too (`c_builtin_x86_helpers.c`), Key Locker's
   of vectors and pointers both, and its encryptions' with a branch that branch
-  sizing sizes.
+  sizing sizes. The library builtins (`c_builtin_library.c`) are calls of their
+  C library functions by name, with their rows' prototypes, folded where clang
+  folds them (`c_check_builtin_library.c`), and the plain names (`sin`,
+  `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
+  `-ffreestanding` say, declared implicitly with their prototypes as clang
+  declares them; `test-checker --program-library` and `test-checker-driver`
+  check them against clang (the guide's "Library builtins").
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -1084,7 +1106,7 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--program-library|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -1096,6 +1118,8 @@ designs and the compilers already built this way.
   `c_check_program_half_test.c`), run against clang -O0's code where the host has their features.
   Byte funnel shifts of 16-byte vectors require XOP: these tests compile/link everywhere and execute only where
   XOP is present; `test-x86-intrinsics` also checks their emitted expressions against Clang, including `_mm_rot_epi8`.
+  `--program-library` selects the library builtins' tables, constant folds and programs alone
+  (`c_check_program_library_test.c`).
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.

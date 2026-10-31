@@ -145,6 +145,10 @@ The admitted families are:
   and `rep bsr` and `rep bsf`, which are `lzcnt`'s and `tzcnt`'s bytes (F3 0F
   BD and BC: dr_flac spells `lzcnt` so), encoded as their forms, so a target
   without LZCNT or BMI refuses them;
+- AMD's return-stack-buffer hints `rep ret`/`repz ret` (F3 C3) and
+  `repne ret`/`repnz ret` (F2 C3), with or without AT&T's `q` and as a prefix
+  written before or as a statement of its own; `retl` stays refused, as GNU as
+  refuses it;
 - a prefix written as a statement of its own, `lock` or `rep` and its aliases,
   past a semicolon or lines (`lock ; cmpxchg %ecx,(%rdx)`, as musl's atomics
   write it): GNU as applies it to the next instruction, and so does this

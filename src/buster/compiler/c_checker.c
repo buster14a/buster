@@ -1463,7 +1463,19 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
         check_action_call(types, &ordinary, result);
         result->conversions[0] = (CheckConversion){ 0 };
     }
-    if (cbuiltin_fortify_id(call->info->name, call->info->name_length) != CBUILTIN_FORTIFY_COUNT)
+    const char* name = call->info->name;
+    const uint32_t length = call->info->name_length;
+    // The library builtins (c_builtin_library.c) are calls of their prototypes too, those the lowering refuses by name
+    // among them, and a listed one folds where clang folds it.
+    const bool candidate = cbuiltin_library_candidate(name, length);
+    const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
+    const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
+                               (candidate && (cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC || cbuiltin_library_refusal(name, length) != NULL));
+    if (library != CBUILTIN_LIBRARY_COUNT)
+    {
+        check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
+    }
+    if (ordinary_call)
     {
         // These exact generic signatures have no x86 immediate constraints. Keep the ordinary call's conversions,
         // side effects and diagnostics, without imposing the x86 adapter's 64-argument bound on printf varargs.
@@ -1703,6 +1715,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
         CheckBuiltinMiscResult checked;
         check_builtin_misc(types, &input, &checked, 1);
         *result = checked.action;
+        check_builtin_library_fold_memory(types, input.id, action, checked.argument_conversions, result);
         result->warnings |= (checked.warnings & BUSTER_CHECK_BUILTIN_MISC_WARN_QUALIFIERS) != 0 ? CHECK_WARNING_DISCARDED_QUALIFIERS : 0;
         for (uint32_t i = 0; i < action->argument_count && i < 4; i += 1)
         {
@@ -2209,6 +2222,11 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     else
     {
         check_action_scalar(types, &action, &result);
+        // A call of a plain library builtin's declaration that clang folds (#148, the reader's mark in its member).
+        if (action.op == CHECK_OP_CALL && (action.member & BUSTER_CHECK_LIBRARY_CALL) != 0)
+        {
+            check_builtin_library_fold_plain(types, action.member, &action, &result);
+        }
     }
     if (action.op == CHECK_OP_STATEMENT_VALUE)
     {
