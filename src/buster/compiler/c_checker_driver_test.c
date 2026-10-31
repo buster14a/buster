@@ -3791,6 +3791,56 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
           "void returning(void) {}\n[[noreturn]] void returning(void), stop(void);\n"
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x; }\n"
           "int a(void) { stop(); return h(1); }\nint b(void) { returning(); return h(2); }\n", true, true, "-std=c23" },
+        // #148: an x86 builtin's own required features (err_builtin_needs_feature), against its caller's whatever either
+        // function's attributes: clang's expression of them, an or's and an and's too, and the calls it emits alone.
+        { "a builtin of a feature the unit lacks", "-march=x86-64",
+          "typedef char v16qi __attribute__((vector_size(16)));\nv16qi f(v16qi a, v16qi b) { return __builtin_ia32_palignr128(a, b, 3); }\n", true, true },
+        { "a builtin of a feature the unit has", "-march=x86-64-v3",
+          "unsigned f(unsigned x, unsigned y) { return __builtin_ia32_pdep_si(x, y); }\n", false, true },
+        { "a builtin of a feature its caller's attribute adds", "-march=x86-64",
+          "__attribute__((target(\"bmi2\"))) unsigned f(unsigned x, unsigned y) { return __builtin_ia32_pdep_si(x, y); }\n", false, true },
+        { "a builtin of a feature its caller's attribute turns off", "-march=x86-64-v3",
+          "__attribute__((target(\"no-bmi2\"))) unsigned f(unsigned x, unsigned y) { return __builtin_ia32_pdep_si(x, y); }\n", true, true },
+        { "a builtin of either of two features", "-march=x86-64",
+          "typedef float v4sf __attribute__((vector_size(16)));\nv4sf f(v4sf a, v4sf b, v4sf c) { return __builtin_ia32_vfmaddsubps(a, b, c); }\n", true, true },
+        { "a builtin of two features, one of them its caller's", "-march=x86-64",
+          "__attribute__((target(\"kl\"))) unsigned char f(void* o, const void* i, const void* h) { return __builtin_ia32_aesdecwide128kl_u8(o, i, h); }\n",
+          true, true },
+        { "a builtin of two features, both its caller's", "-march=x86-64",
+          "__attribute__((target(\"kl,widekl\"))) unsigned char f(void* o, const void* i, const void* h) { return __builtin_ia32_aesdecwide128kl_u8(o, i, h); }\n",
+          false, true },
+        { "a builtin of two features, one of them the unit's", "-march=x86-64-v4",
+          "typedef char v16qi __attribute__((vector_size(16)));\nv16qi f(v16qi a, v16qi b, v16qi c) { return __builtin_ia32_vpermi2varqi128(a, b, c); }\n", true, true },
+        { "a builtin of two features, the unit's and its caller's", "-march=x86-64-v4",
+          "typedef char v16qi __attribute__((vector_size(16)));\n"
+          "__attribute__((target(\"avx512vbmi\"))) v16qi f(v16qi a, v16qi b, v16qi c) { return __builtin_ia32_vpermi2varqi128(a, b, c); }\n",
+          false, true },
+        { "a builtin in dead code and in a function nothing emits, before one it emits", "-march=x86-64",
+          "typedef char v16qi __attribute__((vector_size(16)));\nstatic v16qi unused(v16qi a, v16qi b) { return __builtin_ia32_palignr128(a, b, 3); }\n"
+          "v16qi f(v16qi a, v16qi b) { if (0) return __builtin_ia32_palignr128(a, b, 3); a = 0 ? __builtin_ia32_palignr128(a, b, 2) : a;\n"
+          "    return __builtin_ia32_palignr128(a, b, 1); }\n", true, true },
+        { "a builtin clang folds, before one it emits", "-march=x86-64",
+          "unsigned f(void) { return __builtin_ia32_pdep_si(5, 3); }\nunsigned g(unsigned x) { return __builtin_ia32_pdep_si(x, 3); }\n", true, true },
+        { "a builtin in a deferred function", "-march=x86-64",
+          "typedef char v16qi __attribute__((vector_size(16)));\nstatic v16qi s(v16qi a, v16qi b) { return __builtin_ia32_palignr128(a, b, 3); }\n"
+          "v16qi e(v16qi a, v16qi b) { return s(a, b); }\n",
+          true, true },
+        { "an intrinsic's macro of a feature the unit lacks", "-march=x86-64",
+          "#include <immintrin.h>\n__m128i f(__m128i a, __m128i b) { return _mm_alignr_epi8(a, b, 3); }\n", true, true },
+        // SSE's compares take AVX's 32 predicates, and one past SSE's 8 needs AVX (CodeGenFunction::checkTargetFeatures'
+        // own case for __builtin_ia32_cmpps, cmpss, cmppd and cmpsd). Where it has AVX, the unit's vectors are AVX-512's
+        // here, which the lowering takes; SSE's predicates, and AVX from a function's attribute, are every-error
+        // fixtures' (check_test_driver_target_feature_errors), which lower nothing.
+        { "an SSE compare of a predicate past 7", "-march=x86-64",
+          "typedef float v4sf __attribute__((vector_size(16)));\nv4sf f(v4sf a, v4sf b) { return __builtin_ia32_cmpps(a, b, 8); }\n", true, true },
+        { "an SSE compare of a predicate past 7 in a unit with AVX", "-march=x86-64-v4",
+          "typedef float v4sf __attribute__((vector_size(16)));\nv4sf f(v4sf a, v4sf b) { return __builtin_ia32_cmpps(a, b, 8); }\n", false, true },
+        { "a scalar double compare of a predicate past 7", "-march=x86-64",
+          "typedef double v2df __attribute__((vector_size(16)));\nv2df f(v2df a, v2df b) { return __builtin_ia32_cmpsd(a, b, 16); }\n", true, true },
+        { "an intrinsic's macro of SSE's predicate before one of AVX's", "-march=x86-64",
+          "#include <immintrin.h>\n__m128 f(__m128 a, __m128 b) { return _mm_cmp_ps(a, b, _CMP_LT_OS); }\n"
+          "__m128 g(__m128 a, __m128 b) { return _mm_cmp_ps(a, b, _CMP_GE_OQ); }\n",
+          true, true },
     };
     const uint32_t routes = executable != NULL ? 4 : 2;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -3882,6 +3932,43 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
         { "the first function's errors alone",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\nstatic int s(int x) { return h(x); }\n"
           "int e1(int x) { return s(x) + h(x + 1) + h(x + 3); }\nint e2(int x) { return h(x + 2); }\n" },
+        // #148: an x86 builtin's call is checked before its arguments are emitted (CodeGenFunction::EmitBuiltinExpr), so its
+        // error comes before its arguments' calls' (by its beginning, theirs by their ends); the first function's alone.
+        { "a builtin's error before its arguments' calls' and after the calls that end before it",
+          "typedef char v16qi __attribute__((vector_size(16)));\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) v16qi h(v16qi x) { return x; }\n"
+          "v16qi f(v16qi a, v16qi b) { return __builtin_ia32_palignr128(h(a), __builtin_ia32_palignr128(a, h(b), 1), 3); }\n"
+          "v16qi g(v16qi a, v16qi b) { return h(__builtin_ia32_palignr128(h(a), b, 3)); }\n" },
+        { "builtins' errors in a function's statements, the first function's alone",
+          "typedef char v16qi __attribute__((vector_size(16)));\ntypedef float v4sf __attribute__((vector_size(16)));\n"
+          "v4sf f(v4sf a, v16qi b) { v16qi c = __builtin_ia32_palignr128(b, b, 1); a = __builtin_ia32_addsubps(a, a); return a + (v4sf)c; }\n"
+          "v4sf g(v4sf a) { return __builtin_ia32_addsubps(a, a); }\n" },
+        // An SSE compare of a predicate past 7 needs AVX, which clang checks before the builtin's own features: both
+        // errors, in that order, where the caller lacks SSE2 too; deferred functions' compares, each its own, but one of
+        // SSE's predicate and one whose function's attribute adds AVX, which isn't an error in a function that another
+        // builtin's error makes the check walk either; and a compare's error among a statement's builtins', but a compare
+        // of SSE's predicate.
+        { "an SSE compare's predicate and its own feature, in that order",
+          "typedef double v2df __attribute__((vector_size(16)));\n"
+          "__attribute__((target(\"no-sse2\"))) v2df f(v2df a, v2df b) { return __builtin_ia32_cmpsd(a, b, 9); }\n" },
+        { "deferred functions' compares of predicates past 7, and of one that isn't",
+          "typedef float v4sf __attribute__((vector_size(16)));\ntypedef double v2df __attribute__((vector_size(16)));\n"
+          "static v4sf ss31(v4sf a, v4sf b) { return __builtin_ia32_cmpss(a, b, 31); }\n"
+          "static v2df pd9(v2df a, v2df b) { return __builtin_ia32_cmppd(a, b, 9); }\n"
+          "static v2df sd7(v2df a, v2df b) { return __builtin_ia32_cmpsd(a, b, 7); }\n"
+          "v2df e(v4sf x, v2df a, v2df b) { (void)ss31(x, x); return pd9(a, b) + sd7(a, b); }\n" },
+        { "a deferred compare of a predicate past 7 whose function's attribute adds AVX, beside one without",
+          "typedef float v4sf __attribute__((vector_size(16)));\n"
+          "static __attribute__((target(\"avx\"))) v4sf s(v4sf a, v4sf b) { return __builtin_ia32_cmpps(a, b, 8); }\n"
+          "static v4sf t(v4sf a, v4sf b) { return __builtin_ia32_cmpps(a, b, 9); }\nv4sf e(v4sf a, v4sf b) { return s(a, b) + t(a, b); }\n" },
+        { "a compare of a predicate past 7 in a function whose attribute adds AVX, which another builtin's error walks",
+          "typedef float v4sf __attribute__((vector_size(16)));\ntypedef char v32qi __attribute__((vector_size(32)));\n"
+          "__attribute__((target(\"avx\"))) v4sf f(v4sf a, v4sf b, v32qi* c) { int m = __builtin_ia32_pmovmskb256(*c); "
+          "return __builtin_ia32_cmpps(a, b, 8) + (float)m; }\n" },
+        { "a compare's predicate among a statement's builtins",
+          "typedef float v4sf __attribute__((vector_size(16)));\ntypedef char v16qi __attribute__((vector_size(16)));\n"
+          "v4sf f(v4sf a, v16qi b) { v16qi c = __builtin_ia32_palignr128(b, b, 1); return __builtin_ia32_cmpps(a, a, 8) + (v4sf)c + "
+          "__builtin_ia32_cmpps(a, a, 3); }\n" },
         { "a function's errors by their calls' ends",
           "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
           "static inline __attribute__((always_inline, target(\"bmi2,avx2\"))) int g(int x) { return x + 2; }\n"

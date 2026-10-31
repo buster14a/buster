@@ -339,9 +339,10 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                  check_program_bodies_ordered(full);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     // Only code generation's check of target features reads CheckProgram.body_eager, and only in a unit with a target
-    // attribute (CheckProgram.attribute_keys): others make none. It is made by check_program_body_eager, from each
-    // selected body's declarations up to its definition, not by the definitions' flags, which hold the unit's final ones.
-    const bool eager_needed = full->attribute_keys != 0;
+    // attribute (CheckProgram.attribute_keys) or an x86 builtin's call (#148): others make none. It is made by
+    // check_program_body_eager, from each selected body's declarations up to its definition, not by the definitions'
+    // flags, which hold the unit's final ones.
+    const bool eager_needed = full->attribute_keys != 0 || (full->stream != 0 && full->stream->x86_count != 0);
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;

@@ -311,7 +311,8 @@ struct CheckProgram
     // not by the unit's final ones: a later declaration that makes an inline definition external (C99's
     // `extern int f(int);`) is no emission point, it queues the function for the unit's end, where the deferred ones
     // are emitted. Code generation's check of target features takes clang's order of emission from it (#775); null in
-    // a program that no selection made, or in a unit without a target attribute, which the check skips.
+    // a program that no selection made, or in a unit without a target attribute or an x86 builtin's call (#148), which
+    // the check skips.
     uint8_t* body_eager;
 };
 

@@ -489,8 +489,45 @@ calls that don't return. C23 fixtures compare the ignored late unscoped
 standard spellings with effective earlier standard, late GNU, scoped GNU and
 keyword spellings, including a mixed attribute list and shared declarators.
 
-A builtin's own required features (`'__builtin_ia32_palignr128' needs target
-feature ssse3`) aren't checked yet.
+An x86 builtin's call is checked too (#148, `err_builtin_needs_feature`): the
+builtin's required features, clang's expression of them from its definition
+(`BuiltinIntrinsicInfo.features`: names joined by `,` for and and `|` for or,
+with parentheses, as `Builtin::evaluateRequiredTargetFeatures` reads them),
+against the calling function's map, whatever either function's attributes:
+`'__builtin_ia32_palignr128' needs target feature ssse3`, at the call's
+beginning, its name, which is where an intrinsic's macro expands
+(`_mm_alignr_epi8`'s). Clang checks it where it emits the call
+(`EmitBuiltinExpr`), after its constant folding: not where it folds the call
+first (a builtin it may evaluate, `E` in its definition, with an integer or a
+floating result and constant arguments: `__builtin_ia32_pdep_si(5, 3)`), nor in
+a constant context. Before the builtin's own features, it checks SSE's compares
+(`__builtin_ia32_cmpps`, `cmpss`, `cmppd` and `cmpsd`), which take AVX's 32
+predicates: one past SSE's 8 in a function without AVX is
+`'__builtin_ia32_cmpps' needs target feature avx`, at the same place, and so is
+`_mm_cmp_ps(a, b, _CMP_GE_OQ)` at `-march=x86-64`. A builtin's call is checked
+before its arguments are emitted, so its errors come before its arguments'
+calls': it is ordered by its beginning, where a function's call is by its end.
+An expression's answer for a map is kept by the expression
+(`CheckTargetFeatureBuiltins`), as a unit's builtins share a few expressions and
+its functions a few maps. The check runs in a unit with a target attribute or
+an x86 builtin's call, whose selection then classifies its bodies
+(`CheckProgram.body_eager`), and walks only a body that calls a builtin that
+fails. `test-checker` checks that every expression of the builtins' table names
+only `predefines_features`' names, which the maps hold
+(`check_test_target_feature_builtins`), and `test-checker-driver` compares
+fixtures' errors with clang `-c`'s: a feature the unit lacks and one it has, one
+that a caller's attribute adds or turns off, either of two features, both of
+two with one or both the caller's or the unit's, builtins in dead code and in a
+function nothing emits, one clang folds, one in a deferred function and an
+intrinsic's macro; SSE's compares of a predicate past 7, at a target with AVX
+(`x86-64-v4`, whose vectors the lowering takes), a scalar double's and through
+`_mm_cmp_ps`; and every error, line for line, of a builtin's call before its
+arguments' calls', of builtins in a function's statements, of a compare's
+predicate before its own feature (in a `no-sse2` function), of deferred
+functions' compares (one of SSE's last predicate and one whose function's
+attribute adds AVX among them, which aren't errors), of such a compare in a
+function that another builtin's error makes the check walk, and of a compare
+among a statement's builtins.
 
 ## Sources and reproduction
 
