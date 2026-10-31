@@ -2506,20 +2506,50 @@ static void tier1_select_test_overlong(Tier1SelectTest* test)
     arena_release(&input);
 }
 
-// #977's review: constants added to an index. `p + (i + c) * s + k` of a 64-bit i is one memory operand,
-// p + i * s + (k + c * s): c on either side of an addition, or subtracted, for loads, stores and pointers. A 32-bit
-// index added before its sign extension keeps its addition, as does a scaled constant past 32 bits. Each runs as the
-// IR says on indices 0 to 3, which stay in the memory (with 2^31, the indices 2^31 below them, whose index the constant
-// cancels), and the pointer, which nothing accesses, also on indices whose additions wrap: at 32 bits before the
-// extension (INT32_MAX + 3), and at 64 (#989's review).
-static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, uint32_t shape, uint32_t scale, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
+// An index fixture's index: i op c of a 64-bit i and a constant c, with `left` c op i, or with `narrow` a 32-bit i
+// plus c before its sign extension.
+typedef struct Tier1SelectTestIndex Tier1SelectTestIndex;
+struct Tier1SelectTestIndex
 {
-    // form 0: add i, c; 1: add c, i; 2: sub i, c; 3: add.i32 (trunc i), c, then sext; 4: add i, 2^31 (past 32 bits).
-    const bool narrow = form == 3;
+    int64_t constant;
+    uint8_t op;
+    bool left;
+    bool narrow;
+};
+
+// c on either side of an addition, and subtracted; a 32-bit addition before its extension; a scaled constant past 32
+// bits; and #989's review's: negative constants in each place, the displacement's lower bound (8 + c, or 8 - c, exactly
+// INT32_MIN at scale 1, and one past it) and a constant on the left of a subtraction, which the walk doesn't peel.
+static const Tier1SelectTestIndex tier1_select_test_indices[] =
+{
+    { .constant = 3, .op = IR_ADD },
+    { .constant = 3, .op = IR_ADD, .left = true },
+    { .constant = 3, .op = IR_SUB },
+    { .constant = 3, .op = IR_ADD, .narrow = true },
+    { .constant = INT64_C(1) << 31, .op = IR_ADD },
+    { .constant = -3, .op = IR_ADD },
+    { .constant = -3, .op = IR_ADD, .left = true },
+    { .constant = -3, .op = IR_SUB },
+    { .constant = (int64_t)INT32_MIN - 8, .op = IR_ADD },
+    { .constant = (int64_t)INT32_MIN - 9, .op = IR_ADD },
+    { .constant = (INT64_C(1) << 31) + 8, .op = IR_SUB },
+    { .constant = (INT64_C(1) << 31) + 9, .op = IR_SUB },
+    { .constant = 3, .op = IR_SUB, .left = true },
+};
+
+// #977's review: constants added to an index. `p + (i + c) * s + k` of a 64-bit i is one memory operand,
+// p + i * s + (k + c * s), for loads, stores and pointers, while k + c * s fits 32 bits: c on either side of an
+// addition, or subtracted. A 32-bit index added before its sign extension keeps its addition, as does a subtraction
+// from c. Each runs as the IR says on indices 0 to 3, which stay in the memory (with a constant past 8, the indices it
+// takes the index from: 2^31 below them for 2^31), and the pointer, which nothing accesses, also on indices whose
+// additions wrap: at 32 bits before the extension (INT32_MAX + 3), and at 64 (#989's review).
+static void tier1_select_test_index_walk(Tier1SelectTest* test, const Tier1SelectTestIndex* form, uint32_t shape, uint32_t scale, Arena* input, Arena* output, Arena* scratch, uint64_t* random)
+{
+    const bool narrow = form->narrow;
     const uint32_t index = narrow ? 6 : 4;
     const uint32_t address = index + 1;
     const uint32_t count = shape == 1 ? address + 4 : address + 3;
-    const int64_t constant = form == 4 ? INT64_C(1) << 31 : 3;
+    const int64_t constant = form->constant;
     const int64_t offset = 8;
     const IrSizes sizes =
     {
@@ -2548,13 +2578,13 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
         {
             tier1_select_test_node(&function, 3, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 4, IR_TRUNC, IR_I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            tier1_select_test_node(&function, 5, IR_ADD, IR_I32, 4, 3, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 5, form->op, IR_I32, 4, 3, BUSTER_IR_NONE);
             tier1_select_test_node(&function, 6, IR_SEXT, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
         else
         {
             tier1_select_test_node(&function, 3, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            tier1_select_test_node(&function, 4, form == 2 ? IR_SUB : IR_ADD, IR_I64, form == 1 ? 3 : 1, form == 1 ? 1 : 3, BUSTER_IR_NONE);
+            tier1_select_test_node(&function, 4, form->op, IR_I64, form->left ? 3 : 1, form->left ? 1 : 3, BUSTER_IR_NONE);
         }
         tier1_select_test_node(&function, address, IR_ADDRESS, IR_PTR, 2, index, 0);
         if (shape == 0)
@@ -2578,12 +2608,18 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
     if (created && tier1_select_test_walk_plans(test, &function, root, output, scratch, plans, "index fixture selects") == 2)
     {
         const Tier1SelectPattern* pattern = &plans[0].patterns[root];
-        const bool folded = form <= 2;
-        const int64_t displacement = folded ? offset + (form == 2 ? -constant : constant) * (int64_t)scale : offset;
+        // What c adds to the index, unless it is subtracted from: its displacement fits 32 bits or the walk stops.
+        const bool additive = !narrow && !(form->op == IR_SUB && form->left);
+        const int64_t addition = form->op == IR_SUB ? -constant : constant;
+        const int64_t sum = offset + addition * (int64_t)scale;
+        const bool folded = additive && sum >= INT32_MIN && sum <= INT32_MAX;
+        const int64_t displacement = folded ? sum : offset;
         const uint8_t rule = shape == 0 ? TIER1_RULE_LOAD_ADDRESS : shape == 1 ? TIER1_RULE_STORE_ADDRESS : TIER1_RULE_ADDRESS;
         tier1_select_test_expect(test, pattern->rule == rule && pattern->values[0] == 0 && pattern->values[1] == (folded ? 1u : index) && pattern->displacement == displacement &&
                                            pattern->scale == tier1_select_log2(scale) && plans[0].covered[2] && plans[0].covered[address] && plans[0].covered[4] == folded,
-                                 "a 64-bit index's added constants join the displacement, scaled; a 32-bit addition before its extension and a scaled constant past 32 bits stay");
+                                 "a 64-bit index's added or subtracted constants join the displacement, scaled, while it fits 32 bits; a 32-bit addition before its extension and a subtraction from a constant stay");
+        // A constant past 8 takes the inputs from the indices 0 to 3 that stay in the memory.
+        const uint64_t far = additive && (addition < -8 || addition > 8) ? (uint64_t)addition : 0;
         uint8_t registers[16];
         memset(registers, X86_REGISTER_RAX, sizeof(registers));
         registers[0] = X86_REGISTER_RDI;
@@ -2601,7 +2637,7 @@ static void tier1_select_test_index_walk(Tier1SelectTest* test, uint32_t form, u
             {
                 for (uint32_t input = 0; input < inputs; input += 1)
                 {
-                    const uint64_t i = input < 4 ? input - (form == 4 ? UINT64_C(1) << 31 : 0) : wraps[input - 4];
+                    const uint64_t i = input < 4 ? input - far : wraps[input - 4];
                     uint64_t memory[64];
                     uint64_t expected_memory[64];
                     for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(memory); word += 1)
@@ -2662,13 +2698,13 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
             }
         }
     }
-    for (uint32_t form = 0; form < 5; form += 1)
+    for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(tier1_select_test_indices); form += 1)
     {
         for (uint32_t shape = 0; shape < 3; shape += 1)
         {
             for (uint32_t scale = 1; scale <= 8; scale *= 2)
             {
-                tier1_select_test_index_walk(test, form, shape, scale, &input, &output, &scratch, &random);
+                tier1_select_test_index_walk(test, &tier1_select_test_indices[form], shape, scale, &input, &output, &scratch, &random);
             }
         }
     }
