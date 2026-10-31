@@ -181,9 +181,14 @@ designs and the compilers already built this way.
   self-loops. Every other function, general CFGs with loops and phis, goes
   through `tier1_emit_cfg.c` (#140): `tier1_cfg.c` allocates it and its edges
   move values, before a jump, at a successor's start or in a split critical
-  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. Run
-  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit` and
-  `test-tier1-pipeline --cross-check` for bounded typed-stream/native
+  edge's stub. Indirect/variadic/wide-ABI calls still refuse explicitly. AVX-512's
+  masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,
+  stores and constants of every width) and allocated in the opmask class by the
+  CFG consumer, which moves and spills them at their widths and saves them around
+  calls; vectors are refused (#141). Run
+  `test-tier1-select`, `test-tier1-liveness`, `test-tier1-emit`,
+  `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask IR
+  natively against the IR's interpreter) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2). `test-tier1-model` checks the emitted-case measurement reader;

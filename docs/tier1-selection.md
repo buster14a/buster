@@ -331,6 +331,77 @@ stores and copies are scalar emission work; the existing liveness, allocation,
 frame and rematerialization producers retain their vector/scalar paths. No
 compile-time speedup is claimed for adding this consumer.
 
+## AVX-512's masks (#179)
+
+The IR's masks, `m8` to `m64` (#732), are the opmask class's, which the CFG
+consumer allocates (the [allocation guide](tier1-allocation.md)'s "The opmask
+class"). The selector takes a function with masks and refuses one with vectors
+(`tier1_select_has_vectors`: a vector type, constant or operation in its
+instructions, parameters, calls or slots), which are #141's: a mask's operations
+need no vector register. Its mask rules, each of the mask's width, 1 to 8 bytes:
+
+| IR | Rule | Records |
+| --- | --- | --- |
+| `const` (and `undef`, any mask: zero) | `TIER1_RULE_MASK_CONSTANT` | `kxor k, k, k` for zero, `kxnor k, k, k` for every bit, else `mov r11d, imm32` (or `movabs r11`) and `kmov k, r11` |
+| `copy` | `TIER1_RULE_MASK_COPY` | `kmov k, k`, none where allocation gave both one register |
+| `and`, `or`, `xor` | `TIER1_RULE_MASK_LOGIC` | `kand`, `kor`, `kxor` `k, k, k` |
+| `not` | `TIER1_RULE_MASK_NOT` | `knot k, k` |
+| `load`, `store` | `TIER1_RULE_MASK_LOAD`, `_STORE`, and their `_ADDRESS` folds | `kmov k, m` and `kmov m, k`, the address folded as an integer access's |
+| `phi` | `TIER1_RULE_PHI` | none: its operands are its edges' moves |
+
+The opmask instructions of a width leave the bits past it zero, as the IR's masks
+have them, so no record extends a mask. A node's register is its allocation's
+location, class 2's `64 + k`, whose low three bits the expansion takes as k. A
+mask's `select`, `vcmp` and `vselect` have no rule and are refused at their node:
+`cmov` has no opmask form, and the comparisons and selection need vectors.
+
+Only the CFG consumer takes the rules (`tier1_emit_cfg.c`): the straight-line
+consumer sends any function with a mask there, and the uniform-register
+`tier1_select_emit` refuses them. There a mask's value is class 2's, allowed k1
+to k7, with k0 the class's scratch. Its spills, reloads, edge and split moves are
+`kmov` of the mask's width (`tier1_select_mask_forms`): to and from its slot,
+whose size is the mask's bytes, and between opmask registers; a cycle goes through
+k0, and a slot-to-slot move through k0 too, in two moves, as `tier1_cfg.c` stages
+them. No opmask register survives a call, so a call saves every mask live past it
+in a frame row of its register's (`Tier1EmitPrepared.mask_save_mask`, the
+registers some mask holds across some call) and reloads it after, by `kmov` of
+the mask's width; a mask never takes a callee-saved general register. The rows
+come after the general registers' call-save rows, then the general class's
+temporary slot and the opmask class's, then the frame objects. The records' forms
+are the target's to allow, as every record's: `kmovw` and the word forms need
+AVX512F, the byte forms AVX512DQ, the doubleword and quadword ones AVX512BW, and
+a target without them is refused at emission (`TIER1_EMIT_TARGET`).
+
+`test-tier1-masks [--seed N] [--print]` (`tier1_masks_test.c`) takes
+hand-written IR of masks through this path: each fixture is a function of a
+pointer to a 256-byte buffer, and of a count where it loops, that loads masks of
+every width from the buffer's first half and stores masks into its second half
+(the IR has no mask argument or result, and no conversion between a mask and an
+integer). Each is parsed by both of `ir_parse.c`'s paths into the same function,
+planned and emitted by both of Tier 1's paths for x86-64-v4, its allocation
+accepted by `tier1_cfg_verify`, its records by the target's allow-list and
+`x86_semantics.c`'s coverage, and encoded by both encoders into the same bytes.
+On a host with AVX512F, BW and DQ, each runs in a child on 16 random buffers (a
+quarter all zeros, a quarter all ones), whose bytes after the run, the ones no
+store writes among them, must be the shared IR interpreter's. The fixtures:
+
+- `and`, `or`, `xor`, `not` and copies at the four widths;
+- constants: zero and every bit at each width, and others through r11;
+- a loop whose two mask phis swap every iteration, a cycle through k0, beside a
+  mask accumulated from the buffer by a loaded index;
+- ten masks live at once, more than k1 to k7 hold, spilled and reloaded at their
+  widths;
+- masks live across two calls, and a mask phi across a call in a loop, of a helper
+  that sets every opmask register (`kxnorq` into k0 to k7) before it returns its
+  argument plus one: generated code beside the function, where the interpreter
+  calls a C function that returns the same.
+
+And the refusals, on both paths: a vector at selection, a mask's `select` at
+selection, and at emission the baseline target (no opmask form) and AVX512F alone
+for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
+masks alone is taken. `--print` prints each fixture's records by the vector path,
+as GNU as reads them.
+
 ## Tests and benchmark
 
 `test-tier1-select` checks both original-IR covers, real records and native

@@ -53,12 +53,15 @@ it as their third class, k1 to k7 for values and k0 the class's scratch, calls
 clobbering all of them, and `tier1_cfg_verify` checks it; `tier1_cfg_ir.c`
 models the IR's masks with it, and `test-tier1-cfg-source --simd` allocates
 real C's `vcmp` masks ([the allocation guide](tier1-allocation.md)'s "The
-opmask class"). A consumer then spills and reloads a mask at its width and
-moves it along CFG edges with `kmov`. Neither consumer may reinterpret a mask as
-an ordinary GPR value or infer target permission from the compiler host.
-Scalar-only promotion, optimization and selection still refuse SIMD functions
-before publication; this handoff does not claim native Tier 1 vector execution,
-full vector ABI support or a throughput gain.
+opmask class"). The selector takes masks' operations, and the CFG consumer
+spills and reloads a mask at its width, moves it along CFG edges with `kmov` and
+saves it around calls ([the selection guide](tier1-selection.md)'s "AVX-512's
+masks"): `test-tier1-masks` runs hand-written IR of masks natively against the
+shared IR's interpreter. Neither consumer may reinterpret a mask as an ordinary
+GPR value or infer target permission from the compiler host. Scalar-only
+promotion and optimization still refuse SIMD functions before publication, and
+selection refuses vectors; this handoff does not claim native Tier 1 vector
+execution, full vector ABI support or a throughput gain.
 
 ## Required evidence
 
