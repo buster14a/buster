@@ -2514,10 +2514,12 @@ static __attribute__((noinline)) void check_test_program_fpclassify(CheckTest* t
 
 // A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
 // next body's builder may, and retain reference epochs for nodes reached by earlier bodies. Both a completed walk
-// and its conservative early stop must restore those marks before builtin/reference selection reads them.
+// and its conservative early stop must restore those marks before builtin/reference selection reads them. The
+// capacities end in every remainder of four: a capacity that isn't a multiple of four is the cleanup-room case
+// (#147) that once left the visited list misaligned, which UBSan catches and the poisoned suffix locates.
 static void check_test_program_return_marks(CheckTest* test)
 {
-    enum { TOKENS = 1024, CAPACITY = 8 * TOKENS + 16, NODES = 4096 };
+    enum { TOKENS = 1024, BASE_CAPACITY = 8 * TOKENS + 16, CAPACITY = BASE_CAPACITY + 3, NODES = 4096 };
     CheckTestTypes types = { 0 };
     Arena scratch = arena_reserve(UINT64_C(1) << 20);
     bool ready = scratch.base != NULL && check_test_types_open(&types);
@@ -2535,40 +2537,49 @@ static void check_test_program_return_marks(CheckTest* test)
     CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
     ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
     check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
-    for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
+    for (uint32_t capacity = BASE_CAPACITY; ready && capacity <= CAPACITY; capacity += 1)
     {
-        for (uint32_t node = 0; node < NODES; node += 1)
+        for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
         {
-            ops[node] = CHECK_OP_VALUE;
-            operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
-            marks[node] = node == 0 ? unsafe : node % 2;
+            for (uint32_t node = 0; node < NODES; node += 1)
+            {
+                ops[node] = CHECK_OP_VALUE;
+                operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
+                marks[node] = node == 0 ? unsafe : node % 2;
+            }
+            ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
+            ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
+            operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
+            seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
+            marks[NODES] = stack[NODES] = labels[capacity] = UINT32_C(0x71625344);
+            memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
+            const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
+                                       .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
+            CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
+            CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+            CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
+            CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
+            check_program_return_flow(&writer, &body, marks, stack, NULL);
+            const uint32_t touched_offset = (capacity + 3) & ~UINT32_C(3);
+            bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
+                        marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[capacity] == UINT32_C(0x71625344);
+            for (uint32_t node = 0; same && node < NODES; node += 1)
+            {
+                same = marks[node] == (node == 0 ? unsafe : node % 2);
+            }
+            // The call stops its comma expression with the other operand still queued. Only one or three ledger words
+            // change, after the bytes a capacity that isn't a multiple of four leaves as alignment padding.
+            const uint8_t* bytes = (const uint8_t*)tasks;
+            for (uint32_t byte = capacity; same && byte < touched_offset; byte += 1)
+            {
+                same = bytes[byte] == 0xa5;
+            }
+            for (uint32_t byte = touched_offset + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < touched_offset + NODES; byte += 1)
+            {
+                same = bytes[byte] == 0xa5;
+            }
+            check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch at every capacity remainder, including early stops");
         }
-        ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
-        ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
-        operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
-        seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
-        marks[NODES] = stack[NODES] = labels[CAPACITY] = UINT32_C(0x71625344);
-        memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
-        const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
-                                   .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
-        CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
-        CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
-        CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = CAPACITY };
-        CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
-        check_program_return_flow(&writer, &body, marks, stack, NULL);
-        bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
-                    marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[CAPACITY] == UINT32_C(0x71625344);
-        for (uint32_t node = 0; same && node < NODES; node += 1)
-        {
-            same = marks[node] == (node == 0 ? unsafe : node % 2);
-        }
-        // The call stops its comma expression with the other operand still queued. Only one or three ledger words change.
-        const uint8_t* bytes = (const uint8_t*)tasks;
-        for (uint32_t byte = CAPACITY + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < CAPACITY + NODES; byte += 1)
-        {
-            same = bytes[byte] == 0xa5;
-        }
-        check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch, including early stops");
     }
     arena_release(&scratch);
     check_test_types_close(&types);

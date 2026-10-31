@@ -45,6 +45,11 @@ static void cbuiltin_intrinsic_feature_test_status(CBuiltinIntrinsicFeatureTest*
     CBuiltinIntrinsicFeatureFrame frames[BUSTER_INTRINSIC_FEATURE_TEST_DEPTH];
     const CBuiltinIntrinsicFeatureStatus actual = c_builtin_intrinsic_features_evaluate(expression, length, features, count, frames, BUSTER_INTRINSIC_FEATURE_TEST_DEPTH);
     cbuiltin_intrinsic_feature_test_expect(test, actual == expected, "expression status");
+    // Of a valid table, the evaluation without the table's validation (#148's check of target features) agrees.
+    const bool valid = c_builtin_intrinsic_features_table_valid(features, count);
+    const CBuiltinIntrinsicFeatureStatus unvalidated =
+        valid ? c_builtin_intrinsic_features_evaluate_valid(expression, length, features, count, frames, BUSTER_INTRINSIC_FEATURE_TEST_DEPTH) : actual;
+    cbuiltin_intrinsic_feature_test_expect(test, unvalidated == actual && (valid || actual == CBUILTIN_INTRINSIC_FEATURE_INVALID), "an expression of a valid table, unvalidated");
 }
 
 static void cbuiltin_intrinsic_feature_test_truth(CBuiltinIntrinsicFeatureTest* test)
