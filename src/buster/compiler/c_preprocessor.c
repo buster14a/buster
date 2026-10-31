@@ -1797,7 +1797,7 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
     uint32_t result = 0;
     uint32_t* current = &pp->scratch_range[clean];
     uint32_t* used = &pp->scratch_used[clean];
-    if (*current == BUSTER_PP_NONE || *used + length > pp->ranges[*current].length - 1)
+    if (*current == BUSTER_PP_NONE || *used + length >= pp->ranges[*current].length - 1)
     {
         const uint32_t chunk = length >= BUSTER_PP_SCRATCH_CHUNK_BYTES ? length + 1 : BUSTER_PP_SCRATCH_CHUNK_BYTES;
         uint8_t* memory = arena_push(&pp->scratch[clean], chunk, 1);
