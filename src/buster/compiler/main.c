@@ -578,6 +578,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+#include "buster/compiler/tier1_pipeline_benchmark.c"
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -1499,6 +1500,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-pipeline") == 0)
     {
         result = run_tier1_pipeline_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
+    {
+        result = run_tier1_pipeline_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
     {

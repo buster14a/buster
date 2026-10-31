@@ -594,6 +594,49 @@ static bool tier1_pipeline_freeze(Tier1PipelineTest* test, const Tier1PipelineFi
     return ok;
 }
 
+// The fixtures' 32 inputs: the Tier 0 generator's random ones, then 64-bit and narrow boundaries.
+static void tier1_pipeline_inputs(Tier1PipelineTest* test, uint64_t seed)
+{
+    for (uint32_t batch = 0; batch < BUSTER_TIER1_PIPELINE_INPUTS / BUSTER_TIER0_TEST_INPUTS; batch += 1)
+    {
+        tier0_test_inputs(seed + batch, test->inputs + batch * BUSTER_TIER0_TEST_INPUTS);
+    }
+    const uint64_t boundaries[] = {
+        0,
+        1,
+        UINT32_MAX,
+        UINT64_C(0x100000000),
+        UINT64_C(0x7fffffffffffffff),
+        UINT64_C(0x8000000000000000),
+        UINT64_MAX - 1,
+        UINT64_MAX,
+    };
+    for (uint32_t input = 0; input < BUSTER_ARRAY_LENGTH(boundaries); input += 1)
+    {
+        test->inputs[input][0] = boundaries[input];
+        test->inputs[input][1] = boundaries[BUSTER_ARRAY_LENGTH(boundaries) - 1 - input];
+        test->inputs[input][2] = boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(boundaries)];
+    }
+    const uint64_t narrow_boundaries[] = {
+        UINT64_C(0x7f),
+        UINT64_C(0x80),
+        UINT64_C(0xff),
+        UINT64_C(0x7fff),
+        UINT64_C(0x8000),
+        UINT64_C(0xffff),
+        UINT64_C(0x7fffffff),
+        UINT64_C(0x80000000),
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(boundaries) + BUSTER_ARRAY_LENGTH(narrow_boundaries) <= BUSTER_TIER1_PIPELINE_INPUTS, "boundary inputs fit the fixture table");
+    for (uint32_t input = 0; input < BUSTER_ARRAY_LENGTH(narrow_boundaries); input += 1)
+    {
+        const uint32_t row = BUSTER_ARRAY_LENGTH(boundaries) + input;
+        test->inputs[row][0] = UINT64_C(0xa5a55a5a00000000) | narrow_boundaries[input];
+        test->inputs[row][1] = UINT64_C(0x5a5aa5a500000000) | narrow_boundaries[BUSTER_ARRAY_LENGTH(narrow_boundaries) - 1 - input];
+        test->inputs[row][2] = UINT64_C(0xfedcba9800000000) | narrow_boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(narrow_boundaries)];
+    }
+}
+
 static void tier1_pipeline_mutation_regression(Tier1PipelineTest* test)
 {
     test->fixture = 0;
@@ -975,10 +1018,12 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_pipeline_call(con
     return function(inputs[0], inputs[1], inputs[2]);
 }
 
-static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* emitted)
+// Every function's records encoded by both encoders, which must agree, into one mapping made executable, their local
+// calls resolved: the mapping, with its size in *mapped and each function's start in starts[], or MAP_FAILED, the
+// failure reported.
+static uint8_t* tier1_pipeline_load(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* emitted, uint64_t* mapped, uint64_t* starts)
 {
     uint64_t capacity = 0;
-    uint64_t starts[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
     uint64_t capacities[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
     uint32_t maximum_records = 0;
     uint32_t maximum_references = 0;
@@ -991,14 +1036,13 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* 
         maximum_records = emitted[f].code.count > maximum_records ? emitted[f].code.count : maximum_records;
         maximum_references = emitted[f].reference_count > maximum_references ? emitted[f].reference_count : maximum_references;
     }
-    const uint64_t mapped = (capacity + 4095) & ~UINT64_C(4095);
-    uint8_t* machine = mmap(0, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    *mapped = (capacity + 4095) & ~UINT64_C(4095);
+    uint8_t* machine = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint8_t* scalar = malloc(capacity);
     uint32_t* offsets = malloc(((uint64_t)maximum_records + 1) * sizeof(uint32_t));
     uint32_t* ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
     uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(maximum_references) * sizeof(uint32_t));
-    uint64_t* actual = mmap(0, sizeof(test->expected[0]), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0 && actual != MAP_FAILED, "allocate native encoder and symbolic-fixup buffers") && ok;
+    ok = tier1_pipeline_expect(test, capacity < INT32_MAX && machine != MAP_FAILED && scalar != 0 && offsets != 0 && ends != 0 && scalar_ends != 0, "allocate native encoder and symbolic-fixup buffers") && ok;
     for (uint32_t f = 0; ok && f < program->function_count; f += 1)
     {
         Tier1SelectCode* code = &emitted[f].code;
@@ -1057,8 +1101,26 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* 
     }
     if (ok)
     {
-        ok = tier1_pipeline_expect(test, mprotect(machine, mapped, PROT_READ | PROT_EXEC) == 0, "make generated code executable");
+        ok = tier1_pipeline_expect(test, mprotect(machine, *mapped, PROT_READ | PROT_EXEC) == 0, "make generated code executable");
     }
+    free(scalar);
+    free(offsets);
+    free(ends);
+    free(scalar_ends);
+    if (!ok && machine != MAP_FAILED)
+    {
+        munmap(machine, *mapped);
+    }
+    return ok ? machine : MAP_FAILED;
+}
+
+static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* program, Tier1EmitResult* emitted)
+{
+    uint64_t starts[BUSTER_TIER1_PIPELINE_FUNCTIONS] = {0};
+    uint64_t mapped = 0;
+    uint8_t* machine = tier1_pipeline_load(test, program, emitted, &mapped, starts);
+    uint64_t* actual = mmap(0, sizeof(test->expected[0]), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    bool ok = machine != MAP_FAILED && tier1_pipeline_expect(test, actual != MAP_FAILED, "allocate the native results' shared page");
     if (ok)
     {
         fflush(0);
@@ -1092,34 +1154,32 @@ static void tier1_pipeline_execute(Tier1PipelineTest* test, const Tier0Program* 
     {
         munmap(actual, sizeof(test->expected[0]));
     }
-    free(scalar);
-    free(offsets);
-    free(ends);
-    free(scalar_ends);
 }
+
+// Each supported fixture's shape (tier1_pipeline_fixture), by fixture index: straight-line ones, then control flow.
+static const uint32_t tier1_pipeline_shapes[BUSTER_TIER1_PIPELINE_CASES] = {
+    0,
+    1,
+    2,
+    3,
+    7,
+    9,
+    10,
+    11,
+    4,
+    5,
+    6,
+    12,
+    13,
+    14,
+    15,
+};
 
 static void tier1_pipeline_supported(Tier1PipelineTest* test)
 {
-    const uint32_t shapes[BUSTER_TIER1_PIPELINE_CASES] = {
-        0,
-        1,
-        2,
-        3,
-        7,
-        9,
-        10,
-        11,
-        4,
-        5,
-        6,
-        12,
-        13,
-        14,
-        15,
-    };
     for (uint32_t fixture_index = 0; fixture_index < BUSTER_TIER1_PIPELINE_CASES; fixture_index += 1)
     {
-        const uint32_t shape = shapes[fixture_index];
+        const uint32_t shape = tier1_pipeline_shapes[fixture_index];
         test->fixture = fixture_index;
         Tier1PipelineFixture fixture;
         Tier1PipelineFixture original;
@@ -1279,37 +1339,47 @@ static void tier1_pipeline_refusals(Tier1PipelineTest* test)
     }
 }
 
+// The C side's prelude and each fixture's formula, by fixture index: statements that set `result` from a, b and c (which
+// they may change). Separate source formulas intentionally know nothing about SSA IDs, selected patterns or
+// allocations. Signed narrow inputs are reconstructed with in-range arithmetic before casting, without host truncation.
+// The oracle's original() and benchmark-tier1-pipeline's functions are built of them.
+static const char tier1_pipeline_prelude[] =
+    "#include <stdint.h>\n#include <stdio.h>\n#include <inttypes.h>\n"
+    "static uint64_t constant(unsigned i) { return UINT64_C(0x9e3779b97f4a7c15) + (uint64_t)i * UINT64_C(0xd1b54a32d192ed03); }\n"
+    "static __attribute__((noinline)) uint64_t helper_constant(void) { return 7; }\n"
+    "static __attribute__((noinline)) uint64_t helper_arguments(uint64_t x, uint64_t y, uint64_t z) { return (x + (y << 3)) ^ z; }\n";
+
+static const char* const tier1_pipeline_formulas[BUSTER_TIER1_PIPELINE_CASES] = {
+    "uint64_t local = ~a; result = (local + (b << 3)) ^ c;",
+    "uint64_t local[12]; for (unsigned i = 0; i < 12; ++i) local[i] = (a ^ constant(i)) + (b << (i % 5 + 1)); result = c; for (unsigned i = 0; i < 12; ++i) result += local[i];",
+    "uint64_t local[16]; for (unsigned i = 0; i < 16; ++i) local[i] = constant(i); result = (a ^ b) + c; for (unsigned i = 0; i < 16; ++i) { if (i % 2 == 0) result += local[i]; else result ^= local[i]; }",
+    "uint32_t local = (uint32_t)a + (uint32_t)b; result = (uint64_t)(uint32_t)((local >> 11) + (local ^ UINT32_C(0x92d68ca7))) ^ c;",
+    "result = helper_constant();",
+    "uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c;",
+    "uint64_t low = a % UINT64_C(65536); uint64_t swapped = (low % 256) * 256 + low / 256; result = (swapped + b) ^ c;",
+    "int8_t small = (int8_t)((int)(a & 255) - ((a & 128) != 0 ? 256 : 0)); int16_t via = small; int16_t medium = (int16_t)((int32_t)(b & 65535) - ((b & 32768) != 0 ? 65536 : 0)); int32_t wide = (int32_t)((int64_t)(c & UINT32_MAX) - ((c & UINT64_C(0x80000000)) != 0 ? INT64_C(0x100000000) : 0)); result = (((uint64_t)(int64_t)via + (uint64_t)(int64_t)medium) ^ (uint64_t)(int64_t)wide) + ((uint64_t)(int64_t)small << 17);",
+    "result = a != 0 ? b : c;",
+    "do { b += a; a >>= 1; } while (a != 0); result = b;",
+    "result = a != 0 ? 17 : 29;",
+    "uint64_t i = c & 15, x = a, y = b; while (i != 0) { uint64_t t = x; x = y ^ (t << 1); y = t; i -= 1; } result = x + y;",
+    "uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k];",
+    "uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b;",
+    "uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1);",
+};
+
 static bool tier1_pipeline_oracle_source(const Tier1PipelineTest* test, const char* path)
 {
     FILE* file = fopen(path, "w");
     bool ok = file != 0;
     if (ok)
     {
-        // Separate source formulas intentionally know nothing about SSA IDs, selected patterns or allocations.
-        // Signed narrow inputs are reconstructed with in-range arithmetic before casting, without host truncation.
-        fputs("#include <stdint.h>\n#include <stdio.h>\n#include <inttypes.h>\n"
-              "static uint64_t constant(unsigned i) { return UINT64_C(0x9e3779b97f4a7c15) + (uint64_t)i * UINT64_C(0xd1b54a32d192ed03); }\n"
-              "static __attribute__((noinline)) uint64_t helper_constant(void) { return 7; }\n"
-              "static __attribute__((noinline)) uint64_t helper_arguments(uint64_t x, uint64_t y, uint64_t z) { return (x + (y << 3)) ^ z; }\n"
-              "static uint64_t original(unsigned shape, uint64_t a, uint64_t b, uint64_t c)\n{\n"
-              "    uint64_t result;\n"
-              "    if (shape == 0) { uint64_t local = ~a; result = (local + (b << 3)) ^ c; }\n"
-              "    else if (shape == 1) { uint64_t local[12]; for (unsigned i = 0; i < 12; ++i) local[i] = (a ^ constant(i)) + (b << (i % 5 + 1)); result = c; for (unsigned i = 0; i < 12; ++i) result += local[i]; }\n"
-              "    else if (shape == 2) { uint64_t local[16]; for (unsigned i = 0; i < 16; ++i) local[i] = constant(i); result = (a ^ b) + c; for (unsigned i = 0; i < 16; ++i) { if (i % 2 == 0) result += local[i]; else result ^= local[i]; } }\n"
-              "    else if (shape == 3) { uint32_t local = (uint32_t)a + (uint32_t)b; result = (uint64_t)(uint32_t)((local >> 11) + (local ^ UINT32_C(0x92d68ca7))) ^ c; }\n"
-              "    else if (shape == 4) { result = helper_constant(); }\n"
-              "    else if (shape == 5) { uint64_t live = a ^ b; uint64_t called = helper_arguments(c, a, b); result = (called + live) ^ c; }\n"
-              "    else if (shape == 6) { uint64_t low = a % UINT64_C(65536); uint64_t swapped = (low % 256) * 256 + low / 256; result = (swapped + b) ^ c; }\n"
-              "    else if (shape == 8) { result = a != 0 ? b : c; }\n"
-              "    else if (shape == 9) { do { b += a; a >>= 1; } while (a != 0); result = b; }\n"
-              "    else if (shape == 10) { result = a != 0 ? 17 : 29; }\n"
-              "    else if (shape == 11) { uint64_t i = c & 15, x = a, y = b; while (i != 0) { uint64_t t = x; x = y ^ (t << 1); y = t; i -= 1; } result = x + y; }\n"
-              "    else if (shape == 12) { uint64_t v[8]; for (unsigned k = 0; k < 8; ++k) v[k] = a ^ constant(k); for (uint64_t i = c & 7; i != 0; i -= 1) for (unsigned k = 0; k < 8; ++k) v[k] = (v[k] + v[(k + 1) % 8]) ^ b; result = v[0]; for (unsigned k = 1; k < 8; ++k) result ^= v[k]; }\n"
-              "    else if (shape == 13) { uint64_t s = 0; for (uint64_t i = c & 7; i != 0; i -= 1) s = helper_arguments(s, a, i); result = s ^ b; }\n"
-              "    else if (shape == 14) { uint64_t x = a; if ((b & 1) != 0) x ^= c; result = x + (b >> 1); }\n"
-              "    else { int8_t small = (int8_t)((int)(a & 255) - ((a & 128) != 0 ? 256 : 0)); int16_t via = small; int16_t medium = (int16_t)((int32_t)(b & 65535) - ((b & 32768) != 0 ? 65536 : 0)); int32_t wide = (int32_t)((int64_t)(c & UINT32_MAX) - ((c & UINT64_C(0x80000000)) != 0 ? INT64_C(0x100000000) : 0)); result = (((uint64_t)(int64_t)via + (uint64_t)(int64_t)medium) ^ (uint64_t)(int64_t)wide) + ((uint64_t)(int64_t)small << 17); }\n"
-              "    return result;\n}\n"
-              "static const uint64_t inputs[][3] = {\n", file);
+        fputs(tier1_pipeline_prelude, file);
+        fputs("static uint64_t original(unsigned shape, uint64_t a, uint64_t b, uint64_t c)\n{\n    uint64_t result = 0;\n", file);
+        for (uint32_t k = 0; k < BUSTER_TIER1_PIPELINE_CASES; k += 1)
+        {
+            fprintf(file, "    %sif (shape == %u) { %s }\n", k == 0 ? "" : "else ", k, tier1_pipeline_formulas[k]);
+        }
+        fputs("    return result;\n}\nstatic const uint64_t inputs[][3] = {\n", file);
         for (uint32_t input = 0; input < BUSTER_TIER1_PIPELINE_INPUTS; input += 1)
         {
             fprintf(file, "    { UINT64_C(0x%016" PRIx64 "), UINT64_C(0x%016" PRIx64 "), UINT64_C(0x%016" PRIx64 ") },\n", test->inputs[input][0], test->inputs[input][1], test->inputs[input][2]);
@@ -1465,44 +1535,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
                 .architecture = X86_ARCH_BASELINE,
             };
             x86_target_forms(&target, test.allowed);
-            for (uint32_t batch = 0; batch < BUSTER_TIER1_PIPELINE_INPUTS / BUSTER_TIER0_TEST_INPUTS; batch += 1)
-            {
-                tier0_test_inputs(seed + batch, test.inputs + batch * BUSTER_TIER0_TEST_INPUTS);
-            }
-            const uint64_t boundaries[] = {
-                0,
-                1,
-                UINT32_MAX,
-                UINT64_C(0x100000000),
-                UINT64_C(0x7fffffffffffffff),
-                UINT64_C(0x8000000000000000),
-                UINT64_MAX - 1,
-                UINT64_MAX,
-            };
-            for (uint32_t input = 0; input < BUSTER_ARRAY_LENGTH(boundaries); input += 1)
-            {
-                test.inputs[input][0] = boundaries[input];
-                test.inputs[input][1] = boundaries[BUSTER_ARRAY_LENGTH(boundaries) - 1 - input];
-                test.inputs[input][2] = boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(boundaries)];
-            }
-            const uint64_t narrow_boundaries[] = {
-                UINT64_C(0x7f),
-                UINT64_C(0x80),
-                UINT64_C(0xff),
-                UINT64_C(0x7fff),
-                UINT64_C(0x8000),
-                UINT64_C(0xffff),
-                UINT64_C(0x7fffffff),
-                UINT64_C(0x80000000),
-            };
-            _Static_assert(BUSTER_ARRAY_LENGTH(boundaries) + BUSTER_ARRAY_LENGTH(narrow_boundaries) <= BUSTER_TIER1_PIPELINE_INPUTS, "boundary inputs fit the fixture table");
-            for (uint32_t input = 0; input < BUSTER_ARRAY_LENGTH(narrow_boundaries); input += 1)
-            {
-                const uint32_t row = BUSTER_ARRAY_LENGTH(boundaries) + input;
-                test.inputs[row][0] = UINT64_C(0xa5a55a5a00000000) | narrow_boundaries[input];
-                test.inputs[row][1] = UINT64_C(0x5a5aa5a500000000) | narrow_boundaries[BUSTER_ARRAY_LENGTH(narrow_boundaries) - 1 - input];
-                test.inputs[row][2] = UINT64_C(0xfedcba9800000000) | narrow_boundaries[(input + 3) % BUSTER_ARRAY_LENGTH(narrow_boundaries)];
-            }
+            tier1_pipeline_inputs(&test, seed);
             tier1_pipeline_mutation_regression(&test);
             tier1_pipeline_deadline_regression(&test);
             tier1_pipeline_supported(&test);
