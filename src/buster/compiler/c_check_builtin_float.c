@@ -21,6 +21,15 @@
 // ISGREATER ... ISUNORDERED take two arguments whose usual arithmetic conversions, as clang makes them for a comparison,
 // must give a real floating type, both then converted to it; their quiet comparisons' int folds, an ICE, as the
 // classifiers' does.
+// ISNORMAL, ISSUBNORMAL, ISZERO, ISSIGNALING and ISFPCLASS (clang's BuiltinFPClassification) take their real floating
+// argument unconverted, as ISNAN does; ISFPCLASS also a vector of them, whose result is the signed vector of its
+// elements' width (check_vector_mask_type, never folded), and a mask, unconverted and unevaluated, that must be an
+// integer constant expression in [0, 1023]: llvm's FPClassTest bits, 1 signaling NaN, 2 quiet NaN, 4 -inf, 8 -normal,
+// 16 -subnormal, 32 -0, 64 +0, 128 +subnormal, 256 +normal and 512 +inf. SIGNBITF and SIGNBITL convert their argument to
+// their prototypes' float and long double first, as FABSF and FABSL do. Each folds as clang's evaluator does (APFloat's
+// isNormal, isDenormal, isZero, isSignaling, classify() & mask and isNegative), an ICE. CANONICALIZE, CANONICALIZEF and
+// CANONICALIZEL take their prototypes' conversions too, and are x * 1.0 at runtime; clang's rows aren't constexpr, so a
+// call never folds, and under FENV_ACCESS it may raise FE_INVALID (check_builtin_float_strict).
 #ifndef BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 #define BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 
@@ -31,6 +40,7 @@
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNKNOWN_PAYLOAD 0x04u
 #define BUSTER_CHECK_BUILTIN_FLOAT_INVALID_PAYLOAD 0x08u
 #define BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION 0x10u
+#define BUSTER_CHECK_BUILTIN_FLOAT_MASK_LIMIT 1023u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_QUALIFIERS 0x01u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_POINTER_SIGN 0x02u
 #define BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE 0x04u
@@ -72,6 +82,8 @@ struct CheckBuiltinFloatResult
     uint32_t evaluated_operands;
     uint32_t definite_operands;
     uint32_t selected_selector;
+    // ISFPCLASS's mask, and the other classifiers' own: ISNORMAL's 264, ISSUBNORMAL's 144, ISZERO's 96, ISSIGNALING's 1.
+    uint32_t class_mask;
     uint32_t unsupported;
     uint32_t warnings;
     CBuiltinId runtime_builtin;
@@ -79,6 +91,22 @@ struct CheckBuiltinFloatResult
     bool folded;
     bool reads_memory;
 };
+
+// The classifications whose code under FENV_ACCESS may raise FP exceptions, clang's strictfp code's: fpclassify's and
+// isinf_sign's compares, and canonicalize's multiplication.
+static bool check_builtin_float_strict(uint32_t id)
+{
+    const bool result = id == CBUILTIN_FPCLASSIFY || id == CBUILTIN_ISINF_SIGN || cbuiltin_float_canonicalize(id);
+    return result;
+}
+
+// A classifier's FPClassTest mask: the bits clang's code tests (CGBuiltin.cpp's createIsFPClass of each).
+static uint32_t check_builtin_float_fixed_mask(CBuiltinId id)
+{
+    const uint32_t result = id == CBUILTIN_ISNORMAL ? 0x108u : id == CBUILTIN_ISSUBNORMAL ? 0x90u : id == CBUILTIN_ISZERO ? 0x60u :
+                            id == CBUILTIN_ISSIGNALING ? 0x1u : 0;
+    return result;
+}
 
 static bool check_builtin_float_source_complete(const TypeTable* table, TypeId type, const CheckBuiltinFloatAction* input)
 {
@@ -228,6 +256,89 @@ static uint32_t check_builtin_float_class(TypeId type, long double value)
     {
         const long double minimum = type == BUSTER_TYPE_FLOAT ? 0x1p-126L : type == BUSTER_TYPE_DOUBLE ? 0x1p-1022L : 0x1p-16382L;
         result = fabsl(number) < minimum ? 3 : 2;
+    }
+    return result;
+}
+
+// Whether a NaN's representation is quiet: its top fraction bit, bit 62 of the x87 significand that holds every format's
+// value (a float's or double's top fraction bit lands there).
+static bool check_builtin_float_quiet(long double value)
+{
+    uint64_t significand = 0;
+    memcpy(&significand, &value, sizeof(significand));
+    const bool result = ((significand >> 62) & 1) != 0;
+    return result;
+}
+
+// A value's FPClassTest bit, as APFloat's classify() gives it in the value's declared format.
+static uint32_t check_builtin_float_class_bit(TypeId type, long double value)
+{
+    // By category (0 NaN, 1 infinity, 2 normal, 3 subnormal, 4 zero) and sign; a NaN is quiet (2) or signaling (1).
+    const uint16_t positive[5] = { 2, 512, 256, 128, 64 };
+    const uint16_t negative[5] = { 2, 4, 8, 16, 32 };
+    const uint32_t category = check_builtin_float_class(type, value);
+    const uint32_t bit = signbit(value) ? negative[category] : positive[category];
+    const uint32_t result = category == 0 && !check_builtin_float_quiet(value) ? 1 : bit;
+    return result;
+}
+
+// ISFPCLASS's mask (operand 1), as clang's BuiltinConstantArgRange takes it: an integer constant expression, unconverted,
+// whose value sign-extended from its own type's width (getSExtValue, whatever its signedness: a bool's 1 and an unsigned
+// char's 200 are negative there) is in [0, 1023]. Its value goes to class_mask.
+static void check_builtin_float_mask(TypeTable* table, const CheckValue* value, CheckBuiltinFloatResult* output)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    if (!check_action_is_integer(table, value->type))
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 1);
+    }
+    else if (value->fault != CHECK_FAULT_NONE || value->constant_kind != CHECK_CONSTANT_INTEGER || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+    }
+    else if ((value->flags & BUSTER_CHECK_ICE) == 0)
+    {
+        // A folded value alone cannot certify the AST's ICE rule (a comma expression, say), as the misc builtins'.
+        check_action_diagnose(&output->action, (value->flags & BUSTER_CHECK_FLOAT_LITERAL) != 0 ? CHECK_DIAG_INCOMPATIBLE : CHECK_DIAG_UNSUPPORTED, 1);
+    }
+    else if (!check_action_integer_type(table, value->type, &width, &is_signed))
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 1);
+    }
+    else
+    {
+        const unsigned __int128 bits = value->integer & check_action_mask(width);
+        const bool negative = width != 0 && ((bits >> (width - 1)) & 1) != 0;
+        if (negative || bits > BUSTER_CHECK_BUILTIN_FLOAT_MASK_LIMIT)
+        {
+            check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
+        }
+        else
+        {
+            output->class_mask = (uint32_t)bits;
+        }
+    }
+}
+
+// A classifier's int answer for a constant of a supported format (ISNAN ... ISINF_SIGN and ISNORMAL ... ISFPCLASS, and
+// the signbits), as clang's evaluator gives it.
+static uint64_t check_builtin_float_answer(CBuiltinId id, TypeId type, long double value, uint32_t mask)
+{
+    const uint32_t category = check_builtin_float_class(type, value);
+    uint64_t result = !!signbit(value);
+    switch (id)
+    {
+        case CBUILTIN_ISNAN: result = category == 0; break;
+        case CBUILTIN_ISINF: result = category == 1; break;
+        case CBUILTIN_ISFINITE: result = category != 0 && category != 1; break;
+        case CBUILTIN_ISINF_SIGN: result = category == 1 ? (signbit(value) ? UINT32_MAX : 1) : 0; break;
+        case CBUILTIN_ISNORMAL:
+        case CBUILTIN_ISSUBNORMAL:
+        case CBUILTIN_ISZERO:
+        case CBUILTIN_ISSIGNALING:
+        case CBUILTIN_ISFPCLASS: result = (check_builtin_float_class_bit(type, value) & mask) != 0; break;
+        default: break;
     }
     return result;
 }
@@ -390,6 +501,46 @@ static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloa
     }
 }
 
+// A fixed prototype's conversion of its one argument to `parameter` (FABS, SIGNBITF, CANONICALIZE and their kin): an
+// arithmetic argument, converted as by assignment, a complex one or one of an unsupported format a runtime requirement,
+// never folded. Whether it converted.
+static bool check_builtin_float_prototype(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output, CheckValue* values,
+                                          TypeId parameter)
+{
+    const bool arithmetic = check_action_is_arithmetic(table, values[0].type);
+    if (!arithmetic)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+    }
+    else
+    {
+        const uint8_t kind = check_action_kind(table, values[0].type);
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool wide_integer = check_action_is_integer(table, values[0].type) && !check_action_integer_type(table, values[0].type, &width, &is_signed);
+        if (kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, values[0].type)) || wide_integer)
+        {
+            output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION;
+            values[0].constant_kind = CHECK_CONSTANT_NONE;
+        }
+        if (type_unqualified(type_strip_aligned(table, values[0].type)) == parameter)
+        {
+            // A same-format prototype conversion is an identity. Do not round through host FP arithmetic,
+            // which can quiet a signaling NaN even though fabs itself only clears the sign bit.
+            output->argument_conversions[0].type = parameter;
+            output->argument_conversions[0].flags |= BUSTER_CHECK_CONVERT_ASSIGNMENT;
+            values[0].type = parameter;
+        }
+        else
+        {
+            check_action_conversion(table, &values[0], parameter, BUSTER_CHECK_CONVERT_ASSIGNMENT, &output->argument_conversions[0], input->node);
+        }
+        output->floating_type = parameter;
+        check_builtin_float_inherit(output, values, 1, 1, 1);
+    }
+    return arithmetic;
+}
+
 static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output)
 {
     *output = (CheckBuiltinFloatResult){
@@ -397,12 +548,15 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     };
     const bool special = input->id >= CBUILTIN_HUGE_VAL && input->id <= CBUILTIN_INFL;
     const bool nan = input->id >= CBUILTIN_NAN && input->id <= CBUILTIN_NANL;
-    const bool classify = input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_ISINF_SIGN;
+    const bool classify = (input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_ISINF_SIGN) || cbuiltin_float_class(input->id);
     const bool compare = input->id >= CBUILTIN_ISGREATER && input->id <= CBUILTIN_ISUNORDERED;
     const bool absolute = input->id == CBUILTIN_FABS || input->id == CBUILTIN_FABSF || input->id == CBUILTIN_FABSL;
+    const bool sign = cbuiltin_float_signbit(input->id);
+    const bool canonicalize = cbuiltin_float_canonicalize(input->id);
     const bool selectors = input->id == CBUILTIN_FPCLASSIFY;
-    const uint32_t count = special ? 0 : selectors ? 6 : compare ? 2 : 1;
-    if (!special && !nan && !classify && !absolute && !compare)
+    const bool fpclass = input->id == CBUILTIN_ISFPCLASS;
+    const uint32_t count = special ? 0 : selectors ? 6 : compare || fpclass ? 2 : 1;
+    if (!special && !nan && !classify && !absolute && !compare && !sign && !canonicalize)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
     }
@@ -417,15 +571,19 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     if (output->action.diagnostic == CHECK_DIAG_NONE)
     {
         TypeId result_type = BUSTER_TYPE_DOUBLE;
-        if (input->id == CBUILTIN_HUGE_VALF || input->id == CBUILTIN_INFF || input->id == CBUILTIN_NANF || input->id == CBUILTIN_FABSF)
+        if (input->id == CBUILTIN_HUGE_VALF || input->id == CBUILTIN_INFF || input->id == CBUILTIN_NANF || input->id == CBUILTIN_FABSF ||
+            input->id == CBUILTIN_SIGNBITF || input->id == CBUILTIN_CANONICALIZEF)
         {
             result_type = BUSTER_TYPE_FLOAT;
         }
-        else if (input->id == CBUILTIN_HUGE_VALL || input->id == CBUILTIN_INFL || input->id == CBUILTIN_NANL || input->id == CBUILTIN_FABSL)
+        else if (input->id == CBUILTIN_HUGE_VALL || input->id == CBUILTIN_INFL || input->id == CBUILTIN_NANL || input->id == CBUILTIN_FABSL ||
+                 input->id == CBUILTIN_SIGNBITL || input->id == CBUILTIN_CANONICALIZEL)
         {
             result_type = BUSTER_TYPE_LONG_DOUBLE;
         }
-        output->action.value.type = classify || compare ? BUSTER_TYPE_INT : result_type;
+        // A signbit's result_type is its parameter's.
+        output->action.value.type = classify || compare || sign ? BUSTER_TYPE_INT : result_type;
+        output->class_mask = check_builtin_float_fixed_mask(input->id);
         output->action.value.category = CHECK_RVALUE;
         output->runtime_builtin = input->id;
         CheckValue values[6] = { 0 };
@@ -467,47 +625,26 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 output->reads_memory = !output->folded;
             }
         }
-        else if (absolute && output->action.diagnostic == CHECK_DIAG_NONE)
+        else if ((absolute || sign || canonicalize) && output->action.diagnostic == CHECK_DIAG_NONE)
         {
-            if (check_builtin_float_absolute_warning(table, input->arguments[0].type, result_type))
+            if (absolute && check_builtin_float_absolute_warning(table, input->arguments[0].type, result_type))
             {
                 output->warnings |= BUSTER_CHECK_BUILTIN_FLOAT_WARN_ABSOLUTE_VALUE;
             }
-            if (!check_action_is_arithmetic(table, values[0].type))
+            const bool known = check_builtin_float_prototype(table, input, output, values, result_type) &&
+                               values[0].constant_kind == CHECK_CONSTANT_FLOATING && output->action.value.fault == CHECK_FAULT_NONE;
+            // canonicalize's x * 1.0 never folds: clang's row isn't constexpr.
+            if (known && absolute)
             {
-                check_action_diagnose(&output->action, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+                output->action.value.constant_kind = CHECK_CONSTANT_FLOATING;
+                check_builtin_float_absolute_bits(&values[0].floating, &output->action.value.floating);
+                output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
             }
-            else
+            else if (known && sign)
             {
-                const uint8_t kind = check_action_kind(table, values[0].type);
-                uint32_t width = 0;
-                bool is_signed = false;
-                const bool wide_integer = check_action_is_integer(table, values[0].type) && !check_action_integer_type(table, values[0].type, &width, &is_signed);
-                if (kind == BUSTER_TYPE_KIND_COMPLEX || (kind == BUSTER_TYPE_KIND_FLOATING && !check_action_float_supported(table, values[0].type)) || wide_integer)
-                {
-                    output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_CONVERSION;
-                    values[0].constant_kind = CHECK_CONSTANT_NONE;
-                }
-                if (type_unqualified(type_strip_aligned(table, values[0].type)) == result_type)
-                {
-                    // A same-format prototype conversion is an identity. Do not round through host FP arithmetic,
-                    // which can quiet a signaling NaN even though fabs itself only clears the sign bit.
-                    output->argument_conversions[0].type = result_type;
-                    output->argument_conversions[0].flags |= BUSTER_CHECK_CONVERT_ASSIGNMENT;
-                    values[0].type = result_type;
-                }
-                else
-                {
-                    check_action_conversion(table, &values[0], result_type, BUSTER_CHECK_CONVERT_ASSIGNMENT, &output->argument_conversions[0], input->node);
-                }
-                output->floating_type = result_type;
-                check_builtin_float_inherit(output, values, 1, 1, count);
-                if (values[0].constant_kind == CHECK_CONSTANT_FLOATING && output->action.value.fault == CHECK_FAULT_NONE)
-                {
-                    output->action.value.constant_kind = CHECK_CONSTANT_FLOATING;
-                    check_builtin_float_absolute_bits(&values[0].floating, &output->action.value.floating);
-                    output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
-                }
+                output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
+                output->action.value.integer = check_builtin_float_answer(input->id, result_type, values[0].floating, 0);
+                output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
             }
         }
         else if (compare && output->action.diagnostic == CHECK_DIAG_NONE)
@@ -517,11 +654,28 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         else if (classify && output->action.diagnostic == CHECK_DIAG_NONE)
         {
             const uint32_t fp = selectors ? 5 : 0;
-            const TypeId type = type_unqualified(type_strip_aligned(table, values[fp].type));
+            const TypeId operand = type_unqualified(type_strip_aligned(table, values[fp].type));
+            const uint8_t operand_kind = check_action_kind(table, operand);
+            const bool vector = fpclass && (operand_kind == BUSTER_TYPE_KIND_VECTOR || operand_kind == BUSTER_TYPE_KIND_EXT_VECTOR);
+            const TypeId type = vector ? type_unqualified(type_strip_aligned(table, check_vector_element(table, operand))) : operand;
             output->floating_type = type;
             if (check_action_kind(table, type) != BUSTER_TYPE_KIND_FLOATING)
             {
                 check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, fp);
+            }
+            else if (vector)
+            {
+                // isfpclass of a vector gives the signed vector of its elements' width, never a constant.
+                const TypeId result = check_vector_mask_type(table, operand);
+                if (result == 0)
+                {
+                    check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, fp);
+                }
+                output->action.value.type = result;
+            }
+            if (fpclass && output->action.diagnostic == CHECK_DIAG_NONE)
+            {
+                check_builtin_float_mask(table, &values[1], output);
             }
             const bool supported = check_action_float_supported(table, type);
             if (!supported)
@@ -546,18 +700,15 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 }
                 output->selectors[i] = values[i];
             }
-            const bool known = supported && values[fp].constant_kind == CHECK_CONSTANT_FLOATING && values[fp].fault == CHECK_FAULT_NONE;
+            const bool known = supported && !vector && values[fp].constant_kind == CHECK_CONSTANT_FLOATING && values[fp].fault == CHECK_FAULT_NONE;
             const uint32_t category = known ? check_builtin_float_class(type, values[fp].floating) : BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR;
             if (!selectors)
             {
                 check_builtin_float_inherit(output, values, 1, 1, count);
                 if (known)
                 {
-                    const uint64_t answer = input->id == CBUILTIN_ISNAN ? category == 0 : input->id == CBUILTIN_ISINF ? category == 1 :
-                                            input->id == CBUILTIN_ISFINITE ? category != 0 && category != 1 : input->id == CBUILTIN_ISINF_SIGN ?
-                                            (category == 1 ? (signbit(values[0].floating) ? UINT32_MAX : 1) : 0) : !!signbit(values[0].floating);
                     output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
-                    output->action.value.integer = answer;
+                    output->action.value.integer = check_builtin_float_answer(input->id, type, values[0].floating, output->class_mask);
                     output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
                 }
             }
@@ -596,7 +747,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         if (output->folded)
         {
             output->runtime_builtin = CBUILTIN_NONE;
-            if ((classify || compare) && (output->action.value.flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
+            if ((classify || compare || sign) && (output->action.value.flags & BUSTER_CHECK_GNU_OBJECT_READ) == 0)
             {
                 output->action.value.flags |= BUSTER_CHECK_ICE;
             }

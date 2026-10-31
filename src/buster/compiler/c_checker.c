@@ -344,6 +344,7 @@ struct CheckBuiltinFloatEffect
     uint32_t evaluated_operands;
     uint32_t definite_operands;
     uint32_t selected_selector;
+    uint32_t class_mask;
     uint32_t unsupported;
     uint32_t warnings;
     CBuiltinId runtime_builtin;
@@ -699,7 +700,8 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
         op = CHECK_OP_BUILTIN_MISC;
     }
     else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) ||
-             check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE)
+             check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE || cbuiltin_float_class(id) || cbuiltin_float_signbit(id) ||
+             cbuiltin_float_canonicalize(id))
     {
         op = CHECK_OP_BUILTIN_FLOAT;
     }
@@ -1849,6 +1851,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                 .evaluated_operands = checked.evaluated_operands,
                 .definite_operands = checked.definite_operands,
                 .selected_selector = checked.selected_selector,
+                .class_mask = checked.class_mask,
                 .unsupported = checked.unsupported,
                 .warnings = checked.warnings,
                 .runtime_builtin = checked.runtime_builtin,
@@ -2059,8 +2062,7 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
                              action->op == CHECK_OP_BUILTIN_BIT_CAST ? stream->bit_casts[stream->bit_cast_count - 1].evaluated_operands :
                              stream->queries[stream->query_count - 1].evaluated_operands;
         const bool strict_comparison = action->op == CHECK_OP_BUILTIN_FLOAT &&
-                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 &&
-                                       (action->member == CBUILTIN_FPCLASSIFY || action->member == CBUILTIN_ISINF_SIGN);
+                                       (action->fp_environment & BUSTER_CHECK_FP_ENV_ACCESS) != 0 && check_builtin_float_strict(action->member);
         if (strict_comparison)
         {
             result->value.flags |= BUSTER_CHECK_FP_ENVIRONMENT;
