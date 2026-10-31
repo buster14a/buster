@@ -317,7 +317,12 @@ designs and the compilers already built this way.
   `strlen`) are builtins as `-fno-builtin`, `-fno-builtin-NAME` and
   `-ffreestanding` say, declared implicitly with their prototypes as clang
   declares them; `test-checker --program-library` and `test-checker-driver`
-  check them against clang (the guide's "Library builtins").
+  check them against clang (the guide's "Library builtins"). The floating
+  classifications past the first ones (`isnormal` to `isfpclass`, `signbitf`,
+  `signbitl` and `canonicalize`: `c_check_builtin_float.c`,
+  `c_builtin_float_lower.c`) test their `FPClassTest` masks by a table, an x87
+  value's from a model of LLVM's expansion (`cbuiltin_float_lower_x87_class`),
+  and `test-checker` runs every mask against clang -O0's builds.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5

@@ -5105,6 +5105,48 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
     unlink(source);
 }
 
+// isfpclass of a vector of long doubles (#148): clang accepts it, its result a vector of __int128 whose lanes are the
+// element's 16 bytes. The lowering's int and long long lane stores can't hold those, so it must refuse by name rather
+// than write garbage; a vector of floats still compiles, as the guard against refusing too much.
+static void check_test_driver_float_classify(CheckTest* test, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/classify-vector.c", directory);
+    snprintf(object, sizeof(object), "%s/classify-vector.o", directory);
+    static const char refused[] = "typedef long double v2ld __attribute__((vector_size(32)));\n"
+                                  "typedef __int128 v2i __attribute__((vector_size(32)));\n"
+                                  "v2i f(v2ld v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
+    static const char accepted[] = "typedef float v4f __attribute__((vector_size(16)));\n"
+                                   "typedef int v4i __attribute__((vector_size(16)));\n"
+                                   "v4i f(v4f v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
+    bool written = parse_test_write(source, refused, sizeof(refused) - 1);
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: isfpclass of a vector whose elements are not 4 or 8 bytes") != NULL,
+                          path == 0 ? "isfpclass of a vector of long doubles is refused, not miscompiled" :
+                                      "isfpclass of a vector of long doubles is refused, not miscompiled, scalar");
+        free(text);
+    }
+    written = written && parse_test_write(source, accepted, sizeof(accepted) - 1);
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* text = NULL;
+        char* const vector_arguments[] = { (char*)executable, "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-march=x86-64-v4", "-c", "-o", object, source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0,
+                          path == 0 ? "isfpclass of a vector of floats still compiles" : "isfpclass of a vector of floats still compiles, scalar");
+        free(text);
+    }
+    unlink(source);
+    unlink(object);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5699,6 +5741,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_members(&test, clang, executable, directory);
             check_test_driver_array_alignment(&test, clang, executable, directory);
+            check_test_driver_float_classify(&test, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);

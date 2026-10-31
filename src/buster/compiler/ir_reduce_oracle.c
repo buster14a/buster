@@ -50,6 +50,22 @@ static bool ir_reduce_interpreter_limit(InterpreterStatus status)
     return result;
 }
 
+// Only checked semantic execution outcomes can establish an optimizer failure. Missing interpreter support,
+// unresolved symbols/native bindings, invalid execution and unknown future statuses remain unavailable.
+static IrReduceObservationStatus ir_reduce_execution_observation(InterpreterStatus status)
+{
+    IrReduceObservationStatus result = IR_REDUCE_UNSUPPORTED;
+    if (ir_reduce_interpreter_limit(status))
+    {
+        result = IR_REDUCE_PREDICATE_LIMIT;
+    }
+    else if (status == INTERPRETER_OK || status == INTERPRETER_UNDEFINED || status == INTERPRETER_MEMORY || status == INTERPRETER_ARITHMETIC)
+    {
+        result = IR_REDUCE_OBSERVED;
+    }
+    return result;
+}
+
 static InterpreterResult ir_reduce_execute(const IrFunction* function, const IrReduceOracle* oracle, const IrReduceLimits* limits,
                                            uint64_t* memory, Arena* scratch)
 {
@@ -134,9 +150,10 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                                 uint64_t actual_memory[4];
                                 memcpy(actual_memory, oracle->memory, sizeof(actual_memory));
                                 InterpreterResult actual = ir_reduce_execute(&optimized.function, oracle, limits, actual_memory, &execution);
-                                if (ir_reduce_interpreter_limit(actual.status))
+                                const IrReduceObservationStatus observation = ir_reduce_execution_observation(actual.status);
+                                if (observation != IR_REDUCE_OBSERVED)
                                 {
-                                    result.status = IR_REDUCE_PREDICATE_LIMIT;
+                                    result.status = observation;
                                 }
                                 else if (actual.status != INTERPRETER_OK)
                                 {
