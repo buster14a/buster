@@ -279,7 +279,10 @@ typedef enum CheckTier1Stage
 } CheckTier1Stage;
 
 // What Tier 1's code of a body holds: its records, and the allocation's traffic, its spills' stores and reloads, the
-// saves and restores around its calls and fixed registers' sequences, its recomputed constants and its edges' moves.
+// saves and restores around its calls and fixed registers' sequences, its recomputed values (constants and addresses,
+// #178), the definitions of recomputed values it left out, which nothing read, and its edges' moves; its spill slots, and
+// its frame's bytes (Tier1Frame.maximum_stack_bytes: what it takes below the return address, its saved registers among
+// them).
 typedef struct CheckTier1Counts CheckTier1Counts;
 struct CheckTier1Counts
 {
@@ -289,7 +292,10 @@ struct CheckTier1Counts
     uint32_t call_stores;
     uint32_t call_loads;
     uint32_t rematerializations;
+    uint32_t dropped_definitions;
     uint32_t edge_moves;
+    uint32_t spill_slots;
+    uint32_t frame_bytes;
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -307,7 +313,10 @@ struct CheckTier1Report
     uint64_t call_stores;
     uint64_t call_loads;
     uint64_t rematerializations;
+    uint64_t dropped_definitions;
     uint64_t edge_moves;
+    uint64_t spill_slots;
+    uint64_t frame_bytes;
 };
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
@@ -373,8 +382,10 @@ struct CheckProgramLanes
     uint64_t lanes_ns;
     uint64_t merge_ns;
     // --tier1, and what became of the emissions' bodies, summed over them; with --tier1-refusals, the stream that each
-    // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal).
+    // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal). With
+    // --tier1-no-rematerialize, Tier 1's allocation spills what it would recompute (#178's comparison).
     bool tier1;
+    bool tier1_no_rematerialize;
     CheckTier1Report tier1_report;
     FILE* tier1_refusals;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -389,7 +400,7 @@ static bool check_tier1_ready = false;
 // CHECK_TIER1_COMPILED, or the step that refused it (with a selection's refused IR operation in *operation), leaving
 // `output` as it was.
 static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
-                                           Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
+                                           bool rematerialize, Arena* output, Tier0Code* code, uint32_t* operation, CheckTier1Counts* counts);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
@@ -672,7 +683,7 @@ static __attribute__((noinline)) bool check_program_emit_tier1(CheckEmitRun* run
     uint32_t operation = 0;
     const CheckTier1Stage stage = naked ? CHECK_TIER1_NAKED :
                                           check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
-                                                              lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
+                                                              !run->lanes->tier1_no_rematerialize, lane->scratch, &run->codes[b], &operation, &run->tier1_counts[b]);
     run->tier1_outcomes[b] = (uint32_t)stage | operation << 8;
     return stage == CHECK_TIER1_COMPILED;
 }
@@ -1597,7 +1608,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.call_stores += compiled ? counts->call_stores : 0;
         lanes->tier1_report.call_loads += compiled ? counts->call_loads : 0;
         lanes->tier1_report.rematerializations += compiled ? counts->rematerializations : 0;
+        lanes->tier1_report.dropped_definitions += compiled ? counts->dropped_definitions : 0;
         lanes->tier1_report.edge_moves += compiled ? counts->edge_moves : 0;
+        lanes->tier1_report.spill_slots += compiled ? counts->spill_slots : 0;
+        lanes->tier1_report.frame_bytes += compiled ? counts->frame_bytes : 0;
     }
     // The lowering's result, in source order's order (check_lower_finish): its first failure, or its label symbols, its
     // runtime functions' symbols and its entries.
