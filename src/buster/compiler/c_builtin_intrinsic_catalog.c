@@ -18,6 +18,7 @@
 #include <string.h>
 #include "host_isa.h"
 #include "c_builtin_fortify.c"
+#include "c_builtin_library.c"
 
 typedef struct BuiltinIntrinsicInfo BuiltinIntrinsicInfo;
 struct BuiltinIntrinsicInfo

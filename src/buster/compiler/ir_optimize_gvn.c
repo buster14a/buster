@@ -8,6 +8,7 @@
 
 #define BUSTER_IR_GVN_FIELDS 8
 #define BUSTER_IR_GVN_HASH_MULTIPLIER UINT64_C(1099511628211)
+#define BUSTER_IR_GVN_PROBES_PER_INSTRUCTION 8
 
 typedef struct IrGvnOptions IrGvnOptions;
 struct IrGvnOptions
@@ -23,6 +24,8 @@ struct IrGvnResult
     uint32_t removed;
     uint32_t classes;
     uint64_t rounds;
+    uint64_t partition_probes;
+    uint64_t partition_sort_fallbacks;
     uint64_t scratch_bytes;
     bool fallback;
 };
@@ -260,7 +263,6 @@ static void ir_gvn_keys(IrGvnWork* work, bool initial, bool scalar)
             {
                 work->hashes[i] = ir_gvn_hash_one(work, i, initial);
             }
-            work->order[i] = i;
         }
     }
 }
@@ -289,12 +291,15 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, bool in
     return result;
 }
 
-static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
+// The independent comparison-sort completion also bounds adversarial hash-table work. Neither grouping path
+// mutates the old classes: parent-class keys remain immutable until the complete partition is published.
+static uint32_t ir_gvn_partition_sorted(IrGvnWork* work, bool initial)
 {
-    (void)scalar;
-
-    ir_gvn_keys(work, initial, BUSTER_SCALAR_PATH(scalar));
     const uint64_t n = work->ir.function->instruction_count;
+    for (uint32_t i = 0; i < n; i += 1)
+    {
+        work->order[i] = i;
+    }
     for (uint64_t width = 1; width < n; width *= 2)
     {
         for (uint64_t first = 0; first < n; first += width * 2)
@@ -322,6 +327,72 @@ static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
         }
         work->next_classes[work->order[i]] = classes;
     }
+    return classes;
+}
+
+// Reuse the sort's two n-element u32 columns as bucket heads and representative links. The largest power of two
+// not exceeding n needs no extra allocation or padding. Only representatives enter a chain, so a wide duplicate
+// class costs one comparison per member, not a growing chain. Full keys (including ordered phi inputs) decide
+// equality; the folded hash selects a bucket only. Class IDs need not follow key order, only the same equivalence.
+//
+// Stop after a linear probe budget and restart the unchanged comparison sort on the already materialized keys.
+// This bounds a hostile all-collision round by O(n log n) key comparisons instead of quadratic probing. The table
+// probes use scalar indexed loads, not gathers; the preceding eight-lane SIMD key hashing stays unchanged.
+static uint32_t ir_gvn_partition_group(IrGvnWork* work, bool initial, bool sorted)
+{
+    const uint32_t n = work->ir.function->instruction_count;
+    uint32_t classes = 0;
+    if (!sorted && n != 0)
+    {
+        uint32_t buckets = 1;
+        while (buckets <= n / 2)
+        {
+            buckets *= 2;
+        }
+        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
+        const uint64_t budget = (uint64_t)n * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION;
+        uint64_t probes = 0;
+        for (uint32_t i = 0; i < n && !sorted; i += 1)
+        {
+            const uint64_t hash = work->hashes[i];
+            const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
+            uint32_t match = work->temporary_order[bucket];
+            bool equal = false;
+            while (match != BUSTER_IR_NONE && !equal && probes < budget)
+            {
+                probes += 1;
+                equal = ir_gvn_compare(work, i, match, initial) == 0;
+                if (!equal)
+                {
+                    match = work->order[match];
+                }
+            }
+            sorted = match != BUSTER_IR_NONE && !equal;
+            if (!sorted)
+            {
+                if (match == BUSTER_IR_NONE)
+                {
+                    work->order[i] = work->temporary_order[bucket];
+                    work->temporary_order[bucket] = i;
+                    classes += 1;
+                }
+                work->next_classes[i] = match == BUSTER_IR_NONE ? classes : work->next_classes[match];
+            }
+        }
+        work->statistics.partition_probes += probes;
+        work->statistics.partition_sort_fallbacks += sorted;
+    }
+    if (sorted)
+    {
+        classes = ir_gvn_partition_sorted(work, initial);
+    }
+    return classes;
+}
+
+static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
+{
+    ir_gvn_keys(work, initial, BUSTER_SCALAR_PATH(scalar));
+    const uint32_t classes = ir_gvn_partition_group(work, initial, scalar);
     uint32_t* swap = work->classes;
     work->classes = work->next_classes;
     work->next_classes = swap;

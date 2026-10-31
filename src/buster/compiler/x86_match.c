@@ -286,10 +286,13 @@ static bool x86_match_supported(const X86FormDescription* form)
             "call",
             "jmp",
             "ret",
+            "rep ret",
+            "repne ret",
             "leave",
             "nop",
             "int3",
             "ud2",
+            "endbr64",
             "syscall",
             "pause",
             "lfence",
@@ -312,6 +315,12 @@ static bool x86_match_supported(const X86FormDescription* form)
             "loope",
             "loopne",
             "jrcxz",
+            "notrack jmp",
+            "notrack call",
+            "bnd jmp",
+            "bnd call",
+            "notrack bnd jmp",
+            "notrack bnd call",
             // What C's inline assembly reaches the processor's state with (#147): the CPU's identity and XCR0, the x87's
             // control and status words, MXCSR, the x87's, MMX's and SSE's state of 512 bytes (main.c's test of DAZ
             // reads MXCSR's mask from fxsave's), and the exchange that cpuid.h's rbx saving takes; the byte swap of
@@ -430,6 +439,64 @@ static bool x86_match_supported(const X86FormDescription* form)
             "paddd",
             "psubd",
     };
+    // #808: SSE2's packed integer instructions are baseline but their mnemonics end in the AT&T suffix letters. They
+    // stay out of the VEX list: the AVX catalogue has its own, wider rows and syntax.
+    static const char* const legacy_integer[] =
+        {
+            "paddb",
+            "paddw",
+            "paddq",
+            "paddsb",
+            "paddsw",
+            "paddusb",
+            "paddusw",
+            "psubb",
+            "psubw",
+            "psubq",
+            "psubsb",
+            "psubsw",
+            "psubusb",
+            "psubusw",
+            "pavgb",
+            "pavgw",
+            "pcmpeqb",
+            "pcmpeqw",
+            "pcmpgtb",
+            "pcmpgtw",
+            "pcmpgtd",
+            "pmaddwd",
+            "pmaxsw",
+            "pminsw",
+            "pminub",
+            "pmaxub",
+            "pmulhuw",
+            "pmulhw",
+            "pmullw",
+            "pmuludq",
+            "psadbw",
+            "packsswb",
+            "packssdw",
+            "packuswb",
+            "punpcklbw",
+            "punpcklwd",
+            "punpckldq",
+            "punpcklqdq",
+            "punpckhbw",
+            "punpckhwd",
+            "punpckhdq",
+            "punpckhqdq",
+            "psllw",
+            "pslld",
+            "psllq",
+            "psrlw",
+            "psrld",
+            "psrlq",
+            "psraw",
+            "psrad",
+            "pand",
+            "pandn",
+            "por",
+    };
     static const char* const conditions[] =
         {
             "o",
@@ -473,6 +540,12 @@ static bool x86_match_supported(const X86FormDescription* form)
         for (uint32_t i = 0; !allowed && !mmx && i < BUSTER_ARRAY_LENGTH(scalar); i += 1)
         {
             allowed = name[0] == scalar[i][0] && strcmp(name, scalar[i]) == 0;
+        }
+        for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(legacy_integer); i += 1)
+        {
+            const uint16_t descriptors = form->reg | form->rm;
+            allowed = name[0] == legacy_integer[i][0] && strcmp(name, legacy_integer[i]) == 0 && (descriptors & BUSTER_X86_OPERAND_REGISTER) != 0 &&
+                      (descriptors & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_XMM;
         }
         const char* suffix = strncmp(name, "cmov", 4) == 0 ? name + 4 : strncmp(name, "set", 3) == 0 ? name + 3
                                                                     : name[0] == 'j'                 ? name + 1

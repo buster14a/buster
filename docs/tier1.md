@@ -100,10 +100,13 @@ scalar values in straight-line block chains, plus byte/word memory and integer
 conversions with canonical 32-bit storage. It emits actual spill stores,
 reloads, constant rematerialization and stack probes. A chain may end in a
 return, explicit unreachable, or an empty self-loop sink retaining its actual
-branch. General CFG fragment
-reconciliation, phis, indirect/variadic/wide-ABI calls and floating-point emission remain outside this
-bounded consumer. The selector's uniform-register API has its own broader
-branch subset and explicitly refuses unsupported allocations.
+branch. Every other CFG, with loops and phis, goes through its CFG path
+(`tier1_emit_cfg.c`, #140): [`tier1_cfg.c`](tier1-allocation.md) allocates the
+selected uses over the CFG, and the records carry each edge's moves, critical
+edges' in stubs. Indirect/variadic/wide-ABI calls and floating-point emission
+remain outside this bounded consumer. The selector's uniform-register API has
+its own broader branch subset and explicitly refuses unsupported allocations
+and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
 arguments and a void or matching scalar result. The native consumer preserves
@@ -116,11 +119,12 @@ requires integrating the source owner's exact helper and checked-call path.
 fixtures and runs ABI assignment, lowering, SSA promotion, optimization,
 selection, liveness, allocation, frame emission, branch sizing and encoding.
 It freezes interpreter expectations before compilation and also compares
-Clang-built C formulas. A complete cross-check expects 1,024 native results,
-512 Clang results, eight emitted direct calls and eight explicit unsupported
-refusals. These are bounded integration fixtures, described in
+Clang-built C formulas. A complete cross-check expects 1,920 native results,
+960 Clang results, twelve emitted direct calls, 28 functions through the CFG
+path and two explicit unsupported refusals. These are bounded integration fixtures, described in
 the [pipeline guide](tier1-pipeline.md), not a source-corpus campaign.
-Source byte loops still need a CFG/phi consumer. Source floating-point helper
+Source byte loops now have a CFG/phi consumer, but no source corpus is compiled
+through it yet. Source floating-point helper
 adapters additionally need addressable frame locals, stack addresses, FP value
 transport/conversions and their ABI. Raw integer-bit helper-call acceptance
 does not establish those producer paths.

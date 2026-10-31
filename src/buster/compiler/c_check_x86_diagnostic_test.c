@@ -157,8 +157,53 @@ static void check_test_x86_context_storage(CheckTest* test)
     arena_release(&scratch);
 }
 
+// Code generation's check of the x86 builtins' features (#148, c_check_target_feature.c) evaluates each builtin's
+// expression against a table of predefines_features' names, without validating it each time, and takes any answer but
+// available as missing, as clang's map has no other names: the table must be valid, and every x86 builtin of clang's
+// metadata (the catalog the checker's intrinsic calls take their records from) must have an expression of those names
+// alone, available with every feature and missing without them (but an empty one, which needs none).
+static void check_test_target_feature_builtins(CheckTest* test)
+{
+    static CBuiltinIntrinsicFeature every[BUSTER_ARRAY_LENGTH(predefines_features)];
+    static CBuiltinIntrinsicFeature none[BUSTER_ARRAY_LENGTH(predefines_features)];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_features); i += 1)
+    {
+        const uint32_t length = (uint32_t)strlen(predefines_features[i].name);
+        every[i] = (CBuiltinIntrinsicFeature){ .name = predefines_features[i].name, .name_length = length, .available = true };
+        none[i] = (CBuiltinIntrinsicFeature){ .name = predefines_features[i].name, .name_length = length, .available = false };
+    }
+    check_test_expect(test, c_builtin_intrinsic_features_table_valid(every, BUSTER_ARRAY_LENGTH(every)) &&
+                           c_builtin_intrinsic_features_table_valid(none, BUSTER_ARRAY_LENGTH(none)),
+                      "the target-feature check's table of predefines_features' names is valid");
+    uint32_t builtins = 0;
+    uint32_t wrong = 0;
+    const char* first = NULL;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_at(i);
+        if (info->name_length > 15 && memcmp(info->name, "__builtin_ia32_", 15) == 0)
+        {
+            CBuiltinIntrinsicFeatureFrame frames[8];
+            const CBuiltinIntrinsicFeatureStatus with = c_builtin_intrinsic_features_evaluate_valid(info->features, info->features_length, every,
+                                                                                                   BUSTER_ARRAY_LENGTH(every), frames, BUSTER_ARRAY_LENGTH(frames));
+            const CBuiltinIntrinsicFeatureStatus without = c_builtin_intrinsic_features_evaluate_valid(info->features, info->features_length, none,
+                                                                                                      BUSTER_ARRAY_LENGTH(none), frames, BUSTER_ARRAY_LENGTH(frames));
+            const bool right = with == CBUILTIN_INTRINSIC_FEATURE_AVAILABLE &&
+                               without == (info->features_length == 0 ? CBUILTIN_INTRINSIC_FEATURE_AVAILABLE : CBUILTIN_INTRINSIC_FEATURE_MISSING);
+            builtins += 1;
+            wrong += !right;
+            first = first == NULL && !right ? info->name : first;
+        }
+    }
+    char description[256];
+    snprintf(description, sizeof(description), "%u x86 builtins' features are expressions of predefines_features' names (%u not, the first %s)", builtins, wrong,
+             first != NULL ? first : "none");
+    check_test_expect(test, builtins != 0 && wrong == 0, description);
+}
+
 static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
 {
+    check_test_target_feature_builtins(test);
     check_test_x86_diagnostic_storage(test);
     check_test_x86_context_storage(test);
     static const struct
