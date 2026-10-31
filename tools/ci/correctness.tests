@@ -475,6 +475,8 @@ if ./build/compiler test-preprocessor --compare-clang tests/preprocessor-oracle/
 ./build/compiler test-ir-inline
 == Test Tier 1 allocation, reload splitting and rematerialization
 ./build/compiler test-tier1-allocation
+== Test Tier 1 allocation over CFGs, edge moves and the independent checker
+./build/compiler test-tier1-cfg
 == Test dataflow bitsets
 ./build/compiler test-dataflow
 == Test the partial Zen 5 model and instruction harness

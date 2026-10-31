@@ -128,6 +128,23 @@ physical masks. `test-tier1-allocation` compares these registers with an
 independent implementation of the same rule, which walks positions without the
 event sort.
 
+The rule alone gives values that end and restart at one position each other's
+registers: ends deposit downward in input order and starts take upward in input
+order. A CFG's per-block ranges do exactly that at a block's start, so
+`hint_values` names, per interval, a value whose most recently assigned register
+the interval takes where it is free; `tier1_cfg.c` hints each range a value
+enters a block with to the value itself, and each phi to an operand. The common
+path takes the hinted register from the level above that holds it, which then
+holds the register the rule would have taken, or as a fresh one, which makes a
+register taken from the current level fresh again. Every level from the current
+one up still holds a free register or none, and every level below none, so an
+end never overwrites a deposit and a start never finds no register while the
+class's pressure fits; with hints it may use more of the class's registers than
+maximum pressure. The scan honors the static `hints` first, then `hint_values`.
+Without `hint_values` every output is unchanged. `tier1_allocate_hints_test.c`
+checks the rule against an independent reference over positions, and a trace
+whose two values the rule alone swaps.
+
 That matching stays scalar, for a measured reason. It used to resolve the
 partners' registers afterwards: pointer-jumping rounds over every interval,
 after an AVX-512 prefix sum that recounted the pressure the class loop already
@@ -256,6 +273,99 @@ and resolver ASan/UBSan qualification all passed on the locked host.
 
 The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
 record the shapes, complete process ranges, memory costs and validation scope.
+
+## Allocation over a CFG (#140)
+
+`tier1_cfg.c` allocates a function's machine CFG: blocks in layout order, each
+a range of positions, with both CSR views of the edges, and SSA values. A phi
+is defined at its block's start by the moves on the block's incoming edges,
+with one operand per predecessor, in the predecessor view's order. Block 0 is
+the entry, with no predecessors and no phis. Every other value is defined once,
+before its uses in its block. A use in another block must be dominated by the
+definition: a value live into the entry or into its own block is refused as
+invalid.
+
+Liveness is `dataflow.c`'s solve over the values used outside their block, phi
+operands among them. A phi operand is a use on its edge: it joins its
+predecessor's use row unless that block defines it, and the predecessor's
+live-out row after the solve. Each value then gets an interval per block it is
+defined in or live into, from its definition or the block's start to its last
+use there, or to the block's end where it stays live. A value's blocks come
+block by block from the live-in rows, counted and then filled, so building the
+intervals costs the live pairs rather than values times blocks.
+
+A block continues its layout predecessor's intervals when it has no phis and
+every value live into it is live out of that predecessor. Then every value of
+its entry state continues, and a fragment transition at its first position runs
+inside the block, on every path into it. Without that rule a phi moved in on an
+edge could take a register that a continuing value gives up at the block's
+start, in a transition that runs only after the edge's moves. Intervals are
+numbered by value, then position: each interval's uses are a slice of its
+value's, and the allocator borrows the input's use columns.
+
+After `tier1_allocate`, or its scalar twin, assigns the intervals, each edge
+moves its successor's entry state, the live-in values and the phis, from their
+locations at the predecessor's last position to their entry locations
+(`tier1_cfg_entry_location`: the location at the block's start, or for a
+continuing interval the location just before it). `tier1_resolve_moves` orders
+each class's moves. A cycle is broken with the class's scratch register or,
+when one of the class's moves on the edge goes slot to slot, with the class's
+temporary slot; a slot-to-slot move goes through the scratch register, which
+then holds nothing from one move to the next. Recomputing a rematerializable
+value comes last. The moves go at the end of a predecessor with one successor
+(after its last instruction, so a jump there must read no allocated value), at
+the start of a successor with one predecessor, and otherwise on the split edge.
+
+A value's range is also cut around each fixed range of its class that blocks
+every register the value may take: a call's clobbers block a double's. The
+allocator takes a fixed range's registers from every interval that overlaps it,
+so without the cut a double live across a call would have no register anywhere
+in its block, and a use that needs one would be refused. The piece over the
+fixed range goes to memory, and the pieces around it keep their registers,
+hinted back to the one the value had. Where pieces meet inside a block, a
+split's moves take each value from its location before the position to its new
+piece's, resolved as an edge's moves are; they run after the position's stores
+and before its reloads. A block whose start a fixed range covers doesn't
+continue its predecessor's ranges.
+
+Locations are `class * 32 + register` for registers,
+`BUSTER_TIER1_CFG_SPILL + spill id` for slots and
+`BUSTER_TIER1_CFG_SPILL + spill_count + class` for the temporary slots, which
+`temp_slots` marks for the frame to reserve. A move whose source is
+`BUSTER_TIER1_CFG_REMATERIALIZE` recomputes its value into its destination.
+
+`tier1_cfg_verify` is the independent oracle. It computes liveness by walking
+each use back to its definition, simulates each block's locations from its
+entry state as the emitter runs the fragments (stores, then reloads and
+recomputations, at each transition; fixed ranges clobber their registers), and
+checks that every use finds its value and that no write lands on a value the
+allocation still keeps in that location; a split's moves run between the
+position's stores and its reloads. For each edge it applies the moves in order
+to the predecessor's final state: each must read the value it says it carries
+and write a location of that value's class, and the successor's entry state
+must then hold every live-in value and each phi's operand.
+
+`test-tier1-cfg [--seed N] [--count N]` runs six fixtures (a diamond, a loop
+phi, a phi swap, a critical edge, one register, and a swap without general
+registers, whose slot cycle needs the temporary slot) and `--count` random SSA
+programs (2,000 by default) over CFGs with loops, self-loops, irreducible
+regions, narrowed masks, required uses, fixed ranges and rematerializable
+values, every use dominated by its definition (`dominators.c`). Both entry
+points' results must pass the checker and, up to 600 intervals, the interval
+verifier. On every fixture and every eighth program, mutants must fail the
+checker: a register fragment given the register of another value's fragment
+that overlaps it, and an edge's or a split's move run before a move whose
+source it overwrites.
+
+This first form keeps interval construction, edge resolution and the checker
+scalar around the vector liveness solve and the vector allocator; their shares
+of the cost are to be measured on the 9700X before they get vector paths. A
+value's fresh interval at a join takes whatever register the allocator gives
+it, so edges into joins and loop headers may move values that a hint would keep
+in place; the move counts on the corpora come first. Not yet done: the adapter
+from the shared IR's functions, the corpora's checks, native emission of the
+edge moves and the split edges, and the 9700X's compile-time and code-quality
+comparisons.
 
 ## Rematerialization
 

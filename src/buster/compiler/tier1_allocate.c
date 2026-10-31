@@ -54,6 +54,11 @@ struct Tier1AllocationInput
     // Optional columns. Required means the entire interval must have a register; impossible requests fail closed.
     const uint8_t* flags;
     const uint8_t* hints;
+    // Optional: per interval, a value whose most recently assigned register the interval takes at its start where
+    // that register is free (after `hints`, which only the scan honors); UINT32_MAX for none. Both paths honor it, so
+    // that a value's separate intervals, a CFG's per-block ranges, can keep one register. The hinted value's intervals
+    // must have this interval's class.
+    const uint32_t* hint_values;
     const uint8_t* rematerializable;
     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
@@ -136,6 +141,7 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
         {
             valid = (input->allowed_registers[i] & ~input->registers[input->classes[i]]) == 0;
             valid = valid && (input->hints == 0 || input->hints[i] == UINT8_MAX || (input->hints[i] < 32 && ((input->allowed_registers[i] >> input->hints[i]) & 1) != 0));
+            valid = valid && (input->hint_values == 0 || input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count);
         }
         if (valid && input->use_offsets != 0)
         {
@@ -194,7 +200,14 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
 // frees its register at its end event, unless an eviction gave the register to another interval (active[r] says
 // whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
 // Fixed clobbers restrict a whole interval; splitting around call sites belongs in the producer's machine ranges.
-static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds)
+// The register a hinted value holds last, or UINT8_MAX: `last` is null without hint_values.
+static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
+{
+    const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
+    return value != UINT32_MAX ? last[value] : UINT8_MAX;
+}
+
+static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* allowed, uint8_t* regs, uint32_t* split, uint8_t* kinds, uint8_t* last)
 {
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing every store below could change
     // *input, and clang would reload them after each one.
@@ -224,6 +237,7 @@ static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t clas
             {
                 const uint32_t position = columns.starts[interval];
                 const uint32_t free = ~occupied & allowed[interval];
+                const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
                 uint32_t chosen = UINT32_MAX;
                 if (free != 0)
                 {
@@ -231,6 +245,10 @@ static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t clas
                     if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                     {
                         chosen = columns.hints[interval];
+                    }
+                    else if (follow < 32 && ((free >> follow) & 1) != 0)
+                    {
+                        chosen = follow;
                     }
                 }
                 else
@@ -266,6 +284,10 @@ static bool tier1_allocate_scan(const Tier1AllocationInput* input, uint32_t clas
                     regs[interval] = (uint8_t)chosen;
                     active[chosen] = interval;
                     occupied |= 1u << chosen;
+                    if (last != 0)
+                    {
+                        last[columns.values[interval]] = (uint8_t)chosen;
+                    }
                 }
                 else
                 {
@@ -353,7 +375,7 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
 // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
 // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
 // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
-static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces)
+static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
 {
     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
     // has no register (regs is UINT8_MAX) until a required use reloads it, so the active[r] check guards its end.
@@ -393,6 +415,7 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
             const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
             const bool required = tier1_allocation_required_at(&columns, interval, position);
             const uint32_t free = ~occupied & allowed[interval];
+            const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
             uint32_t chosen = UINT32_MAX;
             if (free != 0)
             {
@@ -400,6 +423,10 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
                 {
                     chosen = columns.hints[interval];
+                }
+                else if (follow < 32 && ((free >> follow) & 1) != 0)
+                {
+                    chosen = follow;
                 }
             }
             else
@@ -439,6 +466,10 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
                 regs[interval] = (uint8_t)chosen;
                 active[chosen] = interval;
                 occupied |= 1u << chosen;
+                if (last != 0)
+                {
+                    last[columns.values[interval]] = (uint8_t)chosen;
+                }
             }
         }
     }
@@ -457,10 +488,17 @@ static bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t
 // has reached takes a fresh register. A start's partner started earlier, so its register is final when the two are
 // matched, and each register is resolved in this one pass. It replaced a prefix sum of the deltas and pointer
 // jumping over the partners, which recomputed what this loop knows (docs/tier1-allocation.md, "Assignment").
-static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs)
+//
+// With hint_values (`last` not null), a start whose hinted register is free takes it instead: from the level above
+// that holds it, which then holds the register the rule would have taken, or as a fresh one, which makes a register
+// taken from this level fresh again. Every level from the current one up then still holds a free register or none,
+// and every level below none, so an end never overwrites a deposit and a start never runs out of registers while the
+// class's pressure fits.
+static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, uint8_t* regs, uint8_t* last)
 {
     uint8_t ended[32];
     uint32_t available = input->registers[class];
+    uint32_t deposited = 0;
     uint32_t level = 0;
     memset(ended, UINT8_MAX, sizeof(ended));
     for (uint32_t e = 0; e < event_count; e += 1)
@@ -470,20 +508,49 @@ static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t c
         {
             level -= 1;
             ended[level] = regs[interval];
+            deposited |= 1u << regs[interval];
         }
         else
         {
             uint8_t r = ended[level];
-            if (r != UINT8_MAX)
+            const bool waiting = r != UINT8_MAX;
+            if (!waiting)
             {
-                ended[level] = UINT8_MAX;
+                r = (uint8_t)__builtin_ctz(available);
+            }
+            const uint8_t follow = tier1_allocation_value_hint(input, last, interval);
+            if (follow < 32 && follow != r && (((available | deposited) >> follow) & 1) != 0)
+            {
+                if (((deposited >> follow) & 1) != 0)
+                {
+                    uint32_t k = level + 1;
+                    while (ended[k] != follow)
+                    {
+                        k += 1;
+                    }
+                    ended[k] = r;
+                    deposited |= 1u << r;
+                    available &= ~(1u << r);
+                }
+                else
+                {
+                    available = (available & ~(1u << follow)) | (waiting ? 1u << r : 0);
+                    deposited &= ~(waiting ? 1u << r : 0);
+                }
+                deposited &= ~(1u << follow);
+                r = follow;
             }
             else
             {
-                r = (uint8_t)__builtin_ctz(available);
-                available &= available - 1;
+                available &= waiting ? available : available & (available - 1);
+                deposited &= ~(1u << r);
             }
+            ended[level] = UINT8_MAX;
             regs[interval] = r;
+            if (last != 0)
+            {
+                last[input->values[interval]] = r;
+            }
             level += 1;
         }
     }
@@ -611,6 +678,8 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     uint8_t* kinds = 0;
     uint8_t* value_seen = 0;
     uint32_t* value_active_end = 0;
+    // With hint_values, each value's most recently assigned register.
+    uint8_t* value_last = 0;
     uint32_t* use_intervals = 0;
     Tier1AllocationPieces pieces = { 0 };
     bool extended[BUSTER_TIER1_ALLOCATE_CLASSES] = { false, false };
@@ -649,6 +718,14 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
         if (allocation.fragment_offsets != 0 && allocation.starts != 0 && allocation.ends != 0 && allocation.kinds != 0 && allocation.registers != 0 && allocation.value_registers != 0 && allocation.spill_ids != 0 && allocation.spill_values != 0 && buckets != 0 && events != 0 && allowed != 0 && split != 0 && regs != 0 && kinds != 0 && value_seen != 0 && value_active_end != 0)
         {
             error = TIER1_ALLOCATION_OK;
+        }
+        if (error == TIER1_ALLOCATION_OK && columns.hint_values != 0)
+        {
+            value_last = arena_push_array(arena, (uint64_t)columns.value_count + 1, sizeof(uint8_t), 1);
+            if (value_last == 0)
+            {
+                error = TIER1_ALLOCATION_CAPACITY;
+            }
         }
         if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
         {
@@ -740,6 +817,19 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 value_active_end[value] = columns.ends[i];
             }
         }
+        // A hinted value's registers are its class's: a value without intervals gives no hint.
+        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && value_last != 0 && i < columns.count; i += 1)
+        {
+            const uint32_t hinted = columns.hint_values[i];
+            if (hinted != UINT32_MAX && value_seen[hinted] != 0 && value_seen[hinted] != columns.classes[i] + 1)
+            {
+                error = TIER1_ALLOCATION_INVALID;
+            }
+        }
+        if (value_last != 0)
+        {
+            memset(value_last, UINT8_MAX, (uint64_t)columns.value_count + 1);
+        }
         if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
@@ -779,7 +869,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             regular &= allocation.peak_pressure[class] <= (uint32_t)__builtin_popcount(columns.registers[class]);
             if (regular && class_count != 0)
             {
-                tier1_allocation_color(input, class, class_events, class_event_count, regs);
+                tier1_allocation_color(input, class, class_events, class_event_count, regs, value_last);
                 allocation.vector_intervals += class_count;
             }
             else
@@ -789,11 +879,11 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 if (columns.use_required != 0)
                 {
                     extended[class] = true;
-                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces);
+                    assigned = tier1_allocate_scan_uses(input, class, events, event_count, use_intervals, allowed, regs, split, kinds, &pieces, value_last);
                 }
                 else
                 {
-                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds);
+                    assigned = tier1_allocate_scan(input, class, events, event_count, allowed, regs, split, kinds, value_last);
                 }
                 if (!assigned)
                 {
