@@ -216,7 +216,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         {
             action.operands[i] = arguments[i];
         }
-        if (builtin == CBUILTIN_UMULL_OVERFLOW)
+        if (check_builtin_typed_overflow_info(builtin) != NULL)
         {
             CheckBuiltinTypedOverflowResult checked;
             check_builtin_typed_overflow(reader->types, &action, &checked, 1, BUSTER_SCALAR_PATH(reader->parser->options.scalar));

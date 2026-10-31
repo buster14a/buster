@@ -705,7 +705,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
     }
-    else if (id == CBUILTIN_UMULL_OVERFLOW)
+    else if (check_builtin_typed_overflow_info(id) != NULL)
     {
         op = CHECK_OP_BUILTIN_OVERFLOW;
     }
@@ -2140,7 +2140,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
         };
         CheckBuiltinResult checked;
         CheckBuiltinTypedOverflowResult typed = { 0 };
-        if (builtin.id == CBUILTIN_UMULL_OVERFLOW)
+        const bool typed_builtin = check_builtin_typed_overflow_info(builtin.id) != NULL;
+        if (typed_builtin)
         {
             check_builtin_typed_overflow(types, &builtin, &typed, 1, true);
             checked = typed.builtin;
@@ -2161,8 +2162,8 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
                 .node = node,
                 .value = checked.store_value,
                 .destination = checked.store_destination,
-                .runtime_builtin = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.runtime_builtin : builtin.id,
-                .evaluated_operands = builtin.id == CBUILTIN_UMULL_OVERFLOW ? typed.evaluated_operands : 7,
+                .runtime_builtin = typed_builtin ? typed.runtime_builtin : builtin.id,
+                .evaluated_operands = typed_builtin ? typed.evaluated_operands : 7,
                 .warnings = typed.warnings,
                 .warning_operands = typed.warning_operands,
                 .unsupported = typed.unsupported,

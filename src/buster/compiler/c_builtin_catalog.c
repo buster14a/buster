@@ -124,6 +124,23 @@
     X(STRLEN, 0x164u, "__builtin_strlen", BUSTER_CBUILTIN_SOURCE) \
     X(ALLOCA, 0x165u, "__builtin_alloca", BUSTER_CBUILTIN_SOURCE) \
     X(UMULL_OVERFLOW, 0x170u, "__builtin_umull_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADD_OVERFLOW, 0x380u, "__builtin_sadd_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADDL_OVERFLOW, 0x381u, "__builtin_saddl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SADDLL_OVERFLOW, 0x382u, "__builtin_saddll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUB_OVERFLOW, 0x383u, "__builtin_ssub_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUBL_OVERFLOW, 0x384u, "__builtin_ssubl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SSUBLL_OVERFLOW, 0x385u, "__builtin_ssubll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMUL_OVERFLOW, 0x386u, "__builtin_smul_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMULL_OVERFLOW, 0x387u, "__builtin_smull_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(SMULLL_OVERFLOW, 0x388u, "__builtin_smulll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADD_OVERFLOW, 0x389u, "__builtin_uadd_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADDL_OVERFLOW, 0x38au, "__builtin_uaddl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UADDLL_OVERFLOW, 0x38bu, "__builtin_uaddll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUB_OVERFLOW, 0x38cu, "__builtin_usub_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUBL_OVERFLOW, 0x38du, "__builtin_usubl_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(USUBLL_OVERFLOW, 0x38eu, "__builtin_usubll_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UMUL_OVERFLOW, 0x38fu, "__builtin_umul_overflow", BUSTER_CBUILTIN_SOURCE) \
+    X(UMULLL_OVERFLOW, 0x390u, "__builtin_umulll_overflow", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_LOAD, 0x180u, "__atomic_load", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_LOAD_N, 0x181u, "__atomic_load_n", BUSTER_CBUILTIN_SOURCE) \
     X(ATOMIC_STORE, 0x182u, "__atomic_store", BUSTER_CBUILTIN_SOURCE) \
