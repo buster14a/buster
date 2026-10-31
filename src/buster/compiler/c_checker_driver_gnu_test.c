@@ -164,6 +164,40 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         }
         unlink(source);
     }
+    // C23's auto and constexpr (#793) are accepted by both paths, as clang accepts them, and must write no diagnostic.
+    static const struct
+    {
+        const char* name;
+        const char* source;
+    } c23[] =
+    {
+        { "C23 auto: a pointer's deduction", "int main(void) { __auto_type x = 1; auto p = \"x\"; return p[1] + x; }\n" },
+        { "C23 auto: a double's deduction", "int main(void) { auto x = 3.5; return (int)sizeof x - 8; }\n" },
+        { "C23 constexpr: an array's bound", "int main(void) { constexpr int y = 2; int a[y]; return sizeof a - 8; }\n" },
+        { "C23 constexpr: a double and a null pointer", "int main(void) { constexpr double d = 2.5; constexpr int *p = nullptr; return (int)d + (p != 0); }\n" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(c23); i += 1)
+    {
+        char source[192];
+        char description[384];
+        snprintf(source, sizeof(source), "%s/gnu-c23-%u.c", directory, i);
+        const bool written = parse_test_write(source, c23[i].source, strlen(c23[i].source));
+        CheckCorpusOracle oracle = { 0 };
+        const char* clang_arguments[] = { "-std=c23", "-w" };
+        const bool clang_ready = written && check_corpus_clang_file(clang, clang_arguments, BUSTER_ARRAY_LENGTH(clang_arguments), source, &oracle);
+        check_test_expect(test, clang_ready && !oracle.rejected, c23[i].name);
+        const char* extra[] = { "-std=c23" };
+        for (uint32_t route = 0; clang_ready && route < (executable != NULL ? 4u : 2u); route += 1)
+        {
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run_with(route >= 2 ? executable : NULL, source, NULL, (route & 1) != 0, false, true, lazy, extra,
+                                                         BUSTER_ARRAY_LENGTH(extra), &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, route %u: accepted with no diagnostic", c23[i].name, route);
+            check_test_expect(test, ran && !checked.rejected && warnings == 0, description);
+        }
+        unlink(source);
+    }
 }
 
 #endif

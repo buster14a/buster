@@ -627,6 +627,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__(\"fsqrt # %0\" : \"+t\"(x));return (int)x;}",
                                        "asm-x87-named", true, false, 0, 1, "x87 registers named in inline assembly templates");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
+                                      "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register

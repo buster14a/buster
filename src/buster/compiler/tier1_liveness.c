@@ -68,7 +68,9 @@ static uint32_t tier1_liveness_parameter_mask(uint32_t parameter)
     return parameter < sizeof(registers) ? 1u << registers[parameter] : 0;
 }
 
-static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector)
+// With `phis`, for the CFG consumer (tier1_emit_cfg.c), a selected phi is valid too; this file's intervals still refuse
+// them.
+static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector, bool phis)
 {
     (void)vector;
 
@@ -108,9 +110,13 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         {
             error = TIER1_LIVENESS_INVALID;
         }
-        else if (op == IR_PHI || op == IR_CALL_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)) || (type != IR_VOID && tier1_select_width(type) == 0))
+        else if ((op == IR_PHI && !phis) || op == IR_CALL_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)) || (type != IR_VOID && tier1_select_width(type) == 0))
         {
             error = TIER1_LIVENESS_UNSUPPORTED;
+        }
+        else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
+        {
+            error = TIER1_LIVENESS_INVALID;
         }
         else if (op == IR_CALL)
         {
@@ -343,7 +349,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
     IrCfg cfg = { 0 };
     if (error == TIER1_LIVENESS_OK)
     {
-        error = tier1_liveness_validate_plan(plan, scratch, BUSTER_VECTOR_PATH(vector));
+        error = tier1_liveness_validate_plan(plan, scratch, BUSTER_VECTOR_PATH(vector), false);
     }
     if (error == TIER1_LIVENESS_OK)
     {

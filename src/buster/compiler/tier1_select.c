@@ -64,6 +64,9 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ZERO_EXTEND,
     TIER1_RULE_SIGN_EXTEND,
     TIER1_RULE_UNREACHABLE,
+    // A phi: no records, and no effective uses, since its operands are uses on its block's incoming edges, which the
+    // CFG consumer's edge moves read (tier1_emit_cfg.c).
+    TIER1_RULE_PHI,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -494,6 +497,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_UNREACHABLE:
         result.records[result.count++] = (X86Instruction){ .form = X86_FORM_UD2 };
+        break;
+    case TIER1_RULE_PHI:
         break;
     default:
         result.records[result.count++] = (X86Instruction){0};
@@ -1064,6 +1069,11 @@ static Tier1SelectCandidates tier1_select_candidates(const Tier1SelectForest* fo
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
+    else if (op == IR_PHI && width != 0)
+    {
+        base.rule = TIER1_RULE_PHI;
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
     return candidates;
 }
 
@@ -1195,7 +1205,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)))
+        if (op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || op == IR_BR_INDIRECT || (op == IR_CALL && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }
@@ -1206,7 +1216,21 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
         parameter_prefix &= op == IR_PARAM;
         effective_capacity += op == IR_CALL && error == TIER1_SELECT_OK ? function->calls[function->b[node]].argument_count : 3;
         const uint32_t operand_count = error == TIER1_SELECT_OK ? (uint32_t)ir_operand_count(function, node) : 0;
-        for (uint32_t p = 0; error == TIER1_SELECT_OK && p < operand_count; p += 1)
+        // A phi's operand reaches it along an edge: it may follow the phi (a loop's back edge), and its use counts, but
+        // nothing folds into a phi, so its depth doesn't order the phi's choice. Its own loop leaves the others' as it was.
+        for (uint32_t p = 0; error == TIER1_SELECT_OK && op == IR_PHI && p < operand_count; p += 1)
+        {
+            const IrOperand operand = ir_operand(function, node, p, blocks[node]);
+            if (operand.value >= count || (blocks[operand.value] != blocks[node] && dominance == 0))
+            {
+                error = TIER1_SELECT_ERROR_INVALID;
+            }
+            else
+            {
+                uses[operand.value] += 1;
+            }
+        }
+        for (uint32_t p = 0; error == TIER1_SELECT_OK && op != IR_PHI && p < operand_count; p += 1)
         {
             const IrOperand operand = ir_operand(function, node, p, blocks[node]);
             if (operand.value >= node || (blocks[operand.value] != blocks[node] && dominance == 0))
@@ -1464,11 +1488,12 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
     {
         error = TIER1_SELECT_ERROR_LIMIT;
     }
-    // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups.
-    // Reject the complete call plan before allocating records, even if earlier value locations are spilled.
+    // This legacy consumer has neither ABI argument moves nor call-clobber preservation or symbolic fixups, nor the
+    // edge moves a phi needs. Reject the complete plan before allocating records, even if earlier value locations are
+    // spilled.
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
-        if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL)
+        if (plan->function->op[node] == IR_CALL || plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_PHI)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

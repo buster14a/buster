@@ -1280,6 +1280,25 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // A label with no instruction to follow in its template would be a place in the statement's function, which its
         // code (Tier 0's) doesn't mark.
         reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
+        // A template that returns before any branch would leave the helper with its frame still reserved, where clang's
+        // inline emission returns from the enclosing function. Refuse that initial flow by name; a template that jumps
+        // over its return (a called snippet's label) stays admitted, as clang's own asm labels do.
+        for (uint32_t r = 0; reason == NULL && r < code.count; r += 1)
+        {
+            const uint16_t form = code.records[r].form;
+            const bool ret = form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 ||
+                             form == X86_FORM_RETD || form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+            bool branch = false;
+            for (uint32_t b = 0; b < code.branch_count; b += 1)
+            {
+                branch |= code.branches[b] == r;
+            }
+            reason = ret ? "inline assembly templates that return from their helper" : branch ? NULL : reason;
+            if (ret || branch)
+            {
+                break;
+            }
+        }
     }
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
