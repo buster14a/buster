@@ -1,0 +1,76 @@
+name: Issue 802 scratch and command qualification
+on:
+  push:
+    branches: [codex/issue-802-views-transfer]
+permissions:
+  contents: write
+jobs:
+  qualify:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 2
+      - name: Apply source-only follow-up at the published PR head
+        run: |
+          set -euo pipefail
+          echo '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' | base64 --decode | xz --decompress > "$RUNNER_TEMP/followup.patch"
+          printf '%s  %s\n' 3cd52401767ab5926793595cdeb9bcbcf21430aa6819e69a990a30eb47051897 "$RUNNER_TEMP/followup.patch" | sha256sum --check
+          git checkout --detach 6a5e8e28559ebf906dbc42e80313a1baf0d1ec83
+          git apply "$RUNNER_TEMP/followup.patch"
+          git diff --check
+          git add -u
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Keep scratch views commit-aware and inject exact resource refusals (#802)'
+          git rev-parse HEAD
+          git push origin HEAD:refs/heads/codex/issue-802-views-result
+      - run: bash tools/ci/setup-hosted.sh
+      - name: Build the compiler
+        run: |
+          mkdir -p "$RUNNER_TEMP/memory-limited" "$RUNNER_TEMP/memory-valgrind" "$RUNNER_TEMP/memory-strict" "$RUNNER_TEMP/qualification"
+          ./build.sh 2>&1 | tee "$RUNNER_TEMP/qualification/build.log"
+          clang -std=c17 -march=x86-64 -O2 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function tests/arena/resources.c -o "$RUNNER_TEMP/memory-resources" -pthread
+      - name: Limited address space and deterministic failures
+        run: '"$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-limited"'
+      - name: Callgrind
+        if: ${{ !cancelled() && hashFiles('build/compiler') != '' }}
+        run: '"$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-valgrind" --valgrind'
+      - name: Strict overcommit with four GiB headroom
+        if: ${{ !cancelled() && hashFiles('build/compiler') != '' }}
+        run: |
+          old_mode=$(cat /proc/sys/vm/overcommit_memory)
+          old_kbytes=$(cat /proc/sys/vm/overcommit_kbytes)
+          old_ratio=$(cat /proc/sys/vm/overcommit_ratio)
+          trap 'sudo sysctl -q -w vm.overcommit_memory="$old_mode"; if [ "$old_kbytes" = 0 ]; then sudo sysctl -q -w vm.overcommit_ratio="$old_ratio"; else sudo sysctl -q -w vm.overcommit_kbytes="$old_kbytes"; fi' EXIT
+          budget=$(awk '/^Committed_AS:/ {used=$2} /^SwapTotal:/ {swap=$2} END {printf "%.0f\n", used + 4*1024*1024 - swap}' /proc/meminfo)
+          sudo sysctl -q -w vm.overcommit_kbytes="$budget" vm.overcommit_memory=2
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-strict" --strict
+      - name: Check scratch consumers
+        if: ${{ !cancelled() && hashFiles('build/compiler') != '' }}
+        run: |
+          status=0
+          for command in test-ssa test-ir test-ir-metamorphic test-ir-reduce; do
+            timeout 120 ./build/compiler "$command" > "$RUNNER_TEMP/qualification/$command.log" 2>&1 || status=1
+            tail -n 20 "$RUNNER_TEMP/qualification/$command.log"
+          done
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: issue-802-followup-qualification
+          path: |
+            ${{ runner.temp }}/qualification/
+            ${{ runner.temp }}/memory-*/
+            build/compiler
+            LICENSE
+            LICENSES/
+            THIRD_PARTY_NOTICES.md
+          retention-days: 7
