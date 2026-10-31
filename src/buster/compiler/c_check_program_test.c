@@ -1364,7 +1364,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                     .initializer = input->initializer_nodes[selected],
                     .token = selected,
                     .initializer_plan = plan,
-                    .alignment_log2 = alignments[object] != 0 ? (uint8_t)(alignments[object] - 1) : 0,
+                    .alignment_log2 = check_data_declared_alignment(input, types, object, type, alignments[object]),
                 };
                 result->reference_offsets[at] = result->reference_count;
                 const uint64_t reference_mark = scratch->length;
@@ -2880,8 +2880,32 @@ static void check_test_program_builtin_scratch(CheckTest* test, const char* clan
         "atomic-captures-and-integer-recipe-scratch", clang);
 }
 
+// #978: arrays of 16 bytes or more aligned to 16, as the x86-64 psABI and clang align them, a char before each so that
+// an alignment of 1 would misalign them: global, initialized, two-dimensional, static, record arrays, a thread-local and a
+// static local one, and in the frame a local array, a two-dimensional one, an array of records and a VLA; an attribute's
+// 4 alone; and __alignof__ of such an array still its element's (clang's getDeclAlign for alignof).
+static void check_test_program_array_alignment(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        "char g_pad1;char g_big[16];char g_pad2;char g_rows[4][4];char g_pad3=1;char g_init[16]=\"abc\";"
+        "static char g_pad4;static char g_static[32];struct small{char c[20];};char g_pad5;struct small g_records[2];"
+        "char g_pad6;__attribute__((aligned(4))) char g_attr[64];_Thread_local char g_pad7;_Thread_local char g_thread[64];"
+        "static long low(const void*p,unsigned long mask){return (long)((unsigned long)p&mask);}"
+        "char*keep(char*p){return p;}"
+        "int tested(int n){static char s_pad;static char s_local[32];char pad1=(char)n;char l_big[16];char pad2=(char)(n+1);"
+        "char l_rows[2][8];char pad3=(char)(n+2);struct small l_records[2];char l_vla[n>0?n+16:17];"
+        "keep(&pad1);keep(&pad2);keep(&pad3);keep(&s_pad);keep(&g_pad1);keep(&g_pad2);keep(&g_pad4);keep(&g_pad5);keep(&g_pad6);keep(&g_pad7);"
+        "l_big[0]=pad1;l_rows[0][0]=pad2;l_records[0].c[0]=pad3;l_vla[0]=g_pad3;"
+        "long low_bits=low(g_big,15)+low(g_rows,15)+low(g_init,15)+low(g_static,15)+low(g_records,15)+low(g_attr,3)+low(g_thread,15)"
+        "+low(s_local,15)+low(l_big,15)+low(l_rows,15)+low(l_records,15)+low(l_vla,15);"
+        "int alignof_kept=__alignof__(g_big)==1&&__alignof__(l_big)==1&&_Alignof(char[64])==1&&__alignof__(g_attr)==4;"
+        "return (int)low_bits*16+(alignof_kept?n:-n)+l_big[0]+l_rows[0][0]+l_records[0].c[0]+l_vla[0];}",
+        "arrays-of-16-bytes-aligned-to-16", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_array_alignment(test, clang);
     check_test_program_return_marks(test);
     check_test_literal_tables(test, clang);
     check_test_program_builtin_scratch(test, clang);
