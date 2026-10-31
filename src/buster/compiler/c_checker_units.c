@@ -1515,7 +1515,16 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         }
         if (command->tier1 && command->tier1_report != NULL)
         {
-            __atomic_fetch_add(&command->tier1_report->functions, lane->functions.tier1_report.functions, __ATOMIC_RELAXED);
+            CheckTier1Report* report = command->tier1_report;
+            const CheckTier1Report* unit_report = &lane->functions.tier1_report;
+            __atomic_fetch_add(&report->functions, unit_report->functions, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->records, unit_report->records, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->spill_stores, unit_report->spill_stores, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->spill_loads, unit_report->spill_loads, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->call_stores, unit_report->call_stores, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->call_loads, unit_report->call_loads, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->rematerializations, unit_report->rematerializations, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->edge_moves, unit_report->edge_moves, __ATOMIC_RELAXED);
         }
         check_program_lanes_release(&lane->functions);
         Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
