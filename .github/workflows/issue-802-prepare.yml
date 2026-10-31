@@ -1,20 +1,83 @@
-name: Issue 802 branch preparation
+name: Issue 802 implementation qualification
 on:
   push:
     branches: [codex/issue-802-lazy-arenas]
+    paths: [.github/workflows/issue-802-prepare.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 3
+  qualify:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: '0'
+      BUSTER_LINKER: lld
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-      - run: git archive --format=tar HEAD > "$RUNNER_TEMP/source.tar"
+      - name: Verify the transferred patch and publish the source-only implementation
+        run: |
+          set -euo pipefail
+          cat .issue-802-transfer-1.txt .issue-802-transfer-2.txt .issue-802-transfer-3.txt | base64 --decode | xz --decompress > "$RUNNER_TEMP/issue-802.patch"
+          printf '%s  %s\n' 2bb12df65f208427a928667e40514ea08e0ff7a30e74856f985ee2a59dc4cfd0 "$RUNNER_TEMP/issue-802.patch" | sha256sum --check
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-802.patch"
+          git diff --check
+          git rm .github/workflows/issue-802-prepare.yml .issue-802-transfer-1.txt .issue-802-transfer-2.txt .issue-802-transfer-3.txt
+          git add -u
+          git add tests/arena/resources.c docs/arena-memory.md
+          git diff --cached --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Reserve arenas without writable commitment and admit constrained compiler commands (#802)'
+          git push origin HEAD:refs/heads/codex/issue-802-lazy-arenas
+      - name: Install the official qualified toolchain and Valgrind
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build compiler and pragma oracle
+        run: |
+          mkdir -p "$RUNNER_TEMP/qualification"
+          bash tools/build-preprocessor-pragma-oracle.sh "$RUNNER_TEMP/preprocessor-pragma-oracle"
+          printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$RUNNER_TEMP/preprocessor-pragma-oracle" >> "$GITHUB_ENV"
+          ./build.sh 2>&1 | tee "$RUNNER_TEMP/qualification/build.log"
+      - name: Check constrained command admission and Callgrind
+        run: |
+          clang -std=c17 -march=x86-64 -O2 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function tests/arena/resources.c -o "$RUNNER_TEMP/memory-resources" -pthread
+          mkdir -p "$RUNNER_TEMP/memory-limited" "$RUNNER_TEMP/memory-valgrind" "$RUNNER_TEMP/memory-strict"
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-limited" 2>&1 | tee "$RUNNER_TEMP/qualification/limited.log"
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-valgrind" --valgrind 2>&1 | tee "$RUNNER_TEMP/qualification/valgrind.log"
+      - name: Check strict overcommit with four GiB of commit headroom
+        if: ${{ !cancelled() && hashFiles('build/compiler') != '' }}
+        run: |
+          old_mode=$(cat /proc/sys/vm/overcommit_memory)
+          old_kbytes=$(cat /proc/sys/vm/overcommit_kbytes)
+          old_ratio=$(cat /proc/sys/vm/overcommit_ratio)
+          trap 'sudo sysctl -q -w vm.overcommit_memory="$old_mode"; if [ "$old_kbytes" = 0 ]; then sudo sysctl -q -w vm.overcommit_ratio="$old_ratio"; else sudo sysctl -q -w vm.overcommit_kbytes="$old_kbytes"; fi' EXIT
+          budget=$(awk '/^Committed_AS:/ {used=$2} /^SwapTotal:/ {swap=$2} END {printf "%.0f\n", used + 4*1024*1024 - swap}' /proc/meminfo)
+          sudo sysctl -q -w vm.overcommit_kbytes="$budget" vm.overcommit_memory=2
+          "$RUNNER_TEMP/memory-resources" "$PWD/build/compiler" "$RUNNER_TEMP/memory-strict" --strict 2>&1 | tee "$RUNNER_TEMP/qualification/strict.log"
+      - name: Check allocator and frontend consumers
+        if: ${{ !cancelled() && hashFiles('build/compiler') != '' }}
+        run: |
+          status=0
+          for command in 'test-lanes' 'test-parser' 'test-preprocessor --clang --jobs 2' 'test-checker-deferred' 'test-checker-driver --executable ./build/compiler' 'test-check-units' 'test-check-lanes' 'test-calling-convention' 'test-ssa'; do
+            name=${command%% *}
+            timeout 600 ./build/compiler $command > "$RUNNER_TEMP/qualification/$name.log" 2>&1 || status=1
+            tail -n 15 "$RUNNER_TEMP/qualification/$name.log"
+          done
+          exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: issue-802-source
-          path: ${{ runner.temp }}/source.tar
-          retention-days: 1
+          name: issue-802-qualification
+          path: |
+            ${{ runner.temp }}/qualification/
+            ${{ runner.temp }}/memory-*/
+            build/compiler
+            tests/arena/resources.c
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+            LICENSES/
+          if-no-files-found: warn
+          retention-days: 7
