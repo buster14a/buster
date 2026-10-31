@@ -120,7 +120,54 @@ claim that the partition solver now beats the weaker scalar algorithm, that
 all acyclic work is eliminated, or that the default C compilation path gets
 faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
 --samples 21` for the existing whole-public-stage fixture, including preparation
-and rewriting. Target acceptance still requires locked 9700X baseline/candidate
-measurements across repeated processes and effective placements, tiny and cyclic
-controls, and real-source IR qualification. Record raw evidence in
-`buster14a/buster-performance`, not this repository.
+and rewriting, and `benchmark-ir-source --only gvn` (or `gvn-scalar`) for
+source-derived IR. `benchmark-ir-source` runs both GVN paths once on every
+function it prepared, requires both to accept it, and reports their removed
+instructions, refinement rounds, key comparisons and collision-budget
+completions before timing them in the same 21-pass medians as lowering and
+promotion.
+
+On the 9700X, built with `BUSTER_DEBUG_INFO=0` and Clang 23.1.1, pinned to CPU
+2 under the shared lock, the synthetic fixture's 21-sample medians over three
+processes per code placement were:
+
+| Shape (instructions) | Path | Placement 0 | Placement 256 | Placement 1,024 |
+| --- | --- | ---: | ---: | ---: |
+| `small-dag` (36) | vector | −21.9% | −22.4% | −23.6% |
+| `large-dag` (4,100) | vector | −75.3% | −74.6% | −75.0% |
+| `cyclic-phi` (15) | vector | −5.6% | −8.4% | −5.5% |
+| `small-dag` (36) | scalar (control) | +2.2% | −0.2% | +1.1% |
+| `large-dag` (4,100) | scalar (control) | +3.9% | +2.0% | +2.9% |
+| `cyclic-phi` (15) | scalar (control) | +1.4% | −2.4% | +1.3% |
+
+The placements put `main_unit_backend.c`'s code 256 and 1,024 bytes later with
+`./build.sh shifts`. The vector path's absolute `large-dag` medians were
+1,375,020, 1,353,000 and 1,311,961 ns before the change and 339,513, 344,156
+and 328,266 ns after it; `small-dag` went from 4,618.6, 4,698.2 and 4,610.2 ns
+to 3,606.3, 3,645.1 and 3,522.2 ns. The scalar control varies within the small
+range the placements show; the change leaves that path's algorithm untouched.
+The `cyclic-phi` fixture still removes four values with the vector solver and
+none with the scalar one, so the cyclic quality is unchanged.
+
+The frozen `sqlite3.c` (2,602 functions, 396,928 typed entries and 598,425
+lowered instructions) gave these 21-sample medians of three processes per
+variant, with the same source benchmark and options as the 9700X job:
+
+| Variant | Main | #946 | Change |
+| --- | ---: | ---: | ---: |
+| `gvn` (per typed entry) | 811.61 ns | 320.52 ns | −60.5% |
+| `gvn-scalar` (per typed entry) | 199.64 ns | 202.11 ns | +1.2% |
+
+Both paths removed 94,358 instructions over the corpus. The vector path ran
+14,998 refinement rounds and made 3,704,792 key comparisons with no
+collision-budget sort completion. The baseline rows apply the same
+measurement-only GVN adapter to main's unchanged pass, since main has no
+source-GVN benchmark; the adapter is part of this change, not of the measured
+pass. Raw logs, commands and the placement script are in [the measurement
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/gvn-866-2026-10-31).
+
+The Tier 1 pipeline still does not feed C source through GVN, so no
+compile-time, emitted-code or default C-driver effect is claimed here. Those
+remain #139's integration work. The source-derived rows qualify the pass on
+real IR; the synthetic rows measure the whole public stage.
+

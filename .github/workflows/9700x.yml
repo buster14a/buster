@@ -1329,8 +1329,9 @@ jobs:
 
       - name: Benchmark the IR of the frozen SQLite source's functions
         # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
-        # largest functions' shares, then lowering, verification and promotion per typed entry by both paths, after both
-        # lowerings agree on every function and both promotions verify. benchmark-backend-source's options.
+        # largest functions' shares, then lowering, verification, promotion and #866's GVN per typed entry by both
+        # paths, after both lowerings agree on every function, both promotions verify and both GVN paths accept it.
+        # benchmark-backend-source's options.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-source,')
         run: |
           unset CPATH C_INCLUDE_PATH

@@ -522,9 +522,9 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         // The IR of the functions -c compiles of real C (#131): their preparation's, as benchmark-backend-source's,
-        // which decides the typed streams it lowers, and the IR's lowering, verification and promotion.
+        // which decides the typed streams it lowers, and the IR's lowering, verification, promotion and #866's GVN.
         .name = "ir-source",
-        .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
+        .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
                    "c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|"
                    "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|"
                    "tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|"
