@@ -21,6 +21,7 @@
 #define BUSTER_CBUILTIN_FLOAT_TEST_INPUTS 384u
 #define BUSTER_CBUILTIN_FLOAT_TEST_PAGE 4096u
 #define BUSTER_CBUILTIN_FLOAT_TEST_PREFIX UINT64_C(0xbadc0ffee1234567)
+#define BUSTER_CBUILTIN_FLOAT_TEST_MASKS 160u
 
 typedef struct CBuiltinFloatLowerTestTally CBuiltinFloatLowerTestTally;
 struct CBuiltinFloatLowerTestTally
@@ -93,7 +94,26 @@ static void cbuiltin_float_lower_test_emit(CBuiltinFloatLowerTestStream* stream,
     stream->buffer.count += 1;
 }
 
-static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle32(CBuiltinId id, uint32_t bits)
+// A value's FPClassTest bit by the host compiler's own isfpclass, one class at a time.
+#define BUSTER_CBUILTIN_FLOAT_TEST_CLASS(v)                                                                                                         \
+    (__builtin_isfpclass(v, 1) * 1u | __builtin_isfpclass(v, 2) * 2u | __builtin_isfpclass(v, 4) * 4u | __builtin_isfpclass(v, 8) * 8u |       \
+     __builtin_isfpclass(v, 16) * 16u | __builtin_isfpclass(v, 32) * 32u | __builtin_isfpclass(v, 64) * 64u | __builtin_isfpclass(v, 128) * 128u | \
+     __builtin_isfpclass(v, 256) * 256u | __builtin_isfpclass(v, 512) * 512u)
+
+// The recipes past the first classifications: classifiers and signbits, and canonicalizations (floating results).
+static bool cbuiltin_float_lower_test_classifies(CBuiltinId id)
+{
+    const bool result = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || cbuiltin_float_class(id) || cbuiltin_float_signbit(id);
+    return result;
+}
+
+static bool cbuiltin_float_lower_test_floating(CBuiltinId id)
+{
+    const bool result = id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL || cbuiltin_float_canonicalize(id);
+    return result;
+}
+
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle32(CBuiltinId id, uint32_t bits, uint32_t mask)
 {
     float value;
     memcpy(&value, &bits, sizeof(value));
@@ -103,15 +123,21 @@ static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle32(CBu
     case CBUILTIN_ISNAN: result = __builtin_isnan(value) != 0; break;
     case CBUILTIN_ISINF: result = __builtin_isinf(value) != 0; break;
     case CBUILTIN_ISFINITE: result = __builtin_isfinite(value) != 0; break;
-    case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
+    case CBUILTIN_SIGNBIT:
+    case CBUILTIN_SIGNBITF: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
     case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
+    case CBUILTIN_ISNORMAL: result = __builtin_isnormal(value) != 0; break;
+    case CBUILTIN_ISSUBNORMAL: result = __builtin_issubnormal(value) != 0; break;
+    case CBUILTIN_ISZERO: result = __builtin_iszero(value) != 0; break;
+    case CBUILTIN_ISSIGNALING: result = __builtin_issignaling(value) != 0; break;
+    case CBUILTIN_ISFPCLASS: result = (BUSTER_CBUILTIN_FLOAT_TEST_CLASS(value) & mask) != 0; break;
     default: break;
     }
     return (uint64_t)(int64_t)result;
 }
 
-static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle64(CBuiltinId id, uint64_t bits)
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle64(CBuiltinId id, uint64_t bits, uint32_t mask)
 {
     double value;
     memcpy(&value, &bits, sizeof(value));
@@ -121,23 +147,30 @@ static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle64(CBu
     case CBUILTIN_ISNAN: result = __builtin_isnan(value) != 0; break;
     case CBUILTIN_ISINF: result = __builtin_isinf(value) != 0; break;
     case CBUILTIN_ISFINITE: result = __builtin_isfinite(value) != 0; break;
-    case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
+    case CBUILTIN_SIGNBIT:
+    case CBUILTIN_SIGNBITF: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
     case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
+    case CBUILTIN_ISNORMAL: result = __builtin_isnormal(value) != 0; break;
+    case CBUILTIN_ISSUBNORMAL: result = __builtin_issubnormal(value) != 0; break;
+    case CBUILTIN_ISZERO: result = __builtin_iszero(value) != 0; break;
+    case CBUILTIN_ISSIGNALING: result = __builtin_issignaling(value) != 0; break;
+    case CBUILTIN_ISFPCLASS: result = (BUSTER_CBUILTIN_FLOAT_TEST_CLASS(value) & mask) != 0; break;
     default: break;
     }
     return (uint64_t)(int64_t)result;
 }
 
-static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_absolute(uint32_t class, uint64_t bits)
+static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_absolute(CBuiltinId id, uint32_t class, uint64_t bits)
 {
     uint64_t result = 0;
+    const bool canonical = cbuiltin_float_canonicalize(id);
     if (class == BUSTER_TYPED_CLASS_F32)
     {
         const uint32_t input = (uint32_t)bits;
         float value;
         memcpy(&value, &input, sizeof(value));
-        const float absolute = __builtin_fabsf(value);
+        const float absolute = canonical ? __builtin_canonicalizef(value) : __builtin_fabsf(value);
         uint32_t output;
         memcpy(&output, &absolute, sizeof(output));
         result = output;
@@ -146,7 +179,7 @@ static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_absolute(uin
     {
         double value;
         memcpy(&value, &bits, sizeof(value));
-        const double absolute = __builtin_fabs(value);
+        const double absolute = canonical ? __builtin_canonicalize(value) : __builtin_fabs(value);
         memcpy(&result, &absolute, sizeof(result));
     }
     return result;
@@ -257,8 +290,8 @@ static uint64_t cbuiltin_float_lower_test_input(uint32_t index, uint32_t class, 
 
 static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call, CBuiltinFloatLowerTestProgram programs[2])
 {
-    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
-    const bool absolute = call->id == CBUILTIN_FABS || call->id == CBUILTIN_FABSF;
+    const bool classification = cbuiltin_float_lower_test_classifies(call->id);
+    const bool absolute = cbuiltin_float_lower_test_floating(call->id);
     const bool argument = classification || absolute;
     const uint32_t class = argument ? call->argument_class : call->constant_class;
     CBuiltinFloatLowerTestStream streams[2];
@@ -276,7 +309,11 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
         lowered[path] = path == 0 ? cbuiltin_float_lower_scalar(&stream->buffer, call) : cbuiltin_float_lower(&stream->buffer, call);
         result &= cbuiltin_float_lower_test_expect(tally, lowered[path].error == CBUILTIN_LOWER_OK && lowered[path].first == 1 &&
             lowered[path].result_class == (classification ? BUSTER_TYPED_CLASS_I32 : class), "append after live prefix", call->id, path);
-        if (argument)
+        if (cbuiltin_float_canonicalize(call->id))
+        {
+            result &= cbuiltin_float_lower_test_expect(tally, lowered[path].temporary_count == 0, "canonicalization without temporaries", call->id, path);
+        }
+        else if (argument)
         {
             result &= cbuiltin_float_lower_test_expect(tally, lowered[path].temporary_count >= 2 && stream->local_classes[1] == class &&
                 stream->local_flags[1] == BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, "actual floating temporary", call->id, path);
@@ -369,8 +406,8 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_c
 {
     CBuiltinFloatLowerTestProgram programs[2] = { 0 };
     bool ok = cbuiltin_float_lower_test_programs(tally, arena, call, programs);
-    const bool classification = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
-    const bool absolute = call->id == CBUILTIN_FABS || call->id == CBUILTIN_FABSF;
+    const bool classification = cbuiltin_float_lower_test_classifies(call->id);
+    const bool absolute = cbuiltin_float_lower_test_floating(call->id);
     const bool argument = classification || absolute;
     const uint32_t count = argument ? BUSTER_CBUILTIN_FLOAT_TEST_INPUTS : 1;
     uint64_t inputs[BUSTER_CBUILTIN_FLOAT_TEST_INPUTS];
@@ -378,8 +415,9 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_c
     for (uint32_t i = 0; i < count; i += 1)
     {
         inputs[i] = argument ? cbuiltin_float_lower_test_input(i, call->argument_class, state) : 0;
-        const uint64_t value = classification ? (call->argument_class == BUSTER_TYPED_CLASS_F32 ? cbuiltin_float_lower_test_oracle32(call->id, (uint32_t)inputs[i]) :
-            cbuiltin_float_lower_test_oracle64(call->id, inputs[i])) : absolute ? cbuiltin_float_lower_test_absolute(call->argument_class, inputs[i]) : call->constant_bits;
+        const uint64_t value = classification ? (call->argument_class == BUSTER_TYPED_CLASS_F32 ? cbuiltin_float_lower_test_oracle32(call->id, (uint32_t)inputs[i], call->class_mask) :
+            cbuiltin_float_lower_test_oracle64(call->id, inputs[i], call->class_mask)) :
+            absolute ? cbuiltin_float_lower_test_absolute(call->id, call->argument_class, inputs[i]) : call->constant_bits;
         expected[i] = value ^ BUSTER_CBUILTIN_FLOAT_TEST_PREFIX;
     }
     uint64_t* native = mmap(0, count * sizeof(uint64_t) * 2, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -477,6 +515,11 @@ static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle80(CBu
     case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
     case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
+    case CBUILTIN_ISNORMAL: result = __builtin_isnormal(value) != 0; break;
+    case CBUILTIN_ISSUBNORMAL: result = __builtin_issubnormal(value) != 0; break;
+    case CBUILTIN_ISZERO: result = __builtin_iszero(value) != 0; break;
+    case CBUILTIN_ISSIGNALING: result = __builtin_issignaling(value) != 0; break;
+    case CBUILTIN_SIGNBITL: result = __builtin_signbitl(value) != 0; break;
     default: break;
     }
     return (uint64_t)(int64_t)result;
@@ -495,14 +538,19 @@ static __attribute__((noinline)) uint64_t cbuiltin_float_lower_test_oracle80_str
     case CBUILTIN_SIGNBIT: result = __builtin_signbit(value) != 0; break;
     case CBUILTIN_FPCLASSIFY: result = __builtin_fpclassify(0, 1, 2, 3, 4, value); break;
     case CBUILTIN_ISINF_SIGN: result = __builtin_isinf_sign(value); break;
+    case CBUILTIN_ISNORMAL: result = __builtin_isnormal(value) != 0; break;
+    case CBUILTIN_ISSUBNORMAL: result = __builtin_issubnormal(value) != 0; break;
+    case CBUILTIN_ISZERO: result = __builtin_iszero(value) != 0; break;
+    case CBUILTIN_ISSIGNALING: result = __builtin_issignaling(value) != 0; break;
+    case CBUILTIN_SIGNBITL: result = __builtin_signbitl(value) != 0; break;
     default: break;
     }
     return (uint64_t)(int64_t)result;
 }
 
-static __attribute__((noinline)) CBuiltinFloatLowerTestX87 cbuiltin_float_lower_test_absolute80(long double value)
+static __attribute__((noinline)) CBuiltinFloatLowerTestX87 cbuiltin_float_lower_test_absolute80(CBuiltinId id, long double value)
 {
-    const long double absolute = __builtin_fabsl(value);
+    const long double absolute = id == CBUILTIN_CANONICALIZEL ? __builtin_canonicalizel(value) : __builtin_fabsl(value);
     uint8_t bytes[sizeof(long double)];
     memcpy(bytes, &absolute, sizeof(bytes));
     CBuiltinFloatLowerTestX87 result = { 0 };
@@ -514,33 +562,34 @@ static __attribute__((noinline)) CBuiltinFloatLowerTestX87 cbuiltin_float_lower_
 }
 
 // The x87's encodings, named, with clang 23.1's -O0 results for each (isnan's default and under FENV_ACCESS, isinf,
-// isfinite, signbit, fpclassify(0, 1, 2, 3, 4, x) and isinf_sign), as a fixture independent of the oracle above.
+// isfinite, signbit, fpclassify(0, 1, 2, 3, 4, x), isinf_sign, then isnormal, issubnormal, iszero and issignaling), as a
+// fixture independent of the oracle above.
 typedef struct CBuiltinFloatLowerTestX87Case CBuiltinFloatLowerTestX87Case;
 struct CBuiltinFloatLowerTestX87Case
 {
     const char* name;
     CBuiltinFloatLowerTestX87 bits;
-    int8_t expected[7];
+    int8_t expected[11];
 };
 
 static const CBuiltinFloatLowerTestX87Case cbuiltin_float_lower_test_x87_cases[] =
 {
-    { "zero", { 0, 0 }, { 0, 0, 0, 1, 0, 4, 0 } },
-    { "negative zero", { 0, 0x8000 }, { 0, 0, 0, 1, 1, 4, 0 } },
-    { "denormal", { 1, 0 }, { 0, 0, 0, 1, 0, 3, 0 } },
-    { "pseudo-denormal", { UINT64_C(0x8000000000000000), 0 }, { 0, 1, 0, 1, 0, 2, 0 } },
-    { "negative pseudo-denormal", { UINT64_C(0x8000000000000001), 0x8000 }, { 0, 1, 0, 1, 1, 2, 0 } },
-    { "one", { UINT64_C(0x8000000000000000), 0x3fff }, { 0, 0, 0, 1, 0, 2, 0 } },
-    { "unnormal", { UINT64_C(0x4000000000000000), 0x3fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "pseudo-zero", { 0, 0x3fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "infinity", { UINT64_C(0x8000000000000000), 0x7fff }, { 0, 0, 1, 0, 0, 1, 1 } },
-    { "negative infinity", { UINT64_C(0x8000000000000000), 0xffff }, { 0, 0, 1, 0, 1, 1, -1 } },
-    { "pseudo-infinity", { 0, 0x7fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "quiet NaN", { UINT64_C(0xc000000000000000), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "signaling NaN", { UINT64_C(0x8000000000000001), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "pseudo-NaN", { UINT64_C(0x4000000000000000), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0 } },
-    { "largest", { UINT64_MAX, 0x7ffe }, { 0, 0, 0, 1, 0, 2, 0 } },
-    { "largest unnormal", { UINT64_C(0x7fffffffffffffff), 0x7ffe }, { 1, 1, 0, 0, 0, 0, 0 } },
+    { "zero", { 0, 0 }, { 0, 0, 0, 1, 0, 4, 0, 0, 0, 1, 0 } },
+    { "negative zero", { 0, 0x8000 }, { 0, 0, 0, 1, 1, 4, 0, 0, 0, 1, 0 } },
+    { "denormal", { 1, 0 }, { 0, 0, 0, 1, 0, 3, 0, 0, 1, 0, 0 } },
+    { "pseudo-denormal", { UINT64_C(0x8000000000000000), 0 }, { 0, 1, 0, 1, 0, 2, 0, 0, 0, 0, 0 } },
+    { "negative pseudo-denormal", { UINT64_C(0x8000000000000001), 0x8000 }, { 0, 1, 0, 1, 1, 2, 0, 0, 0, 0, 0 } },
+    { "one", { UINT64_C(0x8000000000000000), 0x3fff }, { 0, 0, 0, 1, 0, 2, 0, 1, 0, 0, 0 } },
+    { "unnormal", { UINT64_C(0x4000000000000000), 0x3fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+    { "pseudo-zero", { 0, 0x3fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+    { "infinity", { UINT64_C(0x8000000000000000), 0x7fff }, { 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0 } },
+    { "negative infinity", { UINT64_C(0x8000000000000000), 0xffff }, { 0, 0, 1, 0, 1, 1, -1, 0, 0, 0, 0 } },
+    { "pseudo-infinity", { 0, 0x7fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+    { "quiet NaN", { UINT64_C(0xc000000000000000), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+    { "signaling NaN", { UINT64_C(0x8000000000000001), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
+    { "pseudo-NaN", { UINT64_C(0x4000000000000000), 0x7fff }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+    { "largest", { UINT64_MAX, 0x7ffe }, { 0, 0, 0, 1, 0, 2, 0, 1, 0, 0, 0 } },
+    { "largest unnormal", { UINT64_C(0x7fffffffffffffff), 0x7ffe }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
 };
 
 static CBuiltinFloatLowerTestX87 cbuiltin_float_lower_test_x87_input(uint32_t index, uint64_t* state)
@@ -592,12 +641,35 @@ static CBuiltinFloatLowerTestX87 cbuiltin_float_lower_test_x87_input(uint32_t in
     return result;
 }
 
+// An x87 encoding's category, from its fields.
+static CBuiltinFloatX87Category cbuiltin_float_lower_test_x87_category(CBuiltinFloatLowerTestX87 bits)
+{
+    const uint64_t exponent = bits.top & 0x7fff;
+    const bool integer = (bits.significand >> 63) != 0;
+    const bool fraction = (bits.significand & UINT64_C(0x7fffffffffffffff)) != 0;
+    const bool quiet = ((bits.significand >> 62) & 1) != 0;
+    CBuiltinFloatX87Category result = integer ? CBUILTIN_FLOAT_X87_NORMAL : CBUILTIN_FLOAT_X87_UNNORMAL;
+    if (exponent == 0)
+    {
+        result = integer ? CBUILTIN_FLOAT_X87_PSEUDO_DENORMAL : fraction ? CBUILTIN_FLOAT_X87_DENORMAL : CBUILTIN_FLOAT_X87_ZERO;
+    }
+    else if (exponent == 0x7fff && integer)
+    {
+        result = !fraction ? CBUILTIN_FLOAT_X87_INFINITY : quiet ? CBUILTIN_FLOAT_X87_QUIET : CBUILTIN_FLOAT_X87_SIGNALING;
+    }
+    else if (exponent == 0x7fff)
+    {
+        result = fraction ? CBUILTIN_FLOAT_X87_PSEUDO_NAN : CBUILTIN_FLOAT_X87_PSEUDO_INFINITY;
+    }
+    return result;
+}
+
 // A long double recipe's native function, (uint64_t* p) -> uint64_t: the value at p into the argument object (local 1),
 // the recipe after a live prefix, and the prefix XOR the classification, or for fabsl the prefix, its result stored at p.
 static bool cbuiltin_float_lower_test_x87_program(CBuiltinFloatLowerTestTally* tally, Arena* arena, const CBuiltinFloatLowerCall* call,
                                                   CBuiltinFloatLowerTestProgram programs[2])
 {
-    const bool absolute = call->id == CBUILTIN_FABSL;
+    const bool absolute = call->id == CBUILTIN_FABSL || call->id == CBUILTIN_CANONICALIZEL;
     static const uint32_t local_sizes[BUSTER_CBUILTIN_FLOAT_TEST_LOCALS] = { 0, 16 };
     static const uint8_t local_alignments[BUSTER_CBUILTIN_FLOAT_TEST_LOCALS] = { 0, 4 };
     static const uint64_t constants[2] = { 0, 0 };
@@ -719,11 +791,15 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_x
 {
     CBuiltinFloatLowerTestProgram programs[2] = { 0 };
     bool ok = cbuiltin_float_lower_test_x87_program(tally, arena, call, programs);
-    const bool absolute = call->id == CBUILTIN_FABSL;
+    const bool absolute = call->id == CBUILTIN_FABSL || call->id == CBUILTIN_CANONICALIZEL;
     const uint32_t count = BUSTER_CBUILTIN_FLOAT_TEST_INPUTS;
     const uint32_t named = BUSTER_ARRAY_LENGTH(cbuiltin_float_lower_test_x87_cases);
-    // A fixture's column: isnan's (under FENV_ACCESS or not), then the other builtins' in CBuiltinId's order.
-    const uint32_t column = call->id == CBUILTIN_ISNAN ? (call->fenv_access ? 1u : 0u) : absolute ? 0u : 1u + (uint32_t)(call->id - CBUILTIN_ISNAN);
+    // A fixture's column: isnan's (under FENV_ACCESS or not), then the other builtins' in CBuiltinId's order, then isnormal's
+    // to issignaling's; none for isfpclass, signbitl and canonicalizel.
+    const bool first = call->id >= CBUILTIN_ISNAN && call->id <= CBUILTIN_ISINF_SIGN;
+    const bool fixed = call->id >= CBUILTIN_ISNORMAL && call->id <= CBUILTIN_ISSIGNALING;
+    const uint32_t column = call->id == CBUILTIN_ISNAN ? (call->fenv_access ? 1u : 0u) : first ? 1u + (uint32_t)(call->id - CBUILTIN_ISNAN) :
+                            fixed ? 7u + (uint32_t)(call->id - CBUILTIN_ISNORMAL) : 0u;
     CBuiltinFloatLowerTestX87 inputs[BUSTER_CBUILTIN_FLOAT_TEST_INPUTS];
     CBuiltinFloatLowerTestX87 expected[BUSTER_CBUILTIN_FLOAT_TEST_INPUTS];
     for (uint32_t i = 0; i < count; i += 1)
@@ -732,15 +808,23 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_float_lower_test_x
         const long double value = cbuiltin_float_lower_test_x87_value(inputs[i]);
         if (absolute)
         {
-            expected[i] = cbuiltin_float_lower_test_absolute80(value);
-            cbuiltin_float_lower_test_expect(tally, expected[i].significand == inputs[i].significand && expected[i].top == (inputs[i].top & 0x7fff),
-                "fabsl clears the sign bit alone", call->id, i);
+            expected[i] = cbuiltin_float_lower_test_absolute80(call->id, value);
+            cbuiltin_float_lower_test_expect(tally, call->id != CBUILTIN_FABSL || (expected[i].significand == inputs[i].significand &&
+                expected[i].top == (inputs[i].top & 0x7fff)), "fabsl clears the sign bit alone", call->id, i);
+        }
+        else if (call->id == CBUILTIN_ISFPCLASS)
+        {
+            // clang's -O3 code differs from its -O0 code for some masks (test-checker compares every mask with -O0's): the
+            // model's answer for the encoding's category, which the recipe must give.
+            const uint64_t answer = cbuiltin_float_lower_x87_class(call->class_mask, cbuiltin_float_lower_test_x87_category(inputs[i]),
+                                                                   (inputs[i].top & 0x8000) != 0, call->fenv_access);
+            expected[i] = (CBuiltinFloatLowerTestX87){ .significand = answer ^ BUSTER_CBUILTIN_FLOAT_TEST_PREFIX };
         }
         else
         {
             const uint64_t clang = call->fenv_access ? cbuiltin_float_lower_test_oracle80_strict(call->id, value) : cbuiltin_float_lower_test_oracle80(call->id, value);
             expected[i] = (CBuiltinFloatLowerTestX87){ .significand = clang ^ BUSTER_CBUILTIN_FLOAT_TEST_PREFIX };
-            if (i < named)
+            if (i < named && (first || fixed))
             {
                 cbuiltin_float_lower_test_expect(tally, clang == (uint64_t)(int64_t)cbuiltin_float_lower_test_x87_cases[i].expected[column],
                     cbuiltin_float_lower_test_x87_cases[i].name, call->id, i);
@@ -815,16 +899,18 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
     }
     if (cbuiltin_float_lower_test_expect(tally, mapped, "guard mappings", 0, 0))
     {
-        for (uint32_t shape = 0; shape < 6; shape += 1)
+        for (uint32_t shape = 0; shape < 8; shape += 1)
         {
             const CBuiltinFloatLowerCall original =
             {
-                .id = shape == 2 ? CBUILTIN_NANF : shape == 3 ? CBUILTIN_FABSF : shape == 4 ? CBUILTIN_FABS : shape == 5 ? CBUILTIN_ISINF_SIGN : CBUILTIN_FPCLASSIFY,
+                .id = shape == 2 ? CBUILTIN_NANF : shape == 3 ? CBUILTIN_FABSF : shape == 4 ? CBUILTIN_FABS : shape == 5 ? CBUILTIN_ISINF_SIGN :
+                      shape == 6 ? CBUILTIN_ISFPCLASS : shape == 7 ? CBUILTIN_CANONICALIZE : CBUILTIN_FPCLASSIFY,
                 .argument_local = 0,
-                .argument_class = shape == 1 || shape == 4 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32,
+                .argument_class = shape == 1 || shape == 4 || shape == 6 || shape == 7 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32,
                 .folded = true,
                 .constant_class = BUSTER_TYPED_CLASS_F32,
                 .constant_bits = UINT64_C(0x7fc12345),
+                .class_mask = 0x1f8,
             };
             CBuiltinFloatLowerTestStream stream;
             cbuiltin_float_lower_test_stream(&stream, original.argument_class);
@@ -849,7 +935,7 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
                             .local_classes = pages[3] + BUSTER_CBUILTIN_FLOAT_TEST_PAGE - locals,
                             .local_flags = pages[4] + BUSTER_CBUILTIN_FLOAT_TEST_PAGE - locals,
                             .local_count = 1,
-                            .local_capacity = locals - (variant == 2 && shape != 2),
+                            .local_capacity = locals - (variant == 2 && expected.temporary_count != 0),
                         };
                         for (uint32_t i = 0; i < 5; i += 1)
                         {
@@ -873,7 +959,7 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
                             memcpy(snapshots[i], pages[i], BUSTER_CBUILTIN_FLOAT_TEST_PAGE);
                         }
                         const CBuiltinLowerResult lowered = path == 0 ? cbuiltin_float_lower_scalar(&buffer, &call) : cbuiltin_float_lower(&buffer, &call);
-                        if (variant == 0 || (variant == 2 && shape == 2))
+                        if (variant == 0 || (variant == 2 && expected.temporary_count == 0))
                         {
                             bool same = lowered.error == CBUILTIN_LOWER_OK && lowered.first == prefix && lowered.count == expected.count &&
                                 buffer.count == entries && buffer.local_count == locals;
@@ -914,7 +1000,7 @@ static void cbuiltin_float_lower_test_guards(CBuiltinFloatLowerTestTally* tally)
 
 static void cbuiltin_float_lower_test_refusals(CBuiltinFloatLowerTestTally* tally)
 {
-    for (uint32_t variant = 0; variant < 21; variant += 1)
+    for (uint32_t variant = 0; variant < 26; variant += 1)
     {
         CBuiltinFloatLowerTestStream stream;
         cbuiltin_float_lower_test_stream(&stream, variant >= 16 && variant < 19 ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_F32);
@@ -950,12 +1036,46 @@ static void cbuiltin_float_lower_test_refusals(CBuiltinFloatLowerTestTally* tall
         case 18: call.id = CBUILTIN_FABSL; call.argument_class = BUSTER_TYPED_CLASS_F80; call.argument_local = 1; stream.local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN; break;
         case 19: call.id = CBUILTIN_FPCLASSIFY; call.argument_class = BUSTER_TYPED_CLASS_F80; break;
         case 20: call.id = CBUILTIN_NANL; call.constant_class = BUSTER_TYPED_CLASS_F80; error = CBUILTIN_LOWER_UNSUPPORTED; break;
+        // A prototype's class, and isfpclass's mask past its ten bits.
+        case 21: call.id = CBUILTIN_SIGNBITF; call.argument_class = BUSTER_TYPED_CLASS_F64; break;
+        case 22: call.id = CBUILTIN_CANONICALIZEL; call.argument_class = BUSTER_TYPED_CLASS_F32; break;
+        case 23: call.id = CBUILTIN_CANONICALIZE; call.argument_class = BUSTER_TYPED_CLASS_F32; break;
+        case 24: call.id = CBUILTIN_ISFPCLASS; call.argument_class = BUSTER_TYPED_CLASS_F32; call.class_mask = 0x400; break;
+        case 25: call.id = CBUILTIN_SIGNBITL; call.argument_class = BUSTER_TYPED_CLASS_F64; break;
         }
         CBuiltinFloatLowerTestStream before = stream;
         const CBuiltinLowerResult lowered = cbuiltin_float_lower(&stream.buffer, &call);
         cbuiltin_float_lower_test_expect(tally, lowered.error == error && memcmp(&before, &stream, sizeof(stream)) == 0, "explicit refused boundary", call.id, variant);
     }
     cbuiltin_float_lower_test_expect(tally, cbuiltin_float_lower(0, 0).error == CBUILTIN_LOWER_ARGUMENT, "null bounded input", 0, 0);
+}
+
+// isfpclass's masks: none and all, each class alone and every class but it, the masks LLVM tests by their inverses or by
+// a compare and their complements, those whose code differs under FENV_ACCESS and at -O3, and every 37th. Their count.
+static uint32_t cbuiltin_float_lower_test_masks(uint32_t masks[BUSTER_CBUILTIN_FLOAT_TEST_MASKS])
+{
+    const uint16_t special[] = {
+        0x003, 0x001, 0x002, 0x204, 0x200, 0x004, 0x108, 0x100, 0x008, 0x090, 0x080, 0x010, 0x060, 0x040, 0x020, 0x1f8, 0x1c0, 0x038, 0x063, 0x0f0,
+        0x0f3, 0x207, 0x203, 0x007, 3, 7, 99, 243, 515, 780, 924, 1020, 28, 31, 124, 127, 896, 899, 992, 995,
+    };
+    uint32_t count = 0;
+    masks[count++] = 0;
+    masks[count++] = 0x3ff;
+    for (uint32_t bit = 0; bit < 10; bit += 1)
+    {
+        masks[count++] = UINT32_C(1) << bit;
+        masks[count++] = 0x3ffu & ~(UINT32_C(1) << bit);
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(special); i += 1)
+    {
+        masks[count++] = special[i];
+        masks[count++] = 0x3ffu & ~(uint32_t)special[i];
+    }
+    for (uint32_t mask = 37; mask < 0x3ff; mask += 37)
+    {
+        masks[count++] = mask;
+    }
+    return count;
 }
 
 static int run_builtin_float_lower_tests(int argc, char** argv)
@@ -988,6 +1108,10 @@ static int run_builtin_float_lower_tests(int argc, char** argv)
         CBuiltinFloatLowerTestTally tally = { 0 };
         Arena arena = arena_reserve(UINT64_C(1) << 27);
         uint64_t state = seed != 0 ? seed : 1;
+        uint32_t masks[BUSTER_CBUILTIN_FLOAT_TEST_MASKS];
+        const uint32_t count = cbuiltin_float_lower_test_masks(masks);
+        const CBuiltinId fixed[] = { CBUILTIN_ISNORMAL, CBUILTIN_ISSUBNORMAL, CBUILTIN_ISZERO, CBUILTIN_ISSIGNALING };
+        const uint32_t fixed_masks[] = { 0x108, 0x90, 0x60, 0x1 };
         cbuiltin_float_lower_test_guards(&tally);
         cbuiltin_float_lower_test_refusals(&tally);
         for (uint32_t class = BUSTER_TYPED_CLASS_F32; class <= BUSTER_TYPED_CLASS_F64; class += 1)
@@ -1009,6 +1133,24 @@ static int run_builtin_float_lower_tests(int argc, char** argv)
                 .argument_class = class,
             };
             cbuiltin_float_lower_test_case(&tally, &arena, &call, &state);
+            // isnormal ... issignaling with their masks, isfpclass with the masks, signbitf, and canonicalize.
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const CBuiltinFloatLowerCall classify = { .id = CBUILTIN_ISFPCLASS, .argument_class = class, .class_mask = masks[i] };
+                cbuiltin_float_lower_test_case(&tally, &arena, &classify, &state);
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixed); i += 1)
+            {
+                const CBuiltinFloatLowerCall classify = { .id = fixed[i], .argument_class = class, .class_mask = fixed_masks[i] };
+                cbuiltin_float_lower_test_case(&tally, &arena, &classify, &state);
+            }
+            const CBuiltinFloatLowerCall sign = { .id = CBUILTIN_SIGNBITF, .argument_class = BUSTER_TYPED_CLASS_F32 };
+            const CBuiltinFloatLowerCall canonical = { .id = class == BUSTER_TYPED_CLASS_F32 ? CBUILTIN_CANONICALIZEF : CBUILTIN_CANONICALIZE, .argument_class = class };
+            if (class == BUSTER_TYPED_CLASS_F32)
+            {
+                cbuiltin_float_lower_test_case(&tally, &arena, &sign, &state);
+            }
+            cbuiltin_float_lower_test_case(&tally, &arena, &canonical, &state);
         }
         // Long double, its argument the object local 1: each classification, isnan under FENV_ACCESS too, and fabsl.
         for (uint32_t id = CBUILTIN_ISNAN; id <= CBUILTIN_FABSL; id += 1)
@@ -1027,6 +1169,40 @@ static int run_builtin_float_lower_tests(int argc, char** argv)
                     cbuiltin_float_lower_test_x87_case(&tally, &arena, &call, &state);
                 }
             }
+        }
+        // Long double: isnormal ... issignaling, isfpclass with each mask under FENV_ACCESS and not, signbitl and canonicalizel.
+        for (uint32_t strict = 0; strict < 2; strict += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const CBuiltinFloatLowerCall call =
+                {
+                    .id = CBUILTIN_ISFPCLASS,
+                    .argument_local = 1,
+                    .argument_class = BUSTER_TYPED_CLASS_F80,
+                    .fenv_access = strict != 0,
+                    .class_mask = masks[i],
+                };
+                cbuiltin_float_lower_test_x87_case(&tally, &arena, &call, &state);
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixed); i += 1)
+            {
+                const CBuiltinFloatLowerCall call =
+                {
+                    .id = fixed[i],
+                    .argument_local = 1,
+                    .argument_class = BUSTER_TYPED_CLASS_F80,
+                    .fenv_access = strict != 0,
+                    .class_mask = fixed_masks[i],
+                };
+                cbuiltin_float_lower_test_x87_case(&tally, &arena, &call, &state);
+            }
+        }
+        const CBuiltinId x87_others[] = { CBUILTIN_SIGNBITL, CBUILTIN_CANONICALIZEL };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x87_others); i += 1)
+        {
+            const CBuiltinFloatLowerCall call = { .id = x87_others[i], .argument_local = 1, .argument_class = BUSTER_TYPED_CLASS_F80 };
+            cbuiltin_float_lower_test_x87_case(&tally, &arena, &call, &state);
         }
         const CBuiltinId constants[6] =
         {

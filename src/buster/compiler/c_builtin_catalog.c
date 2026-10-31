@@ -54,7 +54,8 @@
 // builtins (their masks are vectors of bools, which the lowering has no class for) and the matrix ones (every call an
 // error: no unit has a matrix type). Availability does not promise every operand type, ISA or ABI: the typed checker
 // and lowering retain their explicit restrictions. Family ranges leave room for later additions without renumbering any
-// published identity: clang 23's vector builtins past the 23 observed ones start at 0x320.
+// published identity: clang 23's vector builtins past the 23 observed ones start at 0x320, and its floating builtins past
+// the first ones (c_check_builtin_float.c: isnormal to isfpclass, signbitf and signbitl, canonicalize) take 0x3d0 to 0x3d9.
 #define BUSTER_CBUILTIN_SPECIAL_NAMES(X) \
     X(VA_START, 0x100u, "__builtin_va_start", BUSTER_CBUILTIN_SOURCE) \
     X(C23_VA_START, 0x101u, "__builtin_c23_va_start", BUSTER_CBUILTIN_SOURCE) \
@@ -103,6 +104,16 @@
     X(ISLESSEQUAL, 0x15cu, "__builtin_islessequal", BUSTER_CBUILTIN_SOURCE) \
     X(ISLESSGREATER, 0x15du, "__builtin_islessgreater", BUSTER_CBUILTIN_SOURCE) \
     X(ISUNORDERED, 0x15eu, "__builtin_isunordered", BUSTER_CBUILTIN_SOURCE) \
+    X(ISNORMAL, 0x3d0u, "__builtin_isnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSUBNORMAL, 0x3d1u, "__builtin_issubnormal", BUSTER_CBUILTIN_SOURCE) \
+    X(ISZERO, 0x3d2u, "__builtin_iszero", BUSTER_CBUILTIN_SOURCE) \
+    X(ISSIGNALING, 0x3d3u, "__builtin_issignaling", BUSTER_CBUILTIN_SOURCE) \
+    X(ISFPCLASS, 0x3d4u, "__builtin_isfpclass", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITF, 0x3d5u, "__builtin_signbitf", BUSTER_CBUILTIN_SOURCE) \
+    X(SIGNBITL, 0x3d6u, "__builtin_signbitl", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZE, 0x3d7u, "__builtin_canonicalize", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEF, 0x3d8u, "__builtin_canonicalizef", BUSTER_CBUILTIN_SOURCE) \
+    X(CANONICALIZEL, 0x3d9u, "__builtin_canonicalizel", BUSTER_CBUILTIN_SOURCE) \
     X(SQRT, 0x200u, "__builtin_sqrt", BUSTER_CBUILTIN_SOURCE) \
     X(SQRTF, 0x201u, "__builtin_sqrtf", BUSTER_CBUILTIN_SOURCE) \
     X(COPYSIGN, 0x202u, "__builtin_copysign", BUSTER_CBUILTIN_SOURCE) \
@@ -467,6 +478,28 @@ static __attribute__((unused)) bool cbuiltin_has_capability(const uint8_t* name,
 static __attribute__((unused)) bool cbuiltin_vector(uint32_t id)
 {
     const bool result = (id >= CBUILTIN_ELEMENTWISE_ABS && id <= CBUILTIN_NONTEMPORAL_STORE) || (id >= CBUILTIN_ELEMENTWISE_ACOS && id <= CBUILTIN_MATRIX_COLUMN_MAJOR_STORE);
+    return result;
+}
+
+// Whether an identity is one of clang's floating classifications past the first ones (isnormal, issubnormal, iszero,
+// issignaling and isfpclass, 0x3d0 to 0x3d4), which take a real floating argument unconverted, as isnan does.
+static __attribute__((unused)) bool cbuiltin_float_class(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_ISNORMAL && id <= CBUILTIN_ISFPCLASS;
+    return result;
+}
+
+// Whether an identity is clang's signbitf or signbitl, whose fixed prototypes convert their argument first (0x3d5, 0x3d6).
+static __attribute__((unused)) bool cbuiltin_float_signbit(uint32_t id)
+{
+    const bool result = id == CBUILTIN_SIGNBITF || id == CBUILTIN_SIGNBITL;
+    return result;
+}
+
+// Whether an identity is one of clang's canonicalize builtins, x * 1.0 of their prototypes' types (0x3d7 to 0x3d9).
+static __attribute__((unused)) bool cbuiltin_float_canonicalize(uint32_t id)
+{
+    const bool result = id >= CBUILTIN_CANONICALIZE && id <= CBUILTIN_CANONICALIZEL;
     return result;
 }
 

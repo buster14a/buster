@@ -5609,6 +5609,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_warning_input_test.c"
 #include "c_check_selection_test.c"
 #include "c_check_program_library_test.c"
+#include "c_check_program_classify_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -5894,6 +5895,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_musttails(&test, clang);
             check_test_program_initializers(&test, clang);
             check_test_library(&test, clang);
+            check_test_classify(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);

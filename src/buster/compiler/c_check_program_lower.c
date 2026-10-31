@@ -6942,12 +6942,16 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     {
         const CheckBuiltinFloatEffect* effect = stream->floating + selected;
         const CBuiltinId id = effect->runtime_builtin;
-        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL;
+        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL ||
+                              cbuiltin_float_class(id) || cbuiltin_float_signbit(id) || cbuiltin_float_canonicalize(id);
         const bool compare = id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
-        if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)) || (compare && count != 2))
+        // isfpclass's mask (its second argument) is a constant the effect holds, never evaluated.
+        const uint32_t arguments = selectors ? 6u : id == CBUILTIN_ISFPCLASS ? 2u : 1u;
+        if (effect->unsupported != 0 || (classify && count != arguments) || (compare && count != 2))
         {
-            check_lower_unsupported(writer, "this floating builtin");
+            check_lower_unsupported(writer, effect->unsupported == BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR ? "__builtin_isfpclass of a vector" :
+                                                                                                                 "this floating builtin");
         }
         else if (compare)
         {
@@ -6981,7 +6985,13 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             // A long double's argument is a frame object of its own, which fabsl clears the sign of in place.
             const uint32_t argument = check_lower_temporary(writer, class);
             const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
-            writer->floating[index] = (CBuiltinFloatLowerCall){ .id = id, .argument_local = argument, .argument_class = class, .fenv_access = fenv_access };
+            writer->floating[index] = (CBuiltinFloatLowerCall){
+                .id = id,
+                .argument_local = argument,
+                .argument_class = class,
+                .fenv_access = fenv_access,
+                .class_mask = effect->class_mask,
+            };
             if (selectors)
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);

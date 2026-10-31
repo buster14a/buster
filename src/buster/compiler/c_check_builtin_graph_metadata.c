@@ -94,7 +94,8 @@ static __attribute__((unused)) bool check_builtin_float_effect_equal(const Check
     return a->node == b->node && a->math_kind == b->math_kind && a->errno_pointer_type == b->errno_pointer_type &&
            value_equal(a->converted_arguments, b->converted_arguments) && value_equal(a->converted_arguments + 1, b->converted_arguments + 1) &&
            a->floating_type == b->floating_type && a->evaluated_operands == b->evaluated_operands &&
-           a->definite_operands == b->definite_operands && a->selected_selector == b->selected_selector && a->unsupported == b->unsupported &&
+           a->definite_operands == b->definite_operands && a->selected_selector == b->selected_selector && a->class_mask == b->class_mask &&
+           a->unsupported == b->unsupported &&
            a->warnings == b->warnings && a->runtime_builtin == b->runtime_builtin && a->evaluation == b->evaluation &&
            a->folded == b->folded && a->reads_memory == b->reads_memory &&
            a->compiler_barrier == b->compiler_barrier && a->reads_fp_environment == b->reads_fp_environment &&

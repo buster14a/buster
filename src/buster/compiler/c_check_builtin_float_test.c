@@ -34,7 +34,8 @@ static bool check_builtin_float_test_equal(const CheckBuiltinFloatResult* a, con
 {
     bool equal = check_test_action_equal(&a->action, &b->action) && a->floating_type == b->floating_type &&
                  a->evaluated_operands == b->evaluated_operands && a->definite_operands == b->definite_operands &&
-                 a->selected_selector == b->selected_selector && a->unsupported == b->unsupported && a->warnings == b->warnings &&
+                 a->selected_selector == b->selected_selector && a->class_mask == b->class_mask && a->unsupported == b->unsupported &&
+                 a->warnings == b->warnings &&
                  a->runtime_builtin == b->runtime_builtin && a->evaluation == b->evaluation && a->folded == b->folded && a->reads_memory == b->reads_memory;
     for (uint32_t i = 0; equal && i < 6; i += 1)
     {
@@ -501,6 +502,182 @@ static void check_builtin_float_test_constraints(CheckBuiltinFloatTest* test, Ty
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.folded, "completed selector enum becomes usable after its source cutoff");
 }
 
+// A value's FPClassTest bit by the host compiler's own isfpclass, one class at a time.
+#define BUSTER_CHECK_BUILTIN_FLOAT_TEST_CLASS(v)                                                                                                  \
+    (__builtin_isfpclass(v, 1) * 1u | __builtin_isfpclass(v, 2) * 2u | __builtin_isfpclass(v, 4) * 4u | __builtin_isfpclass(v, 8) * 8u |       \
+     __builtin_isfpclass(v, 16) * 16u | __builtin_isfpclass(v, 32) * 32u | __builtin_isfpclass(v, 64) * 64u | __builtin_isfpclass(v, 128) * 128u | \
+     __builtin_isfpclass(v, 256) * 256u | __builtin_isfpclass(v, 512) * 512u)
+
+// isnormal ... isfpclass, signbitf and signbitl, and canonicalize: each fold against the host compiler's own builtins in
+// each format, isfpclass's with every mask, the signbits' prototype conversions (an int's among them), and canonicalize
+// typed by its prototype but never folded.
+static void check_builtin_float_test_classes(CheckBuiltinFloatTest* test, TypeTable* table)
+{
+    const TypeId formats[] = { BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
+    const long double samples[] = {
+        0.0L, -0.0L, 1.0L, -1.5L, 0x1p-126L, -0x1p-126L, 0x1.fffffcp-127L, 0x1p-149L, -0x1p-1022L, 0x1p-1074L, 0x1p-16382L, -0x1p-16445L,
+        0x1.fffffep127L, __builtin_infl(), -__builtin_infl(), __builtin_nanl("1"), -__builtin_nanl(""),
+    };
+    const CBuiltinId fixed[] = { CBUILTIN_ISNORMAL, CBUILTIN_ISSUBNORMAL, CBUILTIN_ISZERO, CBUILTIN_ISSIGNALING };
+    const uint32_t fixed_masks[] = { 0x108, 0x90, 0x60, 0x1 };
+    for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(samples); s += 1)
+        {
+            const long double number = check_action_round_float(formats[format], samples[s]);
+            const float narrow = (float)number;
+            const double wide = (double)number;
+            const uint32_t bit = format == 0 ? BUSTER_CHECK_BUILTIN_FLOAT_TEST_CLASS(narrow) : format == 1 ? BUSTER_CHECK_BUILTIN_FLOAT_TEST_CLASS(wide) :
+                                                                                                         BUSTER_CHECK_BUILTIN_FLOAT_TEST_CLASS(number);
+            const int answers[4][3] = {
+                { __builtin_isnormal(narrow), __builtin_isnormal(wide), __builtin_isnormal(number) },
+                { __builtin_issubnormal(narrow), __builtin_issubnormal(wide), __builtin_issubnormal(number) },
+                { __builtin_iszero(narrow), __builtin_iszero(wide), __builtin_iszero(number) },
+                { __builtin_issignaling(narrow), __builtin_issignaling(wide), __builtin_issignaling(number) },
+            };
+            CheckValue arguments[2] = { check_test_float(formats[format], number), check_test_integer(BUSTER_TYPE_INT, 0) };
+            for (uint32_t op = 0; op < BUSTER_ARRAY_LENGTH(fixed); op += 1)
+            {
+                const CheckBuiltinFloatAction action = { .id = fixed[op], .arguments = arguments, .argument_count = 1 };
+                CheckBuiltinFloatResult result;
+                check_builtin_float_one(table, &action, &result);
+                check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
+                                                result.floating_type == formats[format] && result.folded && result.class_mask == fixed_masks[op] &&
+                                                result.action.value.integer == (uint32_t)!!answers[op][format] && result.evaluated_operands == 1 &&
+                                                (result.action.value.flags & BUSTER_CHECK_ICE) != 0, "isnormal ... issignaling fold as the host's builtins");
+                check_builtin_float_test_expect(test, ((bit & fixed_masks[op]) != 0) == (answers[op][format] != 0), "a classifier's mask is its builtin's");
+            }
+            for (uint32_t mask = 0; mask < 1024; mask += 1)
+            {
+                arguments[1] = check_test_integer(BUSTER_TYPE_INT, mask);
+                const CheckBuiltinFloatAction action = { .id = CBUILTIN_ISFPCLASS, .arguments = arguments, .argument_count = 2 };
+                CheckBuiltinFloatResult result;
+                check_builtin_float_one(table, &action, &result);
+                check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
+                                                result.folded && result.class_mask == mask && result.evaluated_operands == 1 &&
+                                                result.action.value.integer == ((bit & mask) != 0) && (result.action.value.flags & BUSTER_CHECK_ICE) != 0,
+                                                "isfpclass folds as the host's builtins for every mask");
+            }
+            const CBuiltinId signs[] = { CBUILTIN_SIGNBITF, CBUILTIN_SIGNBITL };
+            const CheckValue sources[] = { arguments[0], check_test_integer(BUSTER_TYPE_INT, format == 0 ? 0xfffffffbu : 7) };
+            for (uint32_t op = 0; op < BUSTER_ARRAY_LENGTH(signs); op += 1)
+            {
+                for (uint32_t source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+                {
+                    const TypeId parameter = op == 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_LONG_DOUBLE;
+                    const long double converted = source == 0 ? number : format == 0 ? -5.0L : 7.0L;
+                    const int expected = op == 0 ? __builtin_signbitf((float)converted) : __builtin_signbitl(converted);
+                    const CheckBuiltinFloatAction action = { .id = signs[op], .arguments = sources + source, .argument_count = 1 };
+                    CheckBuiltinFloatResult result;
+                    check_builtin_float_one(table, &action, &result);
+                    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_INT &&
+                                                    result.floating_type == parameter && result.argument_conversions[0].type == parameter && result.folded &&
+                                                    result.action.value.integer == (uint32_t)!!expected && (result.action.value.flags & BUSTER_CHECK_ICE) != 0,
+                                                    "signbitf and signbitl fold after their prototypes' conversions");
+                }
+            }
+            const CBuiltinId canonicals[] = { CBUILTIN_CANONICALIZEF, CBUILTIN_CANONICALIZE, CBUILTIN_CANONICALIZEL };
+            for (uint32_t op = 0; op < BUSTER_ARRAY_LENGTH(canonicals); op += 1)
+            {
+                const CheckBuiltinFloatAction action = { .id = canonicals[op], .arguments = arguments, .argument_count = 1 };
+                CheckBuiltinFloatResult result;
+                check_builtin_float_one(table, &action, &result);
+                check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == formats[op] &&
+                                                result.floating_type == formats[op] && result.argument_conversions[0].type == formats[op] && !result.folded &&
+                                                result.action.value.constant_kind == CHECK_CONSTANT_NONE && result.runtime_builtin == canonicals[op] &&
+                                                result.evaluated_operands == 1 && check_builtin_float_strict(canonicals[op]),
+                                                "canonicalize is typed by its prototype and never folds");
+            }
+        }
+    }
+    // isfpclass's mask: an integer constant expression in [0, 1023], unconverted, after the floating argument's own rule.
+    CheckValue arguments[2] = { check_test_float(BUSTER_TYPE_DOUBLE, 1.0L), check_test_integer(BUSTER_TYPE_INT, 1024) };
+    CheckBuiltinFloatAction action = { .id = CBUILTIN_ISFPCLASS, .arguments = arguments, .argument_count = 2 };
+    CheckBuiltinFloatResult result;
+    const struct
+    {
+        CheckValue mask;
+        CheckDiagnostic diagnostic;
+        const char* description;
+    } masks[] = {
+        { check_test_integer(BUSTER_TYPE_INT, 1024), CHECK_DIAG_INCOMPATIBLE, "a mask past 1023 is refused" },
+        { check_test_integer(BUSTER_TYPE_INT, 0xffffffffu), CHECK_DIAG_INCOMPATIBLE, "a negative mask is refused" },
+        { check_test_integer(BUSTER_TYPE_LLONG, UINT64_C(0x100000000)), CHECK_DIAG_INCOMPATIBLE, "a wide mask past 1023 is refused" },
+        { check_test_integer(BUSTER_TYPE_UINT, 1023), CHECK_DIAG_NONE, "an unsigned mask of 1023 is taken" },
+        { check_test_integer(BUSTER_TYPE_CHAR, 3), CHECK_DIAG_NONE, "a char mask is taken unconverted" },
+        // clang sign-extends the value from its type's width whatever its signedness (getSExtValue).
+        { check_test_integer(BUSTER_TYPE_BOOL, 1), CHECK_DIAG_INCOMPATIBLE, "a bool mask of 1 is refused, as clang's sign extension reads it" },
+        { check_test_integer(BUSTER_TYPE_BOOL, 0), CHECK_DIAG_NONE, "a bool mask of 0 is taken" },
+        { check_test_integer(BUSTER_TYPE_UCHAR, 200), CHECK_DIAG_INCOMPATIBLE, "an unsigned char mask of 200 is refused, as clang's sign extension reads it" },
+        { check_test_integer(BUSTER_TYPE_UCHAR, 127), CHECK_DIAG_NONE, "an unsigned char mask of 127 is taken" },
+        { check_test_float(BUSTER_TYPE_DOUBLE, 3.0L), CHECK_DIAG_INTEGER_REQUIRED, "a floating mask is refused" },
+        { (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE }, CHECK_DIAG_INCOMPATIBLE, "a mask that isn't constant is refused" },
+        { (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 3 }, CHECK_DIAG_UNSUPPORTED,
+          "a folded mask that isn't an integer constant expression is refused" },
+        { (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE | BUSTER_CHECK_SIDE_EFFECT,
+                        .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 3 }, CHECK_DIAG_INCOMPATIBLE, "a mask with an effect is refused" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(masks); i += 1)
+    {
+        arguments[1] = masks[i].mask;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == masks[i].diagnostic &&
+                                        (masks[i].diagnostic == CHECK_DIAG_NONE ? result.folded && result.class_mask == (uint32_t)masks[i].mask.integer &&
+                                                                                     result.evaluated_operands == 1 :
+                                                                                 result.action.diagnostic_operand == 1),
+                                        masks[i].description);
+    }
+    arguments[0] = check_test_integer(BUSTER_TYPE_INT, 1);
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 5000);
+    check_builtin_float_one(table, &action, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE && result.action.diagnostic_operand == 0,
+                                    "isfpclass refuses its argument's type before its mask");
+    arguments[0].type = type_complex(table, BUSTER_TYPE_FLOAT);
+    check_builtin_float_one(table, &action, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "isfpclass refuses a complex argument");
+    const TypeId vectors[2] = { type_vector(table, BUSTER_TYPE_FLOAT, 4, false), type_vector(table, BUSTER_TYPE_DOUBLE, 2, true) };
+    const TypeId results[2] = { type_vector(table, BUSTER_TYPE_INT, 4, false), type_vector(table, BUSTER_TYPE_LLONG, 2, true) };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        arguments[0] = (CheckValue){ .type = vectors[i], .category = CHECK_RVALUE };
+        arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == results[i] && !result.folded &&
+                                        result.floating_type == (i == 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE) && result.class_mask == 3 &&
+                                        (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_VECTOR) != 0,
+                                        "isfpclass of a vector gives the signed vector of its elements' width, never folded");
+    }
+    arguments[0] = check_test_float(BUSTER_TYPE_DOUBLE, 1.0L);
+    for (uint32_t count = 0; count <= 3; count += 1)
+    {
+        action.argument_count = count;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, (result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT) == (count != 2), "isfpclass takes two arguments");
+        action.id = CBUILTIN_ISZERO;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, (result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT) == (count != 1), "iszero takes one argument");
+        action.id = CBUILTIN_CANONICALIZEL;
+        check_builtin_float_one(table, &action, &result);
+        check_builtin_float_test_expect(test, (result.action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT) == (count != 1), "canonicalizel takes one argument");
+        action.id = CBUILTIN_ISFPCLASS;
+    }
+    arguments[0] = (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_INT), .category = CHECK_RVALUE };
+    action = (CheckBuiltinFloatAction){ .id = CBUILTIN_SIGNBITF, .arguments = arguments, .argument_count = 1 };
+    check_builtin_float_one(table, &action, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED, "signbitf refuses a pointer");
+    action.id = CBUILTIN_ISNORMAL;
+    check_builtin_float_one(table, &action, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "isnormal refuses a pointer");
+    arguments[0] = check_test_float(BUSTER_TYPE_FLOAT128, 1.0L);
+    check_builtin_float_one(table, &action, &result);
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && !result.folded &&
+                                    (result.unsupported & BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_FORMAT) != 0,
+                                    "isnormal of an unsupported format stays a typed runtime action");
+    check_builtin_float_test_expect(test, !check_builtin_float_strict(CBUILTIN_ISNORMAL) && !check_builtin_float_strict(CBUILTIN_ISFPCLASS) &&
+                                    !check_builtin_float_strict(CBUILTIN_SIGNBITL) && check_builtin_float_strict(CBUILTIN_FPCLASSIFY),
+                                    "only fpclassify's, isinf_sign's and canonicalize's code is strict under FENV_ACCESS");
+}
+
 // A value of `type`, as a constant of that type holds it.
 static long double check_builtin_float_test_round(TypeId type, long double value)
 {
@@ -829,6 +1006,62 @@ static void check_builtin_float_test_oracle(CheckBuiltinFloatTest* test, const c
     rmdir(directory);
 }
 
+// clang's acceptance of the classifications' rules that check_builtin_float_test_classes checks: their folds as
+// constant expressions, the signbits' and canonicalize's prototypes, isfpclass's mask and vectors, and each refusal.
+static void check_builtin_float_test_class_oracle(CheckBuiltinFloatTest* test, const char* clang)
+{
+    const char* sources[] = {
+        "_Static_assert(__builtin_isnormal(1.0) && !__builtin_isnormal(0x1p-1030) && __builtin_issubnormal(0x1p-1030) && __builtin_iszero(-0.0f) &&"
+        " !__builtin_issignaling(__builtin_nanf(\"\")) && __builtin_isfpclass(-1.0, 8) && __builtin_isfpclass(-0.0, 32), \"classes\");\n",
+        "_Static_assert(__builtin_signbitf(-0.0) && !__builtin_signbitl(1) && __builtin_signbitl(-__builtin_infl()) &&"
+        " _Generic(__builtin_canonicalizef(1), float: 1, default: 0) && _Generic(__builtin_canonicalizel(1.0), long double: 1, default: 0), \"signs\");\n",
+        "int f(double x) { return __builtin_isfpclass(x, 1023u) + __builtin_isfpclass(x, (char)3) + __builtin_isfpclass(x, (int)3.7); }\n",
+        "typedef float v4 __attribute__((vector_size(16))); typedef int i4 __attribute__((vector_size(16)));\n"
+        "i4 f(v4 x) { return __builtin_isfpclass(x, 3); }\n",
+        "int a[__builtin_isfpclass(-2.0, 8) + 1]; int f(double x) { switch (1) { case __builtin_isnormal(1.0): return 1; } return __builtin_issignaling(x); }\n",
+        "int f(double x, int m) { return __builtin_isfpclass(x, m); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, 1024); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, -1); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, 1.0); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, (1, 2)); }\n",
+        "int f(int x) { return __builtin_isfpclass(x, 3); }\n",
+        "int f(_Complex double x) { return __builtin_isfpclass(x, 3); }\n",
+        "int f(double x) { return __builtin_isfpclass(x); }\n",
+        "int f(int x) { return __builtin_isnormal(x); }\n",
+        "int f(double x) { return __builtin_iszero(x, x); }\n",
+        "int f(int* p) { return __builtin_signbitf(p); }\n",
+        "double f(int* p) { return __builtin_canonicalize(p); }\n",
+        "static const double d = __builtin_canonicalize(1.0);\n",
+        "int f(double x) { return __builtin_isfpclass(x, (_Bool)0) + __builtin_isfpclass(x, (unsigned char)127); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, (_Bool)1); }\n",
+        "int f(double x) { return __builtin_isfpclass(x, (unsigned char)200); }\n",
+    };
+    const bool rejected[] = { false, false, false, false, false, true, true, true, true, true, true, true, true, true, true, true, true, true,
+                              false, true, true };
+    _Static_assert(BUSTER_ARRAY_LENGTH(sources) == BUSTER_ARRAY_LENGTH(rejected), "every classification oracle source has an expected result");
+    char directory[] = "/tmp/buster-check-builtin-class-XXXXXX";
+    bool ready = mkdtemp(directory) != NULL;
+    char paths[BUSTER_ARRAY_LENGTH(sources)][160];
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        ready = parse_test_write(paths[i], sources[i], strlen(sources[i]));
+    }
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        bool failed = false;
+        ready = check_builtin_float_test_clang_run(clang, paths[i], &failed);
+        check_builtin_float_test_expect(test, ready && failed == rejected[i], "Clang disagrees with a classification source fixture");
+    }
+    check_builtin_float_test_expect(test, ready, "independent Clang classification oracle could not run");
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sources); i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
+        unlink(paths[i]);
+    }
+    rmdir(directory);
+}
+
 static int run_check_builtin_float_tests(int argc, char** argv)
 {
     const bool epoch = oracle_epoch_begin();
@@ -859,12 +1092,14 @@ static int run_check_builtin_float_tests(int argc, char** argv)
             check_builtin_float_test_classification(&test, &types.table);
             check_builtin_float_test_absolute(&test, &types.table);
             check_builtin_float_test_constraints(&test, &types.table);
+            check_builtin_float_test_classes(&test, &types.table);
             check_builtin_float_test_comparisons(&test, &types.table);
             check_builtin_float_test_batches(&test, &types.table);
             check_builtin_float_test_pages(&test, &types.table);
         }
         check_test_types_close(&types);
         check_builtin_float_test_oracle(&test, clang);
+        check_builtin_float_test_class_oracle(&test, clang);
     }
     printf("test-check-builtin-float: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     oracle_cache_report(oracle_cache(), "test-check-builtin-float");

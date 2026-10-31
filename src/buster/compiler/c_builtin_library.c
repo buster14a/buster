@@ -11,13 +11,13 @@
 // function of that name (c_check_program_lower.c's runtime functions). __builtin_powi, powif and powil are llvm.powi's,
 // whose code calls libgcc's __powidf2, __powisf2 and __powixf2 (cbuiltin_library_libgcc).
 //
-// The table's other F rows stay refused, and __has_builtin answers 0 for them: the __fp16 ones (their prototypes take
-// and return __fp16, which no C function can), the classification builtins of custom checking (__builtin_isnormal and
-// its kin), the matrix builtins and C++'s __builtin_trivially_relocate, the alloca variants, __builtin_signbitf and
-// signbitl (clang tests the bit inline; no library function of that name exists), the signaling NaNs' and the
-// _Float128 and _Float16 NaNs' (which clang folds and libc has no function for), and the FILE builtins (fprintf and its
-// kin, whose prototypes need the unit's FILE). Those that the checker can type are refused by name where they are
-// lowered (cbuiltin_library_refusal); the others' prototypes don't decode (c_builtin_intrinsic_types.c).
+// The table's F rows of custom checking that classify a value (__builtin_isnormal and its kin) and __builtin_signbitf and
+// signbitl, which clang tests inline, are the floating builtins' (c_check_builtin_float.c), not calls. Its other F rows
+// stay refused, and __has_builtin answers 0 for them: the __fp16 ones (their prototypes take and return __fp16, which no
+// C function can), the matrix builtins and C++'s __builtin_trivially_relocate, the alloca variants, the signaling NaNs'
+// and the _Float128 and _Float16 NaNs' (which clang folds and libc has no function for), and the FILE builtins (fprintf
+// and its kin, whose prototypes need the unit's FILE). Those that the checker can type are refused by name where they
+// are lowered (cbuiltin_library_refusal); the others' prototypes don't decode (c_builtin_intrinsic_types.c).
 //
 // The rows with attribute f are the C library's functions by their own names (sin, strlen, printf), which clang makes
 // builtins of the unit unless -fno-builtin, -ffreestanding or -fno-builtin-NAME says otherwise, and ALL_GNU_LANGUAGES'
@@ -224,8 +224,6 @@ static __attribute__((unused)) const char* cbuiltin_library_refusal(const char* 
         { "__builtin_alloca_uninitialized", "__builtin_alloca_uninitialized" },
         { "__builtin_alloca_with_align", "__builtin_alloca_with_align, whose alignment Tier 0's allocation doesn't take" },
         { "__builtin_alloca_with_align_uninitialized", "__builtin_alloca_with_align_uninitialized, whose alignment Tier 0's allocation doesn't take" },
-        { "__builtin_signbitf", "__builtin_signbitf, which clang tests inline and no library function implements" },
-        { "__builtin_signbitl", "__builtin_signbitl, which clang tests inline and no library function implements" },
         { "__builtin_nans", "__builtin_nans, a signaling NaN that clang folds and no library function makes" },
         { "__builtin_nansf", "__builtin_nansf, a signaling NaN that clang folds and no library function makes" },
         { "__builtin_nansl", "__builtin_nansl, a signaling NaN that clang folds and no library function makes" },
