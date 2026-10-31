@@ -745,7 +745,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
         {
             const Tier1SelectRecords selected = tier1_select_expand(&holes);
             const bool returns = plan->function->op[node] == IR_RET;
-            if (returns && (selected.count == 0 || selected.records[selected.count - 1].form != X86_FORM_RET))
+            if (selected.overflowed || (returns && (selected.count == 0 || selected.records[selected.count - 1].form != X86_FORM_RET)))
             {
                 error = TIER1_EMIT_INVALID;
             }
