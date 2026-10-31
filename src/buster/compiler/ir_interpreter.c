@@ -627,6 +627,10 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
             const uint32_t first = function->a[phi_end];
             const uint32_t count = function->b[phi_end];
             uint32_t source = BUSTER_IR_NONE;
+            // The scan reads a pair at a time and keeps the last match: clang's vector form loads 16 or 32 words at once and
+            // masks the lanes past the phi's pairs, but MSan charges the whole loaded vector, so its report was a read of
+            // the arena's undefined pages, not a value the scan uses. The trip count is a predecessor count; keep it scalar.
+#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
             for (uint32_t p = 0; p < count; p += 1)
             {
                 if (function->extra[first + p * 2] == predecessor)
