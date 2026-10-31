@@ -713,6 +713,27 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
             .slot_flags = BUSTER_IR_SLOT_TEMPORARY,
             .load_type = IR_I64,
             .store_type = IR_I64,
+            .promote = true,
+        },
+        {
+            .slot_type = IR_VOID,
+            .slot_flags = BUSTER_IR_SLOT_TEMPORARY,
+            .load_type = IR_I32,
+            .store_type = IR_I64,
+        },
+        {
+            .slot_type = IR_VOID,
+            .slot_flags = BUSTER_IR_SLOT_TEMPORARY,
+            .load_type = IR_I64,
+            .store_type = IR_I64,
+            .store_flags = BUSTER_IR_VOLATILE,
+        },
+        {
+            .slot_type = IR_VOID,
+            .slot_flags = BUSTER_IR_SLOT_TEMPORARY,
+            .load_type = IR_I64,
+            .store_type = IR_I64,
+            .escape = IR_COPY,
         },
         {
             .slot_type = IR_I64,
