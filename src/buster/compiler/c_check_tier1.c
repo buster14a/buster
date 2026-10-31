@@ -166,9 +166,26 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
     return stage;
 }
 
+static const char* const check_tier1_stage_names[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource" };
+
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome)
+{
+    const uint32_t stage = outcome & 0xff;
+    const uint32_t operation = outcome >> 8;
+    const char* refused = stage == CHECK_TIER1_SELECTION && operation < IR_OP_COUNT ? ir_op_names[operation] : stage == CHECK_TIER1_SELECTION && operation == IR_OP_COUNT ? "function" : "";
+    if (refused[0] != 0)
+    {
+        fprintf(stream, "tier1-refused\t%.*s\t%s\t%s\n", (int)length, (const char*)name, check_tier1_stage_names[stage], refused);
+    }
+    else
+    {
+        fprintf(stream, "tier1-refused\t%.*s\t%s\terror%" PRIu32 "\n", (int)length, (const char*)name, check_tier1_stage_names[stage], stage == CHECK_TIER1_SELECTION ? operation - IR_OP_COUNT : operation);
+    }
+}
+
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report)
 {
-    static const char* const stages[CHECK_TIER1_STAGE_COUNT] = { "tier1", "naked", "lowering", "promotion", "optimization", "analysis", "selection", "emission", "resource" };
+    const char* const* stages = check_tier1_stage_names;
     fprintf(stream, "tier1\tfunctions=%" PRIu32, report->functions);
     for (uint32_t s = 0; s < CHECK_TIER1_STAGE_COUNT; s += 1)
     {

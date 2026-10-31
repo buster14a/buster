@@ -403,9 +403,9 @@ designs and the compilers already built this way.
   the direct path lower only what the unit's roots reach,
   `check_program_select`), `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, with
-  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` says which
-  step refused each: [the Tier 1 guide](docs/tier1.md)'s "The C driver's
-  `--tier1`"), `--id-order N` handing the unit's identifiers their
+  `-fno-asynchronous-unwind-tables`, without `-g`; `--tier1-report` and
+  `--tier1-refusals` say which step refused the others: [the Tier 1
+  guide](docs/tier1.md)'s "The C driver's `--tier1`"), `--id-order N` handing the unit's identifiers their
   ids in another order, on which nothing it writes may depend (#153's test
   option, `check_driver_id_order`), and `-g` attaching DWARF of its functions'
   source lines (`c_check_debug.c`, #395), to the executable and with `-c` to the

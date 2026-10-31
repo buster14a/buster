@@ -97,10 +97,12 @@ by its scalar twin. Its records, branch columns and references take Tier 0's
 place in the emission (`check_program_emit_tier1`), on the emission's lanes,
 each lane with arenas of its own for the pipeline. `--tier1-report` prints, on
 standard error after the command, how many functions each tier compiled and the
-step, and for the selector the IR operation, that refused each of the others:
+step, and for the selector the IR operation, that refused each of the others,
+and `--tier1-refusals` a line for each function Tier 0 compiled, its name and
+that step (`tier1-refused	NAME	selection	call`):
 
 ```text
-tier1	functions=2709	tier1=2035	...	selection=671	...	selection.call=369	...
+tier1	functions=2709	tier1=2207	...	selection=499	...	selection.call=369	...
 ```
 
 The driver refuses what Tier 1's code can't carry yet: unwind tables (Tier 1's
@@ -116,11 +118,14 @@ where the emission's access column says so; thread-locals are Tier 0's),
 parameters anywhere in the entry block and narrow ones (zero-extended into
 their canonical storage at the entry), variadic calls of integer arguments (`al`
 zero), calls through a pointer (the callee moved into `r10` with the
-arguments), and narrow call results and returns. A parameter's register binds
-its definition's interval alone (`Tier1CfgInput.definition_registers`). Still
-refused: floating point, narrow call arguments (the IR doesn't keep their
-signedness, which the callee's extension needs), stack arguments, division and
-remainder, shifts by a register, labels, switches, aggregates by value and
+arguments), narrow call results and returns, and division, remainder and shifts
+by a register (`tier1_emit_cfg_fixed`: the divisor or the shifted value through
+the scratch register, x86's `rax` and `rdx` or `cl` taken after the operands are
+read, and any other value live past the node there saved around it in a
+call-save row). A parameter's register binds its definition's interval alone
+(`Tier1CfgInput.definition_registers`). Still refused: floating point, narrow
+call arguments (the IR doesn't keep their signedness, which the callee's
+extension needs), stack arguments, labels, switches, aggregates by value and
 variadic definitions.
 
 `test-c-testsuite --tier1` runs c-testsuite's programs so, and

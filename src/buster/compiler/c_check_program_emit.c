@@ -350,9 +350,11 @@ struct CheckProgramLanes
     uint64_t prepare_ns;
     uint64_t lanes_ns;
     uint64_t merge_ns;
-    // --tier1, and what became of the emissions' bodies, summed over them.
+    // --tier1, and what became of the emissions' bodies, summed over them; with --tier1-refusals, the stream that each
+    // body Tier 0 compiled gets a line on, its name and the step that refused it (check_tier1_print_refusal).
     bool tier1;
     CheckTier1Report tier1_report;
+    FILE* tier1_refusals;
     CheckProgramLaneArenas arenas[BUSTER_CHECK_EMIT_MAX_LANES];
 };
 
@@ -370,6 +372,9 @@ static CheckTier1Stage check_tier1_compile(CheckTier1Lane* lane, const Tier0Func
 static void check_tier1_lane_release(CheckTier1Lane* lane);
 // Prints `report`, a line on `stream`: how many functions each tier compiled, and why Tier 1 refused the others.
 static void check_tier1_print_report(FILE* stream, const CheckTier1Report* report);
+// Prints a line on `stream` for a function Tier 1 refused: its name, `length` bytes at `name`, and its outcome's step and
+// IR operation or error.
+static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, uint32_t outcome);
 
 // CLOCK_MONOTONIC, for CheckProgramLanes.timing.
 static uint64_t check_program_lanes_now(void)
@@ -2460,6 +2465,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             arena_pop_to(&lanes->arenas[lane].output, 0);
             arena_pop_to(&lanes->arenas[lane].scratch, 0);
             arena_pop_to(&lanes->arenas[lane].bytes, 0);
+        }
+    }
+    // With --tier1-refusals, each body Tier 0 compiled, in source order, by its symbol's name.
+    for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && lanes->tier1_refusals != NULL && b < count; b += 1)
+    {
+        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
+        if ((run.tier1_outcomes[b] & 0xff) != CHECK_TIER1_COMPILED && (run.tier1_outcomes[b] & 0xff) < CHECK_TIER1_STAGE_COUNT && name != 0)
+        {
+            check_tier1_print_refusal(lanes->tier1_refusals, result->link.names.bytes[name], result->link.names.length[name], run.tier1_outcomes[b]);
         }
     }
     arena_pop_to(scratch, temporary);

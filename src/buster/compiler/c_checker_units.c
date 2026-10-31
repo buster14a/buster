@@ -1496,6 +1496,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             .board_lane = (uint32_t)(lane - run->lanes),
             .board_pause_microseconds = command->shared_parts ? BUSTER_CHECK_UNITS_SHARED_PAUSE : 0,
             .tier1 = command->tier1,
+            .tier1_refusals = command->tier1_refusals,
         };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
         arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
